@@ -123,8 +123,8 @@ const CONFIG_KEYS = [
   // console market row those tests do not write.
   'ASSET_MARKETS',
   'ASSET_QUOTE_VALIDITY_SECONDS',
-  'ASSET_USDA_BUY_ENABLED',
-  'ASSET_USDA_SELL_ENABLED',
+  'ASSET_USDA_TO_BTC_ENABLED',
+  'ASSET_USDA_FROM_BTC_ENABLED',
   'ASSET_USDA_APPROVAL_THRESHOLD',
 ]
 
@@ -1043,7 +1043,12 @@ describe('ASSET_MARKETS', () => {
   it('parses SYMBOL:<asset id> with both directions open', () => {
     process.env.ASSET_MARKETS = `USDA:${USDA}`
     expect(loadConfig().assetRfqTokens).toEqual([
-      { symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: true }, approvalThresholdUnits: null },
+      {
+        symbol: 'USDA',
+        assetId: USDA,
+        enabled: { clientGivesAsset: true, clientGetsAsset: true },
+        approvalThresholdUnits: null,
+      },
     ])
   })
 
@@ -1053,10 +1058,10 @@ describe('ASSET_MARKETS', () => {
     expect(loadConfig().assetRfqTokens[0]!.approvalThresholdUnits).toBe(250_000n)
   })
 
-  it('ASSET_USDA_BUY_ENABLED=false closes sell_base — the client GIVES the base leg', () => {
+  it('ASSET_USDA_TO_BTC_ENABLED=false closes the direction in which the client GIVES the asset', () => {
     process.env.ASSET_MARKETS = `USDA:${USDA}`
-    process.env.ASSET_USDA_BUY_ENABLED = 'false'
-    expect(loadConfig().assetRfqTokens[0]!.enabled).toEqual({ sell_base: false, buy_base: true })
+    process.env.ASSET_USDA_TO_BTC_ENABLED = 'false'
+    expect(loadConfig().assetRfqTokens[0]!.enabled).toEqual({ clientGivesAsset: false, clientGetsAsset: true })
   })
 
   it('refuses a malformed entry at boot rather than at the first quote', () => {

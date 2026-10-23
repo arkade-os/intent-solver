@@ -1,21 +1,23 @@
 /**
- * Where the stored rows and the environment disagree about what is served.
+ * Where the stored rows and the config disagree about what is served.
  *
  * PURE. The rows win — they are what the runtime reads after the seed. This
- * exists so an operator whose `.env` still says something else is TOLD rather
- * than silently overruled, and so a ROLLBACK to a binary that reads the env
+ * exists so an operator whose config still says something else is TOLD rather
+ * than silently overruled, and so a ROLLBACK to a binary that reads the config
  * again is visible before it happens rather than after.
  */
-import { assetRfqEnvStem } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
 import type { AssetMarketRow, ServingSeed } from '../admin/db.js'
-import { samePair } from './assetRfqMarkets.js'
+import { servingFor } from './assetRfqMarkets.js'
 
 const label = (row: AssetMarketRow): string => row.symbol ?? row.marketKey
 
-export const marketServingDivergence = (rows: readonly AssetMarketRow[], env: ServingSeed): readonly string[] => {
+export const marketServingDivergence = (
+  rows: readonly AssetMarketRow[],
+  seed: ServingSeed,
+  pathOf: ReadonlyMap<string, string> = new Map(),
+): readonly string[] => {
   const lines: string[] = []
-  const declaredForOffers = (row: AssetMarketRow): boolean => env.offerMarkets.some((pair) => samePair(row, pair))
-  const byAsset = new Map(env.tokens.map((token) => [token.assetId, token]))
+  const name = (knob: string): string => pathOf.get(knob) ?? knob
 
   for (const row of rows) {
     // A DISABLED row quoting nothing is what the operator asked for; an enabled
@@ -26,32 +28,38 @@ export const marketServingDivergence = (rows: readonly AssetMarketRow[], env: Se
           `market, or disable it so it stops showing as live.`,
       )
     }
-    if (declaredForOffers(row) !== row.servesOffer) {
+    const wanted = servingFor(row, seed, new Set())
+    if (wanted.servesOffer !== row.servesOffer) {
       lines.push(
-        `${label(row)}: OFFER_MARKETS ${declaredForOffers(row) ? 'names' : 'omits'} this pair, ` +
+        `${label(row)}: ${name('OFFER_MARKETS')} ${wanted.servesOffer ? 'names' : 'omits'} this pair, ` +
           `the stored row says serves_offer=${row.servesOffer ? 1 : 0}. The row is what this process reads.`,
       )
     }
     const assetId = row.base !== null && row.quote !== null ? null : (row.base ?? row.quote)
-    const token = assetId === null ? undefined : byAsset.get(assetId)
+    const token = seed.tokens.find((candidate) => candidate.assetId === assetId)
     if (!token) continue
-    for (const [direction, open] of [
-      ['sell_base', row.rfqSellBase],
-      ['buy_base', row.rfqBuyBase],
+    const assetIsBase = row.base === assetId
+    for (const [direction, open, configured] of [
+      ['sell_base', row.rfqSellBase, wanted.rfqSellBase],
+      ['buy_base', row.rfqBuyBase, wanted.rfqBuyBase],
     ] as const) {
-      if (token.enabled[direction] === open) continue
+      if (configured === open) continue
+      // `sell_base` is the client giving the base: the asset when it is the base, BTC otherwise.
+      const givesAsset = (direction === 'sell_base') === assetIsBase
+      const knob = `ASSET_${token.symbol}_${givesAsset ? 'TO_BTC' : 'FROM_BTC'}_ENABLED`
       lines.push(
-        `${label(row)}: ${assetRfqEnvStem(token, direction)}_ENABLED says ` +
-          `${token.enabled[direction]}, the stored row says ${direction} is ${open ? 'open' : 'closed'}. ` +
-          `The row is what this process reads.`,
+        `${label(row)}: ${name(knob)} says ${configured}, the stored row says ${direction} is ` +
+          `${open ? 'open' : 'closed'}. The row is what this process reads.`,
       )
     }
   }
 
   const known = new Set(rows.flatMap((row) => (row.base === null || row.quote === null ? [row.base ?? row.quote] : [])))
-  for (const token of env.tokens) {
+  for (const token of seed.tokens) {
     if (!known.has(token.assetId)) {
-      lines.push(`ASSET_MARKETS names ${token.symbol}, which no stored market row carries; it is served by nothing.`)
+      lines.push(
+        `${name('ASSET_MARKETS')} names ${token.symbol}, which no stored market row carries; it is served by nothing.`,
+      )
     }
   }
   return lines

@@ -23,7 +23,7 @@ import {
   type CarrierMode,
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
-import { samePair, type AssetRfqToken } from '../ops/assetRfqMarkets.js'
+import { servingFor, type AssetRfqToken } from '../ops/assetRfqMarkets.js'
 import type { BalanceCheckpoint } from '../ops/balanceCheckpoints.js'
 
 const SCHEMA = `
@@ -338,30 +338,20 @@ export class AdminStore {
     const done = await this.driver.get('SELECT name FROM admin_migration WHERE name = ?', [MARKET_SERVING_SEED])
     if (done) return
     const rows = await this.listMarkets()
-    const byAsset = new Map(seed.tokens.map((token) => [token.assetId, token]))
-    const declaredForOffers = (row: AssetMarketRow): boolean => seed.offerMarkets.some((pair) => samePair(row, pair))
     const taken = new Set<string>()
     await this.driver.transaction(async () => {
       for (const row of rows) {
-        const assetId = row.base !== null && row.quote !== null ? null : (row.base ?? row.quote)
-        const token = assetId === null ? undefined : byAsset.get(assetId)
-        const derived = assetId === null ? null : (token?.symbol ?? rfqSymbolFor(assetId))
-        // Fail CLOSED on a symbol an earlier row took, the answer `repairServing` gives: a second
-        // row carrying it violates idx_admin_market_symbol, and that throw is a boot nothing repairs.
-        const symbol = derived === null || taken.has(derived) ? null : derived
-        if (symbol !== null) taken.add(symbol)
-        const sellBase = symbol !== null && (token?.enabled.sell_base ?? true)
-        const buyBase = symbol !== null && (token?.enabled.buy_base ?? true)
+        const serving = servingFor(row, seed, taken)
+        if (serving.symbol !== null) taken.add(serving.symbol)
         await this.driver.run(
           'UPDATE admin_market SET symbol = ?, serves_offer = ?, serves_rfq = ?, rfq_sell_base = ?, ' +
             'rfq_buy_base = ? WHERE market_key = ?',
           [
-            symbol,
-            declaredForOffers(row) ? 1 : 0,
-            // The DIRECTIONS, not the symbol: both closed is a row `checkServing` rejects.
-            sellBase || buyBase ? 1 : 0,
-            sellBase ? 1 : 0,
-            buyBase ? 1 : 0,
+            serving.symbol,
+            serving.servesOffer ? 1 : 0,
+            serving.servesRfq ? 1 : 0,
+            serving.rfqSellBase ? 1 : 0,
+            serving.rfqBuyBase ? 1 : 0,
             row.marketKey,
           ],
         )

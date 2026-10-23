@@ -51,7 +51,12 @@ describe('marketServingDivergence', () => {
   const env: ServingSeed = {
     offerMarkets: [],
     tokens: [
-      { symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: true }, approvalThresholdUnits: null },
+      {
+        symbol: 'USDA',
+        assetId: USDA,
+        enabled: { clientGivesAsset: true, clientGetsAsset: true },
+        approvalThresholdUnits: null,
+      },
     ],
   }
 
@@ -63,7 +68,7 @@ describe('marketServingDivergence', () => {
     const [line] = marketServingDivergence([row({ rfqBuyBase: false })], env)
     expect(line).toMatch(/USDA/)
     expect(line).toMatch(/buy_base/)
-    expect(line).toMatch(/ASSET_USDA_SELL/)
+    expect(line).toMatch(/ASSET_USDA_TO_BTC_ENABLED/)
   })
 
   it('names a market the environment declares for offers and the row does not', () => {

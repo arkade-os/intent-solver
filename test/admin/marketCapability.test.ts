@@ -15,7 +15,11 @@ const OTHER = 'bb'.repeat(34)
 const KEY = assetMarketKey(null, USDT)
 
 const btcUsdt = { base: null, quote: USDT }
-const token = (assetId: string) => ({ symbol: 'USDT', assetId, enabled: { sell_base: true, buy_base: true } })
+const token = (assetId: string) => ({
+  symbol: 'USDT',
+  assetId,
+  enabled: { clientGivesAsset: true, clientGetsAsset: true },
+})
 const serving = (over: Partial<ServingRuntime> = {}): ServingRuntime => ({
   assetOffers: null,
   liveOfferMarkets: [],
