@@ -79,7 +79,7 @@ export const PATHS: readonly Row[] = [
   ['diagnostics.latency', 'SOLVER_LATENCY_DIAGNOSTICS', (on) => (on ? '1' : '0')],
 ]
 
-const EVM_FIELDS: Readonly<Record<string, string>> = {
+export const EVM_FIELDS: Readonly<Record<string, string>> = {
   chainId: 'EVM_CHAIN_ID',
   rpcUrl: 'EVM_RPC_URL',
   htlcAddress: 'EVM_HTLC_ADDRESS',
@@ -99,10 +99,10 @@ const EVM_FIELDS: Readonly<Record<string, string>> = {
   directClaimsOnly: 'EVM_DIRECT_CLAIMS_ONLY',
 }
 
-type Family = 'lightning' | 'onchain send' | 'onchain receive' | 'erc20' | 'Arkade asset'
+export type Family = 'lightning' | 'onchain send' | 'onchain receive' | 'erc20' | 'Arkade asset'
 
 const COMMON = ['enabled', 'minSats', 'maxSats', 'feeBps', 'feeFlatSats']
-const FIELDS: Readonly<Record<Family, readonly string[]>> = {
+export const CORRIDOR_FIELDS: Readonly<Record<Family, readonly string[]>> = {
   lightning: COMMON,
   'onchain send': [...COMMON, 'feeCapSats', 'feeMinSats'],
   'onchain receive': [...COMMON, 'feeCapSats', 'feeMinSats', 'maxBandSats', 'bandBelowShare'],
@@ -128,12 +128,15 @@ const ABSOLUTE: Readonly<Record<string, string>> = {
   bandBelowShare: 'ONCHAIN_RECEIVE_BAND_BELOW_SHARE',
 }
 
-const BTC_FAMILY: Readonly<Record<string, Family>> = {
+export const BTC_FAMILY: Readonly<Record<string, Family>> = {
   'arkade:BTC->lightning:BTC': 'lightning',
   'lightning:BTC->arkade:BTC': 'lightning',
   'arkade:BTC->onchain:BTC': 'onchain send',
   'onchain:BTC->arkade:BTC': 'onchain receive',
 }
+
+/** The setting id one corridor field is read from. */
+export const corridorKnob = (stem: string, field: string): string => ABSOLUTE[field] ?? `${stem}_${SUFFIX[field]}`
 
 const BTC_SIDES = new Set(['arkade:BTC', 'lightning:BTC', 'onchain:BTC'])
 const LABEL = /^[A-Za-z0-9@._-]{1,32}$/
@@ -214,9 +217,9 @@ export const documentToKnobs = (doc: SolverDocument): Flattened => {
     stems.set(`arkade:BTC->${label}`, { stem: send, family })
     stems.set(`${label}->arkade:BTC`, { stem: receive, family })
   }
-  const knobOf = (stem: string, field: string): string => ABSOLUTE[field] ?? `${stem}_${SUFFIX[field]}`
   for (const [pair, { stem, family }] of stems) {
-    for (const field of FIELDS[family]) pathOf.set(knobOf(stem, field), jsonPath(['corridors', pair, field]))
+    for (const field of CORRIDOR_FIELDS[family])
+      pathOf.set(corridorKnob(stem, field), jsonPath(['corridors', pair, field]))
   }
 
   for (const [pair, terms] of Object.entries(doc.corridors ?? {})) {
@@ -231,12 +234,12 @@ export const documentToKnobs = (doc: SolverDocument): Flattened => {
       )
     }
     for (const [field, value] of Object.entries(terms)) {
-      if (!FIELDS[corridor.family].includes(field)) {
+      if (!CORRIDOR_FIELDS[corridor.family].includes(field)) {
         throw new Error(
           `${jsonPath(['corridors', pair, field])}: not valid on ${article(corridor.family)} ${corridor.family} corridor`,
         )
       }
-      set(knobOf(corridor.stem, field), jsonPath(['corridors', pair, field]), value)
+      set(corridorKnob(corridor.stem, field), jsonPath(['corridors', pair, field]), value)
     }
   }
 

@@ -8,11 +8,13 @@ import { z } from 'zod'
 
 const UNKNOWN_KEY = 'unknown key'
 
+/** Marks a 256-bit amount, which travels as a string: a JSON number has been rounded by the parser. */
+export const DECIMAL = 'decimal string'
+
 // One message for a number and for a hex string alike: either way the value is not what was meant.
-const decimal = z.custom<string>(
-  (value) => typeof value === 'string' && /^\d+$/.test(value),
-  'must be a decimal string',
-)
+const decimal = z
+  .custom<string>((value) => typeof value === 'string' && /^\d+$/.test(value), `must be a ${DECIMAL}`)
+  .describe(DECIMAL)
 const str = z.string()
 const num = z.number()
 const bool = z.boolean()
