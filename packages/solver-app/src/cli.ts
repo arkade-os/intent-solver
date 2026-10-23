@@ -49,7 +49,7 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
 import { Transaction, SigHash, p2tr } from '@scure/btc-signer'
-import { loadConfig, sentryOptionsFromEnv, swapDbPath, type Config } from './config.js'
+import { loadConfig, sentryOptionsFromKnobs, swapDbPath, type Config } from './config.js'
 import { createErrorReporter, type ErrorReporter } from './ops/sentry.js'
 import { SwapStore, type SendSwapRow } from '@arkade-os/solver-corridors/db/swaps.js'
 import { type OnchainSendSwapRow } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
@@ -312,7 +312,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
   const watcher = new LockupWatcher({
     contracts: contractEvents,
     onEvent: (event, scripts) => {
-      if (process.env.SOLVER_LATENCY_DIAGNOSTICS !== '1') return
+      if (!services.config.latencyDiagnostics) return
       for (const script of scripts) {
         const watched = swapByScript.get(script)
         if (!watched) continue
@@ -333,7 +333,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
         void watched
           .tick()
           .then(() => {
-            if (process.env.SOLVER_LATENCY_DIAGNOSTICS === '1') {
+            if (services.config.latencyDiagnostics) {
               log(
                 'lockup_event_timing',
                 json({ swapId: watched.id, tickMs: Math.round(performance.now() - started), outcome: 'ok' }),
@@ -341,7 +341,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
             }
           })
           .catch((error) => {
-            if (process.env.SOLVER_LATENCY_DIAGNOSTICS === '1') {
+            if (services.config.latencyDiagnostics) {
               log(
                 'lockup_event_timing',
                 json({ swapId: watched.id, tickMs: Math.round(performance.now() - started), outcome: 'failed' }),
@@ -863,7 +863,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
 
   async status([id]) {
     if (!id) throw new GiveUp('usage: status <id>')
-    const store = await SwapStore.open(swapDbPath())
+    const store = await SwapStore.open(swapDbPath(process.env))
     try {
       log(json(printable(await store.get(id))))
       log('history:', json(await store.history(id)))
@@ -896,7 +896,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
    * when the solver first SAW the lockup, not when the client sent it.
    */
   async timeline([ref]) {
-    const store = await SwapStore.open(swapDbPath())
+    const store = await SwapStore.open(swapDbPath(process.env))
     try {
       const row = ref
         ? ((await store.findByLockupTxid(ref)) ??
@@ -973,7 +973,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
   },
 
   async list() {
-    const store = await SwapStore.open(swapDbPath())
+    const store = await SwapStore.open(swapDbPath(process.env))
     try {
       for (const row of await store.findRecoverable()) log(json(printable(row)))
       log('(non-terminal swaps only; use status <id> for any specific swap)')
@@ -1134,7 +1134,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     const services = await createServices(config)
     const { webSocketRelayConnection, isRelayFault } = await import('@arkade-os/solver-transport/relay/connection.js')
     const { RelayIngress, OpenRfqBidder } = await import('@arkade-os/solver-transport/ingress/relay.js')
-    const latencyDiagnostics = process.env.SOLVER_LATENCY_DIAGNOSTICS === '1'
+    const latencyDiagnostics = config.latencyDiagnostics
     if (latencyDiagnostics && services.receiveService) {
       services.receiveService.onQuoteTiming = (sample) => log('receive_quote_timing', json(sample))
       services.receiveService.onStepTiming = (sample) => log('receive_step_timing', json(sample))
@@ -1921,11 +1921,11 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
    */
   async card(args) {
     const pointer = args.includes('--pointer')
-    const name = args.find((arg) => !arg.startsWith('--')) ?? process.env.SOLVER_NAME
+    const config = loadConfig()
+    const name = args.find((arg) => !arg.startsWith('--')) ?? config.solverName
     if (!name) {
       throw new GiveUp('usage: card [name] [--pointer]   (or set SOLVER_NAME; becomes solvers/<network>/<name>.json)')
     }
-    const config = loadConfig()
     // This command does not build the service stack, but the card it writes
     // must state the terms the stack would actually enforce — so it resolves
     // the same effective policy `createServices` does, from the same store.
@@ -2064,7 +2064,7 @@ const panic = async (context: string, error: unknown): Promise<void> => {
 const main = async (): Promise<void> => {
   // Before the command resolves: a panic while reading the environment is one
   // worth reporting, and `loadConfig` has not run yet.
-  reporter = createErrorReporter(sentryOptionsFromEnv())
+  reporter = createErrorReporter(sentryOptionsFromKnobs(process.env))
   if (reporter) {
     process.on('uncaughtException', (error) => void panic('uncaught exception', error))
     process.on('unhandledRejection', (reason) => void panic('unhandled rejection', reason))

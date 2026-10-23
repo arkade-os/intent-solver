@@ -41,7 +41,7 @@ import { SwapStore } from '@arkade-os/solver-corridors/db/swaps.js'
 import { OnchainSendSwapStore } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
 import { EvmSendSwapStore } from '@arkade-os/solver-corridors-evm/db/evmSendSwaps.js'
 import { EvmReceiveSwapStore } from '@arkade-os/solver-corridors-evm/db/evmReceiveSwaps.js'
-import { loadEvmChainConfig } from '@arkade-os/solver-rails-evm/evm/config.js'
+import { setLatencyDiagnostics } from '@arkade-os/solver-core/util/diagnostics.js'
 import { createJsonRpc } from '@arkade-os/solver-rails-evm/evm/rpc.js'
 import { createEvmHtlcBackend } from '@arkade-os/solver-rails-evm/evm/backend.js'
 import { probeLogScanRange } from '@arkade-os/solver-rails-evm/evm/logScanProbe.js'
@@ -494,6 +494,7 @@ export const createServices = async (
   config: Config,
   opts?: { allCorridors?: boolean; corridors?: readonly CorridorPlugin[] },
 ): Promise<Services> => {
+  setLatencyDiagnostics(config.latencyDiagnostics)
   // One file on a fresh install, the five it already has on an existing one —
   // see src/db/layout.ts for why nothing ever moves rows between them.
   const layout = resolveDbLayout(config.swapDbPath)
@@ -1249,10 +1250,7 @@ export const createServices = async (
       sendStore: store,
       receiveStore,
       onError: (error) => log('coupled peer tick failed:', error instanceof Error ? error.message : String(error)),
-      onTiming:
-        process.env.SOLVER_LATENCY_DIAGNOSTICS === '1'
-          ? (sample) => log('coupled_handoff_timing', json(sample))
-          : undefined,
+      onTiming: config.latencyDiagnostics ? (sample) => log('coupled_handoff_timing', json(sample)) : undefined,
     })
   }
 
@@ -1338,7 +1336,7 @@ export const createServices = async (
   // money locked against a corridor this process cannot drive. That is the same
   // failure `evm/config.ts` refuses one level down — "a half-configured chain
   // must not start, because the missing half is always a safety knob."
-  const evmChain = loadEvmChainConfig()
+  const evmChain = config.evmChain
   if (servesEvm && evmChain === null) {
     throw new Error(
       'EVM_TOKENS names corridors but EVM_RPC_URL is not set — ' +

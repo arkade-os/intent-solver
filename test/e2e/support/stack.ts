@@ -118,7 +118,7 @@ export const openArkade = async (): Promise<E2eArkade> => {
     arkServerUrl: required('ARK_SERVER_URL'),
     // The service's own resolution, not a copy of it: this suite is only
     // meaningful against the same wallet database the service opens.
-    databasePath: arkDbPath(),
+    databasePath: arkDbPath(process.env),
     isMainnet: profile.isMainnet,
     arkadeHrp: profile.arkadeHrp,
     expectedArkdNetwork: profile.arkdNetwork,

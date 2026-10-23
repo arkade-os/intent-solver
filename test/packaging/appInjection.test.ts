@@ -137,6 +137,10 @@ const solverConfig = (): Config => {
     openRfqMaxBidsPerMinute: 60,
     relayHealthPath: '/healthz',
     sentry: null,
+    solverName: null,
+    cardRelays: [],
+    latencyDiagnostics: false,
+    evmChain: null,
     nostrAdPublish: 'off',
   }
 }

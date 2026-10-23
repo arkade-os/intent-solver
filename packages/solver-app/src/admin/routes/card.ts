@@ -15,13 +15,8 @@ import type { AdminDeps } from '../server.js'
 import { assetCardMarketsFromPolicy } from '../../ops/assetRfqMarkets.js'
 
 /** `RELAY_URL` then `SOLVER_CARD_RELAYS`. */
-export const advertisedRelays = (relayUrl: string | null): string[] => {
-  const extra = (process.env.SOLVER_CARD_RELAYS ?? '')
-    .split(',')
-    .map((r) => r.trim())
-    .filter(Boolean)
-  return [...(relayUrl ? [relayUrl] : []), ...extra].map(withoutCredentials)
-}
+export const advertisedRelays = (relayUrl: string | null, extra: readonly string[]): string[] =>
+  [...(relayUrl ? [relayUrl] : []), ...extra].map(withoutCredentials)
 
 /** The card goes out with no human reading it, so a `?token=` or `user:pass@` in a relay URL must not ride along. */
 const withoutCredentials = (relay: string): string => {
@@ -70,7 +65,10 @@ export const cardOmissions = (source: CardSource): string[] => [
  * that would LIE about the deployment it names, and the route reports the
  * reason instead of publishing it.
  */
-export const deploymentCard = async (source: CardSource, name = process.env.SOLVER_NAME): Promise<SolverCard> => {
+export const deploymentCard = async (
+  source: CardSource,
+  name = source.config.solverName ?? undefined,
+): Promise<SolverCard> => {
   const { config, bootPolicy } = source
   const trimmed = name?.trim()
   // Guarded here rather than left to `buildSolverCard`: an absent variable
@@ -96,7 +94,7 @@ export const deploymentCard = async (source: CardSource, name = process.env.SOLV
       // The wallet identity — the same x-only key makers already address RFQs
       // to, which is what makes the card's rendezvous data self-attesting.
       discoveryPubkey: source.providerPubkey,
-      relays: advertisedRelays(config.relayUrl),
+      relays: advertisedRelays(config.relayUrl, config.cardRelays),
       corridors: served,
       assetMarkets: assetMarketsOf(source).publishable,
     }),

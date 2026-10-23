@@ -58,7 +58,7 @@ if (wanted.length === 0) {
   process.exit(2)
 }
 
-const layout = resolveDbLayout(swapDbPath())
+const layout = resolveDbLayout(swapDbPath(process.env))
 
 const secs = (n) => (n >= 60 ? `${Math.floor(n / 60)}m${String(n % 60).padStart(2, '0')}s` : `${n}s`)
 

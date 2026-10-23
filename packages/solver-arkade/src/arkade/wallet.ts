@@ -44,6 +44,7 @@ import {
   type UnilateralDelays,
 } from '@arkade-os/solver-core/core/timelocks.js'
 import { log } from '@arkade-os/solver-core/util/poll.js'
+import { latencyDiagnosticsEnabled } from '@arkade-os/solver-core/util/diagnostics.js'
 import { ensureDatabaseDir } from '@arkade-os/solver-core/util/sqlite.js'
 import type { CovenantSwapScript } from './covenant.js'
 import { virtualTxPages, vtxoPages } from './indexerPaging.js'
@@ -262,7 +263,7 @@ export const resolveTimelockUnit = (params: {
 export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<ArkadeContext> => {
   const identity = MnemonicIdentity.fromMnemonic(config.mnemonic, { isMainnet: config.isMainnet })
   const executor = sqliteExecutor(config.databasePath)
-  const latencyDiagnostics = process.env.SOLVER_LATENCY_DIAGNOSTICS === '1'
+  const latencyDiagnostics = latencyDiagnosticsEnabled()
 
   const wallet = await Wallet.create({
     identity,

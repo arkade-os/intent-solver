@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { entropyToMnemonic, validateMnemonic } from '@scure/bip39'
 import { wordlist } from '@scure/bip39/wordlists/english.js'
-import { sentryOptionsFromEnv } from '@arkade-os/solver-app/config.js'
+import { sentryOptionsFromKnobs } from '@arkade-os/solver-app/config.js'
 import {
   buildEvent,
   createErrorReporter,
@@ -400,7 +400,7 @@ describe('the reporter', () => {
   })
 })
 
-describe('sentryOptionsFromEnv', () => {
+describe('sentryOptionsFromKnobs', () => {
   const KEYS = ['SENTRY_DSN', 'SENTRY_ENVIRONMENT', 'SENTRY_RELEASE', 'SWAP_NETWORK'] as const
   let saved: Record<string, string | undefined>
 
@@ -416,15 +416,15 @@ describe('sentryOptionsFromEnv', () => {
   })
 
   it('is null when SENTRY_DSN is unset, and null again when it is blank', () => {
-    expect(sentryOptionsFromEnv()).toBeNull()
+    expect(sentryOptionsFromKnobs(process.env)).toBeNull()
     process.env.SENTRY_DSN = '   '
-    expect(sentryOptionsFromEnv()).toBeNull()
+    expect(sentryOptionsFromKnobs(process.env)).toBeNull()
   })
 
   it('falls back to the swap network for the environment tag', () => {
     process.env.SENTRY_DSN = DSN
     process.env.SWAP_NETWORK = 'regtest'
-    expect(sentryOptionsFromEnv()).toMatchObject({ environment: 'regtest', release: undefined })
+    expect(sentryOptionsFromKnobs(process.env)).toMatchObject({ environment: 'regtest', release: undefined })
   })
 
   it('prefers an explicit environment and carries a release', () => {
@@ -432,12 +432,12 @@ describe('sentryOptionsFromEnv', () => {
     process.env.SWAP_NETWORK = 'regtest'
     process.env.SENTRY_ENVIRONMENT = 'staging'
     process.env.SENTRY_RELEASE = 'v1.2.3'
-    expect(sentryOptionsFromEnv()).toMatchObject({ environment: 'staging', release: 'v1.2.3' })
+    expect(sentryOptionsFromKnobs(process.env)).toMatchObject({ environment: 'staging', release: 'v1.2.3' })
   })
 
   it('throws on a malformed DSN rather than silently reporting nowhere', () => {
     process.env.SENTRY_DSN = 'https://no-project-id@example.com'
-    expect(() => sentryOptionsFromEnv()).toThrow('SENTRY_DSN')
+    expect(() => sentryOptionsFromKnobs(process.env)).toThrow('SENTRY_DSN')
   })
 })
 

@@ -25,9 +25,7 @@ const readme = readFileSync(join(root, 'README.md'), 'utf8')
  * not just in config.ts.
  *
  * The app is where env reading lives — it is the composition root, and every
- * other package is handed its settings. The one `process.env` elsewhere in
- * `packages/` is a default parameter in `solver-rails-evm` that names nothing.
- * This scanned the repo root's `src/` before that tree became a package and
+ * other package is handed its settings. This scanned the repo root's `src/` before that tree became a package and
  * covers exactly the same files; widening it to all of `packages/` would be a
  * change of scope, not of path.
  */
@@ -40,8 +38,8 @@ const sourceFiles = (dir: string): string[] =>
 
 /**
  * The env names the app's src/ reads, however it reads them:
- *  - `process.env.NAME` and `process.env['NAME']`
- *  - passed by name to a reader helper — `required('NAME')`, `intFromEnv('NAME', …)`
+ *  - `env.NAME` and `env['NAME']` on the knobs map (`process.env.NAME` included)
+ *  - passed by name to a reader helper — `required(env, 'NAME')`, `intFromEnv(env, 'NAME', …)`
  *  - built from a corridor stem — `<STEM>_<SUFFIX>`, expanded below
  *  - `fileOrInline` pairs, which read `NAME` and `NAME_PATH`
  */
@@ -51,16 +49,18 @@ const envNamesInSource = (): Set<string> => {
   const names = new Set<string>()
   for (const file of sourceFiles(join(root, 'packages', 'solver-app', 'src'))) {
     const text = readFileSync(file, 'utf8')
-    for (const m of text.matchAll(/process\.env(?:\.([A-Z][A-Z0-9_]+)|\['([A-Z][A-Z0-9_]+)'\])/g)) {
+    for (const m of text.matchAll(/\benv(?:\.([A-Z][A-Z0-9_]+)|\['([A-Z][A-Z0-9_]+)'\])/g)) {
       names.add((m[1] ?? m[2]) as string)
     }
-    for (const m of text.matchAll(/\b(required|intFromEnv|requiredBigintFromEnv)\(\s*'([A-Z][A-Z0-9_]+)'/g)) {
+    for (const m of text.matchAll(
+      /\b(required|intFromEnv|requiredBigintFromEnv)\(\s*(?:env,\s*)?'([A-Z][A-Z0-9_]+)'/g,
+    )) {
       names.add(m[2] as string)
     }
     // `resolveLndSecret(NAME)` reads BOTH `NAME` and `NAME_PATH` — inline or
     // from a file, exactly one of the two. Both are options an operator sets,
     // so both have to be written down.
-    for (const m of text.matchAll(/\bresolveLndSecret\(\s*'([A-Z][A-Z0-9_]+)'/g)) {
+    for (const m of text.matchAll(/\bresolveLndSecret\(\s*(?:env,\s*)?'([A-Z][A-Z0-9_]+)'/g)) {
       names.add(m[1] as string)
       names.add(`${m[1]}_PATH`)
     }
@@ -94,9 +94,9 @@ describe('README documents every config option', () => {
     // assertion above pass by knowing about no options at all.
     const found = envNamesInSource()
     expect(found.size).toBeGreaterThan(20)
-    // One name per SHAPE the regexes above recognise: `process.env.NAME`,
-    // `required('NAME')`, `intFromEnv('NAME', …)` and the `resolveLndSecret`
-    // pair. A shape that stopped matching would otherwise pass silently.
+    // One name per SHAPE the regexes above recognise: `env.NAME`,
+    // `required(env, 'NAME')`, `intFromEnv(env, 'NAME', …)` and the
+    // `resolveLndSecret` pair. A shape that stopped matching would otherwise pass silently.
     for (const name of ['SWAP_NETWORK', 'ARK_MNEMONIC', 'MAX_EXPOSED_SATS', 'POOL_AUTO_MINT', 'LND_CERT_PATH']) {
       expect(found, `${name} should be discoverable in src/`).toContain(name)
     }

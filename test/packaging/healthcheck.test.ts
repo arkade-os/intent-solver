@@ -42,7 +42,7 @@ describe('the image healthcheck', () => {
 
   it('reads the path `relay` actually writes', () => {
     expect(cli).toContain('utimesSync(config.relayHealthPath')
-    expect(read('packages/solver-app/src/config.ts')).toContain('process.env.RELAY_HEALTH_PATH')
+    expect(read('packages/solver-app/src/config.ts')).toContain('env.RELAY_HEALTH_PATH')
   })
 
   // A heartbeat slowed without widening the bound goes unhealthy at random.
@@ -78,6 +78,6 @@ describe('the serve-mode override an operator copies out of the compose file', (
     expect(probe).toContain('/healthz')
     expect(probe).toContain('8787')
     expect(read('packages/solver-transport/src/http/server.ts')).toContain("app.get('/healthz'")
-    expect(read('packages/solver-app/src/config.ts')).toContain("intFromEnv('PORT', 8787")
+    expect(read('packages/solver-app/src/config.ts')).toContain("intFromEnv(env, 'PORT', 8787")
   })
 })
