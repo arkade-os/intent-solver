@@ -50,7 +50,7 @@ import { LockupPreimageReader } from './lockupPreimage.js'
 import { applyUnrolledRefundStep } from './unrolledRefundStep.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
-import { parseUnrolledRefund } from '@arkade-os/solver-arkade/arkade/unrolledRefund.js'
+import { parseUnrolledRefund, type UnrolledRefundRecord } from '@arkade-os/solver-arkade/arkade/unrolledRefund.js'
 import { covenantScriptFromRow } from '../send/arkadeOps.js'
 import type { CovenantScriptRow } from '../send/orchestrator.js'
 import { buildOnchainHtlc, ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
@@ -1081,7 +1081,8 @@ export class OnchainReceiveSwapService {
     const unrolled = outpoints.find((o) => o.unrolled && o.txid === row.arkadeFundTxid)
     if (unrolled && arkade.refundUnrolled) {
       const covenantRow = receiveCovenantRowFor(row)
-      const step = await arkade.refundUnrolled(covenantRow, unrolled, parseUnrolledRefund(row.unrolledRefund))
+      const save = (record: UnrolledRefundRecord) => store.patch(row.id, { unrolled_refund: JSON.stringify(record) })
+      const step = await arkade.refundUnrolled(covenantRow, unrolled, parseUnrolledRefund(row.unrolledRefund), save)
       return applyUnrolledRefundStep(
         store,
         row,

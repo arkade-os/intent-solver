@@ -12,7 +12,7 @@
 import type { UnilateralDelays } from '@arkade-os/solver-core/core/timelocks.js'
 import type { FundedOutput, LockupSpendEvidence } from './wallet.js'
 import type { CovenantScriptRow } from './covenantRow.js'
-import type { UnrolledRefundRecord, UnrolledRefundStep } from './unrolledRefund.js'
+import type { SaveUnrolledRefund, UnrolledRefundRecord, UnrolledRefundStep } from './unrolledRefund.js'
 
 /** The Arkade operations the send-side orchestrators need, shaped for injection. */
 export interface ArkadeOps {
@@ -110,5 +110,6 @@ export interface ReceiveArkadeOps {
     row: CovenantScriptRow,
     lockup: { txid: string; vout: number },
     record: UnrolledRefundRecord | null,
+    save: SaveUnrolledRefund,
   ): Promise<UnrolledRefundStep>
 }
