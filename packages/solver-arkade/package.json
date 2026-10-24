@@ -31,7 +31,7 @@
     "@arkade-os/swap": "0.1.0-rc.28",
     "@noble/hashes": "^2.0.0",
     "@scure/base": "^2.0.0",
-    "@scure/btc-signer": "^2.0.1",
+    "@scure/btc-signer": "2.4.1",
     "better-sqlite3": "^12.11.1"
   },
   "devDependencies": {
