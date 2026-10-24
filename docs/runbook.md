@@ -68,15 +68,19 @@ ignored with a log line, because platforms set them; put `http.host` and
 `http.port` in the document if the solver relied on them.
 
 1. **Export the document with the new image, under the old environment** and
-   with the data volume mounted, so the stored asset-market rows can be read:
+   with the deployment's own data volume mounted, so the stored asset-market
+   rows can be read. Compose prefixes the volume with its project name, so find
+   it with `docker volume ls` (here `<project>_swap-data`):
 
    ```bash
-   docker run --rm --env-file .env -v swap-data:/data <new image> config-from-env > solver.json
+   docker run --rm --env-file .env -v <project>_swap-data:/data <new image> config-from-env > solver.json
    chmod 600 solver.json
    ```
 
    The export is checked by the loader that will read it, so an old value the
    document cannot hold is refused now, by path, rather than at the next boot.
+   So is an old asset direction (`ASSET_<SYMBOL>_BUY_ENABLED`) it cannot place
+   for want of those rows.
    It holds every secret the environment did, printed to stdout only;
    `.gitignore` already lists `solver.json`. `config-from-env` ships for this
    one release.

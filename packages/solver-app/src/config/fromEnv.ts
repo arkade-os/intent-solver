@@ -61,7 +61,11 @@ const setAt = (doc: Record<string, unknown>, segments: readonly string[], value:
   node[segments.at(-1)!] = value
 }
 
-export const envToDocument = (env: NodeJS.ProcessEnv, rows: readonly MarketPair[]): SolverDocument => {
+export const envToDocument = (
+  env: NodeJS.ProcessEnv,
+  rows: readonly MarketPair[],
+  where = 'the admin database',
+): SolverDocument => {
   // Set-but-blank is unset, the discipline every reader applies.
   const read = (name: string): string | undefined => env[name]?.trim() || undefined
   const doc: Record<string, unknown> = {}
@@ -115,7 +119,16 @@ export const envToDocument = (env: NodeJS.ProcessEnv, rows: readonly MarketPair[
     const row = rows.find(
       (candidate) => (candidate.base ?? candidate.quote) === assetId && !(candidate.base && candidate.quote),
     )
-    if (row === undefined) continue
+    if (row === undefined) {
+      const placed = ['BUY', 'SELL'].map((suffix) => `ASSET_${symbol}_${suffix}_ENABLED`).filter((name) => read(name))
+      if (placed.length > 0) {
+        throw new Error(
+          `${placed.join(' and ')} ${placed.length > 1 ? 'are' : 'is'} set, but no market row in ${where} carries ` +
+            `${symbol}: export with the deployment's data volume mounted, or unset it and set the direction in the document`,
+        )
+      }
+      continue
+    }
     const assetIsBase = row.base === assetId
     for (const [suffix, givesBase] of [
       ['BUY', true],
@@ -162,7 +175,8 @@ const storedPairs = async (path: string): Promise<MarketPair[]> => {
 
 /** The document for this environment, checked by the loader that will read it. */
 export const exportConfig = async (env: NodeJS.ProcessEnv): Promise<string> => {
-  const doc = envToDocument(env, await storedPairs(resolveDbLayout(swapDbPath(env)).admin))
+  const admin = resolveDbLayout(swapDbPath(env)).admin
+  const doc = envToDocument(env, await storedPairs(admin), admin)
   loadConfig({ env: { SOLVER_CONFIG_JSON: JSON.stringify(doc) } })
   return JSON.stringify(doc, null, 2)
 }

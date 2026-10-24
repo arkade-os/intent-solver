@@ -175,8 +175,17 @@ describe('envToDocument — the old direction names, against the stored rows', (
     })
   })
 
-  it('drops them where no row carries the asset, as the old seed did', () => {
-    expect(envToDocument(env, []).corridors).toBeUndefined()
+  // A data volume left unmounted reads as no rows, and dropping the flag would reopen the direction.
+  it('refuses them where no row carries the asset, naming where it looked', () => {
+    expect(() => envToDocument(env, [], '/data/swaps-admin.sqlite')).toThrow(
+      'ASSET_USDA_BUY_ENABLED is set, but no market row in /data/swaps-admin.sqlite carries USDA',
+    )
+  })
+
+  it('exports an asset no row carries yet when no direction was set', () => {
+    expect(envToDocument({ ...env, ASSET_USDA_BUY_ENABLED: undefined }, []).assets?.USDA).toMatchObject({
+      kind: 'arkade',
+    })
   })
 })
 
