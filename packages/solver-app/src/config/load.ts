@@ -87,26 +87,38 @@ export const loadConfig = (opts: LoadOptions = {}): Config => {
   }
 }
 
-const inspect = (env: NodeJS.ProcessEnv) => documentToKnobs(parseDocument(readDocument(env), lightningRailNames()))
-
 /** Enough to find the databases: no requirement checked, and an unmigrated environment tolerated. */
-export const loadKnobsForInspection = (env: NodeJS.ProcessEnv = process.env): Knobs => inspect(env).knobs
+export const loadKnobsForInspection = (env: NodeJS.ProcessEnv = process.env): Knobs =>
+  documentToKnobs(parseDocument(readDocument(env), lightningRailNames())).knobs
+
+const PATH_OF: ReadonlyMap<string, string> = new Map(PATHS.map(([path, knob]) => [knob, path]))
 
 /**
- * Crash reporting, read before a command loads its config. No readable document
- * means no reporter rather than no command: the command's own load says what is
- * wrong, and `config-from-env` runs before any document exists.
+ * Crash reporting, read before a command loads its config and from the `sentry`
+ * block alone: a mistake elsewhere in the document is the crash worth reporting.
+ * No readable document means no reporter rather than no command, because
+ * `config-from-env` runs before any document exists.
  */
 export const loadSentryOptions = (env: NodeJS.ProcessEnv = process.env): SentryOptions | null => {
-  let inspected: ReturnType<typeof inspect>
+  let raw: unknown
   try {
-    inspected = inspect(env)
+    raw = readDocument(env)
   } catch {
     return null
   }
+  const doc = (raw !== null && typeof raw === 'object' ? raw : {}) as {
+    network?: unknown
+    sentry?: Record<string, unknown>
+  }
+  const text = (value: unknown): string | undefined => (typeof value === 'string' ? value : undefined)
   try {
-    return sentryOptionsFromKnobs(inspected.knobs)
+    return sentryOptionsFromKnobs({
+      SWAP_NETWORK: text(doc.network),
+      SENTRY_DSN: text(doc.sentry?.dsn),
+      SENTRY_ENVIRONMENT: text(doc.sentry?.environment),
+      SENTRY_RELEASE: text(doc.sentry?.release),
+    })
   } catch (error) {
-    throw new Error(renameKnobs(messageOf(error), inspected.pathOf))
+    throw new Error(renameKnobs(messageOf(error), PATH_OF))
   }
 }

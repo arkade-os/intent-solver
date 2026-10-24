@@ -159,4 +159,9 @@ describe('loadSentryOptions', () => {
   it('is off, not refused, before any document exists', () => {
     expect(loadSentryOptions({})).toBeNull()
   })
+
+  it('still reports a document that is wrong somewhere else', () => {
+    const doc = { sentry: { dsn: 'https://key@o1.ingest.sentry.io/42' }, corridors: { x: { feeBsp: 1 } } }
+    expect(loadSentryOptions(inline(doc))?.dsn.publicKey).toBe('key')
+  })
 })
