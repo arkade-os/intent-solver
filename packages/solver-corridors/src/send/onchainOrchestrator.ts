@@ -46,6 +46,12 @@ import type { OnchainSendBackend, ReceiveSettlement } from '@arkade-os/solver-co
 import type { OnchainSendSwapRow, OnchainSendSwapStore } from '../db/onchainSwaps.js'
 import type { SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
 import type { ArkadeOps, CovenantScriptRow } from './orchestrator.js'
+import {
+  refundColumnsOnly,
+  refundSweptLockupFor,
+  sweptOpsFrom,
+  type SweptLockupRefund,
+} from '@arkade-os/solver-arkade/arkade/sweptLockupRefund.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { askApproval, type ApprovalCheck } from '@arkade-os/solver-core/core/approvalGate.js'
 import { guardedTick, sweep } from '@arkade-os/solver-core/util/sweep.js'
@@ -483,10 +489,20 @@ export class OnchainSendSwapService {
    * client (or another watcher) already moved it. The outcome discriminator
    * records that; the txid column only ever holds txids.
    */
-  private async pushRefund(row: OnchainSendSwapRow): Promise<string | null> {
+  private async pushRefund(row: OnchainSendSwapRow, options: { sweptToo?: boolean } = {}): Promise<string | null> {
     const { store, arkade } = this.deps
     const outputs = await arkade.findLockups(row.pkScript)
     if (outputs.length === 0) {
+      // Only a batch reaches a swept lockup. Unattended, the float pass finds
+      // one through the recovery guard; here only {@link refundNow} opts in.
+      if (options.sweptToo) {
+        const swept = (await arkade.findSweptLockups?.(row.pkScript)) ?? []
+        if (swept.length > 0 && arkade.refundSwept) {
+          const txid = await arkade.refundSwept(covenantRowFor(row), swept)
+          await store.patch(row.id, { refund_outcome: 'pushed', refund_ark_txid: txid })
+          return txid
+        }
+      }
       // The Lightning leg's `pushRefund` guards this identically, for the
       // identical reason: `findLockups` is `spendableOnly`, so an empty answer
       // is not proof of a spend, and `findRefundable` (src/db/onchainSwaps.ts)
@@ -537,6 +553,20 @@ export class OnchainSendSwapService {
     return pushed
   }
 
+  /** `refused` rows only, and no verdict hook: an exposed row here means the solver's own L1 HTLC is out, which {@link reclaimOnchainHtlc} answers. */
+  async refundSweptLockup(pkScript: string): Promise<SweptLockupRefund> {
+    const { store, arkade } = this.deps
+    const ops = sweptOpsFrom(arkade, covenantRowFor)
+    if (!ops) return null
+    return refundSweptLockupFor(pkScript, {
+      ...ops,
+      find: (script) => store.findByPkScript(script),
+      // No `lockup_value`: this store's only such column is the SOLVER's L1
+      // HTLC value, which a client-side refund says nothing about.
+      record: (row, fields) => store.patch(row.id, refundColumnsOnly(fields)),
+    })
+  }
+
   /**
    * Operator override: push the covenant refund for ONE specific row now,
    * whatever state it is in — the only way a `stuck` swap's Arkade lockup ever
@@ -563,7 +593,7 @@ export class OnchainSendSwapService {
    * timelock, so once that decision is made there is nothing left to wait for.
    */
   async refundNow(id: string): Promise<string | null> {
-    return this.pushRefund(await this.deps.store.get(id))
+    return this.pushRefund(await this.deps.store.get(id), { sweptToo: true })
   }
 
   /**

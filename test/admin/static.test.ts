@@ -210,16 +210,16 @@ describe('the console guides the operator', () => {
     expect(await source()).toContain('const contrary = money && !read?.supports[name]')
   })
 
-  it('keeps a contrary action clickable, behind an override', async () => {
+  it('keeps a contrary action clickable, named as going against the read', async () => {
     const js = await source()
     // Gated, not removed: a verdict can be unavailable and an operator can know
     // better, so the path must exist rather than dead-end.
-    expect(js).toContain('overridden')
-    expect(js).toContain('want to proceed anyway')
+    expect(js).toContain("contrary ? ' anyway' : ''")
+    expect(js).toContain('armDialog(name, { id: d.swap.id }, contrary ? because : null)')
   })
 
-  it('requires BOTH the typed confirmation and the override tick', async () => {
-    expect(await source()).toContain('d.typed === d.expects && (!d.override || d.overridden)')
+  it('sends the value the server checks, without making the operator retype it', async () => {
+    expect(await source()).toContain('confirm: d.expects')
   })
 
   it('names what the read said rather than asking a generic are-you-sure', async () => {

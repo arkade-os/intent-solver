@@ -10,6 +10,8 @@ import { MAX_SPLIT_OUTPUTS, planPool, poolTarget, type PoolCoin } from '@arkade-
 import { outpointKey, usableSatsOf } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
 import { isRenewalDue } from '@arkade-os/solver-arkade/arkade/vtxoLifecycle.js'
 import type { ReleaseReservation } from '@arkade-os/solver-arkade/arkade/reservations.js'
+import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { LOCKUP_FUNDING_FILTER } from '@arkade-os/solver-corridors/receive/fundLockup.js'
 import type { Services } from './services.js'
 import type { CorridorReaderSet } from '@arkade-os/solver-core/core/corridor.js'
 
@@ -148,6 +150,12 @@ export const arkadeFundingOwed = async (readers: CorridorReaderSet): Promise<num
   }, 0)
   if (!Number.isSafeInteger(total)) throw new Error('Arkade funding obligations exceed safe integer range')
   return total
+}
+
+/** What the float can fund, read as funding reads it: one filtered call, not `getBalance()`'s full snapshot. */
+export const arkadeFundableSats = async (ctx: Pick<ArkadeContext, 'wallet' | 'dustSats'>): Promise<number> => {
+  const coins = await ctx.wallet.getSpendableVtxos(LOCKUP_FUNDING_FILTER)
+  return coins.reduce((sum, coin) => sum + Math.max(0, usableSatsOf(coin, Number(ctx.dustSats))), 0)
 }
 
 export type MintOutcome =

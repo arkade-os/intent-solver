@@ -12,9 +12,10 @@
  * "done" were blue, amber would be one of five competing colours instead of
  * the only saturated thing on the screen.
  *
- * Monospace is the primary face, not an accent: every column here is a txid, a
- * payment hash, a pubkey or a sat amount. System stack only — no webfont,
- * because there is no build step and an ops box should not need a CDN.
+ * Sans for prose and controls, monospace for data: tables, ids, amounts and
+ * JSON. All-monospace made every sentence on the page as hard to read as a
+ * txid. System stack only — no webfont, because there is no build step and an
+ * ops box should not need a CDN.
  */
 
 :root {
@@ -44,6 +45,9 @@
 
   --mono: ui-monospace, 'SF Mono', 'Cascadia Mono', 'Segoe UI Mono', 'Roboto Mono', Menlo, Consolas, monospace;
   --sans: ui-sans-serif, system-ui, 'Segoe UI', Roboto, sans-serif;
+  --radius: 6px;
+  /* Native scrollbars, checkboxes and dropdowns follow the theme instead of flashing white. */
+  color-scheme: dark;
 }
 
 /**
@@ -77,6 +81,7 @@
   --failed-bg: #fdeae8;
 
   --focus: #5d768d;
+  color-scheme: light;
 }
 
 * {
@@ -87,373 +92,113 @@ body {
   margin: 0;
   background: var(--ground);
   color: var(--text);
-  font: 13px/1.5 var(--mono);
+  font: 14px/1.5 var(--sans);
   -webkit-font-smoothing: antialiased;
 }
 
 a {
   color: inherit;
+  text-underline-offset: 2px;
 }
 
-/* ---- status bar -------------------------------------------------------- */
-/* Always visible, always first. The question at 3am is "is money at risk right
-   now", so the answer is pinned to the top of every view rather than living on
-   a dashboard the operator has to navigate to. */
+code,
+pre,
+.mono {
+  font-family: var(--mono);
+}
 
-.status {
+/* ---- shell: a sidebar with status and navigation, the page beside it -- */
+/* The question at 3am is "is money at risk right now", so the answer is
+   pinned beside every view rather than living on a dashboard the operator
+   has to navigate to. */
+
+#root {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.sidebar {
   position: sticky;
   top: 0;
-  z-index: 10;
+  height: 100vh;
+  overflow-y: auto;
   display: flex;
-  flex-wrap: wrap;
-  gap: 0 1.5rem;
-  align-items: baseline;
-  padding: 0.5rem 1rem;
+  flex-direction: column;
+  gap: 18px;
+  padding: 18px 12px;
   background: var(--raised);
+  border-right: 1px solid var(--line);
+}
+
+.content {
+  min-width: 0;
+}
+
+.status {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 6px 16px;
   border-bottom: 1px solid var(--line);
+  font-size: 12px;
 }
 
-.status b {
-  font-weight: 600;
+.status p {
+  margin: 0;
 }
 
-.status .sep {
-  color: var(--text-faint);
+.status .bar {
+  margin: 6px 0 0;
 }
 
-.status .at-risk {
+.brand {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.brand .faint {
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.at-risk {
   color: var(--exposed);
   font-weight: 600;
 }
 
-/* ---- navigation -------------------------------------------------------- */
+/* The two counts that need a human, and the only coloured things in the sidebar. */
+button.flag {
+  appearance: none;
+  align-self: flex-start;
+  font: 600 12px/1.4 var(--sans);
+  color: var(--exposed);
+  background: var(--exposed-bg);
+  border: 1px solid var(--exposed);
+  border-radius: 999px;
+  padding: 1px 10px;
+  cursor: pointer;
+}
 
 nav {
   display: flex;
-  gap: 0;
-  padding: 0 1rem;
-  border-bottom: 1px solid var(--line);
-  overflow-x: auto;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
 }
 
 nav button {
   appearance: none;
   background: none;
   border: none;
-  border-bottom: 2px solid transparent;
+  border-radius: var(--radius);
   color: var(--text-dim);
-  font: 14px/1.5 var(--sans);
-  padding: 0.6rem 0.9rem;
+  font: 500 14px/1.4 var(--sans);
+  padding: 7px 10px;
+  text-align: left;
   cursor: pointer;
   white-space: nowrap;
-}
-
-.wallet-page {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 12px 8px 48px;
-  font: 15px/1.55 var(--sans);
-}
-
-.wallet-page h1 {
-  margin: 0;
-  font-size: 30px;
-  line-height: 1.2;
-  letter-spacing: -0.025em;
-}
-
-.wallet-heading {
-  margin-bottom: 28px;
-}
-
-.wallet-heading p,
-.wallet-section > p {
-  margin: 8px 0 20px;
-  max-width: 78ch;
-}
-
-.wallet-page h2,
-.wallet-page .panel h2 {
-  margin: 0;
-  color: var(--text);
-  font-size: 19px;
-  font-weight: 600;
-  letter-spacing: normal;
-  text-transform: none;
-}
-
-.wallet-page h3 {
-  margin: 0 0 8px;
-  font-size: 17px;
-}
-
-.wallet-page .panel {
-  min-width: 0;
-  padding: 20px;
-  border-radius: 6px;
-}
-
-.wallet-page .wallet-balances {
-  grid-template-columns: minmax(0, 1.4fr) repeat(2, minmax(0, 1fr));
-  gap: 16px;
-  margin-bottom: 32px;
-  align-items: start;
-}
-
-.wallet-balance-more summary {
-  color: var(--text-dim);
-  cursor: pointer;
-  font-size: 14px;
-}
-
-.wallet-number {
-  margin: 12px 0 20px;
-  font-size: 28px;
-  line-height: 1.3;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  overflow-wrap: anywhere;
-}
-
-.wallet-number > span {
-  color: var(--text-dim);
-  font-size: 13px;
-  font-weight: 400;
-}
-
-.wallet-balances .kv {
-  display: block;
-  margin: 0;
-  font-size: 13px;
-}
-
-.wallet-balances .kv dt {
-  margin: 12px 0 4px;
-}
-
-.wallet-balances .kv dd {
-  font-family: var(--mono);
-  font-size: 12px;
-}
-
-.wallet-balance-details > span {
-  display: grid;
-  gap: 4px;
-}
-
-.wallet-balance-details > span > span {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.wallet-balance-details .faint {
-  display: none;
-}
-
-.wallet-section {
-  min-width: 0;
-  margin-top: 28px;
-  padding-top: 24px;
-  border-top: 1px solid var(--line-strong);
-}
-
-.wallet-section-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-
-.wallet-page .act,
-.wallet-page input,
-.wallet-page select,
-.wallet-page textarea {
-  min-height: 42px;
-  padding: 9px 12px;
-  border-radius: 4px;
-  font: inherit;
-}
-
-.wallet-page textarea {
-  resize: vertical;
-  background: var(--ground);
-  color: var(--text);
-  border: 1px solid var(--line-strong);
-}
-
-.wallet-page .act {
-  background: var(--raised);
-  font-weight: 600;
-}
-
-.wallet-form-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
-  gap: 20px;
-}
-
-.wallet-field {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-width: 0;
-  font-size: 14px;
-}
-
-.wallet-field input,
-.wallet-field select,
-.wallet-field textarea {
-  width: 100%;
-  min-width: 0;
-}
-
-.wallet-actions {
-  display: flex;
-  gap: 12px;
-  margin-top: 20px;
-}
-
-.wallet-actions .act {
-  background: var(--text);
-  color: var(--ground);
-  border-color: var(--text);
-}
-
-.wallet-pools {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
-  gap: 16px;
-  margin: 20px 0;
-}
-
-.wallet-pool {
-  display: flex;
-  flex-direction: column;
-  align-items: start;
-  border-left: 3px solid var(--line-strong);
-  padding: 4px 16px;
-}
-
-.wallet-pool .wallet-number {
-  margin: 4px 0;
-  font-size: 22px;
-}
-
-.wallet-pool .muted {
-  font-size: 13px;
-}
-
-.wallet-manual,
-.wallet-policy {
-  padding: 24px;
-  background: var(--raised);
-  border: 1px solid var(--line-strong);
-  border-radius: 6px;
-}
-
-.wallet-manual > p {
-  margin: 0 0 24px;
-}
-
-.wallet-policy summary {
-  cursor: pointer;
-  font-size: 17px;
-  font-weight: 600;
-}
-
-.wallet-policy summary .phase {
-  margin-left: 12px;
-  font-size: 12px;
-  font-weight: 400;
-  vertical-align: middle;
-}
-
-.wallet-policy-body {
-  padding-top: 12px;
-}
-
-.wallet-toggle {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin: 20px 0;
-}
-
-.wallet-toggle input {
-  width: 20px;
-  min-height: 20px;
-  height: 20px;
-  margin: 0;
-  accent-color: var(--text-dim);
-}
-
-.wallet-fieldset {
-  min-width: 0;
-  margin: 24px 0;
-  padding: 20px;
-  border: 1px solid var(--line-strong);
-  border-radius: 4px;
-}
-
-.wallet-fieldset legend {
-  padding: 0 8px;
-  font-weight: 600;
-}
-
-.wallet-confirm {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: end;
-  gap: 16px;
-  margin: 24px 0 0;
-}
-
-.wallet-confirm .wallet-field {
-  flex: 1 1 260px;
-}
-
-.wallet-history {
-  margin: 28px 0;
-}
-
-.wallet-empty {
-  padding: 16px 0;
-  color: var(--text-dim);
-  border-bottom: 1px solid var(--line);
-}
-
-.wallet-transfer {
-  padding: 12px 0;
-  border-bottom: 1px solid var(--line);
-  overflow-wrap: anywhere;
-}
-
-.wallet-page .notice,
-.wallet-page .banner {
-  overflow-wrap: anywhere;
-}
-
-@media (max-width: 760px) {
-  .wallet-page .wallet-balances {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .wallet-page {
-    padding-inline: 0;
-  }
-
-  .wallet-manual,
-  .wallet-policy,
-  .wallet-fieldset {
-    padding: 16px;
-  }
-
-  .wallet-page .panels {
-    grid-template-columns: minmax(0, 1fr);
-  }
 }
 
 nav button:hover {
@@ -462,29 +207,112 @@ nav button:hover {
 
 nav button[aria-current='true'] {
   color: var(--text);
-  border-bottom-color: var(--text);
+  background: var(--line);
 }
 
-/* Pushed to the far end of the nav by the shared `.spacer`: reachable, never in
-   the way of the views. Dimmer than the view tabs — it is a preference, not
+/* Pushed to the bottom of the sidebar by the shared `.spacer`: reachable, never
+   in the way of the views. Dimmer than the views — it is a preference, not
    navigation. */
 nav button.theme {
   color: var(--text-faint);
+  font-size: 13px;
 }
 
 nav button.theme:hover {
   color: var(--text);
 }
 
+@media (max-width: 760px) {
+  #root {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sidebar {
+    position: static;
+    height: auto;
+    gap: 10px;
+    padding: 12px;
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+  }
+
+  nav {
+    flex-direction: row;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+}
+
+/* Amber, not red: config waiting to be applied is not a fault. */
+.restart-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  border-bottom: 1px solid var(--exposed);
+  background: var(--exposed-bg);
+  color: var(--text);
+  padding: 8px 24px;
+  font-size: 13px;
+}
+
+.restart-banner .mono {
+  color: var(--text-dim);
+}
+
+.restart-slot,
+.messages:empty,
+.result:empty,
+.dialog-error:empty {
+  display: none;
+}
+
+/* ---- page ------------------------------------------------------------ */
+
 main {
-  padding: 1rem;
-  max-width: 1400px;
+  max-width: 1320px;
+  padding: 24px 28px 64px;
+}
+
+.page-head {
+  margin: 0 0 20px;
+}
+
+.page-head h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+}
+
+main h2 {
+  margin: 28px 0 10px;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+main h2.section-title {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.spacer {
+  flex: 1;
 }
 
 .activity-section {
-  border-top: 1px solid var(--line);
-  padding: 1rem 0;
-  scroll-margin-top: 5rem;
+  padding: 16px 0;
   min-width: 0;
 }
 
@@ -492,38 +320,99 @@ main {
   overflow-x: auto;
 }
 
-.activity .toolbar h1 {
-  margin: 0;
-  font-size: 1.2rem;
+.activity-content > div > h2:first-child {
+  margin-top: 0;
+}
+
+/* Activity's sections as tabs: one table at a time instead of four stacked. */
+.tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.tabs button {
+  white-space: nowrap;
+  appearance: none;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  padding: 8px 12px;
+  color: var(--text-dim);
+  font: 500 14px/1.4 var(--sans);
+  cursor: pointer;
+}
+
+.tabs button:hover {
+  color: var(--text);
+}
+
+.tabs button[aria-selected='true'] {
+  color: var(--text);
+  border-bottom-color: var(--text);
+}
+
+.tabs .count {
+  margin-left: 6px;
+  color: var(--text-faint);
+  font: 12px var(--mono);
 }
 
 /* ---- tables ------------------------------------------------------------ */
 /* Dense on purpose. An operator scanning for the one bad row wants as many
-   rows on screen as will fit, not generous padding. */
+   rows on screen as will fit, not generous padding. Cells are data, so mono. */
 
 table {
   width: 100%;
   border-collapse: collapse;
+  font: 13px/1.45 var(--mono);
   font-variant-numeric: tabular-nums;
 }
 
 th {
   text-align: left;
-  font-weight: 600;
+  font: 600 12px/1.4 var(--sans);
   color: var(--text-dim);
   border-bottom: 1px solid var(--line-strong);
-  padding: 0.35rem 0.6rem;
+  padding: 8px 10px;
   white-space: nowrap;
 }
 
 td {
   border-bottom: 1px solid var(--line);
-  padding: 0.35rem 0.6rem;
+  padding: 7px 10px;
   white-space: nowrap;
 }
 
+/* Hover takes the other surface, never a third colour no contrast pair covers. */
 tbody tr:hover {
   background: var(--raised);
+}
+
+.panel tbody tr:hover,
+.dialog tbody tr:hover {
+  background: var(--ground);
+}
+
+tbody tr.clickable {
+  cursor: pointer;
+}
+
+/* The pricing row whose editor is open. */
+tbody tr.selected {
+  background: var(--raised);
+}
+
+.figure .bar {
+  margin: 10px 0 0;
+}
+
+tbody tr.clickable:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
 }
 
 .rfq-refusals {
@@ -537,22 +426,40 @@ tbody tr:hover {
   vertical-align: top;
 }
 
-tbody tr.clickable {
-  cursor: pointer;
-}
-
 td.num {
   text-align: right;
+}
+
+/* A block inside the cell, because an auto-layout table may ignore a cell's own max-width. */
+.clip {
+  display: block;
+  max-width: 56ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ---- phase, the only coloured thing ------------------------------------ */
 
 .phase {
   display: inline-block;
-  padding: 0 0.4rem;
+  padding: 0 7px;
   border: 1px solid var(--line-strong);
-  border-radius: 2px;
+  border-radius: 4px;
   color: var(--text-dim);
+  font: 500 12px/1.6 var(--sans);
+  white-space: nowrap;
+}
+
+/* Finished rows are the bulk of every table and need no box drawn round them. */
+.phase-done {
+  border-color: transparent;
+  padding-inline: 0;
+}
+
+/* Failed without harm (refused, refunded): no colour, a dashed edge to say "not delivered". */
+.phase.quiet {
+  border-style: dashed;
 }
 
 .phase-exposed {
@@ -562,7 +469,7 @@ td.num {
   font-weight: 600;
 }
 
-.phase-failed {
+.phase-failed:not(.quiet) {
   color: var(--failed);
   border-color: var(--failed);
   background: var(--failed-bg);
@@ -571,6 +478,7 @@ td.num {
 /* The corridor's own word, secondary to the phase beside it. */
 .state {
   color: var(--text-dim);
+  font-family: var(--sans);
 }
 
 /* `stuck` is spelled the same on all four corridors and always needs a human. */
@@ -583,14 +491,48 @@ td.num {
 
 .panels {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
 }
 
 .panel {
+  min-width: 0;
+  overflow-x: auto;
   border: 1px solid var(--line);
+  border-radius: var(--radius);
   background: var(--raised);
-  padding: 0.75rem;
+  padding: 14px 16px;
+}
+
+/* A help bubble has to escape its panel. */
+.panel:has(.tip) {
+  overflow: visible;
+}
+
+.discovery {
+  grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
+}
+
+@media (max-width: 900px) {
+  .discovery {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.panel h2 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.panel p {
+  margin: 6px 0;
+  overflow-wrap: anywhere;
 }
 
 /*
@@ -599,28 +541,29 @@ td.num {
  * every panel beside it. Wrapping mid-token is the right trade here: this is
  * JSON to be read and copied, not aligned.
  */
-.panel pre {
-  margin: 0;
-  max-height: 18rem;
-  overflow: auto;
+.panel pre,
+.dialog pre {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  background: var(--ground);
+  border: 1px solid var(--line);
+  border-radius: 4px;
   white-space: pre-wrap;
   word-break: break-all;
-  font-size: 0.8rem;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
-.panel h2 {
-  margin: 0 0 0.5rem;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-dim);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+.panel pre {
+  max-height: 24rem;
+  overflow: auto;
 }
 
 .kv {
   display: grid;
   grid-template-columns: max-content 1fr;
-  gap: 0.15rem 0.75rem;
+  gap: 6px 16px;
+  margin: 0;
 }
 
 .kv dt {
@@ -630,6 +573,35 @@ td.num {
 .kv dd {
   margin: 0;
   overflow-wrap: anywhere;
+  font: 13px/1.5 var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* A figure's note is prose under its number, not more of the number. */
+.kv dd > .note {
+  display: block;
+  font: 12px/1.4 var(--sans);
+}
+
+/* The Arkade balance's parts, one per line instead of a dotted run. */
+.balance-list > span {
+  display: grid;
+  gap: 2px;
+}
+
+.balance-list > span > span {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.balance-list .faint {
+  display: none;
+}
+
+#overview-balances .balance-list > span {
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  column-gap: 28px;
 }
 
 /* ---- backend status ---------------------------------------------------- */
@@ -653,16 +625,20 @@ td.num {
 
 button.act,
 input,
-select {
-  font: inherit;
+select,
+textarea {
+  font: 13px/1.4 var(--sans);
   background: var(--ground);
   color: var(--text);
   border: 1px solid var(--line-strong);
-  border-radius: 2px;
-  padding: 0.3rem 0.6rem;
+  border-radius: 4px;
+  padding: 6px 10px;
 }
 
 button.act {
+  min-height: 30px;
+  background: var(--raised);
+  font-weight: 500;
   cursor: pointer;
 }
 
@@ -675,9 +651,118 @@ button.act.armed {
   color: var(--exposed);
 }
 
-button.act:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
+/* The one step a screen leads with. */
+button.act.primary {
+  background: var(--text);
+  border-color: var(--text);
+  color: var(--ground);
+  font-weight: 600;
+}
+
+button.act.armed.primary {
+  background: var(--exposed-bg);
+  border-color: var(--exposed);
+  color: var(--exposed);
+}
+
+button.icon {
+  appearance: none;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-size: 16px;
+  line-height: 1;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+
+button.icon:hover {
+  color: var(--text);
+  border-color: var(--line-strong);
+}
+
+/* A menu of the actions a screen does not lead with: native `<details>`, no script. */
+details.menu {
+  position: relative;
+}
+
+details.menu > summary {
+  list-style: none;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  padding: 5px 10px;
+  color: var(--text);
+  font-weight: 500;
+}
+
+details.menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+details.menu > summary::after {
+  content: ' ▾';
+  color: var(--text-faint);
+}
+
+.menu-list {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + 4px);
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 200px;
+  padding: 4px;
+  background: var(--raised);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.menu-list button.act {
+  border: none;
+  background: none;
+  text-align: left;
+}
+
+.menu-list button.act:hover:not(:disabled) {
+  background: var(--ground);
+}
+
+.decision button.act::first-letter {
+  text-transform: uppercase;
+}
+
+button.link.danger {
+  color: var(--failed);
+}
+
+label.check {
+  margin: 4px 0;
+  color: var(--text-dim);
+}
+
+label.check input[type='checkbox'] {
+  margin: 0;
+}
+
+/* In-page jumps: they move the view, they act on nothing, so they do not look like buttons. */
+button.link {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 4px 6px;
+  color: var(--text-dim);
+  font: 500 13px/1.4 var(--sans);
+  text-decoration: underline;
+  text-decoration-color: var(--line-strong);
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+button.link:hover {
+  color: var(--text);
 }
 
 :focus-visible {
@@ -685,12 +770,18 @@ button.act:disabled {
   outline-offset: 1px;
 }
 
-/* ---- dialog ------------------------------------------------------------ */
+summary {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-weight: 600;
+}
+
+/* ---- dialogs ------------------------------------------------------------ */
 
 .scrim {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.65);
+  background: rgba(0, 0, 0, 0.6);
   display: grid;
   place-items: center;
   padding: 1rem;
@@ -700,48 +791,200 @@ button.act:disabled {
 .dialog {
   background: var(--raised);
   border: 1px solid var(--line-strong);
-  max-width: 620px;
+  border-radius: 8px;
+  max-width: 560px;
   width: 100%;
-  padding: 1rem;
+  padding: 18px 20px;
   /*
    * Scrolls INSIDE the scrim rather than overflowing it. The scrim centres its
    * child, so a dialog taller than the viewport was clipped at BOTH ends with
-   * no way to reach either — and this dialog is long by design: state, meaning,
-   * timeline, explorer links, the action groups and the raw row. On a laptop
-   * the actions were simply not reachable.
+   * no way to reach either.
    *
    * `2rem` is the scrim's own padding, top and bottom.
    */
   max-height: calc(100vh - 2rem);
   overflow-y: auto;
-  /* Keeps a sticky-free footer from being flush against the scroll edge. */
   overscroll-behavior: contain;
 }
 
 .dialog h2 {
-  margin: 0 0 0.5rem;
-  font-size: 14px;
+  margin: 0 0 12px;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.dialog h3 {
+  margin: 24px 0 8px;
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .dialog .warning {
   border-left: 3px solid var(--exposed);
   background: var(--exposed-bg);
   color: var(--text);
-  padding: 0.6rem 0.75rem;
-  margin: 0 0 0.75rem;
-  font-family: var(--sans);
+  padding: 8px 12px;
+  margin: 0 0 12px;
   line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .dialog .row {
   display: flex;
-  gap: 0.5rem;
+  flex-wrap: wrap;
+  gap: 8px;
   align-items: center;
-  margin-top: 0.75rem;
+  margin-top: 12px;
 }
 
-.dialog input {
+.dialog .row.end {
+  justify-content: flex-end;
+  margin-top: 18px;
+}
+
+.dialog .row input {
   flex: 1;
+  font-family: var(--mono);
+}
+
+.dialog .row input[type='checkbox'] {
+  flex: none;
+}
+
+/* The confirm box: one question, its consequence, two buttons. */
+.dialog.confirm {
+  max-width: 440px;
+}
+
+.dialog.confirm input.reason {
+  width: 100%;
+}
+
+details.fine {
+  margin-top: 12px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+details.fine > summary {
+  font-weight: 500;
+}
+
+input[aria-invalid='true'] {
+  border-color: var(--exposed);
+}
+
+/* Focus lands on the pane so the keyboard starts inside it; the pane itself needs no ring. */
+.dialog.detail:focus {
+  outline: none;
+}
+
+/* The page behind a dialog stays put; only the dialog scrolls. */
+body:has(.scrim) {
+  overflow: hidden;
+}
+
+/* The swap pane: a drawer the height of the window, so the list it came from stays in view beside it. */
+.scrim.drawer {
+  place-items: stretch end;
+  padding: 0;
+}
+
+.dialog.detail {
+  max-width: 760px;
+  height: 100vh;
+  max-height: 100vh;
+  border-width: 0 0 0 1px;
+  border-radius: 0;
+  padding: 0 24px 40px;
+  animation: drawer-in 0.16s ease-out;
+}
+
+@keyframes drawer-in {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+}
+
+.detail-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin: 0 -24px 16px;
+  padding: 16px 24px 12px;
+  background: var(--raised);
+  border-bottom: 1px solid var(--line);
+}
+
+.detail-head h2 {
+  margin: 0;
+}
+
+.detail-head p {
+  margin: 2px 0 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.detail-state {
+  margin: 0 0 4px;
+}
+
+.detail-state + .faint {
+  margin: 0 0 14px;
+  font-size: 12px;
+}
+
+/* The pane's decision: what to do next in one sentence, then one button and a menu. */
+.decision {
+  margin: 16px 0;
+  padding: 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--ground);
+}
+
+.decision .row {
+  margin-top: 10px;
+}
+
+details.why {
+  margin: 0 0 12px;
+  color: var(--text-dim);
+}
+
+details.why p {
+  margin: 6px 0 0;
+}
+
+.timeline td {
+  white-space: normal;
+  vertical-align: top;
+}
+
+.timeline td:first-child {
+  width: 3.5rem;
+  color: var(--text-dim);
+}
+
+.result {
+  margin-top: 16px;
+}
+
+.result > .act {
+  margin-top: 8px;
+}
+
+details.raw {
+  margin-top: 24px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
 }
 
 /* ---- banners ----------------------------------------------------------- */
@@ -752,38 +995,32 @@ button.act:disabled {
   border: 1px solid var(--failed);
   background: var(--failed-bg);
   color: var(--text);
-  padding: 0.5rem 0.75rem;
-  margin-bottom: 0.75rem;
-  font-family: var(--sans);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin: 0 0 12px;
 }
 
+/* A standing fact about a list, kept to one quiet line rather than a box to read past. */
 .notice {
-  border: 1px solid var(--line-strong);
-  background: var(--raised);
-  color: var(--text-dim);
-  padding: 0.5rem 0.75rem;
-  margin-bottom: 0.75rem;
-  font-family: var(--sans);
+  color: var(--text-faint);
+  font-size: 12px;
+  margin: 0 0 8px;
 }
 
-/* Amber, not red: config waiting to be applied is not a fault. */
-.restart-banner {
+/* An action's answer, until dismissed. */
+.toast {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem 1rem;
-  border: 1px solid var(--exposed);
-  background: var(--exposed-bg);
-  color: var(--text);
-  padding: 0.5rem 0.75rem;
-  margin: 0 0 0.75rem;
-  font-family: var(--sans);
-}
-
-.restart-banner .mono {
-  font-family: var(--mono);
-  color: var(--text-dim);
+  align-items: baseline;
+  gap: 4px 8px;
+  border: 1px solid var(--line-strong);
+  border-left: 3px solid var(--text-dim);
+  background: var(--raised);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  margin: 0 0 12px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
 }
 
 .muted {
@@ -803,9 +1040,11 @@ button.act:disabled {
 }
 
 .bar {
-  height: 6px;
+  height: 8px;
+  border-radius: 4px;
   background: var(--line);
   overflow: hidden;
+  margin: 4px 0 8px;
 }
 
 .bar > span {
@@ -818,35 +1057,6 @@ button.act:disabled {
   background: var(--exposed);
 }
 
-.toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  align-items: center;
-  margin-bottom: 0.75rem;
-}
-
-.spacer {
-  flex: 1;
-}
-
-/* Operator-facing explanation of a failure or state (src/core/refusalReasons.ts). */
-.explain {
-  border-left: 2px solid var(--line);
-  padding: 0.25rem 0 0.25rem 0.75rem;
-  margin: 0.5rem 0;
-}
-.explain-title {
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  font-size: 0.72rem;
-  opacity: 0.65;
-  margin: 0 0 0.2rem;
-}
-.explain p {
-  margin: 0.2rem 0;
-}
-
 /*
  * An armed action the last check does NOT support, versus one it does.
  *
@@ -856,46 +1066,37 @@ button.act:disabled {
  * being told; the contrary one still works, it just has to be meant.
  */
 .act.armed.contrary {
-  border-color: var(--bad, #e5484d);
+  border-color: var(--failed);
   opacity: 0.72;
 }
+
 .act.armed.supported {
-  border-color: var(--good, #30a46c);
+  background: var(--exposed-bg);
+  font-weight: 600;
 }
 
-/* The action area: three numbered groups, not one row of equal options. */
 .nextstep {
-  border-left: 3px solid var(--accent, #6b8afd);
-  padding: 0.5rem 0.75rem;
-  margin: 0.75rem 0 0.25rem;
-  font-family: system-ui, sans-serif;
-  line-height: 1.45;
+  margin: 0;
+  font-weight: 500;
+  line-height: 1.5;
 }
-.actgroup {
-  margin-top: 0.6rem;
-}
-.actlabel {
-  font-size: 0.82em;
-  margin-bottom: 0.25rem;
-  letter-spacing: 0.03em;
-}
+
 /* A note in the timeline is a thing that HAPPENED, not a step through it. */
-tr.note td {
-  border-left: 3px solid var(--accent, #6b8afd);
+tr.note td:first-child {
+  border-left: 3px solid var(--line-strong);
 }
 
 /* Evidence sits under the step it belongs to, not in a list of its own. */
 .steplink {
-  margin-top: 0.15rem;
-  font-size: 0.92em;
+  margin-top: 2px;
+  font-size: 12px;
 }
 
 /* The reassuring half of a stuck-but-refunded row, which was missing entirely. */
 .settled {
-  border-left: 3px solid var(--good, #30a46c);
-  padding: 0.5rem 0.75rem;
-  margin: 0 0 0.75rem;
-  font-family: system-ui, sans-serif;
+  border-left: 3px solid var(--text-dim);
+  padding: 8px 12px;
+  margin: 0 0 12px;
   line-height: 1.45;
 }
 
@@ -935,6 +1136,9 @@ tr.note td {
     border-right-color: currentColor;
     opacity: 0.5;
   }
+  .dialog.detail {
+    animation: none;
+  }
 }
 
 /*
@@ -945,8 +1149,7 @@ tr.note td {
   flex: 1 1 22rem;
   min-width: 12rem;
   max-width: 34rem;
-  font: inherit;
-  padding: 0.3rem 0.5rem;
+  font-family: var(--mono);
 }
 
 /*
@@ -1037,31 +1240,32 @@ tr.note td {
 
 /* The caveat under every total. Not a footnote — it decides what the number means. */
 .basis {
-  border-left: 2px solid var(--exposed);
-  padding: 0.3rem 0 0.3rem 0.75rem;
-  margin: 0 0 0.75rem;
+  border-left: 3px solid var(--exposed);
+  padding: 4px 0 4px 12px;
+  margin: 0 0 16px;
   color: var(--text-dim);
-  font-family: var(--sans);
+  max-width: 110ch;
 }
 
-/* The headline figures. Tabular so the digits line up between refreshes. */
+/* The headline figures, as tiles. Tabular so the digits line up between refreshes. */
 .figures {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 1.5rem;
-  margin-bottom: 0.75rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
 }
 
 .figure {
-  min-width: 8rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--raised);
+  padding: 12px 14px;
 }
 
 .figure b {
   display: block;
-  font-size: 1.5rem;
-  font-weight: 500;
+  font: 600 22px/1.25 var(--mono);
   font-variant-numeric: tabular-nums;
-  line-height: 1.2;
 }
 
 .figure b.c-loss {
@@ -1074,7 +1278,7 @@ tr.note td {
 
 .figure span {
   color: var(--text-dim);
-  font-size: 0.85em;
+  font-size: 12px;
 }
 
 /*
@@ -1088,27 +1292,12 @@ tr.note td {
   color: var(--text-faint);
 }
 
-/*
- * Sats outstanding, in a table.
- *
- * `.at-risk` was only ever styled inside `.status` and as a meter fill, so a
- * bare `span.at-risk` in a table body rendered in `--text` — the console's one
- * design rule, COLOUR IS RESERVED FOR RISK, silently not applied on the panel
- * whose subject is risk. Scoped to a panel because that is where these tables
- * live, and `--exposed` on `--raised` is now a declared pair in
- * `test/admin/contrast.test.ts`, which is what saying "this combination
- * renders" means here.
- */
-.panel .at-risk {
-  color: var(--exposed);
-}
-
 /* ---- the pricing editor and its preview -------------------------------- */
 
 .form-grid {
   display: grid;
   grid-template-columns: 12rem minmax(8rem, 1fr) minmax(11rem, 15rem);
-  gap: 0.3rem 0.85rem;
+  gap: 6px 14px;
   align-items: baseline;
 }
 
@@ -1120,13 +1309,14 @@ tr.note td {
 
 .form-grid > .hint {
   color: var(--text-faint);
-  font-size: 0.85em;
+  font-size: 12px;
   line-height: 1.35;
 }
 
 .form-grid input,
 .form-grid select {
   width: 100%;
+  font-family: var(--mono);
   font-variant-numeric: tabular-nums;
 }
 
@@ -1140,13 +1330,12 @@ tr.note td {
 
 .form-grid .group {
   grid-column: 1 / 4;
-  margin: 0.85rem 0 0.25rem;
-  padding-top: 0.5rem;
+  margin: 14px 0 4px;
+  padding-top: 8px;
   border-top: 1px solid var(--line);
   color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-size: 0.85em;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .form-grid .group:first-child {
@@ -1183,14 +1372,14 @@ tr.note td {
   top: -0.3rem;
   z-index: 20;
   width: 25rem;
-  padding: 0.5rem 0.65rem;
+  padding: 8px 10px;
   background: var(--ground);
   border: 1px solid var(--line-strong);
-  border-radius: 2px;
+  border-radius: 4px;
   color: var(--text);
   text-align: left;
   white-space: normal;
-  font-size: 0.92em;
+  font-size: 13px;
   line-height: 1.45;
 }
 
@@ -1203,8 +1392,9 @@ tr.note td {
 .split {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 0.75rem;
+  gap: 12px;
   align-items: start;
+  margin: 12px 0;
 }
 
 @media (max-width: 1150px) {
@@ -1215,12 +1405,12 @@ tr.note td {
 
 .sticky {
   position: sticky;
-  top: 4.2rem;
+  top: 16px;
 }
 
 .ladder td,
 .ladder th {
-  padding: 0.3rem 0.5rem;
+  padding: 5px 8px;
 }
 
 .ladder td[colspan] {
@@ -1239,9 +1429,9 @@ tr.note td {
   border: 1px solid var(--exposed);
   background: var(--exposed-bg);
   color: var(--exposed);
-  padding: 0.45rem 0.65rem;
-  margin: 0.6rem 0 0;
-  font-family: var(--sans);
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin: 10px 0 0;
   line-height: 1.45;
 }
 
@@ -1251,15 +1441,15 @@ tr.note td {
   flex-wrap: wrap;
   color: var(--text-faint);
   border-top: 1px solid var(--line);
-  margin-top: 0.7rem;
-  padding-top: 0.5rem;
-  font-size: 0.9em;
+  margin-top: 10px;
+  padding-top: 8px;
+  font-size: 12px;
 }
 
 .seg {
   display: inline-flex;
   border: 1px solid var(--line-strong);
-  border-radius: 2px;
+  border-radius: 4px;
   overflow: hidden;
 }
 
@@ -1269,13 +1459,17 @@ tr.note td {
   border: none;
   border-right: 1px solid var(--line-strong);
   color: var(--text-faint);
-  font: inherit;
-  padding: 0.05rem 0.55rem;
+  font: 500 13px/1.4 var(--sans);
+  padding: 4px 10px;
   cursor: pointer;
 }
 
 .seg button:last-child {
   border-right: none;
+}
+
+.seg button:hover {
+  color: var(--text);
 }
 
 .seg button[aria-pressed='true'] {
@@ -1295,16 +1489,16 @@ tr.note td {
   justify-content: space-between;
   align-items: center;
   gap: 1rem;
-  padding: 0.75rem 0;
+  padding: 12px 0;
   border-block: 1px solid var(--line-strong);
 }
 
 .pricing-apply p {
-  margin: 0.25rem 0 0;
+  margin: 4px 0 0;
 }
 
 .pricing-changes {
-  margin: 1rem 0;
+  margin: 0 0 16px;
 }
 
 .pricing-table {
@@ -1327,15 +1521,14 @@ tr.note td {
 }
 
 .pricing-page details {
-  padding: 0.6rem 0;
-}
-
-.pricing-page summary {
-  cursor: pointer;
-  color: var(--text-dim);
+  padding: 10px 0;
 }
 
 @media (max-width: 700px) {
+  main {
+    padding-inline: 12px;
+  }
+
   .pricing-page .split {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -1370,5 +1563,267 @@ tr.note td {
     left: 0;
     top: 1.2rem;
     width: min(25rem, 70vw);
+  }
+}
+
+/* ---- wallet ------------------------------------------------------------ */
+
+.wallet-section .panels {
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+}
+
+.withdraw:not(:empty) {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.wallet-page h2,
+.wallet-page .panel h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.wallet-page h3 {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+
+.wallet-page .panel {
+  padding: 18px;
+}
+
+.wallet-page .wallet-balances {
+  grid-template-columns: minmax(0, 1.4fr) repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 24px;
+  align-items: start;
+}
+
+.wallet-balance-more summary {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.wallet-number {
+  margin: 10px 0 16px;
+  font: 600 26px/1.3 var(--mono);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.wallet-number > span {
+  color: var(--text-dim);
+  font: 400 13px var(--sans);
+}
+
+.wallet-balances .kv {
+  display: block;
+  margin: 0;
+  font-size: 13px;
+}
+
+.wallet-balances .kv dt {
+  margin: 12px 0 4px;
+}
+
+.wallet-balances .kv dd {
+  font-size: 12px;
+}
+
+.wallet-section {
+  min-width: 0;
+  margin-top: 28px;
+  padding-top: 24px;
+  border-top: 1px solid var(--line-strong);
+}
+
+.wallet-section > p {
+  margin: 8px 0 20px;
+  max-width: 78ch;
+}
+
+.wallet-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.wallet-page .act,
+.wallet-page input,
+.wallet-page select,
+.wallet-page textarea {
+  min-height: 38px;
+  padding: 8px 12px;
+  font-size: 14px;
+}
+
+.wallet-page textarea {
+  resize: vertical;
+}
+
+.wallet-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
+  gap: 16px 20px;
+}
+
+.wallet-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.wallet-field input,
+.wallet-field select,
+.wallet-field textarea {
+  width: 100%;
+  min-width: 0;
+}
+
+.wallet-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 20px;
+}
+
+.wallet-actions .act {
+  background: var(--text);
+  color: var(--ground);
+  border-color: var(--text);
+}
+
+.wallet-pools {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
+  gap: 16px;
+  margin: 20px 0;
+}
+
+.wallet-pool {
+  display: flex;
+  flex-direction: column;
+  align-items: start;
+  border-left: 3px solid var(--line-strong);
+  padding: 4px 16px;
+}
+
+.wallet-pool .wallet-number {
+  margin: 4px 0;
+  font-size: 20px;
+}
+
+.wallet-pool .muted {
+  font-size: 13px;
+}
+
+.wallet-manual,
+.wallet-policy {
+  padding: 20px;
+  background: var(--raised);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+}
+
+.wallet-manual > p {
+  margin: 0 0 20px;
+}
+
+.wallet-policy summary {
+  color: var(--text);
+  font-size: 15px;
+}
+
+.wallet-policy summary .phase {
+  margin-left: 12px;
+  vertical-align: middle;
+}
+
+.wallet-policy-body {
+  padding-top: 12px;
+}
+
+.wallet-toggle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 20px 0;
+}
+
+.wallet-toggle input {
+  width: 20px;
+  min-height: 20px;
+  height: 20px;
+  margin: 0;
+  accent-color: var(--text-dim);
+}
+
+.wallet-fieldset {
+  min-width: 0;
+  margin: 20px 0;
+  padding: 16px 20px 20px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+}
+
+.wallet-fieldset legend {
+  padding: 0 8px;
+  font-weight: 600;
+}
+
+.wallet-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 16px;
+  margin: 24px 0 0;
+}
+
+.wallet-confirm .wallet-field {
+  flex: 1 1 260px;
+}
+
+.wallet-history {
+  margin: 28px 0;
+}
+
+.wallet-empty {
+  padding: 16px 0;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--line);
+}
+
+.wallet-transfer {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+
+.wallet-page .notice,
+.wallet-page .banner {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 760px) {
+  .wallet-page .wallet-balances {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .wallet-manual,
+  .wallet-policy,
+  .wallet-fieldset {
+    padding: 16px;
+  }
+
+  .wallet-page .panels {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

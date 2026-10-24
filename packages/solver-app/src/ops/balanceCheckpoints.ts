@@ -1,7 +1,9 @@
 import type { Services } from './services.js'
+import { hex } from '@scure/base'
+import { LOCKUP_CONTRACT_TYPE, registeredLockupDeadlines } from '@arkade-os/solver-arkade/arkade/vtxoLifecycle.js'
 import { json, messageOf, nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { startCadence } from './cadence.js'
-import { createJoin, within } from './guardedRead.js'
+import { createJoin, STALE_READ_MS, within } from './guardedRead.js'
 import { limitNotification } from './notify.js'
 
 export interface BalanceCheckpoint {
@@ -16,7 +18,20 @@ export interface BalanceCheckpoint {
   errors: Record<string, string>
   previousId: number | null
   decreases: { asset: string; before: string; after: string; decrease: string }[]
+  // Optional: checkpoints stored before recovery tracking have neither.
+  recovered?: (FollowedDecrease & { after: string })[]
+  unrecovered?: FollowedDecrease[]
 }
+
+/** A decrease reported at `checkpointId`, followed until its asset is back to `before`. */
+export interface FollowedDecrease {
+  checkpointId: number
+  asset: string
+  before: string
+}
+
+// ponytail: oldest dropped past this; a time window instead if late follow-ups turn into noise.
+const UNRECOVERED_LIMIT = 20
 
 type CheckpointServices = Pick<Services, 'arkade' | 'ln' | 'onchain' | 'adminStore' | 'config' | 'providerPubkey'>
 
@@ -34,6 +49,8 @@ export interface BalanceChange {
 
 export const balanceCheckpointScope = (services: CheckpointServices): string =>
   json([
+    // Bumped when what a checkpoint counts changes, so the new measure starts its own baseline.
+    'excludes-user-lockups',
     services.config.network,
     services.config.arkade.arkServerUrl,
     services.providerPubkey,
@@ -74,18 +91,51 @@ export const formatBalanceChange = (change: BalanceChange): string => {
   return `${change.asset}: ${delta > 0n ? '+' : ''}${amount(change.delta)} ${change.asset === 'BTC' ? 'sats' : 'base units'} (${amount(change.before)} → ${amount(change.after)})`
 }
 
-export const formatCheckpointWarning = (checkpoint: BalanceCheckpoint, network: string): string | null =>
-  checkpoint.decreases.length === 0
+const levelOf = (checkpoint: BalanceCheckpoint, asset: string): string =>
+  asset === 'BTC' ? (checkpoint.totalSats ?? '0') : (checkpoint.arkade?.assets[asset.slice('arkade:'.length)] ?? '0')
+
+// A decrease is alerted only once the next checkpoint still shows it: a claim landing a few
+// seconds after its payment, or two rails read a moment apart, is back by then.
+export const formatCheckpointWarning = (checkpoint: BalanceCheckpoint, network: string): string | null => {
+  const held = (checkpoint.unrecovered ?? []).filter(({ checkpointId }) => checkpointId === checkpoint.previousId)
+  return held.length === 0
     ? null
     : limitNotification(
         [
-          `POSSIBLE LOSS — ${network} — checkpoint #${checkpoint.id}`,
-          'Fees, withdrawals and funds in flight are not reconciled.',
-          ...checkpoint.decreases.map(({ asset, before, after, decrease }) =>
-            formatBalanceChange({ asset, before, after, delta: String(-BigInt(decrease)) }),
-          ),
+          `⚠️ *POSSIBLE LOSS* · ${network} · checkpoint #${checkpoint.id}`,
+          ...held.map(({ checkpointId, asset, before }) => {
+            const after = levelOf(checkpoint, asset)
+            return `${formatBalanceChange({ asset, before, after, delta: String(BigInt(after) - BigInt(before)) })} since checkpoint #${checkpointId}`
+          }),
+          'Fees, withdrawals and funds in flight are not reconciled. A RECOVERED follow-up is sent if the balance comes back.',
         ].join('\n'),
       )
+}
+
+export const formatCheckpointRecovery = (checkpoint: BalanceCheckpoint, network: string): string | null => {
+  // A decrease back by the next checkpoint was never alerted.
+  const recovered = (checkpoint.recovered ?? []).filter(({ checkpointId }) => checkpointId !== checkpoint.previousId)
+  return recovered.length === 0
+    ? null
+    : limitNotification(
+        [
+          `✅ *RECOVERED* · ${network} · checkpoint #${checkpoint.id}`,
+          ...recovered.map(
+            ({ checkpointId, asset, before, after }) =>
+              `${formatBalanceChange({ asset, before, after, delta: String(BigInt(after) - BigInt(before)) })} since before the drop at checkpoint #${checkpointId}`,
+          ),
+          'The balance is back to its level before the drop; the cause is not reconciled.',
+        ].join('\n'),
+      )
+}
+
+export const checkpointNotices =
+  (network: string, post: (text: string) => void) =>
+  (checkpoint: BalanceCheckpoint): void => {
+    for (const text of [formatCheckpointRecovery(checkpoint, network), formatCheckpointWarning(checkpoint, network)]) {
+      if (text) post(text)
+    }
+  }
 
 const balanceReads = new WeakMap<CheckpointServices, ReturnType<typeof createJoin>>()
 
@@ -97,7 +147,7 @@ const sats = (value: number): string => {
 export const recordBalanceCheckpoint = async (services: CheckpointServices): Promise<BalanceCheckpoint> => {
   const startedAt = nowSeconds()
   const errors: Record<string, string> = {}
-  const joined = balanceReads.get(services) ?? createJoin()
+  const joined = balanceReads.get(services) ?? createJoin(STALE_READ_MS)
   balanceReads.set(services, joined)
   const read = async <T>(name: string, fetch: () => Promise<T>): Promise<T | null> => {
     try {
@@ -110,13 +160,35 @@ export const recordBalanceCheckpoint = async (services: CheckpointServices): Pro
   const [arkade, lightningSats, onchain] = await Promise.all([
     read('arkade', async () => {
       const balance = await services.arkade.wallet.getBalance()
+      // `total` counts every lockup the wallet watches. One a user funded is theirs until we claim it,
+      // so counting it turns each refund into a loss. An unbounded age never syncs, so this reads the
+      // repository getBalance just read, even when its sync failed. Not atomic: a write landing between
+      // the two reads skews one sample, and the one-checkpoint alert hold absorbs it.
+      const lockups = await (
+        await services.arkade.wallet.getContractManager()
+      ).getContractsWithVtxos({ type: [LOCKUP_CONTRACT_TYPE] }, undefined, {
+        maxSyncAgeMs: Number.MAX_SAFE_INTEGER,
+        unspentOnly: true,
+      })
+      const solverPubkey = hex.encode(await services.arkade.identity.xOnlyPublicKey())
+      const theirs = new Set(
+        registeredLockupDeadlines(
+          lockups.map(({ contract }) => contract),
+          solverPubkey,
+        ).map(({ script }) => script),
+      )
+      const inFlight = lockups.filter(({ contract }) => theirs.has(contract.script)).flatMap(({ vtxos }) => vtxos)
       const assets = new Map<string, bigint>()
       for (const asset of balance.assets) {
         if (asset.amount < 0n) throw new Error('asset balance must be non-negative')
         assets.set(asset.assetId, (assets.get(asset.assetId) ?? 0n) + asset.amount)
       }
+      for (const asset of inFlight.flatMap((vtxo) => vtxo.assets ?? [])) {
+        assets.set(asset.assetId, (assets.get(asset.assetId) ?? 0n) - asset.amount)
+      }
+      if ([...assets.values()].some((amount) => amount < 0n)) throw new Error('asset balance must be non-negative')
       return {
-        totalSats: sats(balance.total),
+        totalSats: sats(balance.total - inFlight.reduce((sum, vtxo) => sum + vtxo.value, 0)),
         assets: Object.fromEntries([...assets].map(([id, amount]) => [id, String(amount)])),
       }
     }),
@@ -147,6 +219,15 @@ export const recordBalanceCheckpoint = async (services: CheckpointServices): Pro
   const decreases = (changes ?? [])
     .filter(({ delta }) => BigInt(delta) < 0n)
     .map(({ asset, before, after, delta }) => ({ asset, before, after, decrease: String(-BigInt(delta)) }))
+  const levels = new Map((changes ?? []).map(({ asset, after }) => [asset, BigInt(after)]))
+  const level = (asset: string) => levels.get(asset) ?? 0n
+  const followed: FollowedDecrease[] = previous
+    ? [
+        ...(previous.unrecovered ?? []),
+        ...previous.decreases.map(({ asset, before }) => ({ checkpointId: previous.id, asset, before })),
+      ]
+    : []
+  const isBack = ({ asset, before }: FollowedDecrease) => level(asset) >= BigInt(before)
   return services.adminStore.recordBalanceCheckpoint({
     scope,
     startedAt,
@@ -158,6 +239,8 @@ export const recordBalanceCheckpoint = async (services: CheckpointServices): Pro
     errors,
     previousId: previous?.id ?? null,
     decreases,
+    recovered: followed.filter(isBack).map((d) => ({ ...d, after: String(level(d.asset)) })),
+    unrecovered: followed.filter((d) => !isBack(d)).slice(-UNRECOVERED_LIMIT),
   })
 }
 
@@ -179,6 +262,9 @@ export const withBalanceCheckpoints = async (input: {
           `POSSIBLE LOSS: balance decreased at checkpoint ${checkpoint.id}: ${json(decrease)}; ` +
             'fees, withdrawals and funds in flight are not reconciled',
         )
+      }
+      for (const recovery of checkpoint.recovered ?? []) {
+        input.log(`RECOVERED: balance back at checkpoint ${checkpoint.id}: ${json(recovery)}`)
       }
       input.onCheckpoint?.(checkpoint)
     },

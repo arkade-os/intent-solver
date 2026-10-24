@@ -395,9 +395,25 @@ export interface FundedAsset {
  * being a poll is deliberate and unchanged by the subscription; what the
  * subscription removed is the wait, not the check.
  */
-export const findLockups = async (ctx: ArkadeContext, pkScriptHex: string): Promise<FundedOutput[]> => {
+export const findLockups = async (ctx: ArkadeContext, pkScriptHex: string): Promise<FundedOutput[]> =>
+  lockupsMatching(ctx, pkScriptHex, { spendableOnly: true })
+
+/**
+ * The outputs {@link findLockups} cannot see: SWEPT but unspent. Every refund
+ * path built on that `spendableOnly` read goes blind the moment arkd sweeps the
+ * batch a lockup sat in, and a swept output has no spend fact either — so
+ * nothing retires the swap. @see refundSweptSwapScript
+ */
+export const findSweptLockups = async (ctx: ArkadeContext, pkScriptHex: string): Promise<FundedOutput[]> =>
+  lockupsMatching(ctx, pkScriptHex, { recoverableOnly: true })
+
+const lockupsMatching = async (
+  ctx: ArkadeContext,
+  pkScriptHex: string,
+  filter: { spendableOnly: true } | { recoverableOnly: true },
+): Promise<FundedOutput[]> => {
   const outputs: FundedOutput[] = []
-  for await (const batch of vtxoPages(ctx.wallet.indexerProvider, { scripts: [pkScriptHex], spendableOnly: true })) {
+  for await (const batch of vtxoPages(ctx.wallet.indexerProvider, { scripts: [pkScriptHex], ...filter })) {
     for (const vtxo of batch) {
       // 256-bit, and the indexer reports it as a STRING: never a `number`.
       const assets = ((vtxo as { assets?: { assetId: string; amount: bigint | string }[] }).assets ?? [])

@@ -54,7 +54,8 @@ const count = (ledger: CorridorLedger): Omit<CorridorCount, 'since'> => {
     else if (r.inbound.amount === null) c.unfunded += 1
     else {
       c.failed += 1
-      const reason = r.failureReason ?? r.state
+      // A reason's JSON detail is for the log; grouping on it would count each swap apart.
+      const reason = r.failureReason?.split(' — {')[0] ?? r.state
       c.reasons.set(reason, (c.reasons.get(reason) ?? 0) + 1)
     }
   }
@@ -124,10 +125,14 @@ const shorten = (text: string): string => {
 
 const stamp = (seconds: number): string => new Date(seconds * 1000).toISOString().slice(0, 16).replace('T', ' ')
 
+export const stampSpan = (since: number, until: number): string => {
+  const from = stamp(since)
+  const to = stamp(until)
+  return `${from} to ${to.slice(0, 10) === from.slice(0, 10) ? to.slice(11) : to} UTC`
+}
+
 export const formatSwapSummary = (s: SwapSummary): string[] => {
-  const from = stamp(s.since)
-  const to = stamp(s.until)
-  const header = `Swaps ${from} to ${to.slice(0, 10) === from.slice(0, 10) ? to.slice(11) : to} UTC`
+  const header = `*Swaps* ${stampSpan(s.since, s.until)}`
   const lines: string[] = []
   for (const c of s.corridors) {
     const parts = [
@@ -139,7 +144,7 @@ export const formatSwapSummary = (s: SwapSummary): string[] => {
     if (parts.length === 0 && !c.truncated) continue
     const window = c.since === s.since ? '' : ` (since ${stamp(c.since)})`
     const partial = c.truncated ? ' (partial: row cap reached)' : ''
-    lines.push(`${c.corridor}: ${parts.join(' · ') || 'none counted'}${window}${partial}`)
+    lines.push(`${c.corridor.replace('->', ' → ')}: ${parts.join(' · ') || 'none counted'}${window}${partial}`)
     if (c.failed === 0) continue
     const ranked = [...c.reasons].sort((a, b) => b[1] - a[1])
     const shown = ranked.slice(0, MAX_REASONS).map(([reason, n]) => `${n}× ${shorten(reason)}`)

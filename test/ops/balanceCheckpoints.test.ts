@@ -11,9 +11,14 @@ import {
   balanceCheckpointScope,
   withBalanceCheckpoints,
   checkpointChanges,
+  checkpointNotices,
+  formatCheckpointRecovery,
   formatCheckpointWarning,
 } from '@arkade-os/solver-app/ops/balanceCheckpoints.js'
 import { createNotifier } from '@arkade-os/solver-app/ops/notify.js'
+import { schnorr } from '@noble/curves/secp256k1.js'
+import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { LOCKUP_CONTRACT_TYPE, lockupContractRegistration } from '@arkade-os/solver-arkade/arkade/vtxoLifecycle.js'
 
 const stores: AdminStore[] = []
 const directories: string[] = []
@@ -22,19 +27,51 @@ const openStore = async (path = ':memory:') => {
   stores.push(store)
   return store
 }
+const key = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
+const SOLVER = key(1)
+const USER = key(3)
+const P2TR = (fill: number): Uint8Array => Uint8Array.from([0x51, 0x20, ...new Uint8Array(32).fill(fill)])
+const lockup = (sender: Uint8Array, receiver: Uint8Array, value: number) => {
+  const script = new CovenantSwapScript({
+    receiver,
+    server: key(2),
+    preimageHash: new Uint8Array(20).fill(value % 256),
+    refundLocktime: 1_800_000_000,
+    claimDelay: 512,
+    client: sender,
+    clientRefundDelay: 1024,
+    refundWithoutServerDelay: 2048,
+    nonInteractiveParameters: { emulatorPubkey: key(9), receiverPkScript: P2TR(9), senderPkScript: P2TR(8) },
+  })
+  return { contract: lockupContractRegistration(script, 'ark1address'), vtxos: [{ value, assets: [] }] }
+}
+
 const fixture = async (path?: string) => {
   const arkade = { total: 1_000, assets: [{ assetId: 'aa'.repeat(34), amount: 10n ** 25n }] }
   const lightning = { availableSats: 2_000, incomingSats: 90_000 }
   const onchain = { confirmedSats: 3_000, unconfirmedSats: 400, sharedWithLightning: false }
+  const lockups: ReturnType<typeof lockup>[] = []
+  const getContractsWithVtxos = vi.fn(async () => lockups)
   const services = {
     adminStore: await openStore(path),
     config: { network: 'regtest', lnBackend: 'lnd', arkade: { arkServerUrl: 'http://arkade.test' } },
     providerPubkey: 'provider',
-    arkade: { wallet: { getBalance: vi.fn(async () => arkade) } },
+    arkade: {
+      wallet: { getBalance: vi.fn(async () => arkade), getContractManager: async () => ({ getContractsWithVtxos }) },
+      identity: { xOnlyPublicKey: async () => SOLVER },
+    },
     ln: { getBalance: vi.fn(async () => lightning) },
     onchain: { getBalance: vi.fn(async () => onchain) },
   } as unknown as Parameters<typeof recordBalanceCheckpoint>[0]
-  return { services, arkade, lightning, onchain, sample: () => recordBalanceCheckpoint(services) }
+  return {
+    services,
+    arkade,
+    lightning,
+    onchain,
+    lockups,
+    getContractsWithVtxos,
+    sample: () => recordBalanceCheckpoint(services),
+  }
 }
 
 afterEach(async () => {
@@ -59,6 +96,20 @@ describe('balance checkpoints', () => {
     f.onchain.sharedWithLightning = true
     expect((await f.sample()).totalSats).toBe('4400')
     f.lightning.availableSats = 1
+    expect((await f.sample()).decreases).toEqual([])
+  })
+
+  it('leaves a user-funded lockup out until it is ours, so refunding it is no loss', async () => {
+    const f = await fixture()
+    f.lockups.push(lockup(USER, SOLVER, 300), lockup(SOLVER, USER, 200))
+    f.arkade.total += 500
+    expect((await f.sample()).arkade?.totalSats).toBe('1200')
+    expect(f.getContractsWithVtxos).toHaveBeenCalledWith({ type: [LOCKUP_CONTRACT_TYPE] }, undefined, {
+      maxSyncAgeMs: Number.MAX_SAFE_INTEGER,
+      unspentOnly: true,
+    })
+    f.lockups.shift()
+    f.arkade.total -= 300
     expect((await f.sample()).decreases).toEqual([])
   })
 
@@ -130,6 +181,64 @@ describe('balance checkpoints', () => {
         decrease: '1',
       },
     ])
+  })
+
+  it('follows each decrease until its asset is back, across restarts and incomplete reads', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'solver-balance-recovery-'))
+    directories.push(directory)
+    const path = join(directory, 'admin.sqlite')
+    const asset = `arkade:${'aa'.repeat(34)}`
+    const units = '10000000000000000000000000'
+    const f = await fixture(path)
+    await f.sample()
+    f.arkade.total -= 500
+    f.arkade.assets = []
+    const drop = await f.sample()
+    await f.services.adminStore.close()
+    const restarted = await fixture(path)
+    restarted.arkade.total -= 500
+    restarted.arkade.assets = []
+    expect((await restarted.sample()).unrecovered).toEqual([
+      { checkpointId: drop.id, asset: 'BTC', before: '6400' },
+      { checkpointId: drop.id, asset, before: units },
+    ])
+    vi.mocked(restarted.services.ln!.getBalance).mockRejectedValueOnce(new Error('offline'))
+    await restarted.sample()
+    restarted.arkade.total += 501
+    const back = await restarted.sample()
+    expect(back.recovered).toEqual([{ checkpointId: drop.id, asset: 'BTC', before: '6400', after: '6401' }])
+    expect(back.unrecovered).toEqual([{ checkpointId: drop.id, asset, before: units }])
+    restarted.arkade.assets = [{ assetId: 'aa'.repeat(34), amount: 10n ** 25n }]
+    const assetBack = await restarted.sample()
+    expect(assetBack.recovered).toEqual([{ checkpointId: drop.id, asset, before: units, after: units }])
+    expect(assetBack.unrecovered).toEqual([])
+  })
+
+  it('measures each recovery against the balance before its own decrease', async () => {
+    const f = await fixture()
+    await f.sample()
+    f.arkade.total += 546
+    await f.sample()
+    f.lightning.availableSats -= 544
+    const settled = await f.sample()
+    f.arkade.total -= 600
+    const blip = await f.sample()
+    f.arkade.total += 600
+    const back = await f.sample()
+    expect(back.recovered).toEqual([{ checkpointId: blip.id, asset: 'BTC', before: '6402', after: '6402' }])
+    expect(back.unrecovered).toEqual([{ checkpointId: settled.id, asset: 'BTC', before: '6946' }])
+  })
+
+  it('stops following the oldest of more than 20 unrecovered decreases', async () => {
+    const f = await fixture()
+    await f.sample()
+    for (let i = 0; i < 21; i++) {
+      f.arkade.total -= 1
+      await f.sample()
+    }
+    const unrecovered = (await f.sample()).unrecovered!
+    expect(unrecovered).toHaveLength(20)
+    expect(unrecovered[0]?.before).toBe('6399')
   })
 
   it('keeps providers and backends in separate baselines', async () => {
@@ -273,16 +382,58 @@ describe('balance checkpoints', () => {
     expect(formatCheckpointWarning(initial, 'regtest')).toBeNull()
     f.arkade.total -= 10
     const loss = await f.sample()
-    const text = formatCheckpointWarning(loss, 'regtest')!
-    expect(text).toContain(`POSSIBLE LOSS — regtest — checkpoint #${loss.id}`)
-    expect(text).toContain('BTC: -10 sats (6,400 → 6,390)')
-    expect(text).toContain('not reconciled')
+    expect(formatCheckpointWarning(loss, 'regtest')).toBeNull()
+    f.arkade.total -= 5
+    const held = await f.sample()
+    expect(formatCheckpointWarning(held, 'regtest')).toBe(
+      [
+        `⚠️ *POSSIBLE LOSS* · regtest · checkpoint #${held.id}`,
+        `BTC: -15 sats (6,400 → 6,385) since checkpoint #${loss.id}`,
+        'Fees, withdrawals and funds in flight are not reconciled. A RECOVERED follow-up is sent if the balance comes back.',
+      ].join('\n'),
+    )
     const large = formatCheckpointWarning(
-      { ...loss, decreases: Array.from({ length: 300 }, () => loss.decreases[0]!) },
+      { ...held, unrecovered: Array.from({ length: 300 }, () => held.unrecovered![0]!) },
       'regtest',
     )!
     expect(large.length).toBeLessThanOrEqual(4000)
     expect(large).toContain('message cut')
+  })
+
+  it('posts nothing for a decrease that is back by the next checkpoint', async () => {
+    const f = await fixture()
+    const posted: string[] = []
+    const notify = checkpointNotices('regtest', (text) => posted.push(text))
+    notify(await f.sample())
+    f.arkade.total -= 10
+    notify(await f.sample())
+    f.arkade.total += 10
+    notify(await f.sample())
+    expect(posted).toEqual([])
+  })
+
+  it('posts a recovery follow-up only for an alerted decrease that is back', async () => {
+    const f = await fixture()
+    const posted: string[] = []
+    const notify = checkpointNotices('regtest', (text) => posted.push(text))
+    notify(await f.sample())
+    f.arkade.total -= 10
+    const drop = await f.sample()
+    notify(drop)
+    const held = await f.sample()
+    notify(held)
+    expect(formatCheckpointRecovery(held, 'regtest')).toBeNull()
+    f.arkade.total += 10
+    const back = await f.sample()
+    notify(back)
+    expect(posted).toEqual([
+      formatCheckpointWarning(held, 'regtest'),
+      [
+        `✅ *RECOVERED* · regtest · checkpoint #${back.id}`,
+        `BTC: 0 sats (6,400 → 6,400) since before the drop at checkpoint #${drop.id}`,
+        'The balance is back to its level before the drop; the cause is not reconciled.',
+      ].join('\n'),
+    ])
   })
 })
 
@@ -311,10 +462,7 @@ describe('scheduled balance checkpoints', () => {
       checkpoint: f.sample,
       signal: controller.signal,
       log: vi.fn(),
-      onCheckpoint: (checkpoint) => {
-        const text = formatCheckpointWarning(checkpoint, 'regtest')
-        if (text) notifier.post(text)
-      },
+      onCheckpoint: checkpointNotices('regtest', (text) => notifier.post(text)),
       run: () =>
         new Promise<void>((resolve) => {
           finish = resolve
@@ -324,9 +472,10 @@ describe('scheduled balance checkpoints', () => {
     expect(messages).toEqual([])
     f.arkade.total -= 10
     await vi.advanceTimersByTimeAsync(60_000)
+    expect(messages).toEqual([])
+    await vi.advanceTimersByTimeAsync(60_000)
     expect(messages).toHaveLength(1)
     expect(messages[0]).toContain('BTC: -10 sats')
-    await vi.advanceTimersByTimeAsync(60_000)
     expect(await f.services.adminStore.listBalanceCheckpoints(balanceCheckpointScope(f.services))).toHaveLength(3)
     controller.abort()
     finish()
@@ -356,9 +505,12 @@ describe('scheduled balance checkpoints', () => {
     f.arkade.total -= 10
     await vi.advanceTimersByTimeAsync(60_000)
     expect(log).toHaveBeenCalledWith(expect.stringContaining('POSSIBLE LOSS'))
+    f.arkade.total += 10
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('RECOVERED: balance back at checkpoint'))
     controller.abort()
     await vi.advanceTimersByTimeAsync(60_000)
-    expect(await f.services.adminStore.listBalanceCheckpoints(balanceCheckpointScope(f.services))).toHaveLength(2)
+    expect(await f.services.adminStore.listBalanceCheckpoints(balanceCheckpointScope(f.services))).toHaveLength(3)
     finish()
     await run
     expect(vi.getTimerCount()).toBe(0)
