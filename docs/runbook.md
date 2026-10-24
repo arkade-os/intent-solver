@@ -77,8 +77,9 @@ ignored with a log line, because platforms set them; put `http.host` and
 
    The export is checked by the loader that will read it, so an old value the
    document cannot hold is refused now, by path, rather than at the next boot.
-   It holds every secret the environment did; `.gitignore` already lists
-   `solver.json`.
+   It holds every secret the environment did, printed to stdout only;
+   `.gitignore` already lists `solver.json`. `config-from-env` ships for this
+   one release.
 
 2. **Read it.** The old image set `DB_DIR` and `RELAY_HEALTH_PATH` itself, so
    neither appears unless your environment set it too. The new image links
@@ -92,7 +93,9 @@ ignored with a log line, because platforms set them; put `http.host` and
    `SOLVER_CONFIG_JSON`.
 
 4. **Deploy.** A variable you missed stops the solver at startup, naming it,
-   before anything has moved.
+   before anything has moved. Rolling back means the old image with the old
+   variables: the old image cannot read the document and the new one refuses
+   the variables, so neither mix starts.
 
 ## Shape 1 — single Node process
 

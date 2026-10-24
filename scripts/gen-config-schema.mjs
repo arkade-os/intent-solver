@@ -1,12 +1,4 @@
-/**
- * Write `solver-config.schema.json` from the config document's schema, so an
- * editor can check and complete a document against it.
- *
- *   pnpm -r build && pnpm gen:config-schema
- *
- * `test/config/example.test.ts` fails when the committed file drifts from what
- * this generates.
- */
+/** Writes `solver-config.schema.json` for editors: `pnpm -r build && pnpm gen:config-schema`. */
 import { writeFileSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { zodToJsonSchema } from 'zod-to-json-schema'
