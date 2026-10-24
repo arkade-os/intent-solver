@@ -171,6 +171,14 @@ describe('POST /api/config/revert — applying', () => {
     expect((await post({ scope: 'all', dryRun: false })).status).toBe(409)
   })
 
+  it('refuses a one-market apply when that row moved since the preview', async () => {
+    const { store, post } = await setup()
+    const preview = (await post({ scope: 'market', marketKey: KEY_A, dryRun: true })).body
+    await store.putMarket({ ...market(USDA, 'USDA'), rfqBuyBase: false })
+    expect((await post({ scope: 'market', marketKey: KEY_A, dryRun: false, basis: preview.basis })).status).toBe(409)
+    expect(await rowOf(store, KEY_A)).toMatchObject({ rfqSellBase: true, rfqBuyBase: false })
+  })
+
   it('reverts one market and leaves the overrides and every other row alone', async () => {
     const { store, post } = await setup()
     await store.putMarket({
