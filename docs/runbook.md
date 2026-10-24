@@ -1391,7 +1391,9 @@ hard way. The numbers below are the smallest legal values, not arbitrary ones.
   **Off regtest that floor is per network: mutinynet 4096, signet 86016, mainnet
   (and anything unrecognised) `DEFAULT_MIN_CHECKPOINT_EXIT_DELAY_SECONDS` = 86400
   (24h)**, and `Wallet.create` throws outright below it — worth knowing before
-  this configuration is copied toward mainnet. The SDK picks the floor by the
+  this configuration is copied toward mainnet. 86400 is not a multiple of 512
+  either (168.75 units), so the smallest usable mainnet setting is
+  169x512 = **86528s**, not 86400. The SDK picks the floor by the
   server's advertised `info.network`, so our network profiles pin it for every
   non-regtest network (`packages/solver-core/src/core/networks.ts`).
 - **`ARKD_VTXO_TREE_EXPIRY=6144.`** There is a SECOND, independent floor —

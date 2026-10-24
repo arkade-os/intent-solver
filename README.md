@@ -939,12 +939,17 @@ production deployment.** `Wallet.create` resolves a policy and throws
 `ServerResponseMismatchError` if the server's advertised checkpoint tapscript
 is below it:
 
-| Network                       | Floor               | Constant                                      |
-| ----------------------------- | ------------------- | --------------------------------------------- |
-| regtest (`bech32 === 'bcrt'`) | **1200 s**          | `REGTEST_MIN_CHECKPOINT_EXIT_DELAY_SECONDS`   |
-| mutinynet                     | **4096 s**          | `MUTINYNET_MIN_CHECKPOINT_EXIT_DELAY_SECONDS` |
-| signet                        | **86,016 s**        | `SIGNET_MIN_CHECKPOINT_EXIT_DELAY_SECONDS`    |
-| every other network           | **86,400 s (24 h)** | `DEFAULT_MIN_CHECKPOINT_EXIT_DELAY_SECONDS`   |
+| Network                       | Floor               | Smallest usable delay | Constant                                      |
+| ----------------------------- | ------------------- | --------------------- | --------------------------------------------- |
+| regtest (`bech32 === 'bcrt'`) | **1200 s**          | 1536 s                | `REGTEST_MIN_CHECKPOINT_EXIT_DELAY_SECONDS`   |
+| mutinynet                     | **4096 s**          | 4096 s                | `MUTINYNET_MIN_CHECKPOINT_EXIT_DELAY_SECONDS` |
+| signet                        | **86,016 s**        | 86,016 s              | `SIGNET_MIN_CHECKPOINT_EXIT_DELAY_SECONDS`    |
+| every other network           | **86,400 s (24 h)** | 86,528 s              | `DEFAULT_MIN_CHECKPOINT_EXIT_DELAY_SECONDS`   |
+
+BIP68 counts seconds in 512 s units, so a server's delay is always a multiple
+of 512. Neither 1200 nor 86,400 is one, so the smallest usable delay is the
+next multiple up. Setting `ARKD_CHECKPOINT_EXIT_DELAY` to the floor itself does
+not work: 86,400 s is 168.75 units, and 168 units is 86,016 s.
 
 The comparison is a strict `<`, so a delay exactly at the floor passes. Off
 regtest the policy additionally sets `requireSeconds: true`, so a block-typed
