@@ -14,7 +14,8 @@
 // SWAP_NETWORK — its own view of every service, never taken from the solver.
 
 import { hex } from '@scure/base'
-import { createArkadeContext, deriveNostrIdentity, loadConfig } from '../packages/solver-app/dist/index.js'
+import { createArkadeContext, deriveNostrIdentity } from '../packages/solver-app/dist/index.js'
+import { configFromKnobs } from '../packages/solver-app/dist/config.js'
 import { lockupSpent, nostrRelayTransport, relayTransport, sendToLightning } from './lib/swap-client.mjs'
 
 const [relayUrl, solverPubkey, bolt11] = process.argv.slice(2)
@@ -23,7 +24,7 @@ if (!relayUrl || !solverPubkey || !bolt11) {
   process.exit(1)
 }
 
-const config = loadConfig()
+const config = configFromKnobs(process.env)
 const arkade = await createArkadeContext(config.arkade)
 const me = hex.encode(await arkade.identity.xOnlyPublicKey())
 // Which framing to speak. `dev` is scripts/mock-relay.mjs's broker shape, and
