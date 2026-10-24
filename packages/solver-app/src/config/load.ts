@@ -56,7 +56,8 @@ export const LEGACY_IGNORED = ['HOST', 'PORT'] as const
 const LEGACY = new Set(
   PATHS.map(([, knob]) => knob).filter((knob) => !(LEGACY_IGNORED as readonly string[]).includes(knob)),
 )
-const LEGACY_FAMILY = /^(LN_SEND|LN_RECEIVE|ONCHAIN_SEND|ONCHAIN_RECEIVE|EVM|ASSET|OFFER|LND)_/
+// No LND_ family: its settings are all exact ids above, and Kubernetes derives LND_PORT & co from a service named lnd.
+const LEGACY_FAMILY = /^(LN_SEND|LN_RECEIVE|ONCHAIN_SEND|ONCHAIN_RECEIVE|EVM|ASSET|OFFER)_/
 
 /** Refused rather than ignored: a host half-migrated would otherwise run on settings it believes it changed. */
 export const assertNoLegacyEnv = (env: NodeJS.ProcessEnv): void => {

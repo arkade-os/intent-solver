@@ -102,6 +102,12 @@ describe('loadConfig — the old environment', () => {
     expect(config.host).toBe('127.0.0.1')
   })
 
+  it('leaves the variables Kubernetes derives from a service named lnd alone', () => {
+    const links = { LND_SERVICE_HOST: '10.0.0.5', LND_PORT: 'tcp://10.0.0.5:10009', LND_PORT_10009_TCP_PORT: '10009' }
+    expect(() => loadConfig({ env: inline(minimalDoc, links) })).not.toThrow()
+    expect(() => loadConfig({ env: inline(minimalDoc, { LND_SOCKET: 'lnd:10009' }) })).toThrow(/LND_SOCKET/)
+  })
+
   it('leaves the test harness and runtime variables alone', () => {
     expect(() =>
       loadConfig({ env: inline(minimalDoc, { PAYEE_MNEMONIC: 'x', NODE_ENV: 'test', CI: '1' }) }),
