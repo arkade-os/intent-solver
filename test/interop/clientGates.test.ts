@@ -10,8 +10,8 @@
  * refused us is not ours. It ships in `@arkade-os/swap`, and nothing here ran it.
  *
  * That is the gap this file closes. It imports the published client package and
- * runs its real `assertReceivable` / `assertFundable` against payloads built by
- * this repo's own wire builders. A quote these tests accept is a quote the
+ * runs its real `verifyReceiveWindow` / `verifySendWindow` against payloads built
+ * by this repo's own wire builders. A quote these tests accept is a quote the
  * client that actually exists accepts.
  *
  * ## How this differs from `holdInvoiceWindow.test.ts`
@@ -35,8 +35,8 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { assertReceivable, assertFundable } from '@arkade-os/swap'
-import type { RfqQuote } from '@arkade-os/swap'
+import { verifyReceiveWindow, verifySendWindow } from '@arkade-os/swap/advanced'
+import type { RfqQuote } from '@arkade-os/swap/protocol'
 import { lightningReceiveRfqQuotePayload } from '@arkade-os/solver-corridors/wire/lightningReceivePayloads.js'
 import { rfqQuotePayload } from '@arkade-os/solver-corridors/wire/payloads.js'
 import { onchainRfqQuotePayload } from '@arkade-os/solver-corridors/wire/onchainPayloads.js'
@@ -110,9 +110,14 @@ const receiveQuote = (holdWindow: number = DEFAULT_HOLD_INVOICE_WINDOW): RfqQuot
 const payDeadlineFor = (holdWindow: number): number => NOW + holdWindow
 
 describe('the shipped client accepts our lightning RECEIVE quote', () => {
-  it('passes assertReceivable, the gate that refused every quote during the outage', () => {
+  it('passes verifyReceiveWindow, the gate that refused every quote during the outage', () => {
     expect(() =>
-      assertReceivable({ quote: receiveQuote(), payDeadline: payDeadlineFor(DEFAULT_HOLD_INVOICE_WINDOW), now: NOW }),
+      verifyReceiveWindow({
+        quote: receiveQuote(),
+        quoteId: 'rfq-receive',
+        payDeadline: payDeadlineFor(DEFAULT_HOLD_INVOICE_WINDOW),
+        now: NOW,
+      }),
     ).not.toThrow()
   })
 
@@ -129,19 +134,33 @@ describe('the shipped client accepts our lightning RECEIVE quote', () => {
   it('REFUSES the window that shipped, so we know the gate is live', () => {
     const broken = 95 * 60
     expect(() =>
-      assertReceivable({ quote: receiveQuote(broken), payDeadline: payDeadlineFor(broken), now: NOW }),
+      verifyReceiveWindow({
+        quote: receiveQuote(broken),
+        quoteId: 'rfq-receive',
+        payDeadline: payDeadlineFor(broken),
+        now: NOW,
+      }),
     ).toThrow()
   })
 
   it('names the refusal the operator saw, not merely some error', () => {
-    // The specific string mutinynet reported. A bare `toThrow()` above would
-    // pass on a TypeError from a malformed fixture and prove nothing.
+    // The specific string mutinynet reported, preserved as the wrapper's `cause`.
+    // A bare `toThrow()` above would pass on a TypeError from a malformed fixture
+    // and prove nothing.
     const broken = 95 * 60
     try {
-      assertReceivable({ quote: receiveQuote(broken), payDeadline: payDeadlineFor(broken), now: NOW })
+      verifyReceiveWindow({
+        quote: receiveQuote(broken),
+        quoteId: 'rfq-receive',
+        payDeadline: payDeadlineFor(broken),
+        now: NOW,
+      })
       expect.unreachable('the broken window must be refused')
     } catch (error) {
-      expect((error as { reason?: string }).reason).toBe('claim_window_too_short')
+      expect((error as { check?: string }).check).toBe('refund_window')
+      expect(((error as { cause?: unknown }).cause as { reason?: string } | undefined)?.reason).toBe(
+        'claim_window_too_short',
+      )
     }
   })
 
@@ -157,13 +176,15 @@ describe('the shipped client accepts our lightning RECEIVE quote', () => {
     // The claim race is measured from `payDeadline` regardless of when the
     // client checks, so moving `now` cannot rescue a window that is too narrow.
     const payDeadline = payDeadlineFor(DEFAULT_HOLD_INVOICE_WINDOW)
-    expect(() => assertReceivable({ quote: receiveQuote(), payDeadline, now: payDeadline - 1 })).not.toThrow()
+    expect(() =>
+      verifyReceiveWindow({ quote: receiveQuote(), quoteId: 'rfq-receive', payDeadline, now: payDeadline - 1 }),
+    ).not.toThrow()
   })
 })
 
 describe('the shipped client accepts our lightning SEND quote', () => {
   /**
-   * The send leg's gate is `assertFundable`, not `assertReceivable` — the two
+   * The send leg's gate is `verifySendWindow`, not `verifyReceiveWindow` — the two
    * are not interchangeable and the SDK says so: `refund_locktime` is the
    * SOLVER's on the receive corridors, so `MIN_HEADROOM_SECONDS` would gate the
    * wrong side there. On this leg it is the CLIENT's own refund and the headroom
@@ -200,8 +221,10 @@ describe('the shipped client accepts our lightning SEND quote', () => {
       'rfq-send',
     ) as unknown as RfqQuote
 
-  it('passes assertFundable at quote time', () => {
-    expect(() => assertFundable({ quote: sendQuote(), invoiceExpiresAt: NOW + 15 * 60, now: NOW })).not.toThrow()
+  it('passes verifySendWindow at quote time', () => {
+    expect(() =>
+      verifySendWindow({ quote: sendQuote(), quoteId: 'rfq-send', invoiceExpiresAt: NOW + 15 * 60, now: NOW }),
+    ).not.toThrow()
   })
 
   it('passes at the end of the funding window, not just the start', () => {
@@ -214,7 +237,9 @@ describe('the shipped client accepts our lightning SEND quote', () => {
     // through our own bound so the two cannot disagree about when funding stops.
     const invoiceExpiresAt = NOW + 15 * 60
     const last = invoiceExpiresAt - MIN_INVOICE_WINDOW
-    expect(() => assertFundable({ quote: sendQuote(), invoiceExpiresAt, now: last })).not.toThrow()
+    expect(() =>
+      verifySendWindow({ quote: sendQuote(), quoteId: 'rfq-send', invoiceExpiresAt, now: last }),
+    ).not.toThrow()
   })
 
   /**
@@ -252,7 +277,12 @@ describe('the shipped client accepts our lightning SEND quote', () => {
       // ordinary quote rather than ten months past it.
       expect(quoted.refundLocktime - ORDINARY_LOCKTIME).toBeLessThan(2 * 24 * 3600)
       expect(() =>
-        assertFundable({ quote: sendQuote(quoted.refundLocktime), invoiceExpiresAt: NOW + 15 * 60, now: NOW }),
+        verifySendWindow({
+          quote: sendQuote(quoted.refundLocktime),
+          quoteId: 'rfq-send',
+          invoiceExpiresAt: NOW + 15 * 60,
+          now: NOW,
+        }),
       ).not.toThrow()
     })
 
@@ -262,7 +292,7 @@ describe('the shipped client accepts our lightning SEND quote', () => {
   })
 })
 
-/** `assertFundable` has TWO deadline gates on this leg, and the solver mirrored one. */
+/** `verifySendWindow` has TWO deadline gates on this leg, and the solver mirrored one. */
 describe('the shipped client and this solver stop funding an onchain SEND at the same instant', () => {
   const quoted = evaluateOnchainSendAcceptance({
     amountSats: 50_000,
@@ -295,8 +325,9 @@ describe('the shipped client and this solver stop funding an onchain SEND at the
     ) as unknown as RfqQuote
 
   const clientAccepts = (now: number) =>
-    assertFundable({
+    verifySendWindow({
       quote: sendQuote(),
+      quoteId: 'rfq-onchain-send',
       now,
       onchain: { htlcLocktime: quoted.htlcLocktime, minConfirmations: quoted.minConfirmations, direction: 'send' },
     })
@@ -318,7 +349,18 @@ describe('the shipped client and this solver stop funding an onchain SEND at the
   })
 
   it('both refuse one second later', () => {
-    expect(() => clientAccepts(lastFundable + 1)).toThrow(/claim window/i)
+    // `verifySendWindow`'s own message is generic ("quote failed the
+    // refund_window check"); the specific wording survives on `.actual`.
+    try {
+      clientAccepts(lastFundable + 1)
+      expect.unreachable('must refuse one second past the last fundable instant')
+    } catch (error) {
+      expect((error as { check?: string }).check).toBe('refund_window')
+      expect(((error as { cause?: unknown }).cause as { reason?: string } | undefined)?.reason).toBe(
+        'claim_window_too_short',
+      )
+      expect((error as { actual?: string }).actual).toMatch(/claim window/i)
+    }
     expect(solverFunds(lastFundable + 1)).toBe(false)
   })
 

@@ -11,7 +11,7 @@
  * something else — and a taker that priced the packet would spend the deposit
  * under terms it never checked.
  */
-import { offerVtxoScript, type Offer } from '@arkade-os/swap'
+import { offerVtxoScript, type Offer } from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
 
 /**

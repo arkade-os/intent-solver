@@ -354,7 +354,7 @@ describe('loadConfig — LN_BACKEND is required unless no BTC corridor is served
 })
 
 describe('loadConfig — checkpoint exit delay override', () => {
-  it('relaxes the floor to 4096s on mutinynet, the only network that needs it', () => {
+  it('pins the floor to 4096s on mutinynet', () => {
     // Exactly what the hosted Service advertises, decoded from the
     // `checkpointTapscript` at https://mutinynet.arkade.sh/v1/info:
     // `03 080040 b2 75 20 <forfeitPubkey> ac`. The 3-byte BIP68 push is
@@ -365,12 +365,17 @@ describe('loadConfig — checkpoint exit delay override', () => {
     expect(loadConfig().arkade.minCheckpointExitDelaySeconds).toBe(4096)
   })
 
-  it('leaves mainnet on the SDK 24h floor', () => {
+  it('pins signet to its SDK floor so a server claiming mutinynet cannot relax it', () => {
+    process.env.SWAP_NETWORK = 'signet'
+    expect(loadConfig().arkade.minCheckpointExitDelaySeconds).toBe(86016)
+  })
+
+  it('pins mainnet to the SDK 24h floor', () => {
     // The bound mainnet must never relax, and the reason the value belongs to
     // the network profile: there is no input to loadConfig that reaches it, so
     // a testnet env file copied toward mainnet carries nothing that can.
     process.env.SWAP_NETWORK = 'bitcoin'
-    expect(loadConfig().arkade.minCheckpointExitDelaySeconds).toBeUndefined()
+    expect(loadConfig().arkade.minCheckpointExitDelaySeconds).toBe(86400)
   })
 
   it('leaves regtest alone, where the SDK floor is already 1200', () => {

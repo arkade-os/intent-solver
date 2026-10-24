@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import { lightningSendRequest, marketCorridor } from '@arkade-os/swap'
+import { lightningSendRequest } from '@arkade-os/swap/protocol'
+import { marketCorridor } from '@arkade-os/solver-discovery'
 import { createCorridorSet } from '@arkade-os/solver-core/core/corridor.js'
 import { respondToRfqRequest } from '@arkade-os/solver-transport/ingress/rfq.js'
 

@@ -23,6 +23,7 @@ import {
   matchServerCheckpoints,
   MnemonicIdentity,
   PrevArkTxField,
+  RestArkProvider,
   RestEmulatorProvider,
   setArkPsbtField,
   Transaction,
@@ -263,8 +264,9 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
 
   const wallet = await Wallet.create({
     identity,
-    arkServerUrl: config.arkServerUrl,
-    arkProvider: latencyDiagnostics ? new TimedArkProvider(config.arkServerUrl) : undefined,
+    arkProvider: latencyDiagnostics
+      ? new TimedArkProvider(config.arkServerUrl)
+      : new RestArkProvider(config.arkServerUrl),
     // The SDK's own default is a plain `RestIndexerProvider` at this same URL.
     indexerProvider: latencyDiagnostics
       ? new TimedIndexerProvider(config.arkServerUrl)
@@ -274,15 +276,15 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
       contractRepository: new SQLiteContractRepository(executor),
     },
     // Passing undefined is safe and is NOT the same as passing a hole: the SDK
-    // folds this into its policy only when set (`!== void 0`, pinned SDK
-    // `dist/chunk-DVOQZAAX.js:12939`), so unset keeps the per-network floor.
+    // folds this into its policy only when set (`!== void 0` in the SDK's
+    // `Wallet.create`), so unset keeps the per-network floor.
     // Spreading it conditionally here would read as more careful and do the
     // same thing; the explicit undefined is what makes that checkable.
     minCheckpointExitDelaySeconds:
       config.minCheckpointExitDelaySeconds === undefined ? undefined : BigInt(config.minCheckpointExitDelaySeconds),
     // Safe for the same reason, by a different operator: the SDK takes
-    // `config.onchainProvider || new EsploraProvider(default)` (pinned SDK
-    // `dist/chunk-AEWJU6NZ.js:12457`), so an explicit undefined falls through
+    // `config.onchainProvider || new EsploraProvider(default)` (SDK
+    // `ReadonlyWallet.setupWalletConfig`), so an explicit undefined falls through
     // to the per-network default rather than blanking the provider.
     onchainProvider: config.esploraUrl === undefined ? undefined : new EsploraProvider(config.esploraUrl),
     // NOT a performance tweak, and UNSET IS NOT OFF. The SDK folds an absent

@@ -22,7 +22,8 @@ import { randomBytes, randomInt } from 'node:crypto'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { ArkAddress, isVtxoSpent, asset, Transaction } from '@arkade-os/sdk'
-import { createOffer, cancelOffer, InMemoryAssetSwapRepository, type Offer } from '@arkade-os/swap'
+import { createOffer, cancelOffer, type Offer } from '@arkade-os/swap/protocol'
+import { InMemoryAssetSwapRepository } from '@arkade-os/swap'
 import { base64, hex } from '@scure/base'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
 import { GiveUp, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
@@ -257,7 +258,7 @@ const requestFor = (pair: string, amount: bigint, rfqId = randomBytes(32).toStri
 const depositSats = (base: number): bigint => BigInt(base + randomInt(1, 400))
 
 const clientOffer = async (wantAmount: bigint) =>
-  createOffer(arkade.ctx.wallet, ARKD_URL, { wantAmount, wantAsset: asset.AssetId.fromString(assetId) })
+  createOffer(arkade.ctx.wallet, { wantAmount, wantAsset: asset.AssetId.fromString(assetId) })
 
 describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
   it(
@@ -408,7 +409,7 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
       })
       expect(stranded.txid).toBe(fundingTxid)
 
-      const cancelTxid = await cancelOffer(arkade.ctx.wallet, ARKD_URL, mine.offerHex, {
+      const cancelTxid = await cancelOffer(arkade.ctx.wallet, mine.offerHex, {
         repository: new InMemoryAssetSwapRepository(),
         fundingTxid,
         swapAddress: mine.address,
@@ -452,7 +453,7 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
       expect(row.fillTxid).toBeNull()
       expect((await depositAt(row.offerPkScript))?.txid).toBe(fundingTxid)
 
-      await cancelOffer(arkade.ctx.wallet, ARKD_URL, mine.offerHex, {
+      await cancelOffer(arkade.ctx.wallet, mine.offerHex, {
         repository: new InMemoryAssetSwapRepository(),
         fundingTxid,
         swapAddress: mine.address,
@@ -498,7 +499,7 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
       expect(row.fillTxid).toBeNull()
       expect((await depositAt(row.offerPkScript))?.txid).toBe(fundingTxid)
 
-      await cancelOffer(arkade.ctx.wallet, ARKD_URL, mine.offerHex, {
+      await cancelOffer(arkade.ctx.wallet, mine.offerHex, {
         repository: new InMemoryAssetSwapRepository(),
         fundingTxid,
         swapAddress: mine.address,

@@ -34,7 +34,15 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import * as swap from '@arkade-os/swap'
+import * as swap from '@arkade-os/swap/protocol'
+
+/**
+ * `@arkade-os/swap`'s own floor (`chunk-4X56MN56.js`'s `MIN_CLAIM_WINDOW_SECONDS`,
+ * still `30 * 60` as of swap@0.1.0-rc.28), hardcoded because rc.28 stopped
+ * exporting it from any public entry point — there is no longer a symbol to import.
+ * Import it again once arkade-os/ts-sdk#1095 lands.
+ */
+const SWAP_MIN_CLAIM_WINDOW_SECONDS = 30 * 60
 // EVERY local copy, not one of each.
 //
 // `core/*.ts` modules are self-contained on purpose: a value that coincides
@@ -200,7 +208,7 @@ describe('quantities that look shared and are not', () => {
     // and no test would notice because they would move together.
     // `toBeGreaterThan` already implies they differ, so the separate `not.toBe`
     // it replaced was noise rather than a second guarantee.
-    expect(MIN_CLAIM_WINDOW).toBeGreaterThan(swap.MIN_CLAIM_WINDOW_SECONDS)
+    expect(MIN_CLAIM_WINDOW).toBeGreaterThan(SWAP_MIN_CLAIM_WINDOW_SECONDS)
   })
 
   /**
@@ -213,7 +221,7 @@ describe('quantities that look shared and are not', () => {
    * to prevent, arriving through the constants instead of through a derivation.
    */
   it('is strictly more conservative than the client requires, never less', () => {
-    expect(MIN_CLAIM_WINDOW).toBeGreaterThanOrEqual(swap.MIN_CLAIM_WINDOW_SECONDS)
+    expect(MIN_CLAIM_WINDOW).toBeGreaterThanOrEqual(SWAP_MIN_CLAIM_WINDOW_SECONDS)
   })
 })
 

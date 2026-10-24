@@ -10,7 +10,7 @@ import { Address } from '@scure/btc-signer'
 import { base64, hex } from '@scure/base'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { ripemd160 } from '@noble/hashes/legacy.js'
-import type { RfqSwapRecordStore, RfqSwapManagerDeps, RfqSwapManager, RfqSwapRecord } from '@arkade-os/swap'
+import type { RfqSwapRecordStore, RfqSwapManagerDeps, RfqSwapManager, RfqSwapRecord } from '@arkade-os/swap/protocol'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import type { RebalanceDeposit, RebalancePolicy, RebalanceTransfer } from '@arkade-os/solver-core/ports/rebalance.js'
 import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
@@ -52,8 +52,8 @@ vi.mock('@arkade-os/sdk', async (importOriginal) => {
 })
 
 vi.mock('@arkade-os/swap/nostr', () => ({ nostrRfqTransport: () => ({ close: mocks.close }) }))
-vi.mock('@arkade-os/swap', async (importOriginal) => {
-  const real = await importOriginal<typeof import('@arkade-os/swap')>()
+vi.mock('@arkade-os/swap/protocol', async (importOriginal) => {
+  const real = await importOriginal<typeof import('@arkade-os/swap/protocol')>()
   return {
     ...real,
     requestLightningSend: mocks.request,
@@ -79,7 +79,8 @@ vi.mock('@arkade-os/swap', async (importOriginal) => {
       }
       setCallbacks() {}
       async restoreFromRepository() {
-        mocks.restoreIds.push((await this.deps.repository!.getAllRfqSwaps()).map((record) => record.rfqId))
+        const page = await this.deps.repository!.getRfqSwapsPage({}, { limit: 500 })
+        mocks.restoreIds.push(page.items.map((record) => record.rfqId))
         return { restored: [], failed: [] }
       }
       async start() {}
@@ -418,6 +419,69 @@ describe('Arkade rebalance source routes', () => {
     expect(mocks.close).toHaveBeenCalledOnce()
   })
 
+  it('restores funded records at startup behind an older abandoned unfunded quote', async () => {
+    const receiving = lightningDeposit()
+    mockRequest(receiving)
+    const row = rowFrom(await source.quote(receiving, policy), receiving)
+    const release = await source.reserve(row, policy)
+    expect(await source.submit(row)).toBe(txid)
+    release()
+    const funded = await driver.get<{ record_json: string }>('SELECT record_json FROM rebalance_rfq WHERE rfq_id = ?', [
+      'rfq-1',
+    ])
+    const { fundingTxid: _, ...unfunded } = JSON.parse(funded!.record_json) as RfqSwapRecord
+    await driver.run('INSERT INTO rebalance_rfq (rfq_id, record_json, fund_amount, valid_until) VALUES (?, ?, ?, ?)', [
+      'rfq-0',
+      JSON.stringify({ ...unfunded, rfqId: 'rfq-0', state: 'quoted', updatedAt: 1 }),
+      1_040,
+      1,
+    ])
+    await source.close?.()
+    mocks.restoreIds.length = 0
+    source = await createArkadeRebalanceSource(services, driver, admission)
+    expect(mocks.restoreIds).toEqual([['rfq-1']])
+  })
+
+  it('restores a funded record stored under the pre-0.1.0 field names', async () => {
+    const receiving = lightningDeposit()
+    mockRequest(receiving)
+    const row = rowFrom(await source.quote(receiving, policy), receiving)
+    const release = await source.reserve(row, policy)
+    expect(await source.submit(row)).toBe(txid)
+    release()
+    const funded = await driver.get<{ record_json: string }>('SELECT record_json FROM rebalance_rfq WHERE rfq_id = ?', [
+      'rfq-1',
+    ])
+    const { fundingTxid, ...rest } = JSON.parse(funded!.record_json) as RfqSwapRecord
+    await driver.run('UPDATE rebalance_rfq SET record_json = ? WHERE rfq_id = ?', [
+      JSON.stringify({ ...rest, fundingArkTxid: fundingTxid }),
+      'rfq-1',
+    ])
+    await source.close?.()
+    mocks.restoreIds.length = 0
+    source = await createArkadeRebalanceSource(services, driver, admission)
+    expect(mocks.restoreIds).toEqual([['rfq-1']])
+    const record = await mocks.managerRepositories.at(-1)!.getRfqSwap('rfq-1')
+    expect(record).toMatchObject({ fundingTxid: txid })
+    expect(record).not.toHaveProperty('fundingArkTxid')
+  })
+
+  it('pages same-timestamp records in the code-unit order its cursor resumes from', async () => {
+    // localeCompare puts 'rfq-a' first; the cursor's `>` puts 'rfq-B' first, so a
+    // mismatched sort would return one id twice and drop the other.
+    for (const rfqId of ['rfq-a', 'rfq-B'])
+      await driver.run(
+        'INSERT INTO rebalance_rfq (rfq_id, record_json, fund_amount, valid_until) VALUES (?, ?, ?, ?)',
+        [rfqId, JSON.stringify({ rfqId, state: 'pending', updatedAt: 100, fundingTxid: txid }), 1_040, 1],
+      )
+    await source.close?.()
+    source = await createArkadeRebalanceSource(services, driver, admission)
+    const repository = mocks.managerRepositories.at(-1)!
+    const first = await repository.getRfqSwapsPage({}, { limit: 1 })
+    const second = await repository.getRfqSwapsPage({}, { limit: 1, after: first.nextCursor })
+    expect([...first.items, ...second.items].map((record) => record.rfqId)).toEqual(['rfq-B', 'rfq-a'])
+  })
+
   it('leaves Lightning timeout funding quarantined across restart without refunding an empty quote', async () => {
     const receiving = lightningDeposit()
     mockRequest(receiving)
@@ -462,8 +526,8 @@ describe('Arkade rebalance source routes', () => {
     const record = {
       ...JSON.parse(stored!.record_json),
       state: 'refunded',
-      fundingArkTxid: funding.id,
-      refundArkTxid: refund.id,
+      fundingTxid: funding.id,
+      refundTxid: refund.id,
     }
     await driver.run('UPDATE rebalance_rfq SET record_json = ? WHERE rfq_id = ?', [JSON.stringify(record), 'rfq-1'])
     expect(await source.reconcile(row)).toEqual({ state: 'submitted', fundingTxid: funding.id })
@@ -486,16 +550,15 @@ describe('Arkade rebalance source routes', () => {
     ['failed', 'swept'],
     ['failed', 'unrolled'],
   ] as const)('recovers SDK %s only with eligible %s lockup evidence', async (initialState, condition) => {
-    const real = await vi.importActual<typeof import('@arkade-os/swap')>('@arkade-os/swap')
+    const real = await vi.importActual<typeof import('@arkade-os/swap/protocol')>('@arkade-os/swap/protocol')
     const paymentHash = hex.encode(new Uint8Array(32).fill(8))
     const script = new VHTLC.ScriptV2({
       sender: schnorr.getPublicKey(new Uint8Array(32).fill(3)),
       receiver: schnorr.getPublicKey(new Uint8Array(32).fill(4)),
       server: schnorr.getPublicKey(new Uint8Array(32).fill(5)),
       preimageHash: ripemd160(hex.decode(paymentHash)),
-      refundLocktime: BigInt(
-        condition === 'early' ? timestamp() + 600 : timestamp() - real.REFUND_MTP_LAG_SECONDS - 10,
-      ),
+      // 2 hours: @arkade-os/swap's own REFUND_MTP_LAG_SECONDS, unexported (arkade-os/ts-sdk#1095).
+      refundLocktime: BigInt(condition === 'early' ? timestamp() + 600 : timestamp() - 2 * 60 * 60 - 10),
       unilateralClaimDelay: { type: 'seconds', value: 512n },
       unilateralRefundDelay: { type: 'seconds', value: 1024n },
       unilateralRefundWithoutReceiverDelay: { type: 'seconds', value: 1536n },
@@ -529,7 +592,7 @@ describe('Arkade rebalance source routes', () => {
       kind: 'lightning_send',
       rfqId: 'rfq-recovery',
       lockupAddress: recoveryAddress,
-      fundingArkTxid: funding.id,
+      fundingTxid: funding.id,
       amount: 1_040,
       state: initialState,
       createdAt: timestamp() - 20_000,
@@ -568,7 +631,7 @@ describe('Arkade rebalance source routes', () => {
     }))
     mocks.refund
       .mockRejectedValueOnce(new Error('temporary refund transport failure'))
-      .mockResolvedValue({ arkTxid: refund.id, amount: 1_040 })
+      .mockResolvedValue({ txid: refund.id, amount: 1_040 })
     if (condition !== 'open') {
       if (condition === 'foreign') mocks.signer.mockRejectedValueOnce(new Error('missing local refund signer'))
       await expect(source.reconcile(row)).rejects.toThrow(
@@ -590,7 +653,7 @@ describe('Arkade rebalance source routes', () => {
     ])
     expect(JSON.parse(failed!.record_json)).toMatchObject({
       state: 'failed',
-      fundingArkTxid: funding.id,
+      fundingTxid: funding.id,
       failure: 'temporary refund transport failure',
     })
     expect(await source.reconcile(row)).toEqual({ state: 'submitted', fundingTxid: funding.id })

@@ -21,7 +21,7 @@
  *   optional, and absent it leaves every fillable offer recorded and
  *   `fillable`: a deployment that decides but cannot spend is a valid one.
  */
-import type { Offer } from '@arkade-os/swap'
+import type { Offer } from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
 import {
   evaluateOfferFill,
