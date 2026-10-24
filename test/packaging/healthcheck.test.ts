@@ -34,15 +34,23 @@ describe('the image healthcheck', () => {
     expect(healthcheck).toMatch(/^HEALTHCHECK/)
   })
 
-  it('reads the path the ENV block sets, so the two cannot drift apart', () => {
-    const declared = /RELAY_HEALTH_PATH=(\S+)/.exec(dockerfile)?.[1]
-    expect(declared).toBe('/data/relay-health')
-    expect(healthcheck).toContain(`RELAY_HEALTH_PATH:-${declared}`)
+  // The default heartbeat path is relative to the working directory, and the image links that onto the volume.
+  it('reads where the default relay.healthPath lands in the image', () => {
+    expect(read('packages/solver-app/src/config.ts')).toContain("env.RELAY_HEALTH_PATH?.trim() || '.data/relay-health'")
+    expect(dockerfile).toMatch(/^WORKDIR \/app$/m)
+    expect(dockerfile).toContain('ln -s /data /app/.data')
+    expect(healthcheck).toContain('stat -c %Y /data/relay-health')
   })
 
   it('reads the path `relay` actually writes', () => {
     expect(cli).toContain('utimesSync(config.relayHealthPath')
-    expect(read('packages/solver-app/src/config.ts')).toContain('env.RELAY_HEALTH_PATH')
+  })
+
+  // Any setting left in the environment stops the solver, so the image may set none.
+  it('bakes no setting into the environment', () => {
+    const baked = [...dockerfile.matchAll(/^ENV\s+([A-Z_]+)=/gm)].map((match) => match[1])
+    expect(baked).toEqual(['NODE_ENV'])
+    expect(dockerfile).not.toContain('RELAY_HEALTH_PATH')
   })
 
   // A heartbeat slowed without widening the bound goes unhealthy at random.
@@ -79,5 +87,19 @@ describe('the serve-mode override an operator copies out of the compose file', (
     expect(probe).toContain('8787')
     expect(read('packages/solver-transport/src/http/server.ts')).toContain("app.get('/healthz'")
     expect(read('packages/solver-app/src/config.ts')).toContain("intFromEnv(env, 'PORT', 8787")
+  })
+})
+
+describe('the compose file', () => {
+  it('hands the solver its config document, and no environment settings', () => {
+    expect(compose).toMatch(/SOLVER_CONFIG: \/config\/solver\.json/)
+    expect(compose).toMatch(/\.\/solver\.json:\/config\/solver\.json:ro/)
+    expect(compose).not.toMatch(/^\s*env_file:/m)
+    // HOST would be ignored, so the HTTP variant binds through the document instead.
+    expect(compose).not.toMatch(/^\s*#?\s*HOST:/m)
+  })
+
+  it('keeps the document it mounts, secrets and all, out of the build context', () => {
+    expect(read('.dockerignore').split(/\r?\n/)).toEqual(expect.arrayContaining(['solver.json', 'solver.*.json']))
   })
 })

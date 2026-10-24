@@ -11,10 +11,13 @@ services:
       context: .
       dockerfile: packages/solver-app/Dockerfile
     restart: unless-stopped
-    # RELAY_URL is required in this mode; the process exits immediately without
-    # it rather than coming up deaf.
-    env_file: .env # SWAP_NETWORK, LN_BACKEND, ARK_MNEMONIC, ARK_SERVER_URL, RELAY_URL, ...
+    # The config document, secrets included (see solver.example.json); never commit
+    # yours. relay.url is required in this mode: the process exits immediately
+    # without it rather than coming up deaf.
+    environment:
+      SOLVER_CONFIG: /config/solver.json
     volumes:
+      - ./solver.json:/config/solver.json:ro
       - swap-data:/data # also carries the relay heartbeat the healthcheck reads
 
   # HTTP variant: the same image with an API port instead of a relay
@@ -26,15 +29,16 @@ services:
   #     dockerfile: packages/solver-app/Dockerfile
   #   restart: unless-stopped
   #   command: ["serve"]
-  #   env_file: .env
+  #   # Set http.host to 0.0.0.0 in solver.json: container-internal only, reachability is decided below.
   #   environment:
-  #     HOST: 0.0.0.0         # container-internal only; reachability is decided below
+  #     SOLVER_CONFIG: /config/solver.json
   #   # The image's default probes the relay heartbeat, which this mode never
   #   # writes — so replace it with the real HTTP probe.
   #   healthcheck:
-  #     test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:'+(process.env.PORT??8787)+'/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+  #     test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
   #     interval: 30s
   #   volumes:
+  #     - ./solver.json:/config/solver.json:ro
   #     - swap-data:/data
   #   # ports:
   #   #   - "127.0.0.1:8787:8787"   # host-local only; front with a VPN or tunnel

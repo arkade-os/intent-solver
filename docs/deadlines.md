@@ -217,11 +217,11 @@ constants must relate, write the relationship, not the second number.**
 
 ## Operator-facing
 
-Tunable from the admin console (`docs/environment.md` for the full env list):
+Tunable from the admin console (README § "Settings and defaults" lists every setting):
 
-- `<CORRIDOR>_MIN_SATS` / `_MAX_SATS` / `_FEE_BPS` / `_FEE_FLAT_SATS` / `_ENABLED`
-- `MAX_EXPOSED_SATS`
-- `LOCKUP_TIMEOUT_SECONDS`, bounded `[60, MAX_LOCKUP_TIMEOUT]`
+- `minSats` / `maxSats` / `feeBps` / `feeFlatSats` / `enabled` of each `corridors["<pair>"]`
+- `limits.maxExposedSats`
+- `rails.lightning.lockupTimeoutSeconds`, bounded `[60, MAX_LOCKUP_TIMEOUT]`
 
 Everything else on this page is a constant. Changing one is a code change, on
 purpose: they are the terms on which the solver's own money is at risk.

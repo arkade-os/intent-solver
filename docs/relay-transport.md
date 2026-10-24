@@ -30,8 +30,8 @@ Not a strfry incompatibility. Probed directly (`scripts/probe-relay.mjs`):
 The relay works, the wallet's framing works, and the solver's own transport
 stack works end to end against it. What the relay has never seen is the
 solver. An `authors:[<solver>]` query over strfry's whole retained history
-returns nothing, so the process is not connected there — wrong `RELAY_URL`,
-a different `ARK_MNEMONIC` than the card advertises, or simply not running.
+returns nothing, so the process is not connected there — wrong `relay.url`,
+a different `rails.arkade.mnemonic` than the card advertises, or simply not running.
 
 The reason that took so long to establish is the real defect, and it was in
 our code: `WireCodec.decodeEvent` returned `null` for every frame that was
