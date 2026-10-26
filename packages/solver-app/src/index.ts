@@ -65,7 +65,7 @@ export {
 export { resolveLimits, maxRoutingFeeSats, type Limits } from '@arkade-os/solver-core/core/limits.js'
 export { NETWORKS, type SwapNetwork, type NetworkProfile } from '@arkade-os/solver-core/core/networks.js'
 export { type Config } from './config.js'
-export { loadConfig, type LoadOptions } from './config/load.js'
+export { loadConfig, registerConfigProfile, type LoadOptions } from './config/load.js'
 export { parseDocument, type SolverDocument } from './config/document.js'
 export { buildApp, type HttpDeps } from '@arkade-os/solver-transport/http/server.js'
 export {

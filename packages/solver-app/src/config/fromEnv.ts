@@ -3,6 +3,7 @@
  * path, printed by `cli config-from-env`. The inverse of `knobs.ts`.
  */
 import { existsSync } from 'node:fs'
+import { posix } from 'node:path'
 import { z } from 'zod'
 import { ALL_DESCRIPTORS } from '@arkade-os/solver-corridors/corridors/index.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
@@ -186,12 +187,13 @@ export const exportConfig = async (env: NodeJS.ProcessEnv, profile?: LoadOptions
   return JSON.stringify(doc, null, 2)
 }
 
-const IMAGE_HEALTH_PATHS = ['/data/relay-health', '.data/relay-health']
+// Resolved from the image's working directory, where `.data` links onto the volume.
+const IMAGE_HEALTH_PATHS = ['/data/relay-health', '/app/.data/relay-health']
 
 /** The image's HEALTHCHECK read RELAY_HEALTH_PATH; it now reads a fixed path, so a custom one goes unwatched. */
 export const healthPathNote = (env: NodeJS.ProcessEnv): string | null => {
   const path = env.RELAY_HEALTH_PATH?.trim()
-  return path && !IMAGE_HEALTH_PATHS.includes(path)
+  return path && !IMAGE_HEALTH_PATHS.includes(posix.resolve('/app', path))
     ? `relay.healthPath is ${path}: the image's HEALTHCHECK reads /data/relay-health only`
     : null
 }

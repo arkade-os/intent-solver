@@ -16,6 +16,17 @@ export interface LoadOptions {
   profile?: (doc: SolverDocument) => SolverDocument
 }
 
+let registeredProfile: LoadOptions['profile']
+
+/**
+ * The profile every `loadConfig` that passes none applies: the shipped CLI loads its own config, so a
+ * consumer running it registers here, at import time above the entrypoint, as it does a rail.
+ */
+export const registerConfigProfile = (profile: NonNullable<LoadOptions['profile']>): void => {
+  if (registeredProfile) throw new Error('a config profile is already registered')
+  registeredProfile = profile
+}
+
 const positionOf = (error: unknown, text: string): string => {
   const message = messageOf(error)
   const at = /position (\d+)/.exec(message)?.[1] ?? (/end of JSON/.test(message) ? String(text.length) : undefined)
@@ -81,7 +92,8 @@ export const loadConfig = (opts: LoadOptions = {}): Config => {
   const raw = readDocument(env)
   assertNoLegacyEnv(env)
   const parsed = parseDocument(raw, lightningRailNames())
-  const doc = opts.profile ? parseDocument(opts.profile(parsed), lightningRailNames()) : parsed
+  const profile = opts.profile ?? registeredProfile
+  const doc = profile ? parseDocument(profile(parsed), lightningRailNames()) : parsed
   const { knobs, pathOf, railBlock } = documentToKnobs(doc)
   try {
     return { ...configFromKnobs(knobs), configPaths: pathOf, lightningRailBlock: railBlock }

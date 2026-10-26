@@ -144,11 +144,6 @@ describe('loadConfig — the document', () => {
     expect(() => loadConfig({ env: inline(minimalDoc), profile })).toThrow('relay.urll: unknown key')
   })
 
-  it('refuses an asset labelled BTC, which offers.markets reads as bitcoin', () => {
-    const doc = { ...minimalDoc, assets: { BTC: { kind: 'arkade', assetId: 'aa'.repeat(34) } } }
-    expect(() => loadConfig({ env: inline(doc) })).toThrow('assets.BTC: BTC names bitcoin and cannot label an asset')
-  })
-
   it('carries where each setting lives', () => {
     expect(loadConfig({ env: inline(minimalDoc) }).configPaths.get('LN_SEND_FEE_BPS')).toBe(
       'corridors["arkade:BTC->lightning:BTC"].feeBps',

@@ -177,6 +177,14 @@ describe('documentToKnobs — assets', () => {
     ).toThrow('assets: usda and USDA@x share the symbol USDA')
   })
 
+  it('refuses an Arkade asset labelled BTC, which offers.markets reads as bitcoin, and only an Arkade one', () => {
+    expect(() => documentToKnobs({ assets: { btc: { kind: 'arkade', assetId: USDA_ID } } })).toThrow(
+      'assets.btc: BTC names bitcoin in offers.markets and cannot label an Arkade asset',
+    )
+    const erc20 = { kind: 'erc20' as const, chain: 'arbitrum', address: USDC, decimals: 8 }
+    expect(() => documentToKnobs({ rails: { evm: { arbitrum: {} } }, assets: { 'BTC@arbitrum': erc20 } })).not.toThrow()
+  })
+
   it('refuses an erc20 asset on a chain rails.evm does not name', () => {
     expect(() =>
       documentToKnobs({ assets: { USDC: { kind: 'erc20', chain: 'base', address: USDC, decimals: 6 } } }),

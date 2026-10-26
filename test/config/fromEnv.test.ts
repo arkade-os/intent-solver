@@ -252,7 +252,13 @@ describe('healthPathNote', () => {
     expect(healthPathNote({ RELAY_HEALTH_PATH: '/srv/health' })).toBe(
       "relay.healthPath is /srv/health: the image's HEALTHCHECK reads /data/relay-health only",
     )
-    expect(healthPathNote({ RELAY_HEALTH_PATH: '/data/relay-health' })).toBeNull()
+    for (const watched of [
+      '/data/relay-health',
+      '.data/relay-health',
+      './.data/relay-health',
+      '/app/.data/relay-health',
+    ])
+      expect(healthPathNote({ RELAY_HEALTH_PATH: watched })).toBeNull()
     expect(healthPathNote({})).toBeNull()
   })
 })

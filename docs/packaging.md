@@ -109,6 +109,11 @@ at `loadConfig`, so it has to happen at import time, above the entrypoint; and a
 name already taken, built-in or not, is refused at registration rather than
 silently shadowed.
 
+A deployment **profile**, its own defaults and refusals applied to the document
+before it is validated, goes the same way: `registerConfigProfile(profile)` at import
+time, above the entrypoint. Every `loadConfig` passed no profile applies it, including
+the check `config-from-env` runs on its export.
+
 `test/packaging/corridorInjection.test.ts` and `sdkSurface.test.ts` pin this.
 
 ## Publishing
