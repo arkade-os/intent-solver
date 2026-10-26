@@ -97,8 +97,12 @@ describe('request headers', () => {
     expect(pro['x-cg-demo-api-key']).toBeUndefined()
   })
 
-  it('never sends the key to any other host', async () => {
-    for (const url of ['https://api.coingecko.com.evil.test/x', 'https://api.binance.com/api/v3/ticker/price']) {
+  it('never sends the key to any other host, or over plain http', async () => {
+    for (const url of [
+      'https://api.coingecko.com.evil.test/x',
+      'https://api.binance.com/api/v3/ticker/price',
+      'http://api.coingecko.com/api/v3/simple/price',
+    ]) {
       expect(Object.values(await headersFor(url, 'k'))).not.toContain('k')
     }
   })

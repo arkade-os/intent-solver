@@ -34,7 +34,7 @@ export interface PriceFeedDeps {
   /** Injected so tests need no network. Defaults to the global. */
   fetch?: typeof globalThis.fetch
   /**
-   * Sent as a header, and only to CoinGecko's own hosts: a feed URL is published on
+   * Sent as a header, and only to CoinGecko's own hosts over https: a feed URL is published on
    * the registry card and quoted in every feed error. Defaults to `COINGECKO_API_KEY`.
    */
   coingeckoApiKey?: string
@@ -105,7 +105,8 @@ export const createPriceFeed = (deps: PriceFeedDeps = {}): FetchPrice => {
     validatePricePath(pricePath)
 
     const headers: Record<string, string> = { accept: 'application/json', 'user-agent': USER_AGENT }
-    const keyHeader = COINGECKO_KEY_HEADERS.get(URL.parse(feedUrl)?.hostname ?? '')
+    const url = URL.parse(feedUrl)
+    const keyHeader = url?.protocol === 'https:' ? COINGECKO_KEY_HEADERS.get(url.hostname) : undefined
     if (keyHeader && coingeckoApiKey) headers[keyHeader] = coingeckoApiKey
 
     const response = await call(feedUrl, {
