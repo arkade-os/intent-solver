@@ -43,7 +43,10 @@ export const registerConfigRevertRoutes = (app: Hono, deps: AdminDeps): void => 
         404,
       )
     }
-    if (body.dryRun) return c.json({ changes: plan.changes, basis: plan.basis, loadedAt: deps.startedAt })
+    if (body.dryRun) {
+      const { changes, basis, revertibleAlone } = plan
+      return c.json({ changes, basis, revertibleAlone, loadedAt: deps.startedAt })
+    }
     if (body.basis !== plan.basis) {
       return c.json({ error: 'stale', message: 'config or console state changed since the preview; review again' }, 409)
     }

@@ -29,6 +29,8 @@ export interface RevertPlan {
   basis: string
   serving: { marketKey: string; fields: ServingFields }[]
   overrideKeys: string[]
+  /** Markets a one-market revert would change: one whose config symbol another row holds may have nothing to do alone. */
+  revertibleAlone: string[]
 }
 
 const SERVING_FIELDS = ['symbol', 'servesOffer', 'servesRfq', 'rfqSellBase', 'rfqBuyBase'] as const
@@ -46,17 +48,17 @@ export const planRevert = async (
 
   const seed = { offerMarkets: config.offerMarkets, tokens: config.assetRfqTokens }
   // One market keeps clear of the symbols every other row holds; all of them are re-derived together.
-  const taken = new Set(
-    scope.scope === 'all'
-      ? []
-      : rows.flatMap((row) => (row.marketKey !== scope.marketKey && row.symbol !== null ? [row.symbol] : [])),
-  )
+  const heldBesides = (marketKey: string): Set<string> =>
+    new Set(rows.flatMap((row) => (row.marketKey !== marketKey && row.symbol !== null ? [row.symbol] : [])))
+  const movedIn = (row: AssetMarketRow, fields: ServingFields) =>
+    SERVING_FIELDS.filter((field) => row[field] !== fields[field])
+  const taken = scope.scope === 'all' ? new Set<string>() : heldBesides(scope.marketKey)
   const changes: RevertChange[] = []
   const serving: RevertPlan['serving'] = []
   for (const row of inScope) {
     const fields = servingFor(row, seed, taken)
     if (fields.symbol !== null) taken.add(fields.symbol)
-    const moved = SERVING_FIELDS.filter((field) => row[field] !== fields[field])
+    const moved = movedIn(row, fields)
     if (moved.length === 0) continue
     serving.push({ marketKey: row.marketKey, fields })
     for (const field of moved) {
@@ -90,5 +92,8 @@ export const planRevert = async (
     overrides: overrideKeys.map((key) => [key, overrides[key]]),
   }
   const basis = createHash('sha256').update(JSON.stringify(state)).digest('hex')
-  return { changes, basis, serving, overrideKeys }
+  const revertibleAlone = rows
+    .filter((row) => movedIn(row, servingFor(row, seed, heldBesides(row.marketKey))).length > 0)
+    .map((row) => row.marketKey)
+  return { changes, basis, serving, overrideKeys, revertibleAlone }
 }

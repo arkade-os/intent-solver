@@ -415,7 +415,6 @@ export const describeSettings = (
       source: 'config',
       editable: false,
     },
-    // As the environment spells it, so it can be pasted back.
     {
       key: 'ASSET_MARKETS',
       value: config.assetRfqTokens.map((token) => `${token.symbol}:${token.assetId}`).join(', ') || '(empty)',

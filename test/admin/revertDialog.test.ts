@@ -126,10 +126,16 @@ describe('the revert button', () => {
     expect(textOf(button)).toBe('matches config file')
   })
 
-  it('counts only its own market, and leaves one that already matches to the whole-console button', () => {
-    const state = { data: { revert: plan([NOW]) } }
+  it('offers one market only where the server says reverting it alone changes it', () => {
+    const state = { data: { revert: { ...plan([NOW]), revertibleAlone: ['k-usda'] } } }
     expect(ui(state).revertButton({ scope: 'market', marketKey: 'k-other' }, 'Revert')).toBeNull()
     expect(ui(state).revertButton({ scope: 'market', marketKey: 'k-usda' }, 'Revert')!.attrs.disabled).toBe(false)
+  })
+
+  it('leaves a market whose change cannot apply alone to the whole-console button', () => {
+    const state = { data: { revert: { ...plan([NOW]), revertibleAlone: [] } } }
+    expect(ui(state).revertButton({ scope: 'market', marketKey: 'k-usda' }, 'Revert')).toBeNull()
+    expect(ui(state).revertButton({ scope: 'all' }, 'Revert')!.attrs.disabled).toBe(false)
   })
 
   it('is absent when the preview could not be read', () => {

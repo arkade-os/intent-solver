@@ -2500,7 +2500,7 @@ const paintPricingChanges = () => {
     })),
     ...Object.entries(pricingDraft.overrides).map(([key, value]) => ({
       key,
-      label: key,
+      label: pricingKnobs().find((knob) => knob.key === key)?.path ?? key,
       value: value === null ? 'use config value' : value,
     })),
   ]
@@ -3810,23 +3810,27 @@ const revertDialog = (d) => {
 
 /** Disabled, and saying so, when the console already matches; absent when the preview could not be read. */
 const revertButton = (scope, label) => {
-  const changes = state.data.revert?.changes
-  if (!Array.isArray(changes)) return null
-  const pending = scope.scope === 'all' ? changes : changes.filter((change) => change.marketKey === scope.marketKey)
-  if (scope.scope === 'market' && pending.length === 0) return null
+  const preview = state.data.revert
+  if (!Array.isArray(preview?.changes)) return null
+  // Not this market's share of the whole preview: alone, it must keep clear of symbols other rows hold.
+  if (scope.scope === 'market' && !preview.revertibleAlone?.includes(scope.marketKey)) return null
+  const matches = scope.scope === 'all' && preview.changes.length === 0
   return h(
     'button.act',
     {
-      disabled: pending.length === 0,
+      disabled: matches,
       title: 'Put console changes back to the config file this solver booted with.',
       onclick: () => openRevert(scope),
     },
-    pending.length === 0 ? 'matches config file' : label,
+    matches ? 'matches config file' : label,
   )
 }
 
 const editKnob = (knob) => {
-  const next = window.prompt(`${knob.key}\n\nCurrent: ${knob.value}\nTakes effect on restart.`, String(knob.value))
+  const next = window.prompt(
+    `${knob.path ?? knob.key}\n\nCurrent: ${knob.value}\nTakes effect on restart.`,
+    String(knob.value),
+  )
   if (next === null) return
   patchSetting(knob.key, next)
 }

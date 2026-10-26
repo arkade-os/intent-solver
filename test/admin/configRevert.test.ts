@@ -115,6 +115,18 @@ describe('POST /api/config/revert — the preview', () => {
     expect(JSON.stringify(body.changes)).not.toContain(`"target":"${KEY_B}"`)
   })
 
+  it('offers a market alone only where reverting it alone would change it', async () => {
+    const { store, post } = await setup()
+    // USDB holds the symbol the config gives USDA, so USDA alone can only give up its own.
+    await store.putMarket(market(USDA, 'ELSEWHERE'))
+    await store.putMarket(market(USDB, 'USDA'))
+    const alone = (await post({ scope: 'market', marketKey: KEY_A, dryRun: true })).body
+    await post({ scope: 'market', marketKey: KEY_A, dryRun: false, basis: alone.basis })
+    const { body } = await post({ scope: 'all', dryRun: true })
+    expect(body.changes.some((change: { marketKey?: string }) => change.marketKey === KEY_A)).toBe(true)
+    expect(body.revertibleAlone).toEqual([KEY_B])
+  })
+
   it('answers 404 for a market that does not exist', async () => {
     const { post } = await setup()
     expect((await post({ scope: 'market', marketKey: 'nope', dryRun: true })).status).toBe(404)
