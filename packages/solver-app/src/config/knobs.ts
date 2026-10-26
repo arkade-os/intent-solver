@@ -277,11 +277,15 @@ export const SECRET_KNOBS: ReadonlySet<string> = new Set([
 
 const escape = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
-export const renameKnobs = (message: string, pathOf: ReadonlyMap<string, string>): string => {
+export const renameKnobs = (message: string, pathOf: ReadonlyMap<string, string>, knobs: Knobs = {}): string => {
   const ids = [...pathOf.keys()].sort((a, b) => b.length - a.length)
-  if (ids.length === 0) return message
   const pattern = new RegExp(`(?<![A-Za-z0-9_])(${ids.map(escape).join('|')})(?![A-Za-z0-9_])`, 'g')
-  const secret = [...message.matchAll(pattern)].some((match) => SECRET_KNOBS.has(match[1]!))
-  const renamed = message.replace(pattern, (id) => pathOf.get(id) ?? id)
-  return secret ? renamed.replace(/\bgot\b[\s\S]*$/, 'got <redacted>') : renamed
+  const secret = ids.length > 0 && [...message.matchAll(pattern)].some((match) => SECRET_KNOBS.has(match[1]!))
+  const renamed = ids.length > 0 ? message.replace(pattern, (id) => pathOf.get(id) ?? id) : message
+  const stripped = secret ? renamed.replace(/\bgot\b[\s\S]*$/, 'got <redacted>') : renamed
+  // By value as well: a message that quotes a credential in any other phrase still loses it.
+  return [...SECRET_KNOBS].reduce((text, id) => {
+    const value = knobs[id]?.trim()
+    return value ? text.split(value).join('<redacted>') : text
+  }, stripped)
 }

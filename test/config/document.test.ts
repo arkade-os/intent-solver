@@ -59,7 +59,7 @@ describe('parseDocument', () => {
 
   it('refuses a second evm chain', () => {
     expect(() => parseDocument({ rails: { evm: { a: {}, b: {} } } }, [])).toThrow(
-      'rails.evm: exactly one chain is supported for now',
+      'rails.evm: at most one chain is supported for now',
     )
   })
 

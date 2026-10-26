@@ -234,4 +234,11 @@ describe('renameKnobs', () => {
     const renamed = renameKnobs('EVM_RPC_URL must be a URL, got https://x/v2/KEY', pathOf)
     expect(renamed).toBe('rails.evm.arbitrum.rpcUrl must be a URL, got <redacted>')
   })
+
+  it('redacts a secret by its value, wherever the message quotes it', () => {
+    const knobs = { EVM_RPC_URL: 'https://x/v2/KEY' }
+    expect(renameKnobs('cannot reach https://x/v2/KEY: refused', pathOf, knobs)).toBe(
+      'cannot reach <redacted>: refused',
+    )
+  })
 })

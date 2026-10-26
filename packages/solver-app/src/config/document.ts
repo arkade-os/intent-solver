@@ -112,7 +112,7 @@ const buildSchema = (railNames: readonly string[]) =>
       lightning: lightning(railNames),
       onchain: section({ esploraUrl: str, chainTipEsploraUrl: str, feeRateRefreshMs: num, feeRateStaleMs: num }),
       evm: z.record(str, evmChain).refine((chains) => Object.keys(chains).length <= 1, {
-        message: 'exactly one chain is supported for now',
+        message: 'at most one chain is supported for now',
       }),
     }),
     assets: z.record(str, asset),

@@ -65,7 +65,9 @@ sets every field. Below, `rails.lightning.backend` is a path into it, and
 This version reads no setting from the environment, and refuses to start while
 one of the old variables is still set, naming it. `HOST` and `PORT` alone are
 ignored with a log line, because platforms set them; put `http.host` and
-`http.port` in the document if the solver relied on them.
+`http.port` in the document if the solver relied on them. What Kubernetes
+derives from a Service's name (`EVM_RPC_SERVICE_HOST`, `LND_PORT_10009_TCP` and
+the like) is left alone too.
 
 1. **Export the document with the new image, under the old environment** and
    with the deployment's own data volume mounted, so the stored asset-market

@@ -102,8 +102,17 @@ describe('loadConfig — the old environment', () => {
     expect(config.host).toBe('127.0.0.1')
   })
 
-  it('leaves the variables Kubernetes derives from a service named lnd alone', () => {
-    const links = { LND_SERVICE_HOST: '10.0.0.5', LND_PORT: 'tcp://10.0.0.5:10009', LND_PORT_10009_TCP_PORT: '10009' }
+  it('leaves the variables Kubernetes derives from a service name alone', () => {
+    const links = {
+      LND_SERVICE_HOST: '10.0.0.5',
+      LND_PORT: 'tcp://10.0.0.5:10009',
+      LND_PORT_10009_TCP_PORT: '10009',
+      EVM_RPC_SERVICE_HOST: '10.0.0.6',
+      EVM_RPC_SERVICE_PORT_HTTP: '8545',
+      EVM_RPC_PORT: 'tcp://10.0.0.6:8545',
+      EVM_RPC_PORT_8545_TCP_ADDR: '10.0.0.6',
+      ASSET_FEED_SERVICE_PORT: '80',
+    }
     expect(() => loadConfig({ env: inline(minimalDoc, links) })).not.toThrow()
     expect(() => loadConfig({ env: inline(minimalDoc, { LND_SOCKET: 'lnd:10009' }) })).toThrow(/LND_SOCKET/)
   })

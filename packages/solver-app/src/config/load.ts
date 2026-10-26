@@ -69,13 +69,19 @@ const LEGACY = new Set(
 )
 // No LND_ family: its settings are all exact ids above, and Kubernetes derives LND_PORT & co from a service named lnd.
 const LEGACY_FAMILY = /^(LN_SEND|LN_RECEIVE|ONCHAIN_SEND|ONCHAIN_RECEIVE|EVM|ASSET|OFFER)_/
+// What Kubernetes derives from any Service's name (`evm-rpc` → EVM_RPC_SERVICE_HOST); no setting ends this way.
+const SERVICE_LINK = /_(SERVICE_HOST|SERVICE_PORT(_\w+)?|PORT(_\d+_(TCP|UDP|SCTP)(_(PROTO|PORT|ADDR))?)?)$/
 
 /** Refused rather than ignored: a host half-migrated would otherwise run on settings it believes it changed. */
 export const assertNoLegacyEnv = (env: NodeJS.ProcessEnv): void => {
   const isSet = (name: string): boolean => Boolean(env[name]?.trim())
   const railLegacy = new Set(lightningRailNames().flatMap((rail) => lightningRailFor(rail)?.legacyEnv?.names ?? []))
   const legacy = Object.keys(env)
-    .filter((name) => isSet(name) && (LEGACY.has(name) || railLegacy.has(name) || LEGACY_FAMILY.test(name)))
+    .filter(
+      (name) =>
+        isSet(name) &&
+        (LEGACY.has(name) || railLegacy.has(name) || (LEGACY_FAMILY.test(name) && !SERVICE_LINK.test(name))),
+    )
     .sort()
   if (legacy.length > 0) {
     throw new Error(
@@ -98,7 +104,7 @@ export const loadConfig = (opts: LoadOptions = {}): Config => {
   try {
     return { ...configFromKnobs(knobs), configPaths: pathOf, lightningRailBlock: railBlock }
   } catch (error) {
-    throw new Error(renameKnobs(messageOf(error), pathOf))
+    throw new Error(renameKnobs(messageOf(error), pathOf, knobs))
   }
 }
 
@@ -126,14 +132,15 @@ export const loadSentryOptions = (env: NodeJS.ProcessEnv = process.env): SentryO
     sentry?: Record<string, unknown>
   }
   const text = (value: unknown): string | undefined => (typeof value === 'string' ? value : undefined)
+  const knobs = {
+    SWAP_NETWORK: text(doc.network),
+    SENTRY_DSN: text(doc.sentry?.dsn),
+    SENTRY_ENVIRONMENT: text(doc.sentry?.environment),
+    SENTRY_RELEASE: text(doc.sentry?.release),
+  }
   try {
-    return sentryOptionsFromKnobs({
-      SWAP_NETWORK: text(doc.network),
-      SENTRY_DSN: text(doc.sentry?.dsn),
-      SENTRY_ENVIRONMENT: text(doc.sentry?.environment),
-      SENTRY_RELEASE: text(doc.sentry?.release),
-    })
+    return sentryOptionsFromKnobs(knobs)
   } catch (error) {
-    throw new Error(renameKnobs(messageOf(error), PATH_OF))
+    throw new Error(renameKnobs(messageOf(error), PATH_OF, knobs))
   }
 }
