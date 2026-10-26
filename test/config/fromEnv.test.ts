@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { configFromKnobs, type Config } from '@arkade-os/solver-app/config.js'
 import { loadConfig } from '@arkade-os/solver-app/config/load.js'
-import { envToDocument, exportConfig } from '@arkade-os/solver-app/config/fromEnv.js'
+import { envToDocument, exportConfig, healthPathNote } from '@arkade-os/solver-app/config/fromEnv.js'
 import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
 import { resolveLimits } from '@arkade-os/solver-core/core/limits.js'
 import { DEFAULT_SERVING } from '@arkade-os/solver-core/core/assetMarketConfig.js'
@@ -237,5 +237,22 @@ describe('exportConfig', () => {
     await expect(exportConfig({ ...MINIMAL_ENV, LN_SEND_FEE_BPS: '10000' })).rejects.toThrow(
       'corridors["arkade:BTC->lightning:BTC"].feeBps must be an integer between 0 and 9999',
     )
+  })
+
+  it('refuses what the deployment profile refuses', async () => {
+    const profile = () => {
+      throw new Error('this deployment serves no EVM receive')
+    }
+    await expect(exportConfig(MINIMAL_ENV, profile)).rejects.toThrow('this deployment serves no EVM receive')
+  })
+})
+
+describe('healthPathNote', () => {
+  it('speaks up only for a health file the image does not watch', () => {
+    expect(healthPathNote({ RELAY_HEALTH_PATH: '/srv/health' })).toBe(
+      "relay.healthPath is /srv/health: the image's HEALTHCHECK reads /data/relay-health only",
+    )
+    expect(healthPathNote({ RELAY_HEALTH_PATH: '/data/relay-health' })).toBeNull()
+    expect(healthPathNote({})).toBeNull()
   })
 })

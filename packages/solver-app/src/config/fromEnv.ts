@@ -11,9 +11,10 @@ import { parseEvmTokens } from '@arkade-os/solver-core/core/evmCorridorConfig.js
 import { messageOf } from '@arkade-os/solver-core/util/poll.js'
 import { swapDbPath } from '../config.js'
 import { parseAssetRfqTokens } from '../ops/assetRfqMarkets.js'
+import { lightningRailFor } from '../ops/rails.js'
 import { DECIMAL, documentSchema, type SolverDocument } from './document.js'
 import { BTC_FAMILY, CORRIDOR_FIELDS, corridorKnob, EVM_FIELDS, PATHS } from './knobs.js'
-import { loadConfig } from './load.js'
+import { loadConfig, type LoadOptions } from './load.js'
 
 /** The two legs of a stored market row; null is BTC. */
 export interface MarketPair {
@@ -79,6 +80,10 @@ export const envToDocument = (
     const segments = path.split('.')
     setAt(doc, segments, encode ? encode(true) === raw : decodeAt(segments, raw))
   }
+
+  const backend = read('LN_BACKEND')
+  const railBlock = backend === undefined ? undefined : lightningRailFor(backend)?.legacyEnv?.toBlock(env)
+  if (railBlock !== undefined) setAt(doc, ['rails', 'lightning', backend!], railBlock)
 
   for (const { pair, envStem } of ALL_DESCRIPTORS) {
     for (const field of CORRIDOR_FIELDS[BTC_FAMILY[pair]!]) {
@@ -173,10 +178,20 @@ const storedPairs = async (path: string): Promise<MarketPair[]> => {
   }
 }
 
-/** The document for this environment, checked by the loader that will read it. */
-export const exportConfig = async (env: NodeJS.ProcessEnv): Promise<string> => {
+/** The document for this environment, checked by the loader that will read it, with the deployment's profile. */
+export const exportConfig = async (env: NodeJS.ProcessEnv, profile?: LoadOptions['profile']): Promise<string> => {
   const admin = resolveDbLayout(swapDbPath(env)).admin
   const doc = envToDocument(env, await storedPairs(admin), admin)
-  loadConfig({ env: { SOLVER_CONFIG_JSON: JSON.stringify(doc) } })
+  loadConfig({ env: { SOLVER_CONFIG_JSON: JSON.stringify(doc) }, profile })
   return JSON.stringify(doc, null, 2)
+}
+
+const IMAGE_HEALTH_PATHS = ['/data/relay-health', '.data/relay-health']
+
+/** The image's HEALTHCHECK read RELAY_HEALTH_PATH; it now reads a fixed path, so a custom one goes unwatched. */
+export const healthPathNote = (env: NodeJS.ProcessEnv): string | null => {
+  const path = env.RELAY_HEALTH_PATH?.trim()
+  return path && !IMAGE_HEALTH_PATHS.includes(path)
+    ? `relay.healthPath is ${path}: the image's HEALTHCHECK reads /data/relay-health only`
+    : null
 }

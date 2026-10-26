@@ -5,7 +5,7 @@
 import { readFileSync } from 'node:fs'
 import { log, messageOf } from '@arkade-os/solver-core/util/poll.js'
 import { configFromKnobs, sentryOptionsFromKnobs, type Config, type Knobs } from '../config.js'
-import { lightningRailNames } from '../ops/rails.js'
+import { lightningRailFor, lightningRailNames } from '../ops/rails.js'
 import type { SentryOptions } from '../ops/sentry.js'
 import { parseDocument, type SolverDocument } from './document.js'
 import { documentToKnobs, PATHS, renameKnobs } from './knobs.js'
@@ -62,8 +62,9 @@ const LEGACY_FAMILY = /^(LN_SEND|LN_RECEIVE|ONCHAIN_SEND|ONCHAIN_RECEIVE|EVM|ASS
 /** Refused rather than ignored: a host half-migrated would otherwise run on settings it believes it changed. */
 export const assertNoLegacyEnv = (env: NodeJS.ProcessEnv): void => {
   const isSet = (name: string): boolean => Boolean(env[name]?.trim())
+  const railLegacy = new Set(lightningRailNames().flatMap((rail) => lightningRailFor(rail)?.legacyEnv?.names ?? []))
   const legacy = Object.keys(env)
-    .filter((name) => isSet(name) && (LEGACY.has(name) || LEGACY_FAMILY.test(name)))
+    .filter((name) => isSet(name) && (LEGACY.has(name) || railLegacy.has(name) || LEGACY_FAMILY.test(name)))
     .sort()
   if (legacy.length > 0) {
     throw new Error(
@@ -80,7 +81,8 @@ export const loadConfig = (opts: LoadOptions = {}): Config => {
   const raw = readDocument(env)
   assertNoLegacyEnv(env)
   const parsed = parseDocument(raw, lightningRailNames())
-  const { knobs, pathOf, railBlock } = documentToKnobs(opts.profile ? opts.profile(parsed) : parsed)
+  const doc = opts.profile ? parseDocument(opts.profile(parsed), lightningRailNames()) : parsed
+  const { knobs, pathOf, railBlock } = documentToKnobs(doc)
   try {
     return { ...configFromKnobs(knobs), configPaths: pathOf, lightningRailBlock: railBlock }
   } catch (error) {

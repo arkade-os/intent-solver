@@ -21,6 +21,7 @@ import * as sdk from '@arkade-os/solver-app/index.js'
 import { lightningRailFor, lightningRailNames, registerLightningRail } from '@arkade-os/solver-app/ops/rails.js'
 import type { LightningRail, LightningRailModule } from '@arkade-os/solver-app/index.js'
 import { configFromKnobs } from '@arkade-os/solver-app/config.js'
+import { envToDocument } from '@arkade-os/solver-app/config/fromEnv.js'
 import { valueImports } from '../support/importScan.js'
 
 const servicesSource = readFileSync(
@@ -48,6 +49,10 @@ const injected: LightningRailModule = {
     onchain: { name: 'onchain-leg' } as unknown as LightningRail['onchain'],
   }),
   mintPayeeInvoice: async () => 'lnbcrt1injected',
+  legacyEnv: {
+    names: ['INJECTED_API_KEY'],
+    toBlock: (env) => (env.INJECTED_API_KEY ? { apiKey: env.INJECTED_API_KEY } : undefined),
+  },
 }
 registerLightningRail(RAIL, injected)
 
@@ -207,5 +212,20 @@ describe('a registered rail reads its own block of the config document', () => {
       throw new Error('this deployment serves no EVM receive')
     }
     expect(() => load(document({ backend: 'fake' }), { profile })).toThrow(/^this deployment serves no EVM receive$/)
+  })
+})
+
+describe('a registered rail migrates its own variables', () => {
+  it('has a leftover one refused at boot, like the solver’s own', () => {
+    const env = { SOLVER_CONFIG_JSON: JSON.stringify({ network: 'regtest' }), INJECTED_API_KEY: 'k' }
+    expect(() => sdk.loadConfig({ env })).toThrow(/would be ignored: INJECTED_API_KEY/)
+  })
+
+  it('has its block written by config-from-env when it is the selected backend', () => {
+    const doc = envToDocument({ ...BASE_ENV, INJECTED_API_KEY: 'k' }, [])
+    expect(doc.rails?.lightning?.[RAIL]).toEqual({ apiKey: 'k' })
+    expect(envToDocument({ ...BASE_ENV, LN_BACKEND: 'fake', INJECTED_API_KEY: 'k' }, []).rails?.lightning).toEqual({
+      backend: 'fake',
+    })
   })
 })

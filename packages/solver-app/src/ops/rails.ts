@@ -112,6 +112,11 @@ export interface LightningRailModule {
    *   piped into `send`.
    */
   mintPayeeInvoice?(config: Config, amountSats: number): Promise<string>
+  /**
+   * Optional: the variables this rail read before the config document. Boot refuses any left set;
+   * `cli config-from-env` writes `toBlock(env)` as the rail's block, omitted when it returns undefined.
+   */
+  legacyEnv?: { names: readonly string[]; toBlock(env: NodeJS.ProcessEnv): unknown }
 }
 
 /**

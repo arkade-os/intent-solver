@@ -51,7 +51,7 @@ import { hex } from '@scure/base'
 import { Transaction, SigHash, p2tr } from '@scure/btc-signer'
 import { swapDbPath, type Config } from './config.js'
 import { loadConfig, loadKnobsForInspection, loadSentryOptions } from './config/load.js'
-import { exportConfig } from './config/fromEnv.js'
+import { exportConfig, healthPathNote } from './config/fromEnv.js'
 import { createErrorReporter, type ErrorReporter } from './ops/sentry.js'
 import { SwapStore, type SendSwapRow } from '@arkade-os/solver-corridors/db/swaps.js'
 import { type OnchainSendSwapRow } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
@@ -1987,6 +1987,8 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
   /** The config document for this environment, on stdout. It holds every secret the environment does. */
   async 'config-from-env'() {
     console.log(await exportConfig(process.env))
+    const note = healthPathNote(process.env)
+    if (note) console.error(note)
   },
 
   async balances() {

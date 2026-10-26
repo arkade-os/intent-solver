@@ -183,6 +183,7 @@ export const documentToKnobs = (doc: SolverDocument): Flattened => {
     }
     const symbol = label.split('@')[0]!.toUpperCase()
     if (!SYMBOL.test(symbol)) throw new Error(`${here}: label must start with a 1-12 character symbol`)
+    if (symbol === 'BTC') throw new Error(`${here}: BTC names bitcoin and cannot label an asset`)
     const taken = bySymbol.get(`${asset.kind}:${symbol}`)
     if (taken !== undefined) throw new Error(`assets: ${taken} and ${label} share the symbol ${symbol}`)
     bySymbol.set(`${asset.kind}:${symbol}`, label)
