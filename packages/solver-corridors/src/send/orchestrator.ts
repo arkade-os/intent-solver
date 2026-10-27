@@ -55,7 +55,7 @@ import {
 import { preimageMatchesHash, scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
-import { advanceUnrolledClaims, settleUnrolledClaims } from '../unrolledSpendStep.js'
+import { advanceUnrolledClaims, awaitLeftover, lockupLeftover, settleUnrolledClaims } from '../unrolledSpendStep.js'
 import { MAX_LOCKUP_SPEND_INPUTS } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import type { HoldState, ReceiveBackend, SendBackend, SendHtlcState } from '@arkade-os/solver-core/ports/lightning.js'
 import { PaymentHashRegistered, PaymentNotStarted } from '@arkade-os/solver-core/ports/lightning.js'
@@ -945,6 +945,7 @@ export class SendSwapService {
         lockup_txid: first?.txid ?? null,
         lockup_vout: first?.vout ?? null,
         lockup_value: locked,
+        lockup_outpoints: JSON.stringify(outputs.map(({ txid, vout, value }) => ({ txid, vout, value }))),
       })
     }
 
@@ -1746,13 +1747,19 @@ export class SendSwapService {
       }
       throw error
     }
+    const recourse = () => unilateralExitRecourse(row, { solverPubkey: arkade.providerPubkey })
+    if (unrolled === null || unrolled.settled) {
+      const leftover = await lockupLeftover(arkade, row, txid === null ? [] : outputs, unrolled)
+      if (leftover.length > 0) {
+        const pastDeadline = await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip)
+        return awaitLeftover(store, row.id, txid, leftover, pastDeadline, recourse)
+      }
+    }
     if (unrolled === null) {
       await store.transition(row.id, 'claiming', 'claimed', { claim_ark_txid: txid })
       return false
     }
     if (txid !== null) await store.patch(row.id, { claim_ark_txid: txid })
-    return settleUnrolledClaims(store, row.id, { from: 'claiming', to: 'claimed' }, unrolled, () =>
-      unilateralExitRecourse(row, { solverPubkey: arkade.providerPubkey }),
-    )
+    return settleUnrolledClaims(store, row.id, { from: 'claiming', to: 'claimed' }, unrolled, recourse)
   }
 }

@@ -39,7 +39,9 @@ export interface OnchainReceiveArkadeOps extends Pick<
    * `unrolled` means it has left Arkade, so a spend of it reveals `P` in an L1
    * witness {@link findClaimPreimage} cannot read.
    */
-  findLockupOutpoints(pkScriptHex: string): Promise<{ txid: string; vout: number; unrolled: boolean }[]>
+  findLockupOutpoints(
+    pkScriptHex: string,
+  ): Promise<{ txid: string; vout: number; value: number; spent: boolean; unrolled: boolean }[]>
 
   /**
    * The preimage out of whatever claimed one of `outpoints`, verified against

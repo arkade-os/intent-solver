@@ -86,6 +86,7 @@ const TRANSITION_COLUMNS = new Set([
   'preimage',
   'claim_ark_txid',
   'failure_reason',
+  'lockup_outpoints',
 ])
 const PATCH_COLUMNS = new Set([
   'lockup_value',
@@ -204,6 +205,8 @@ export interface SendSwapRow {
   claimArkTxid: string | null
   /** JSON, by outpoint: the last step of each L1 claim of a lockup output the client unrolled. */
   unrolledClaim: string | null
+  /** JSON `[{txid, vout, value}]`: the lockup outputs adopted at funding, each to be collected. Null on older rows. */
+  lockupOutpoints: string | null
   failureReason: string | null
   /**
    * The backend's last word on the outbound payment — `in_flight` vs `wedged`
@@ -300,7 +303,8 @@ const SEND_SWAP_COLUMNS = `
   payment_evidence              TEXT,
   payment_failure_reason        TEXT,
   routing_fee_paid_sats         INTEGER,
-  unrolled_claim                TEXT
+  unrolled_claim                TEXT,
+  lockup_outpoints              TEXT
 `
 
 const SCHEMA = `
@@ -381,6 +385,7 @@ const toRow = (raw: Raw): SendSwapRow => ({
   rfqId: text(raw.rfq_id),
   routingFeePaidSats: numberOrNull(raw.routing_fee_paid_sats),
   unrolledClaim: text(raw.unrolled_claim),
+  lockupOutpoints: text(raw.lockup_outpoints),
 })
 
 export interface QuoteRecord {
@@ -500,6 +505,7 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
       ['routing_fee_paid_sats', 'INTEGER'],
       ['quoted_refund_deadline', 'INTEGER'],
       ['unrolled_claim', 'TEXT'],
+      ['lockup_outpoints', 'TEXT'],
     ])
 
     // Databases created when payment_hash carried a column-level UNIQUE burn a

@@ -109,7 +109,7 @@ const buildArkadeFake = (): ArkadeFake => {
   // Every outpoint the script ever held, spent included — the unfiltered view
   // `findLockupOutpoints` serves, and the reason a claim stays readable after
   // it has already spent the output.
-  const everSeen = new Map<string, { txid: string; vout: number }[]>()
+  const everSeen = new Map<string, { txid: string; vout: number; value: number }[]>()
   const unrolled = new Set<string>()
   const claimed = new Map<string, Uint8Array>()
   let fundCounter = 0
@@ -120,7 +120,7 @@ const buildArkadeFake = (): ArkadeFake => {
     seedLockup: (address, out) => {
       const key = hex.encode(ArkAddress.decode(address).pkScript)
       lockups.set(key, [...(lockups.get(key) ?? []), out])
-      everSeen.set(key, [...(everSeen.get(key) ?? []), { txid: out.txid, vout: out.vout }])
+      everSeen.set(key, [...(everSeen.get(key) ?? []), { txid: out.txid, vout: out.vout, value: out.value }])
     },
     spendLockup: (pkScriptHex, preimage) => {
       lockups.delete(pkScriptHex)
@@ -142,6 +142,7 @@ const buildArkadeFake = (): ArkadeFake => {
       findLockupOutpoints: async (pkScriptHex) =>
         (everSeen.get(pkScriptHex) ?? []).map((seen) => ({
           ...seen,
+          spent: !(lockups.get(pkScriptHex) ?? []).some((o) => o.txid === seen.txid && o.vout === seen.vout),
           unrolled: unrolled.has(`${seen.txid}:${seen.vout}`),
         })),
       findClaimPreimage: async (outpoints, paymentHashHex) => {
@@ -165,7 +166,7 @@ const buildArkadeFake = (): ArkadeFake => {
         const pkScriptHex = hex.encode(ArkAddress.decode(params.address).pkScript)
         const existing = lockups.get(pkScriptHex) ?? []
         lockups.set(pkScriptHex, [...existing, { txid, vout: 0, value: params.amountSats }])
-        everSeen.set(pkScriptHex, [...(everSeen.get(pkScriptHex) ?? []), { txid, vout: 0 }])
+        everSeen.set(pkScriptHex, [...(everSeen.get(pkScriptHex) ?? []), { txid, vout: 0, value: params.amountSats }])
         return txid
       },
       refund: async (_row, outputs) => {
@@ -949,6 +950,31 @@ describe('OnchainReceiveSwapService', () => {
       const row = await service.tick(swap.id)
       expect(row.state).toBe('awaiting_claim')
       expect(funded).toHaveLength(1) // still just the one broadcast
+    })
+
+    it('adopts its funding after a crash even once the client has already claimed it', async () => {
+      const outcome = await service.quote(quoteRequest())
+      if (!outcome.accepted) throw new Error('expected acceptance')
+      const swap = outcome.swap
+      deps.onchain.receiveExternal({ address: swap.onchainAddress, amountSats: 50_000 })
+      deps.onchain.mineBlocks(1)
+      const originalTransition = store.transition.bind(store)
+      store.transition = async (
+        id: string,
+        from: OnchainReceiveSwapState,
+        to: OnchainReceiveSwapState,
+        fields: Partial<Record<string, unknown>> = {},
+      ) => {
+        if (from === 'funding_arkade' && to === 'awaiting_claim') throw new Error('simulated crash after broadcast')
+        return originalTransition(id, from, to, fields)
+      }
+      await expect(service.tick(swap.id)).rejects.toThrow('simulated crash after broadcast')
+      deps.arkadeFake.spendLockup(swap.pkScript, P)
+
+      store.transition = originalTransition
+      const row = await service.tick(swap.id)
+      expect(row.state).not.toBe('funding_arkade')
+      expect(row.preimage).toBe(hex.encode(P))
     })
 
     it('keeps the lease when fund() fails ambiguously, and does not re-fund while the indexer lags', async () => {
