@@ -17,16 +17,12 @@ import {
   EXPOSED as LN_RECV_EXPOSED,
   NON_TERMINAL as LN_RECV_LIVE,
 } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
-import {
-  EXPOSED as ON_SEND_EXPOSED,
-  NON_TERMINAL as ON_SEND_LIVE,
-} from '@arkade-os/solver-corridors/db/onchainSwaps.js'
-import {
-  EXPOSED as ON_RECV_EXPOSED,
-  NON_TERMINAL as ON_RECV_LIVE,
-} from '@arkade-os/solver-corridors/db/onchainReceiveSwaps.js'
+import { OnchainSendMachine } from '@arkade-os/solver-corridors/machines/onchainSend.js'
+import { OnchainReceiveMachine } from '@arkade-os/solver-corridors/machines/onchainReceive.js'
 
 const CORRIDORS_DIR = fileURLToPath(new URL('../../packages/solver-corridors/src/corridors/', import.meta.url))
+const MACHINES_DIR = fileURLToPath(new URL('../../packages/solver-corridors/src/machines/', import.meta.url))
+const STATE_MACHINE = fileURLToPath(new URL('../../packages/solver-core/src/core/stateMachine.ts', import.meta.url))
 
 const stub = (pair: string, envStem: string): CorridorDescriptor => ({
   pair,
@@ -95,8 +91,8 @@ describe('descriptor state vocabularies', () => {
   it.each([
     ['arkade:BTC->lightning:BTC', LN_SEND_LIVE, LN_SEND_EXPOSED],
     ['lightning:BTC->arkade:BTC', LN_RECV_LIVE, LN_RECV_EXPOSED],
-    ['arkade:BTC->onchain:BTC', ON_SEND_LIVE, ON_SEND_EXPOSED],
-    ['onchain:BTC->arkade:BTC', ON_RECV_LIVE, ON_RECV_EXPOSED],
+    ['arkade:BTC->onchain:BTC', OnchainSendMachine.live, OnchainSendMachine.exposed],
+    ['onchain:BTC->arkade:BTC', OnchainReceiveMachine.live, OnchainReceiveMachine.exposed],
   ] as const)('for %s still match the store that owns them', (pair, live, exposed) => {
     const { states } = descriptorFor(pair)
     expect({ live: [...states.live], exposed: [...states.exposed] }).toEqual({
@@ -183,12 +179,24 @@ describe('the descriptor modules', () => {
     expect(DESCRIPTOR_MODULES.filter((name) => !here.includes(name))).toEqual([])
   })
 
-  it('emit no runtime imports at all, so config stays free of native bindings', () => {
+  it('value-import only the state machines, so config stays free of native bindings', () => {
     const offenders = DESCRIPTOR_MODULES.flatMap((name) =>
-      valueImports(readFileSync(join(CORRIDORS_DIR, name), 'utf8')).map(
-        (specifier) => `${name} value-imports ${specifier}`,
-      ),
+      valueImports(readFileSync(join(CORRIDORS_DIR, name), 'utf8'))
+        .filter((specifier) => !/^\.\.\/machines\/[A-Za-z]+\.js$/.test(specifier))
+        .map((specifier) => `${name} value-imports ${specifier}`),
     )
     expect(offenders.sort()).toEqual([])
+  })
+
+  it('reach only the dependency-free helper through the state machines', () => {
+    const machines = readdirSync(MACHINES_DIR).filter((name) => name.endsWith('.ts'))
+    expect(machines.length).toBeGreaterThan(0)
+    const offenders = machines.flatMap((name) =>
+      valueImports(readFileSync(join(MACHINES_DIR, name), 'utf8'))
+        .filter((specifier) => specifier !== '@arkade-os/solver-core/core/stateMachine.js')
+        .map((specifier) => `${name} value-imports ${specifier}`),
+    )
+    expect(offenders.sort()).toEqual([])
+    expect(valueImports(readFileSync(STATE_MACHINE, 'utf8'))).toEqual([])
   })
 })

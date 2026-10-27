@@ -42,47 +42,9 @@ import {
   type StoreShape,
 } from './baseSwapStore.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { OnchainReceiveMachine, type OnchainReceiveSwapState } from '../machines/onchainReceive.js'
 
-export type OnchainReceiveSwapState =
-  | 'quoted'
-  | 'awaiting_confirmations'
-  | 'funding_arkade'
-  | 'awaiting_claim'
-  | 'claimed'
-  | 'settled'
-  | 'refunding_arkade'
-  | 'refunded'
-  | 'refused'
-  | 'stuck'
-
-export const NON_TERMINAL: readonly OnchainReceiveSwapState[] = [
-  'quoted',
-  'awaiting_confirmations',
-  'funding_arkade',
-  'awaiting_claim',
-  'claimed',
-  'refunding_arkade',
-]
-export const EXPOSED: readonly OnchainReceiveSwapState[] = [
-  'funding_arkade',
-  'awaiting_claim',
-  'claimed',
-  'refunding_arkade',
-]
-
-const LEGAL_EDGES: Record<OnchainReceiveSwapState, readonly OnchainReceiveSwapState[]> = {
-  quoted: ['awaiting_confirmations', 'refused'],
-  // The self-edge re-adopts a fee-bumped client funding; nothing is exposed yet.
-  awaiting_confirmations: ['funding_arkade', 'refused', 'awaiting_confirmations'],
-  funding_arkade: ['awaiting_claim', 'stuck'],
-  awaiting_claim: ['claimed', 'refunding_arkade', 'stuck'],
-  claimed: ['settled', 'stuck'],
-  refunding_arkade: ['claimed', 'refunded', 'stuck'],
-  settled: [],
-  refunded: [],
-  refused: [],
-  stuck: [],
-}
+export type { OnchainReceiveSwapState }
 
 const TRANSITION_COLUMNS = new Set([
   'funding_txid',
@@ -232,7 +194,7 @@ export interface OnchainReceiveSwapRow {
   /** The claim versions {@link onchainClaimTxid} replaced, newest first: until one confirms, ANY of them can be the one that does. */
   onchainClaimPriorTxids: string[]
   arkadeRefundTxid: string | null
-  /** JSON `UnrolledRefundRecord`: the L1 refund of a lockup the client unrolled. */
+  /** JSON `UnrolledSpendRecord`: the L1 refund of a lockup the client unrolled. */
   unrolledRefund: string | null
   refundOutcome: 'pushed' | 'external' | null
   failureReason: string | null
@@ -316,7 +278,7 @@ CREATE TABLE IF NOT EXISTS receive_onchain_swap (${RECEIVE_ONCHAIN_SWAP_COLUMNS}
 CREATE INDEX IF NOT EXISTS idx_receive_onchain_swap_state ON receive_onchain_swap(state);
 CREATE INDEX IF NOT EXISTS idx_receive_onchain_swap_live_recovery_order
   ON receive_onchain_swap(created_at)
-  WHERE state IN ('quoted','awaiting_confirmations','funding_arkade','awaiting_claim','claimed','refunding_arkade');
+  WHERE state IN (${OnchainReceiveMachine.sqlList(OnchainReceiveMachine.live)});
 CREATE UNIQUE INDEX IF NOT EXISTS idx_receive_onchain_swap_live_hash
   ON receive_onchain_swap(payment_hash) WHERE state != 'refused';
 -- Partial for the same reason as send_swap's: findByRfqId runs on every
@@ -465,11 +427,11 @@ const SHAPE: StoreShape<OnchainReceiveSwapRow, OnchainReceiveSwapState> = {
   lifecycleLabel: 'onchain receive lifecycle',
   searchColumns: ONCHAIN_RECEIVE_SEARCH_COLUMNS,
   recoveryOrderIndex: 'idx_receive_onchain_swap_live_recovery_order',
-  legalEdges: LEGAL_EDGES,
+  legalEdges: OnchainReceiveMachine.edges,
   transitionColumns: TRANSITION_COLUMNS,
   patchColumns: PATCH_COLUMNS,
-  live: NON_TERMINAL,
-  exposed: EXPOSED,
+  live: OnchainReceiveMachine.live,
+  exposed: OnchainReceiveMachine.exposed,
   toRow: (raw: RawRow) => toRow(raw as Raw),
 }
 

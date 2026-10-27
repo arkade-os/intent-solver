@@ -12,7 +12,7 @@
 import type { UnilateralDelays } from '@arkade-os/solver-core/core/timelocks.js'
 import type { FundedOutput, LockupSpendEvidence } from './wallet.js'
 import type { CovenantScriptRow } from './covenantRow.js'
-import type { UnrolledRefundRecord, UnrolledRefundStep } from './unrolledRefund.js'
+import type { SaveUnrolledSpend, UnrolledSpendRecord, UnrolledSpendStep } from './unrolledSpend.js'
 
 /** The Arkade operations the send-side orchestrators need, shaped for injection. */
 export interface ArkadeOps {
@@ -48,6 +48,17 @@ export interface ArkadeOps {
   claim(row: CovenantScriptRow, outputs: FundedOutput[], preimageHex: string): Promise<string>
   /** Push the covenant refund of the script the row describes. Needs no keys of ours. */
   refund(row: CovenantScriptRow, outputs: FundedOutput[]): Promise<string>
+  findLockupOutpoints?(
+    pkScriptHex: string,
+  ): Promise<{ txid: string; vout: number; spent: boolean; unrolled: boolean }[]>
+  /** One step of the co-signed L1 claim of one output the client unrolled. Absent: it waits for the operator. */
+  claimUnrolled?(
+    row: CovenantScriptRow,
+    lockup: { txid: string; vout: number },
+    record: UnrolledSpendRecord | null,
+    save: SaveUnrolledSpend,
+    preimageHex: string,
+  ): Promise<UnrolledSpendStep>
   /** The SWEPT outputs `spendableOnly` excludes. OPTIONAL with {@link refundSwept}: a build on the earlier interface — a fork, a test's fake — must still work. */
   findSweptLockups?(pkScriptHex: string): Promise<FundedOutput[]>
   /** Through a BATCH, the one shape reaching a swept input; it costs a whole round, so only the operator refunds and the float pass call it. */
@@ -109,6 +120,7 @@ export interface ReceiveArkadeOps {
   refundUnrolled?(
     row: CovenantScriptRow,
     lockup: { txid: string; vout: number },
-    record: UnrolledRefundRecord | null,
-  ): Promise<UnrolledRefundStep>
+    record: UnrolledSpendRecord | null,
+    save: SaveUnrolledSpend,
+  ): Promise<UnrolledSpendStep>
 }

@@ -170,7 +170,7 @@ export interface ReceiveSwapRow {
   preimage: string | null
   /** Arkade txid of a covenant refund THIS SERVICE pushed for its own lockup. */
   refundArkTxid: string | null
-  /** JSON `UnrolledRefundRecord`: the L1 refund of a lockup the client unrolled. */
+  /** JSON `UnrolledSpendRecord`: the L1 refund of a lockup the client unrolled. */
   unrolledRefund: string | null
 
   failureReason: string | null

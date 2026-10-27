@@ -34,7 +34,7 @@ import type { ReceiveArkadeOps } from '@arkade-os/solver-corridors/receive/arkad
 import { FundNotSubmittedError } from '@arkade-os/solver-corridors/receive/fundLockup.js'
 import type { CovclaimdClient } from '@arkade-os/solver-corridors/receive/covclaimd.js'
 import type { FundedOutput } from '@arkade-os/solver-arkade/arkade/wallet.js'
-import type { UnrolledRefundRecord, UnrolledRefundStep } from '@arkade-os/solver-arkade/arkade/unrolledRefund.js'
+import type { UnrolledSpendRecord, UnrolledSpendStep } from '@arkade-os/solver-arkade/arkade/unrolledSpend.js'
 
 const keyBytes = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
 const p2tr = (program: Uint8Array): Uint8Array => Uint8Array.from([0x51, 0x20, ...program])
@@ -1553,9 +1553,9 @@ describe('ReceiveSwapService.tick — claim detection and settlement', () => {
     })
 
     describe('its refund on L1 through arkd', () => {
-      let steps: UnrolledRefundStep[]
-      let calls: { lockup: { txid: string; vout: number }; record: UnrolledRefundRecord | null }[]
-      const record: UnrolledRefundRecord = {
+      let steps: UnrolledSpendStep[]
+      let calls: { lockup: { txid: string; vout: number }; record: UnrolledSpendRecord | null }[]
+      const record: UnrolledSpendRecord = {
         txid: 'ab'.repeat(32),
         tx: null,
         feeRate: 10,
@@ -1611,6 +1611,17 @@ describe('ReceiveSwapService.tick — claim detection and settlement', () => {
         const row = await service.tick(id)
         expect(row.state).toBe('stuck')
         expect(row.failureReason).toMatch(/unrolled lockup spent on L1/)
+      })
+
+      it('keeps a record saved before arkd answered, when the step then throws', async () => {
+        const { id } = await refunding()
+        arkade.ops.refundUnrolled = async (_row, _lockup, _previous, save) => {
+          await save(record)
+          throw new Error('arkd broadcast it, and the reply never arrived')
+        }
+
+        await expect(service.tick(id)).rejects.toThrow('reply never arrived')
+        expect((await store.get(id)).unrolledRefund).toBe(JSON.stringify(record))
       })
 
       it('names the solo exit once arkd will no longer co-sign', async () => {

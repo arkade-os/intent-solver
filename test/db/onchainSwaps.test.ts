@@ -1,11 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import Database from 'better-sqlite3'
-import {
-  OnchainSendSwapStore,
-  OWES_PAYOUT,
-  NON_TERMINAL,
-  EXPOSED,
-} from '@arkade-os/solver-corridors/db/onchainSwaps.js'
+import { OnchainSendSwapStore } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
+import { OnchainSendMachine } from '@arkade-os/solver-corridors/machines/onchainSend.js'
 import type { SqlDriver } from '@arkade-os/solver-corridors/db/driver.js'
 
 let now = 1_000_000
@@ -308,8 +304,9 @@ describe('owedPayoutSats()', () => {
 
   // Pinned: a live state that does not owe has already spent.
   it('splits the live states at the funding boundary', () => {
-    expect(NON_TERMINAL.filter((state) => !OWES_PAYOUT.includes(state))).toEqual(
-      EXPOSED.filter((state) => state !== 'funding_onchain'),
+    const owes = OnchainSendMachine.where('owesPayout')
+    expect(OnchainSendMachine.live.filter((state) => !owes.includes(state))).toEqual(
+      OnchainSendMachine.exposed.filter((state) => state !== 'funding_onchain'),
     )
   })
 })
