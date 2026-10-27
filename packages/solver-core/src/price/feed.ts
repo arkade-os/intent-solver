@@ -33,23 +33,12 @@ export interface PriceFeedDeps {
   timeoutMs?: number
   /** Injected so tests need no network. Defaults to the global. */
   fetch?: typeof globalThis.fetch
-  /**
-   * Sent as a header, and only to CoinGecko's own hosts over https: a feed URL is published on
-   * the registry card and quoted in every feed error. Defaults to `COINGECKO_API_KEY`.
-   */
-  coingeckoApiKey?: string
 }
 
 const DEFAULT_TIMEOUT_MS = 10_000
 
 // CoinGecko answers 403 to a request without one, and `node:http` (the guarded fetch) sends none.
 const USER_AGENT = 'arkade-intent-solver (+https://github.com/arkade-os/intent-solver)'
-
-// A demo key is accepted on the public host only, a paid key on the pro host only.
-const COINGECKO_KEY_HEADERS = new Map([
-  ['api.coingecko.com', 'x-cg-demo-api-key'],
-  ['pro-api.coingecko.com', 'x-cg-pro-api-key'],
-])
 
 /** A price is a few hundred bytes; the largest feed response seen is kilobytes. */
 const MAX_BODY_BYTES = 1_048_576
@@ -88,7 +77,7 @@ const cappedText = async (response: Response, feedUrl: string): Promise<string> 
 export type FetchPrice = (feedUrl: string, pricePath: string) => Promise<Price>
 
 export const createPriceFeed = (deps: PriceFeedDeps = {}): FetchPrice => {
-  const { timeoutMs = DEFAULT_TIMEOUT_MS, coingeckoApiKey = process.env.COINGECKO_API_KEY?.trim() } = deps
+  const { timeoutMs = DEFAULT_TIMEOUT_MS } = deps
   // Checked HERE rather than at the first request, which is where
   // `AbortSignal.timeout` would otherwise raise it. A misconfigured timeout is
   // a startup fault: letting it through means the process comes up healthy,
@@ -104,14 +93,9 @@ export const createPriceFeed = (deps: PriceFeedDeps = {}): FetchPrice => {
     // and reports the pointer rather than whatever the feed happened to answer.
     validatePricePath(pricePath)
 
-    const headers: Record<string, string> = { accept: 'application/json', 'user-agent': USER_AGENT }
-    const url = URL.parse(feedUrl)
-    const keyHeader = url?.protocol === 'https:' ? COINGECKO_KEY_HEADERS.get(url.hostname) : undefined
-    if (keyHeader && coingeckoApiKey) headers[keyHeader] = coingeckoApiKey
-
     const response = await call(feedUrl, {
       method: 'GET',
-      headers,
+      headers: { accept: 'application/json', 'user-agent': USER_AGENT },
       signal: AbortSignal.timeout(timeoutMs),
     })
 

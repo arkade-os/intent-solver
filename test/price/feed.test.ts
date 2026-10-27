@@ -78,45 +78,6 @@ describe('reading a price off a feed', () => {
   })
 })
 
-describe('request headers', () => {
-  const COINGECKO = 'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd'
-  const headersFor = async (feedUrl: string, coingeckoApiKey?: string) => {
-    const fetch = respond('{"bitcoin":{"usd":64000}}')
-    await createPriceFeed({ fetch, coingeckoApiKey })(feedUrl, '/bitcoin/usd')
-    return (fetch.mock.calls[0]![1] as RequestInit).headers as Record<string, string>
-  }
-
-  it('names itself in the user agent, which coingecko requires', async () => {
-    expect((await headersFor(COINGECKO))['user-agent']).toMatch(/^arkade-intent-solver/)
-  })
-
-  it('sends the key under the header each coingecko host expects', async () => {
-    expect((await headersFor(COINGECKO, 'k'))['x-cg-demo-api-key']).toBe('k')
-    const pro = await headersFor(COINGECKO.replace('api.', 'pro-api.'), 'k')
-    expect(pro['x-cg-pro-api-key']).toBe('k')
-    expect(pro['x-cg-demo-api-key']).toBeUndefined()
-  })
-
-  it('never sends the key to any other host, or over plain http', async () => {
-    for (const url of [
-      'https://api.coingecko.com.evil.test/x',
-      'https://api.binance.com/api/v3/ticker/price',
-      'http://api.coingecko.com/api/v3/simple/price',
-    ]) {
-      expect(Object.values(await headersFor(url, 'k'))).not.toContain('k')
-    }
-  })
-
-  it('reads the key from COINGECKO_API_KEY by default', async () => {
-    vi.stubEnv('COINGECKO_API_KEY', ' from-env ')
-    try {
-      expect((await headersFor(COINGECKO))['x-cg-demo-api-key']).toBe('from-env')
-    } finally {
-      vi.unstubAllEnvs()
-    }
-  })
-})
-
 describe('refusals', () => {
   it('refuses a malformed pointer BEFORE spending a request on it', async () => {
     // Costs no network call, and reports the pointer rather than whatever the
