@@ -59,6 +59,10 @@ export interface ArkadeOps {
     save: SaveUnrolledSpend,
     preimageHex: string,
   ): Promise<UnrolledSpendStep>
+  /** The SWEPT outputs `spendableOnly` excludes. OPTIONAL with {@link refundSwept}: a build on the earlier interface — a fork, a test's fake — must still work. */
+  findSweptLockups?(pkScriptHex: string): Promise<FundedOutput[]>
+  /** Through a BATCH, the one shape reaching a swept input; it costs a whole round, so only the operator refunds and the float pass call it. */
+  refundSwept?(row: CovenantScriptRow, swept: readonly FundedOutput[]): Promise<string>
 }
 
 /**

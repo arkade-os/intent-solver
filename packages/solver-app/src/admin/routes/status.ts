@@ -20,6 +20,7 @@ import { probeBackends } from '../probes.js'
 import { assetSource, consoleBalance, describeAssetId } from '../assets.js'
 import { ASSET_ID_HEX } from '@arkade-os/solver-core/core/marketKey.js'
 import { marketServingDivergence } from '../../ops/marketDivergence.js'
+import { balanceCheckpointScope } from '../../ops/balanceCheckpoints.js'
 import { poolPlan } from '../../ops/pool.js'
 import { requireLn, requireOnchain } from '../../ops/rails.js'
 import { attempt } from '../../ops/attempt.js'
@@ -231,6 +232,16 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
       return c.json({ error: 'bad_request', message: 'not a lowercase 68-character asset id' }, 400)
     }
     return c.json(await describeAssetId(assetId, assetSource(deps.services.arkade.wallet)))
+  })
+
+  app.get('/api/balance-checkpoints', async (c) => {
+    const raw = c.req.query('limit') ?? '100'
+    const limit = Number(raw)
+    if (!/^\d+$/.test(raw) || !Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
+      return c.json({ error: 'invalid_limit', message: 'limit must be an integer between 1 and 200' }, 400)
+    }
+    const scope = balanceCheckpointScope(deps.services)
+    return c.json({ scope, checkpoints: await deps.services.adminStore.listBalanceCheckpoints(scope, limit) })
   })
 
   app.get('/api/wallet', async (c) => {

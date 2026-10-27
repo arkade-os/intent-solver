@@ -2,6 +2,7 @@ import { concatBytes } from '@noble/hashes/utils.js'
 import { keccak_256 } from '@noble/hashes/sha3.js'
 import { addressWord, selectorFor, uintWord, type Erc20SwapLock } from './erc20Swap.js'
 import { receiverArtifact } from './receiverArtifact.js'
+import { readTimelockClock } from './timelockClock.js'
 
 export type IntentReceiverBinding = {
   chainId: bigint
@@ -184,7 +185,8 @@ export const verifyReceiverBinding = async (
   if (!options.allowActivated && active[31] === 1) throw new Error('receiver already activated')
   if (!options.allowClosed) {
     if (typeof blockTag !== 'string') throw new Error('open-window check requires numeric block tag')
-    if (BigInt(blockTag) >= binding.activationCutoff) throw new Error('receiver activation closed')
+    if ((await readTimelockClock(rpc, blockTag)) >= binding.activationCutoff)
+      throw new Error('receiver activation closed')
     const header = (await rpc('eth_getBlockByNumber', [blockTag, false])) as { timestamp: string } | null
     if (!header || BigInt(header.timestamp) >= binding.activationCutoffTimestamp)
       throw new Error('receiver timestamp activation closed')

@@ -100,6 +100,7 @@ const build = async (over: Partial<EvmSendServiceDeps> = {}) => {
     claimArkade: vi.fn().mockResolvedValue('ark-txid'),
     lockFor: vi.fn().mockReturnValue({ timelock: TIMELOCK }) as unknown as EvmSendServiceDeps['lockFor'],
     blockHeight: vi.fn().mockResolvedValue(20_000_000),
+    timelockHeight: vi.fn().mockResolvedValue(20_000_000),
     // Quote-time deps. Every test in this file drives `tick`, which reads none
     // of them — they are here so the fixture satisfies the type, and are
     // deliberately inert so a tick test that started depending on one would
@@ -129,6 +130,7 @@ const build = async (over: Partial<EvmSendServiceDeps> = {}) => {
       minConfirmations: 12,
       minAgeSeconds: 780,
       cadence: { fastestSecondsPerBlock: 12, slowestSecondsPerBlock: 15 },
+      timelockCadence: { fastestSecondsPerBlock: 12, slowestSecondsPerBlock: 15 },
       quoteValiditySeconds: 60,
     },
     now: () => NOW,
@@ -428,6 +430,7 @@ describe('a preimage scan the node refuses must not strand the solver’s tokens
       // At the quote's `evmTimeout`, so RULE 3 is live and refund is what a
       // reached planner decides.
       blockHeight: vi.fn().mockResolvedValue(21_000_000),
+      timelockHeight: vi.fn().mockResolvedValue(21_000_000),
       broadcast: vi.fn().mockResolvedValue('0xrefund'),
       onTickError: (_id, error) => void errors.push(error),
     })
@@ -458,6 +461,7 @@ describe('a preimage scan the node refuses must not strand the solver’s tokens
       const { store, service, deps } = await build({
         evm: { isLocked: vi.fn().mockResolvedValue(true), findClaimPreimage } as never,
         blockHeight: vi.fn().mockResolvedValue(21_000_000),
+        timelockHeight: vi.fn().mockResolvedValue(21_000_000),
         broadcast,
         ...(payoutFunding ? { payoutFunding: payoutFunding as never } : {}),
         onTickError,
@@ -504,6 +508,7 @@ describe('a quarantined receiver invariant closes only the public live row', () 
           findClaimPreimage: vi.fn().mockResolvedValue(null),
         } as never,
         blockHeight: vi.fn().mockResolvedValue(20_000_000),
+        timelockHeight: vi.fn().mockResolvedValue(20_000_000),
         lockFor: vi.fn().mockReturnValue(payoutLockForQuote()) as never,
         payoutFunding: { identity: 'test-provider', ensure } as never,
         onTickError,
@@ -542,6 +547,7 @@ describe('a quarantined receiver invariant closes only the public live row', () 
         transactionOutcome: vi.fn().mockResolvedValue('pending'),
       } as never,
       blockHeight: vi.fn().mockResolvedValue(20_000_000),
+      timelockHeight: vi.fn().mockResolvedValue(20_000_000),
       lockFor: vi.fn().mockReturnValue(payoutLockForQuote()) as never,
       payoutFunding: { identity: 'test-provider', ensure } as never,
       onTickError,
@@ -606,6 +612,7 @@ describe('the scan floor comes from the lock, never from the chain tip', () => {
           transactionBlock: vi.fn().mockResolvedValue(LOCK_BLOCK),
         } as never,
         blockHeight: vi.fn().mockResolvedValue(height),
+        timelockHeight: vi.fn().mockResolvedValue(height),
       })
       await service.tick('swap-1')
     }
@@ -671,6 +678,7 @@ describe('the scan floor comes from the lock, never from the chain tip', () => {
         transactionBlock: vi.fn().mockResolvedValue(null),
       } as never,
       blockHeight: vi.fn().mockResolvedValue(Number(CREATED_AT_HEIGHT) + ELAPSED / 12),
+      timelockHeight: vi.fn().mockResolvedValue(Number(CREATED_AT_HEIGHT) + ELAPSED / 12),
       now: () => NOW + ELAPSED,
     })
     await service.tick('swap-1')
@@ -1027,6 +1035,7 @@ describe('a lock transaction that reverted is not a lock that has not landed', (
     const { store, service } = await revertedRow({
       broadcast,
       blockHeight: vi.fn().mockResolvedValue(21_000_000),
+      timelockHeight: vi.fn().mockResolvedValue(21_000_000),
     })
     await service.tick('swap-1')
     expect(broadcast).not.toHaveBeenCalled()
@@ -1098,6 +1107,7 @@ describe('provider recovery without an EVM lock', () => {
         timelock: BigInt(q.evmTimeout),
       }),
       blockHeight: vi.fn().mockResolvedValue(q.evmTimeout),
+      timelockHeight: vi.fn().mockResolvedValue(q.evmTimeout),
     })
     await store.transition('swap-1', 'quoted', 'funded')
     await store.transition('swap-1', 'funded', 'locking_evm')
@@ -1128,6 +1138,7 @@ describe('a refund that was broadcast is not a refund that landed', () => {
         ...evm,
       } as never,
       blockHeight: vi.fn().mockResolvedValue(21_000_000),
+      timelockHeight: vi.fn().mockResolvedValue(21_000_000),
       broadcast: vi.fn().mockResolvedValue(REFUND_TXID),
       ...over,
     })
@@ -1336,6 +1347,7 @@ describe('a row holding the losing refund txid still reaches `refunded`', () => 
         ...evm,
       } as never,
       blockHeight: vi.fn().mockResolvedValue(21_000_000),
+      timelockHeight: vi.fn().mockResolvedValue(21_000_000),
       ...over,
     })
     await built.store.transition('swap-1', 'quoted', 'funded')
@@ -1499,6 +1511,7 @@ describe('a lock that lands after the books closed', () => {
     }
     const built = await build({
       blockHeight: vi.fn().mockResolvedValue(21_000_000),
+      timelockHeight: vi.fn().mockResolvedValue(21_000_000),
       onTickError,
       ...over,
       evm: evm as unknown as EvmSendServiceDeps['evm'],
@@ -1604,6 +1617,7 @@ describe('a lock that lands after the books closed', () => {
     }
     const built = await build({
       blockHeight: vi.fn().mockResolvedValue(21_000_000),
+      timelockHeight: vi.fn().mockResolvedValue(21_000_000),
       onTickError,
       evm: evm as unknown as EvmSendServiceDeps['evm'],
     })
@@ -1637,5 +1651,48 @@ describe('a lock that lands after the books closed', () => {
 
     expect(onTickError).not.toHaveBeenCalled()
     await store.close()
+  })
+})
+
+/** `findLockups` is `spendableOnly`, so `refundSweep` skips a swept lockup silently while it wedges float recovery — and reaching it costs a batch round. */
+describe('refundSweptLockup on the EVM send corridor', () => {
+  const SWEPT = [{ txid: 'ee'.repeat(32), vout: 0, value: 50_000 }]
+
+  const refused = async () => {
+    const refundSwept = vi.fn(async () => 'batch-txid')
+    const { store, service, deps } = await build({})
+    Object.assign(deps.arkade, {
+      findLockups: async () => [],
+      lockupProvablySpent: async () => false,
+      findSweptLockups: async () => SWEPT,
+      refundSwept,
+    })
+    await store.transition('swap-1', 'quoted', 'refused', { failure_reason: 'lockup timeout' })
+    return { store, service, refundSwept }
+  }
+
+  it('refunds a refused row and records the outcome', async () => {
+    const { store, service, refundSwept } = await refused()
+
+    expect(await service.refundSweptLockup(quote().pkScript)).toEqual({
+      swapId: 'swap-1',
+      txid: 'batch-txid',
+      recorded: true,
+    })
+    expect(refundSwept).toHaveBeenCalledOnce()
+    const row = await store.get('swap-1')
+    expect(row.refundOutcome).toBe('pushed')
+    expect(row.refundArkTxid).toBe('batch-txid')
+  })
+
+  it('is not reachable from the unattended refund sweep', async () => {
+    const { service, refundSwept } = await refused()
+    expect(await service.refundSweep()).toEqual([])
+    expect(refundSwept).not.toHaveBeenCalled()
+  })
+
+  it('answers null for a script no row of ours holds', async () => {
+    const { service } = await refused()
+    expect(await service.refundSweptLockup('5120' + '99'.repeat(32))).toBeNull()
   })
 })

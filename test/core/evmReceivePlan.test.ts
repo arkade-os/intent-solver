@@ -4,6 +4,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
+import { asTimelockHeight } from '@arkade-os/solver-core/ports/evm.js'
 import {
   EVM_RECEIVE_CLAIM_MARGIN_BLOCKS,
   planEvmReceive,
@@ -39,7 +40,7 @@ const seen = (over: Partial<EvmReceiveObservation> = {}): EvmReceiveObservation 
   evmClaimOutcome: 'pending',
   preimage: null,
   nowSeconds: NOW,
-  evmBlockHeight: SAFE_HEIGHT,
+  evmTimelockHeight: asTimelockHeight(SAFE_HEIGHT),
   ...over,
 })
 
@@ -91,12 +92,15 @@ describe('rule 5 - a quote binds only until valid_until', () => {
 describe('rule 2 - do not fund into a nearly-expired client lock', () => {
   it('refuses when too little of the timeout remains to claim in', () => {
     // The solver would pay sats for tokens the client can take straight back.
-    const action = planEvmReceive(row(), seen({ evmBlockHeight: EVM_TIMEOUT - 1 }))
+    const action = planEvmReceive(row(), seen({ evmTimelockHeight: asTimelockHeight(EVM_TIMEOUT - 1) }))
     expect(action).toEqual({ do: 'refuse', reason: 'client ERC20 timeout too close to fund against' })
   })
 
   it('funds when the margin is exactly satisfied', () => {
-    const action = planEvmReceive(row(), seen({ evmBlockHeight: EVM_TIMEOUT - EVM_RECEIVE_CLAIM_MARGIN_BLOCKS - 1 }))
+    const action = planEvmReceive(
+      row(),
+      seen({ evmTimelockHeight: asTimelockHeight(EVM_TIMEOUT - EVM_RECEIVE_CLAIM_MARGIN_BLOCKS - 1) }),
+    )
     expect(action).toEqual({ do: 'fund_arkade' })
   })
 })
@@ -129,7 +133,7 @@ describe('rule 4 - past the client timeout with a preimage, the money is gone', 
   it('sticks rather than pretending a claim can still land', () => {
     const action = planEvmReceive(
       row({ state: 'awaiting_claim' }),
-      seen({ preimage: 'ab'.repeat(32), evmBlockHeight: EVM_TIMEOUT }),
+      seen({ preimage: 'ab'.repeat(32), evmTimelockHeight: asTimelockHeight(EVM_TIMEOUT) }),
     )
     expect(action).toEqual({
       do: 'stick',
@@ -174,7 +178,7 @@ describe('`claimed` means the ERC20 arrived', () => {
   it('sticks past the client timeout while the claim is still unsettled', () => {
     const action = planEvmReceive(
       claiming({ evmClaimTxid: '0xtx' } as Partial<EvmReceiveSwapRow>),
-      seen({ evmClaimOutcome: 'pending', evmBlockHeight: EVM_TIMEOUT }),
+      seen({ evmClaimOutcome: 'pending', evmTimelockHeight: asTimelockHeight(EVM_TIMEOUT) }),
     )
     expect(action).toEqual({
       do: 'stick',
@@ -185,7 +189,7 @@ describe('`claimed` means the ERC20 arrived', () => {
   it('records a claim that already mined even past the client timeout', () => {
     const action = planEvmReceive(
       claiming({ evmClaimTxid: '0xtx' } as Partial<EvmReceiveSwapRow>),
-      seen({ evmClaimOutcome: 'success', evmBlockHeight: EVM_TIMEOUT }),
+      seen({ evmClaimOutcome: 'success', evmTimelockHeight: asTimelockHeight(EVM_TIMEOUT) }),
     )
     expect(action).toEqual({ do: 'record_claim' })
   })

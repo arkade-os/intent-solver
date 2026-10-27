@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { asTimelockHeight } from '@arkade-os/solver-core/ports/evm.js'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
 import { EvmSendSwapStore, type EvmSendQuoteRecord } from '@arkade-os/solver-corridors-evm/db/evmSendSwaps.js'
@@ -78,6 +79,7 @@ const build = async (over: Partial<EvmSendServiceDeps> = {}) => {
     claimArkade: vi.fn().mockResolvedValue('ark-tx'),
     lockFor: sendLockFromRow,
     blockHeight: vi.fn().mockResolvedValue(20_000_000),
+    timelockHeight: vi.fn().mockResolvedValue(20_000_000),
     solverEvmAddress: new Uint8Array(20).fill(0x44),
     arkade: {} as EvmSendServiceDeps['arkade'],
     admission: new AdmissionControl(),
@@ -92,6 +94,7 @@ const build = async (over: Partial<EvmSendServiceDeps> = {}) => {
       minConfirmations: 1,
       minAgeSeconds: 0,
       cadence: { fastestSecondsPerBlock: 1, slowestSecondsPerBlock: 2 },
+      timelockCadence: { fastestSecondsPerBlock: 1, slowestSecondsPerBlock: 2 },
       quoteValiditySeconds: 60,
     },
     now: () => NOW,
@@ -161,7 +164,7 @@ describe('alternate EVM payout funding', () => {
   it('quarantines an absent payout after timeout without refunding or hiding a late lock', async () => {
     const { store, deps, adapter, service } = await build()
     await service.tick('swap-1')
-    vi.mocked(deps.blockHeight).mockResolvedValue(quote().evmTimeout)
+    vi.mocked(deps.timelockHeight).mockResolvedValue(asTimelockHeight(quote().evmTimeout))
     expect((await service.tick('swap-1')).state).toBe('stuck')
     expect(vi.mocked(adapter.ensure).mock.calls.at(-1)?.[1]).toBe('recover')
     expect(deps.evm.refundCall).not.toHaveBeenCalled()
@@ -175,7 +178,7 @@ describe('alternate EVM payout funding', () => {
     const onTickError = vi.fn()
     const { store, deps, adapter, service } = await build({ onTickError })
     await service.tick('swap-1')
-    vi.mocked(deps.blockHeight).mockResolvedValue(quote().evmTimeout)
+    vi.mocked(deps.timelockHeight).mockResolvedValue(asTimelockHeight(quote().evmTimeout))
     const error = new Error('receiver recovery RPC unavailable')
     vi.mocked(adapter.ensure).mockRejectedValueOnce(error)
 

@@ -27,7 +27,7 @@
  *    sats are already out, so a row saying it over a reverted claim lies.
  */
 
-import type { EvmTransactionOutcome } from '../ports/evm.js'
+import type { EvmTransactionOutcome, TimelockHeight } from '../ports/evm.js'
 import type { EvmReceiveSwapState } from './evmSwapState.js'
 
 /**
@@ -53,14 +53,14 @@ export const EVM_RECEIVE_CLAIM_LANDING_BLOCKS = 40
 /**
  * A SUM because RULE 2 budgets TWO landings: a fund accepted at or past
  * `evm_timeout` buys tokens the client has already refunded (TLA+ F3). In BLOCKS,
- * so the total is ~12 min at Ethereum's cadence and ~15s at Arbitrum's.
+ * so the total is ~12 min at Ethereum's cadence (also Arbitrum's `block.number`) and ~2 min at Base's.
  */
 export const EVM_RECEIVE_CLAIM_MARGIN_BLOCKS = EVM_RECEIVE_FUND_LANDING_BLOCKS + EVM_RECEIVE_CLAIM_LANDING_BLOCKS
 
 export const EVM_RECEIVE_FUND_WINDOW_REFUSAL = 'client ERC20 timeout too close to fund against'
 
-export const evmReceiveFundWindowClosed = (evmBlockHeight: number, evmTimeout: number): boolean =>
-  evmBlockHeight + EVM_RECEIVE_CLAIM_MARGIN_BLOCKS >= evmTimeout
+export const evmReceiveFundWindowClosed = (evmTimelockHeight: TimelockHeight, evmTimeout: number): boolean =>
+  evmTimelockHeight + EVM_RECEIVE_CLAIM_MARGIN_BLOCKS >= evmTimeout
 
 export interface EvmReceiveObservation {
   /** Does the client's ERC20 lock exist in the contract? */
@@ -74,7 +74,7 @@ export interface EvmReceiveObservation {
   /** The preimage, once the client's Arkade claim has revealed it. */
   preimage: string | null
   nowSeconds: number
-  evmBlockHeight: number
+  evmTimelockHeight: TimelockHeight
 }
 
 export type EvmReceiveAction =
@@ -108,7 +108,7 @@ export const planEvmReceive = (row: EvmReceivePlanRow, seen: EvmReceiveObservati
     // contract deletes the lock on claim, so the client's refund cannot have
     // landed too. Sticking would file an incident over tokens the solver holds.
     if (row.evmClaimTxid !== null && seen.evmClaimOutcome === 'success') return { do: 'record_claim' }
-    if (seen.evmBlockHeight >= row.evmTimeout) {
+    if (seen.evmTimelockHeight >= row.evmTimeout) {
       // RULE 4. The client's refund path is live. The sats are gone and the
       // tokens may be too; only a human can establish who got there first.
       return { do: 'stick', reason: 'preimage revealed but the client ERC20 timeout has passed' }
@@ -152,7 +152,7 @@ export const planEvmReceive = (row: EvmReceivePlanRow, seen: EvmReceiveObservati
       // RULE 2. Enough of the client's timeout must remain that the solver can
       // still fund AND claim. Funding into a nearly-expired lock buys tokens the
       // client can take straight back. Re-asked at the broadcast, not only here.
-      if (evmReceiveFundWindowClosed(seen.evmBlockHeight, row.evmTimeout)) {
+      if (evmReceiveFundWindowClosed(seen.evmTimelockHeight, row.evmTimeout)) {
         return { do: 'refuse', reason: EVM_RECEIVE_FUND_WINDOW_REFUSAL }
       }
       return { do: 'fund_arkade' }

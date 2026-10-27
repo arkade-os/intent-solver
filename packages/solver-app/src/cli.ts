@@ -33,6 +33,7 @@
  *                                     minted from the rail's own payee wallet where it has one
  *   card [name] [--pointer]           this deployment's signed solver card on stdout; --pointer: the registry pointer
  *   balances                          both wallet balances
+ *   balance-checkpoint                persist balances and check for decreases
  *
  * Secrets come only from the environment; errors are printed as messages, never
  * as whole objects, because config objects carry mnemonics.
@@ -99,6 +100,7 @@ import { poolPlan, mintPool } from './ops/pool.js'
 import { maybeMintPool, runFloatLifecycle } from './ops/float.js'
 import { withEvmSendSweep } from './ops/evmSendSweep.js'
 import { startCadence } from './ops/cadence.js'
+import { recordBalanceCheckpoint, withBalanceCheckpoints } from './ops/balanceCheckpoints.js'
 import { lightningRailFor, requireLn, requireOnchain } from './ops/rails.js'
 
 /**
@@ -205,7 +207,14 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
       recoverySweep: services.evmSendService ? () => services.evmSendService!.payoutFundingRecoverySweep() : undefined,
       intervalMs: FULL_SWEEP_MS,
       signal: controller.signal,
-      run: (startSweep) => watchSwaps(services, startSweep, controller.signal),
+      run: (startSweep) =>
+        withBalanceCheckpoints({
+          checkpoint: () => recordBalanceCheckpoint(services),
+          run: () => watchSwaps(services, startSweep, controller.signal),
+          signal: controller.signal,
+          log,
+          onCheckpoint: services.onBalanceCheckpoint,
+        }),
       onError: (error) => log('EVM send sweep failed:', error instanceof Error ? error.message : String(error)),
     })
   } finally {
@@ -1997,6 +2006,10 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     console.log(JSON.stringify(printed, null, 2))
     console.error(`registry path: solvers/${config.network}/${card.name}.json`)
     for (const note of cardOmissions(source)) console.error(note)
+  },
+
+  async 'balance-checkpoint'() {
+    await withServices({}, async (services) => log(json(await recordBalanceCheckpoint(services))))
   },
 
   async balances() {

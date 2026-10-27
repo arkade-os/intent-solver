@@ -148,6 +148,7 @@ beforeAll(async () => {
     ...evmReceiveArkadeDeps(ops),
     arkade: ops,
     blockHeight: async () => Number(await evm.currentBlock()),
+    timelockHeight: () => evm.timelockClock(),
     // Where the SOLVER claims the client's tokens.
     evmClaimAddress: `0x${hex.encode(solver)}`,
     maxExposedSats: 1_000_000_000,
@@ -176,7 +177,7 @@ beforeAll(async () => {
       minAgeSeconds: 0,
       // Anvil mines on demand; the pair only has to be ordered and positive for
       // the deadline arithmetic to be meaningful.
-      cadence: { fastestSecondsPerBlock: 1, slowestSecondsPerBlock: 2 },
+      timelockCadence: { fastestSecondsPerBlock: 1, slowestSecondsPerBlock: 2 },
       quoteValiditySeconds: 60,
     },
   })

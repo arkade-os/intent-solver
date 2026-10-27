@@ -6,6 +6,7 @@ import {
 } from '@arkade-os/solver-app/ops/balanceReport.js'
 import type { FundBalance, FundSource } from '@arkade-os/solver-app/ops/fundSources.js'
 import type { SwapSummary } from '@arkade-os/solver-app/ops/swapSummary.js'
+import type { BalanceCheckpoint } from '@arkade-os/solver-app/ops/balanceCheckpoints.js'
 
 const source = (label: string, readBalance: () => Promise<FundBalance>): FundSource => ({
   id: label,
@@ -32,7 +33,72 @@ const read = (overrides: Partial<BalanceReportInput> = {}, reader = createBalanc
     ...overrides,
   })
 
+const checkpoint = (id: number, totalSats: string, assets: Record<string, string> = {}): BalanceCheckpoint => ({
+  id,
+  scope: 'provider',
+  startedAt: id * 60,
+  finishedAt: id * 60,
+  arkade: { totalSats, assets },
+  totalSats,
+  lightningSats: null,
+  onchain: null,
+  previousId: null,
+  decreases: [],
+  errors: {},
+})
+
 describe('balance report', () => {
+  it('includes signed BTC changes and exact new, spent and changed asset quantities', async () => {
+    const previous = checkpoint(1, '6400', { changed: '10000000000000000000000000', spent: '10' })
+    const current = checkpoint(3, '7400', { changed: '10000000000000000000000001', added: '25' })
+    const text = formatBalanceReport(await read({ readCheckpoint: async () => ({ current, previous }) }))
+    expect(text).toContain('Balance change since 1970-01-01T00:01:00.000Z (checkpoint at 1970-01-01T00:03:00.000Z)')
+    expect(text).toContain('BTC: +1,000 sats (6,400 → 7,400)')
+    expect(text).toContain(
+      'arkade:changed: +1 base units (10,000,000,000,000,000,000,000,000 → 10,000,000,000,000,000,000,000,001)',
+    )
+    expect(text).toContain('arkade:spent: -10 base units (10 → 0)')
+    expect(text).toContain('arkade:added: +25 base units (0 → 25)')
+    expect(text).toContain('arkade float (sats)')
+  })
+
+  it('includes negative and zero BTC deltas without inventing a delta on the first report', async () => {
+    const previous = checkpoint(1, '6400')
+    const decreased = checkpoint(2, '6300')
+    expect(
+      formatBalanceReport(await read({ readCheckpoint: async () => ({ current: decreased, previous }) })),
+    ).toContain('BTC: -100 sats (6,400 → 6,300)')
+    expect(
+      formatBalanceReport(await read({ readCheckpoint: async () => ({ current: checkpoint(2, '6400'), previous }) })),
+    ).toContain('BTC: 0 sats (6,400 → 6,400)')
+    expect(
+      formatBalanceReport(await read({ readCheckpoint: async () => ({ current: previous, previous: null }) })),
+    ).toContain('first complete report; baseline established')
+  })
+
+  it('reports missing, incomplete and failed checkpoint reads without a false zero change', async () => {
+    const previous = checkpoint(1, '6400')
+    const current = { ...checkpoint(2, '0'), totalSats: null }
+    const incomplete = formatBalanceReport(await read({ readCheckpoint: async () => ({ current, previous }) }))
+    expect(incomplete).toContain('latest checkpoint incomplete; previous report baseline retained')
+    expect(incomplete).not.toContain('BTC:')
+    const stale = formatBalanceReport(await read({ readCheckpoint: async () => ({ current: previous, previous }) }))
+    expect(stale).toContain('no newer checkpoint; previous report baseline retained')
+    expect(stale).not.toContain('BTC:')
+    expect(formatBalanceReport(await read({ readCheckpoint: async () => ({ current: null, previous }) }))).toContain(
+      'awaiting the first checkpoint',
+    )
+    expect(
+      formatBalanceReport(
+        await read({
+          readCheckpoint: async () => {
+            throw new Error('db busy')
+          },
+        }),
+      ),
+    ).toContain('balance change: unreadable (db busy)')
+  })
+
   it('lists every source, its figures, the assets and the committed total', async () => {
     const text = formatBalanceReport(
       await read({

@@ -15,6 +15,7 @@ import {
   claimSwapScript,
   findLockupOutpoints,
   findLockups,
+  findSweptLockups,
   lockupProvablySpent,
   lockupSpendEvidence,
   refundSwapScript,
@@ -22,6 +23,7 @@ import {
 } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { rawDelaySeconds } from '@arkade-os/solver-core/core/timelocks.js'
 import { unrolledSpenderFor } from '@arkade-os/solver-arkade/arkade/unrolledSpend.js'
+import { refundSweptSwapScript } from '@arkade-os/solver-arkade/arkade/sweptRefund.js'
 import type { ArkadeOps, CovenantScriptRow } from './orchestrator.js'
 
 /** The emulator service the refund covenant is signed by. */
@@ -94,6 +96,12 @@ export const arkadeOpsFromContext = async (ctx: ArkadeContext, emulator: Emulato
       const reason = keyMismatch(row)
       if (reason) return { kind: 'closed', reason }
       return spender.advance({ ...unrolledLockupOf(row, lockup), preimage: hex.decode(preimageHex) }, record, save)
+    },
+    findSweptLockups: (pkScriptHex) => findSweptLockups(ctx, pkScriptHex),
+    refundSwept: async (row, swept) => {
+      const script = covenantScriptFromRow(row)
+      assertScriptMatchesRow(script, row)
+      return refundSweptSwapScript(ctx, emulator.url, script, swept, hex.decode(row.refundPkScript!))
     },
   }
 }

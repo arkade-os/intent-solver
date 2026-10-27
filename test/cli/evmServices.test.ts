@@ -277,9 +277,9 @@ describe('the rpc url never reaches a log or an error', () => {
     const uses = createServicesBody()
       .split(/\r?\n/)
       .filter((line) => line.includes('evmChain.rpcUrl'))
-    expect(uses).toHaveLength(3)
+    expect(uses).toHaveLength(5)
     expect(uses.filter((line) => line.includes('createJsonRpc'))).toHaveLength(1)
-    expect(uses.filter((line) => line.includes('endpointHost'))).toHaveLength(2)
+    expect(uses.filter((line) => line.includes('endpointHost'))).toHaveLength(4)
   })
 })
 

@@ -388,8 +388,8 @@ describe('the console renders it', () => {
   })
 
   it('still renders above every panel, not only the overview', () => {
-    expect(appSource).toContain('const pendingBanner = restartBanner()')
-    expect(appSource).toContain('root.appendChild(pendingBanner)')
+    const render = appSource.slice(appSource.indexOf('const render ='), appSource.indexOf('/* ---- live updates'))
+    expect(render).toMatch(/h\('div\.content', restartBanner\(\)/)
   })
 
   it('puts what is in flight in front of the operator before they confirm', () => {

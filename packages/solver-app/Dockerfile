@@ -69,9 +69,9 @@ COPY scripts ./scripts
 # package resolves its dependencies through their `exports` maps to dist/, so
 # the app compiles last, after everything it imports exists.
 RUN pnpm build
-# Drop dev dependencies; keep the compiled native module.
+# Reinstall each workspace's runtime dependencies; root-only prune drops package-local links.
 #
-# CI=true is REQUIRED since the workspace split, not decoration. Pruning a
+# CI=true is REQUIRED since the workspace split, not decoration. Reinstalling a
 # workspace makes pnpm remove and rebuild node_modules wholesale rather than
 # unlinking a few packages, and it refuses to delete a modules directory
 # without a TTY unless told it is running unattended:
@@ -80,7 +80,7 @@ RUN pnpm build
 #
 # A local `docker build` can hide this by reusing a cached layer from before
 # the workspace existed, so it first appeared on the CI run.
-RUN CI=true pnpm prune --prod
+RUN CI=true pnpm install --frozen-lockfile --prod
 
 FROM node:${NODE_VERSION}-slim
 ENV NODE_ENV=production
