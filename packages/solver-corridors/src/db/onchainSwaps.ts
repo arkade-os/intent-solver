@@ -47,6 +47,8 @@ const TRANSITION_COLUMNS = new Set([
   'claim_ark_txid',
   'onchain_refund_txid',
   'failure_reason',
+  'fund_started_at',
+  'lockup_outpoints',
 ])
 /**
  * `onchain_refund_txid` is deliberately in BOTH sets. The automatic refund
@@ -139,6 +141,8 @@ export interface OnchainSendSwapRow {
   claimArkTxid: string | null
   /** JSON, by outpoint: the last step of each L1 claim of a lockup output the client unrolled. */
   unrolledClaim: string | null
+  /** JSON `[{txid, vout, value}]`: the lockup outputs adopted at funding, each to be collected. Null on older rows. */
+  lockupOutpoints: string | null
   /** Written BEFORE the broadcast: the refund ATTEMPTED, not one that landed. */
   onchainRefundTxid: string | null
   /** The sat/vB {@link onchainRefundTxid} was built at, so the next version can be priced above it. */
@@ -202,7 +206,8 @@ const SEND_ONCHAIN_SWAP_COLUMNS = `
   failure_reason                TEXT,
   rfq_id                        TEXT,
   fund_started_at               INTEGER,
-  unrolled_claim                TEXT
+  unrolled_claim                TEXT,
+  lockup_outpoints              TEXT
 `
 
 const SCHEMA = `
@@ -277,6 +282,7 @@ const toRow = (raw: Raw): OnchainSendSwapRow => ({
   rfqId: text(raw.rfq_id),
   fundStartedAt: numberOrNull(raw.fund_started_at),
   unrolledClaim: text(raw.unrolled_claim),
+  lockupOutpoints: text(raw.lockup_outpoints),
 })
 
 export interface OnchainQuoteRecord {
@@ -403,6 +409,7 @@ export class OnchainSendSwapStore extends BaseSwapStore<OnchainSendSwapRow, Onch
       ['onchain_refund_broadcast_at', 'INTEGER'],
       ['onchain_refund_prior_txids', 'TEXT'],
       ['unrolled_claim', 'TEXT'],
+      ['lockup_outpoints', 'TEXT'],
     ])
   }
 
@@ -427,6 +434,11 @@ export class OnchainSendSwapStore extends BaseSwapStore<OnchainSendSwapRow, Onch
 
   override async releaseFundLease(id: string): Promise<void> {
     await super.releaseFundLease(id)
+  }
+
+  /** The only writer of `fund_started_at` on a transition: entry and lease in one write, so no recovery pass leases the row in between. */
+  async enterFunding(id: string): Promise<boolean> {
+    return this.transition(id, 'funded', 'funding_onchain', { fund_started_at: this.now() })
   }
 
   async insertQuote(quote: OnchainQuoteRecord): Promise<OnchainSendSwapRow> {

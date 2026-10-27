@@ -70,6 +70,7 @@ import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { guardedTick, sweep } from '@arkade-os/solver-core/util/sweep.js'
 import { stepFor } from '@arkade-os/solver-core/core/stateMachine.js'
 import { OnchainReceiveMachine } from '../machines/onchainReceive.js'
+import { adoptFunding } from '../legs/arkadeLockup.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
@@ -653,11 +654,9 @@ export class OnchainReceiveSwapService {
    * Recovery path mirrors `send/onchainOrchestrator.ts`'s `recoverFunding`:
    * `IWallet.send` carries no idempotency key, so a blind resubmit after a
    * crash between broadcast and this transition recording it would fund the
-   * Arkade lockup a SECOND time out of the solver's own pocket. Asking
-   * `findLockups` what already landed at this swap's own (unique) script —
-   * the same source of truth `whenQuoted` (send and receive) and
-   * `pushRefund` already trust — closes that gap without needing a
-   * persisted "did we already call fund" flag.
+   * Arkade lockup a SECOND time out of the solver's own pocket. Asking what
+   * this swap's own (unique) script has ever held closes that gap without a
+   * persisted "did we already call fund" flag. @see adoptFunding
    */
   private async whenFundingArkade(row: OnchainReceiveSwapRow): Promise<boolean> {
     const { store, arkade } = this.deps
@@ -666,9 +665,7 @@ export class OnchainReceiveSwapService {
     // paid at the amended amount would otherwise read as under-funded on the
     // next pass and be paid twice.
     const { arkadePayoutSats } = onchainReceiveFundedAmounts(row)
-    const existing = await arkade.findLockups(row.pkScript)
-    const alreadyFunded = existing.reduce((sum, o) => sum + o.value, 0) >= arkadePayoutSats
-    if (alreadyFunded) {
+    if (adoptFunding(await arkade.findLockupOutpoints(row.pkScript), arkadePayoutSats)) {
       return store.transition(row.id, 'funding_arkade', 'awaiting_claim', {})
     }
     // Re-checked here, immediately before the pay, and NOT before the adoption

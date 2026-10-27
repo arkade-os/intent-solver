@@ -2126,7 +2126,7 @@ describe('tick: failure and recovery', () => {
       l1.spent.clear()
       l1.failing.clear()
       arkade.lockups = []
-      arkade.findLockupOutpoints = async () => outpoints
+      arkade.findLockupOutpoints = async () => outpoints.map((o) => ({ ...o, spent: false }))
       arkade.claimUnrolled = async (_row, lockup, record, save, preimage) => {
         const key = `${lockup.txid}:${lockup.vout}`
         l1.calls.push({ lockup: key, record, preimage })
@@ -2168,6 +2168,31 @@ describe('tick: failure and recovery', () => {
       const done = await service.tick(row.id)
       expect(done.state).toBe('claimed')
       expect(done.claimArkTxid).toBe('claim-txid')
+      expect(arkade.claimCalls).toHaveLength(1)
+    })
+
+    it('stays claiming while an adopted output is hidden by a lagging read, then claims it', async () => {
+      const { swap } = await quoted()
+      const adopted = [
+        { txid: 'f1', vout: 0, value: AMOUNT / 2 },
+        { txid: 'u1', vout: 0, value: AMOUNT / 2 },
+      ]
+      await store.transition(swap.id, 'quoted', 'funded', {
+        lockup_value: AMOUNT,
+        lockup_outpoints: JSON.stringify(adopted),
+      })
+      await store.transition(swap.id, 'funded', 'paying', { idempotency_key: 'k' })
+      await store.transition(swap.id, 'paying', 'paid', { payment_id: 'pay-1' })
+      await store.transition(swap.id, 'paid', 'claiming', { preimage: 'cc'.repeat(32) })
+      arkade.lockups = []
+      outpoints = [{ txid: 'f1', vout: 0, unrolled: false }, ...outpoints]
+      l1.confirmed.add('u1:0')
+
+      await expect(service.tick(swap.id)).rejects.toThrow('lockup output(s) f1:0 not yet collected')
+      expect((await store.get(swap.id)).state).toBe('claiming')
+
+      arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT / 2 }]
+      expect((await service.tick(swap.id)).state).toBe('claimed')
       expect(arkade.claimCalls).toHaveLength(1)
     })
 

@@ -2,6 +2,7 @@ import type { ArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 import type { CovenantScriptRow } from '@arkade-os/solver-arkade/arkade/covenantRow.js'
 import type { SaveUnrolledSpend, UnrolledSpendStep } from '@arkade-os/solver-arkade/arkade/unrolledSpend.js'
 import type { BaseSwapStore } from './db/baseSwapStore.js'
+import { outpointKey, uncollected, type AdoptedOutput } from './legs/arkadeLockup.js'
 
 const SPENT_BY_ANOTHER = 'spent on L1 by a transaction that is not ours'
 
@@ -39,6 +40,8 @@ export interface UnrolledClaims {
   /** Each claim has confirmed or been lost: nothing is left to push, rebroadcast or bump. */
   settled: boolean
   lost: string[]
+  /** `txid:vout` of every L1 claim that has confirmed. */
+  confirmed: string[]
   /** The first throw, held until every other output has had its turn. */
   error?: unknown
 }
@@ -85,14 +88,16 @@ export const advanceUnrolledClaims = async (
     }
   }
   const lost: string[] = []
+  const confirmed: string[] = []
   let settled = true
   for (const { txid, vout } of unrolled) {
     const step = steps[`${txid}:${vout}`]
     if (step?.kind === 'spent') lost.push(`${txid}:${vout} ${SPENT_BY_ANOTHER}`)
     else if (step?.kind === 'closed') lost.push(`${txid}:${vout}: ${step.reason}`)
-    else if (step?.kind !== 'confirmed') settled = false
+    else if (step?.kind === 'confirmed') confirmed.push(`${txid}:${vout}`)
+    else settled = false
   }
-  return { settled, lost, error }
+  return { settled, lost, confirmed, error }
 }
 
 /** `claimed` once every L1 claim confirmed; `stuck` once one is lost and none is still out. */
@@ -109,5 +114,43 @@ export const settleUnrolledClaims = async <S extends string>(
   }
   if (claims.lost.length === 0) return store.transition(id, edge.from, edge.to, {})
   await store.fail(id, edge.from, `L1 claim of the unrolled lockup lost: ${claims.lost.join('; ')} — ${recourse()}`)
+  return false
+}
+
+/**
+ * `txid:vout` of each output adopted at funding that neither rail has collected. Empty for a
+ * row that predates `lockup_outpoints`, which has no set to check against.
+ */
+export const lockupLeftover = async (
+  arkade: Pick<ArkadeOps, 'findLockupOutpoints'>,
+  row: { pkScript: string; lockupOutpoints: string | null },
+  claimedNow: readonly { txid: string; vout: number }[],
+  claims: UnrolledClaims | null,
+): Promise<string[]> => {
+  if (row.lockupOutpoints === null || !arkade.findLockupOutpoints) return []
+  const adopted = JSON.parse(row.lockupOutpoints) as AdoptedOutput[]
+  return uncollected(adopted, {
+    outpoints: await arkade.findLockupOutpoints(row.pkScript),
+    claimedOffchain: new Set(claimedNow.map(outpointKey)),
+    claimedOnL1: new Set(claims?.confirmed ?? []),
+  }).map(outpointKey)
+}
+
+/** Never `claimed` while an adopted output is out: retried until the refund deadline, then parked. */
+export const awaitLeftover = async (
+  store: Pick<BaseSwapStore<unknown, string>, 'patch' | 'fail'>,
+  id: string,
+  claimTxid: string | null,
+  leftover: readonly string[],
+  pastDeadline: boolean,
+  recourse: () => string,
+): Promise<false> => {
+  if (claimTxid !== null) await store.patch(id, { claim_ark_txid: claimTxid })
+  if (!pastDeadline) throw new Error(`swap ${id}: lockup output(s) ${leftover.join(', ')} not yet collected`)
+  await store.fail(
+    id,
+    'claiming',
+    `lockup output(s) ${leftover.join(', ')} uncollected at the refund deadline — ${recourse()}`,
+  )
   return false
 }

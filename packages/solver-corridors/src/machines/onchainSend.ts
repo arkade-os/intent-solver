@@ -11,7 +11,8 @@ export const OnchainSendMachine = defineMachine({
     exposed: true,
     owesPayout: true,
     outgoing: true,
-    to: ['awaiting_claim', 'stuck'],
+    // `refused` only from whenFunded's own entry, before any `fund()` could have run.
+    to: ['awaiting_claim', 'refused', 'stuck'],
   },
   awaiting_claim: { live: true, exposed: true, outgoing: true, to: ['claiming', 'refunding_onchain', 'stuck'] },
   claiming: { live: true, exposed: true, outgoing: true, to: ['claimed', 'stuck'] },

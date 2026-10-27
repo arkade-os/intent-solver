@@ -65,6 +65,7 @@ import { GiveUp, json, log, messageOf, nowSeconds, poll } from '@arkade-os/solve
 import { sweep } from '@arkade-os/solver-core/util/sweep.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
+import { adoptFunding } from '../legs/arkadeLockup.js'
 
 const DEADLINE_SECONDS_PURPOSE = 'order the refund deadline against the HTLC'
 
@@ -846,13 +847,8 @@ export class ReceiveSwapService {
     // existing exposure must be adopted regardless. Otherwise a row whose funding
     // crashed and whose invoice has since expired is failed at `armed` with capital
     // already moved and no outpoint for `whenRefunding` to act on.
-    const historical = await arkade.findLockupOutpoints(row.pkScript)
-    const ours = historical.filter((o) => o.value === row.payoutSats)
-    // Prefer an unspent one when both exist: that is the refundable outpoint,
-    // and it is the one `whenRefunding` must target. Either way `whenFunded`
-    // searches ALL historical outpoints for the preimage, so recording one
-    // does not lose the other.
-    const alreadyFunded = ours.find((o) => !o.spent) ?? ours[0]
+    // `whenFunded` searches ALL historical outpoints for the preimage, so recording one loses neither.
+    const alreadyFunded = adoptFunding(await arkade.findLockupOutpoints(row.pkScript), row.payoutSats)
     if (alreadyFunded) {
       // Transition rather than wait in `armed`: `funded` already owns the
       // "learn P, or recover/refund past the deadline" obligation, whereas
