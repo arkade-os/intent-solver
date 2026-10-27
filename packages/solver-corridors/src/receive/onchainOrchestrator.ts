@@ -68,6 +68,8 @@ import type { CovclaimdClient } from './covclaimd.js'
 import type { SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { guardedTick, sweep } from '@arkade-os/solver-core/util/sweep.js'
+import { stepFor } from '@arkade-os/solver-core/core/stateMachine.js'
+import { OnchainReceiveMachine } from '../machines/onchainReceive.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
@@ -497,24 +499,18 @@ export class OnchainReceiveSwapService {
     return sweep(page.rows, this, this.deps.store, { inFlight: this.inFlight })
   }
 
-  private async step(row: OnchainReceiveSwapRow): Promise<boolean> {
-    switch (row.state) {
-      case 'quoted':
-        return this.whenQuoted(row)
-      case 'awaiting_confirmations':
-        return this.whenAwaitingConfirmations(row)
-      case 'funding_arkade':
-        return this.whenFundingArkade(row)
-      case 'awaiting_claim':
-        return this.whenAwaitingClaim(row)
-      case 'claimed':
-        return this.whenClaimed(row)
-      case 'refunding_arkade':
-        return this.whenRefundingArkade(row)
-      default:
-        return false
-    }
-  }
+  private readonly step = stepFor<OnchainReceiveSwapRow['state'], OnchainReceiveSwapRow>(OnchainReceiveMachine, {
+    quoted: (row) => this.whenQuoted(row),
+    awaiting_confirmations: (row) => this.whenAwaitingConfirmations(row),
+    funding_arkade: (row) => this.whenFundingArkade(row),
+    awaiting_claim: (row) => this.whenAwaitingClaim(row),
+    claimed: (row) => this.whenClaimed(row),
+    refunding_arkade: (row) => this.whenRefundingArkade(row),
+    settled: null,
+    refunded: null,
+    refused: null,
+    stuck: null,
+  })
 
   /**
    * Watch the CLIENT's onchain HTLC address for their funding output.

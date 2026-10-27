@@ -54,6 +54,8 @@ import type { ArkadeOps, CovenantScriptRow } from './orchestrator.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { askApproval, type ApprovalCheck } from '@arkade-os/solver-core/core/approvalGate.js'
 import { guardedTick, sweep } from '@arkade-os/solver-core/util/sweep.js'
+import { stepFor } from '@arkade-os/solver-core/core/stateMachine.js'
+import { OnchainSendMachine } from '../machines/onchainSend.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
@@ -717,24 +719,18 @@ export class OnchainSendSwapService {
     return (await this.deps.onchain.settleReceiveAddress?.()) ?? []
   }
 
-  private async step(row: OnchainSendSwapRow): Promise<boolean> {
-    switch (row.state) {
-      case 'quoted':
-        return this.whenQuoted(row)
-      case 'funded':
-        return this.whenFunded(row)
-      case 'funding_onchain':
-        return this.whenFundingOnchain(row)
-      case 'awaiting_claim':
-        return this.whenAwaitingClaim(row)
-      case 'claiming':
-        return this.whenClaiming(row)
-      case 'refunding_onchain':
-        return this.whenRefundingOnchain(row)
-      default:
-        return false
-    }
-  }
+  private readonly step = stepFor<OnchainSendSwapRow['state'], OnchainSendSwapRow>(OnchainSendMachine, {
+    quoted: (row) => this.whenQuoted(row),
+    funded: (row) => this.whenFunded(row),
+    funding_onchain: (row) => this.whenFundingOnchain(row),
+    awaiting_claim: (row) => this.whenAwaitingClaim(row),
+    claiming: (row) => this.whenClaiming(row),
+    refunding_onchain: (row) => this.whenRefundingOnchain(row),
+    claimed: null,
+    refunded: null,
+    refused: null,
+    stuck: null,
+  })
 
   private async whenQuoted(row: OnchainSendSwapRow): Promise<boolean> {
     const { store, arkade, network } = this.deps

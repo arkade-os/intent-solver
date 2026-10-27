@@ -486,3 +486,18 @@ describe('OnchainReceiveSwapStore — migration', () => {
     expect(reread.payoutSats).toBe(49_500)
   })
 })
+
+describe('the live recovery-order index', () => {
+  // `CREATE INDEX IF NOT EXISTS` never rebuilds an existing one, and `pageRecoverable` names it in `INDEXED BY`.
+  it('keeps its predicate text byte-for-byte', async () => {
+    const db = new Database(':memory:')
+    const opened = await OnchainReceiveSwapStore.open(driverOver(db), clock)
+    const row = db
+      .prepare(`SELECT sql FROM sqlite_master WHERE name = 'idx_receive_onchain_swap_live_recovery_order'`)
+      .get() as { sql: string }
+    expect(row.sql).toContain(
+      "WHERE state IN ('quoted','awaiting_confirmations','funding_arkade','awaiting_claim','claimed','refunding_arkade')",
+    )
+    await opened.close()
+  })
+})
