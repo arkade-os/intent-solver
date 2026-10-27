@@ -52,6 +52,7 @@ import { loadConfig, sentryOptionsFromEnv, swapDbPath, type Config } from './con
 import { createErrorReporter, type ErrorReporter } from './ops/sentry.js'
 import { SwapStore, type SendSwapRow } from '@arkade-os/solver-corridors/db/swaps.js'
 import { type OnchainSendSwapRow } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
+import { OnchainSendMachine } from '@arkade-os/solver-corridors/machines/onchainSend.js'
 import { findLockups, refundSwapScript } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { lazyContractSource } from '@arkade-os/solver-arkade/arkade/lazyContractSource.js'
 import { LockupWatcher } from '@arkade-os/solver-arkade/arkade/lockupWatcher.js'
@@ -703,7 +704,7 @@ const driveToTerminal = async (service: SendSwapService, id: string, attempts = 
   )
 
 /** Onchain terminal states: nothing further will ever happen to these rows. */
-const ONCHAIN_TERMINAL = new Set(['claimed', 'refused', 'stuck'])
+const ONCHAIN_TERMINAL: ReadonlySet<string> = new Set(OnchainSendMachine.terminal)
 
 /** Tick one onchain swap until it reaches any state in `until` (terminal or an intermediate wait point). */
 const driveOnchainUntil = async (

@@ -47,10 +47,10 @@ import { fixedFeePricing, type PricingStrategy } from '@arkade-os/solver-core/co
 import { RFQ_PAIR_ONCHAIN_RECEIVE } from '../wire/onchainReceivePayloads.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { LockupPreimageReader } from './lockupPreimage.js'
-import { applyUnrolledRefundStep } from './unrolledRefundStep.js'
+import { applyUnrolledSpendStep } from '../unrolledSpendStep.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
-import { parseUnrolledRefund, type UnrolledRefundRecord } from '@arkade-os/solver-arkade/arkade/unrolledRefund.js'
+import { parseUnrolledSpend, type UnrolledSpendRecord } from '@arkade-os/solver-arkade/arkade/unrolledSpend.js'
 import { covenantScriptFromRow } from '../send/arkadeOps.js'
 import type { CovenantScriptRow } from '../send/orchestrator.js'
 import { buildOnchainHtlc, ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
@@ -68,6 +68,9 @@ import type { CovclaimdClient } from './covclaimd.js'
 import type { SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { guardedTick, sweep } from '@arkade-os/solver-core/util/sweep.js'
+import { stepFor } from '@arkade-os/solver-core/core/stateMachine.js'
+import { OnchainReceiveMachine } from '../machines/onchainReceive.js'
+import { adoptFunding } from '../legs/arkadeLockup.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
@@ -497,24 +500,18 @@ export class OnchainReceiveSwapService {
     return sweep(page.rows, this, this.deps.store, { inFlight: this.inFlight })
   }
 
-  private async step(row: OnchainReceiveSwapRow): Promise<boolean> {
-    switch (row.state) {
-      case 'quoted':
-        return this.whenQuoted(row)
-      case 'awaiting_confirmations':
-        return this.whenAwaitingConfirmations(row)
-      case 'funding_arkade':
-        return this.whenFundingArkade(row)
-      case 'awaiting_claim':
-        return this.whenAwaitingClaim(row)
-      case 'claimed':
-        return this.whenClaimed(row)
-      case 'refunding_arkade':
-        return this.whenRefundingArkade(row)
-      default:
-        return false
-    }
-  }
+  private readonly step = stepFor<OnchainReceiveSwapRow['state'], OnchainReceiveSwapRow>(OnchainReceiveMachine, {
+    quoted: (row) => this.whenQuoted(row),
+    awaiting_confirmations: (row) => this.whenAwaitingConfirmations(row),
+    funding_arkade: (row) => this.whenFundingArkade(row),
+    awaiting_claim: (row) => this.whenAwaitingClaim(row),
+    claimed: (row) => this.whenClaimed(row),
+    refunding_arkade: (row) => this.whenRefundingArkade(row),
+    settled: null,
+    refunded: null,
+    refused: null,
+    stuck: null,
+  })
 
   /**
    * Watch the CLIENT's onchain HTLC address for their funding output.
@@ -657,11 +654,9 @@ export class OnchainReceiveSwapService {
    * Recovery path mirrors `send/onchainOrchestrator.ts`'s `recoverFunding`:
    * `IWallet.send` carries no idempotency key, so a blind resubmit after a
    * crash between broadcast and this transition recording it would fund the
-   * Arkade lockup a SECOND time out of the solver's own pocket. Asking
-   * `findLockups` what already landed at this swap's own (unique) script —
-   * the same source of truth `whenQuoted` (send and receive) and
-   * `pushRefund` already trust — closes that gap without needing a
-   * persisted "did we already call fund" flag.
+   * Arkade lockup a SECOND time out of the solver's own pocket. Asking what
+   * this swap's own (unique) script has ever held closes that gap without a
+   * persisted "did we already call fund" flag. @see adoptFunding
    */
   private async whenFundingArkade(row: OnchainReceiveSwapRow): Promise<boolean> {
     const { store, arkade } = this.deps
@@ -670,9 +665,7 @@ export class OnchainReceiveSwapService {
     // paid at the amended amount would otherwise read as under-funded on the
     // next pass and be paid twice.
     const { arkadePayoutSats } = onchainReceiveFundedAmounts(row)
-    const existing = await arkade.findLockups(row.pkScript)
-    const alreadyFunded = existing.reduce((sum, o) => sum + o.value, 0) >= arkadePayoutSats
-    if (alreadyFunded) {
+    if (adoptFunding(await arkade.findLockupOutpoints(row.pkScript), arkadePayoutSats)) {
       return store.transition(row.id, 'funding_arkade', 'awaiting_claim', {})
     }
     // Re-checked here, immediately before the pay, and NOT before the adoption
@@ -1078,12 +1071,17 @@ export class OnchainReceiveSwapService {
 
     // Ahead of `findLockups`, which reads an unrolled lockup as empty. An adopted
     // row records no fund txid, and stays on the empty-lockup path below.
-    const unrolled = outpoints.find((o) => o.unrolled && o.txid === row.arkadeFundTxid)
+    // The fund tx pays this script once; thrown, not parked, so the claim recheck above keeps running.
+    const matches = outpoints.filter((o) => o.unrolled && o.txid === row.arkadeFundTxid)
+    if (matches.length > 1) {
+      throw new Error(`swap ${row.id}: ${matches.length} unrolled outputs of fund tx ${row.arkadeFundTxid}`)
+    }
+    const [unrolled] = matches
     if (unrolled && arkade.refundUnrolled) {
       const covenantRow = receiveCovenantRowFor(row)
-      const save = (record: UnrolledRefundRecord) => store.patch(row.id, { unrolled_refund: JSON.stringify(record) })
-      const step = await arkade.refundUnrolled(covenantRow, unrolled, parseUnrolledRefund(row.unrolledRefund), save)
-      return applyUnrolledRefundStep(
+      const save = (record: UnrolledSpendRecord) => store.patch(row.id, { unrolled_refund: JSON.stringify(record) })
+      const step = await arkade.refundUnrolled(covenantRow, unrolled, parseUnrolledSpend(row.unrolledRefund), save)
+      return applyUnrolledSpendStep(
         store,
         row,
         { from: 'refunding_arkade', to: 'refunded' },

@@ -22,9 +22,13 @@ import {
   refundWithoutReceiverSwapScript,
   type ArkadeContext,
 } from '@arkade-os/solver-arkade/arkade/wallet.js'
-import { rawDelaySeconds } from '@arkade-os/solver-core/core/timelocks.js'
-import { unrolledRefunderFor, type UnrolledRefunder } from '@arkade-os/solver-arkade/arkade/unrolledRefund.js'
-import { assertScriptMatchesRow, covenantScriptFromRow, type EmulatorInfo } from '../send/arkadeOps.js'
+import { unrolledSpenderFor, type UnrolledSpender } from '@arkade-os/solver-arkade/arkade/unrolledSpend.js'
+import {
+  assertScriptMatchesRow,
+  covenantScriptFromRow,
+  unrolledLockupOf,
+  type EmulatorInfo,
+} from '../send/arkadeOps.js'
 import { fundLockup } from './fundLockup.js'
 
 import type { ReceiveArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
@@ -43,19 +47,9 @@ export const refundReceiveLockup =
   }
 
 export const refundUnrolledLockup =
-  (refunder: UnrolledRefunder): NonNullable<ReceiveArkadeOps['refundUnrolled']> =>
-  async (row, lockup, record, save) => {
-    const script = covenantScriptFromRow(row)
-    assertScriptMatchesRow(script, row)
-    const exitDelaySeconds = Math.min(
-      ...[row.claimDelay, row.refundDelay, row.refundWithoutReceiverDelay].map(rawDelaySeconds),
-    )
-    return refunder.advance(
-      { script, txid: lockup.txid, vout: lockup.vout, refundLocktime: row.refundLocktime, exitDelaySeconds },
-      record,
-      save,
-    )
-  }
+  (refunder: UnrolledSpender): NonNullable<ReceiveArkadeOps['refundUnrolled']> =>
+  async (row, lockup, record, save) =>
+    refunder.advance({ ...unrolledLockupOf(row, lockup), refundLocktime: row.refundLocktime }, record, save)
 
 export const receiveArkadeOpsFromContext = async (
   ctx: ArkadeContext,
@@ -78,6 +72,6 @@ export const receiveArkadeOpsFromContext = async (
     fund: (address, amountSats, stamp) => fundLockup(ctx, address, amountSats, stamp),
     refund: refundReceiveLockup(ctx),
     findClaimPreimage: (outpoints, paymentHashHex) => findClaimPreimage(ctx, outpoints, paymentHashHex),
-    refundUnrolled: refundUnrolledLockup(unrolledRefunderFor(ctx)),
+    refundUnrolled: refundUnrolledLockup(unrolledSpenderFor(ctx)),
   }
 }
