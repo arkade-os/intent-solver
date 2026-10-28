@@ -362,8 +362,8 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
    *
    * Its OWN subscription rather than a share of the lockup watcher's: an offer
    * sits at the MAKER's script, which this wallet does not own and cannot know
-   * in advance, so `subscribeForScripts` — the only subscription the TS SDK
-   * exposes — cannot reach it. @see arkade/offerStream.ts
+   * in advance, so `subscribeForScripts` cannot reach it; a CEL filter does.
+   * @see arkade/offerStream.ts
    *
    * Not awaited, and that is the whole point: it runs until `offers.abort()`
    * below, so awaiting it here would mean the sweep never starts.
