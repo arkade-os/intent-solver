@@ -518,6 +518,25 @@ describe('OnchainSendSwapService', () => {
     expect((await deps.store.get(outcome.swap.id)).refundOutcome).toBe('pushed')
   })
 
+  it('keeps refunding a lockup whose refund had to leave a near-expiry output behind', async () => {
+    const outcome = await service.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    deps.outputs.set(outcome.swap.pkScript, [
+      { txid: 'lockup-tx', vout: 0, value: 50_000 },
+      { txid: 'lockup-tx', vout: 1, value: 10_000, expiresAt: now + 60 },
+    ])
+    expect((await service.tick(outcome.swap.id)).state).toBe('refused')
+
+    expect(await service.refundSweep()).toEqual([outcome.swap.id])
+    expect((await deps.store.get(outcome.swap.id)).refundOutcome).toBeNull()
+  })
+
   // Regtest is exempt from the lockup-expiry gate, so these go through a network that is not.
   const gated = () =>
     new OnchainSendSwapService({

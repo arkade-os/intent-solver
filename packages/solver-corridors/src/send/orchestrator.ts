@@ -56,7 +56,7 @@ import { preimageMatchesHash, scriptHashFromPaymentHash } from '@arkade-os/solve
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
 import { advanceUnrolledClaims, awaitLeftover, lockupLeftover, settleUnrolledClaims } from '../unrolledSpendStep.js'
-import { MAX_LOCKUP_SPEND_INPUTS } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { boundedSpendInputs, MAX_LOCKUP_SPEND_INPUTS } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import type { HoldState, ReceiveBackend, SendBackend, SendHtlcState } from '@arkade-os/solver-core/ports/lightning.js'
 import { PaymentHashRegistered, PaymentNotStarted } from '@arkade-os/solver-core/ports/lightning.js'
 import type { ReceiveSwapRow } from '../db/receiveSwaps.js'
@@ -895,8 +895,8 @@ export class SendSwapService {
       return false
     }
     const txid = await arkade.refund(row, outputs)
-    // One refund spends at most MAX_LOCKUP_SPEND_INPUTS: the row stays refundable for the rest.
-    const all = outputs.length <= MAX_LOCKUP_SPEND_INPUTS
+    // The wallet spends only what boundedSpendInputs selects: the row stays refundable for what it left.
+    const all = boundedSpendInputs(outputs, this.now()).length === outputs.length
     await store.patch(row.id, all ? { refund_outcome: 'pushed', refund_ark_txid: txid } : { refund_ark_txid: txid })
     return true
   }
