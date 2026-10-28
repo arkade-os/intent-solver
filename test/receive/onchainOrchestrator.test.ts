@@ -1275,8 +1275,7 @@ describe('OnchainReceiveSwapService', () => {
       const row = await service.tick(outcome.swap.id)
 
       expect(row.state).toBe('awaiting_claim')
-      // Adoption records no txid, so a null here is what proves it adopted.
-      expect(row.arkadeFundTxid).toBeNull()
+      expect(row.arkadeFundTxid).toBe('pre-upgrade-funding')
       expect(deps.arkadeFake.fundStamps).toHaveLength(0)
       expect(row.stampedAt).toBeNull()
       expect(deps.covclaimdCalls).toHaveLength(1)
@@ -1463,6 +1462,24 @@ describe('OnchainReceiveSwapService', () => {
         expect((await service.tick(row.id)).state).toBe('refunded')
         expect(lockups[0]).toEqual({ txid: row.arkadeFundTxid, vout: 0 })
         expect(deps.arkadeFake.refundCalls).toBe(0)
+      })
+
+      it('refunds a lockup it adopted rather than funded on this pass', async () => {
+        const outcome = await service.quote(quoteRequest())
+        if (!outcome.accepted) throw new Error('expected acceptance')
+        const adopted = { txid: 'adopted-funding', vout: 0, value: outcome.swap.payoutSats }
+        deps.arkadeFake.seedLockup(outcome.swap.lockupAddress, adopted)
+        deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 50_000 })
+        deps.onchain.mineBlocks(1)
+        const awaitingClaim = await service.tick(outcome.swap.id)
+        expect(deps.arkadeFake.fundStamps).toHaveLength(0)
+        now = awaitingClaim.refundLocktime + 1
+        await store.transition(awaitingClaim.id, 'awaiting_claim', 'refunding_arkade', {})
+        deps.arkadeFake.unrollLockup(awaitingClaim.pkScript)
+        steps.push({ kind: 'pending', record })
+
+        await service.tick(awaitingClaim.id)
+        expect(lockups).toEqual([{ txid: adopted.txid, vout: 0 }])
       })
 
       it('refuses to pick between two unrolled outputs of its fund tx', async () => {

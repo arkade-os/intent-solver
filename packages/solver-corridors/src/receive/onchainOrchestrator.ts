@@ -665,8 +665,9 @@ export class OnchainReceiveSwapService {
     // paid at the amended amount would otherwise read as under-funded on the
     // next pass and be paid twice.
     const { arkadePayoutSats } = onchainReceiveFundedAmounts(row)
-    if (adoptFunding(await arkade.findLockupOutpoints(row.pkScript), arkadePayoutSats)) {
-      return store.transition(row.id, 'funding_arkade', 'awaiting_claim', {})
+    const adopted = adoptFunding(await arkade.findLockupOutpoints(row.pkScript), arkadePayoutSats)
+    if (adopted) {
+      return store.transition(row.id, 'funding_arkade', 'awaiting_claim', { arkade_fund_txid: adopted.txid })
     }
     // Re-checked here, immediately before the pay, and NOT before the adoption
     // above. The gate decides whether to CREATE exposure; exposure that already
@@ -1069,8 +1070,7 @@ export class OnchainReceiveSwapService {
       return store.transition(row.id, 'refunding_arkade', 'claimed', { preimage: hex.encode(preimage) })
     }
 
-    // Ahead of `findLockups`, which reads an unrolled lockup as empty. An adopted
-    // row records no fund txid, and stays on the empty-lockup path below.
+    // Ahead of `findLockups`, which reads an unrolled lockup as empty.
     // The fund tx pays this script once; thrown, not parked, so the claim recheck above keeps running.
     const matches = outpoints.filter((o) => o.unrolled && o.txid === row.arkadeFundTxid)
     if (matches.length > 1) {
