@@ -2256,6 +2256,24 @@ describe('tick: failure and recovery', () => {
       expect(arkade.claimCalls).toHaveLength(1)
     })
 
+    it('stays claiming for an adopted output the claim left out as too close to expiry', async () => {
+      const { swap } = await quoted()
+      const healthy = { txid: 'f1', vout: 0, value: AMOUNT / 2 }
+      const expiring = { txid: 'f2', vout: 0, value: AMOUNT / 2, expiresAt: clock + 60 }
+      await store.transition(swap.id, 'quoted', 'funded', {
+        lockup_value: AMOUNT,
+        lockup_outpoints: JSON.stringify([healthy, { txid: 'f2', vout: 0, value: AMOUNT / 2 }]),
+      })
+      await store.transition(swap.id, 'funded', 'paying', { idempotency_key: 'k' })
+      await store.transition(swap.id, 'paying', 'paid', { payment_id: 'pay-1' })
+      await store.transition(swap.id, 'paid', 'claiming', { preimage: 'cc'.repeat(32) })
+      arkade.lockups = [healthy, expiring]
+      outpoints = [healthy, expiring].map((o) => ({ txid: o.txid, vout: 0, unrolled: false }))
+
+      await expect(service.tick(swap.id)).rejects.toThrow('lockup output(s) f2:0 not yet collected')
+      expect((await store.get(swap.id)).state).toBe('claiming')
+    })
+
     it('follows a claim through when a later read stops reporting its output', async () => {
       const row = await claiming()
       expect((await service.tick(row.id)).state).toBe('claiming')

@@ -1241,6 +1241,42 @@ describe('OnchainSendSwapService', () => {
     expect(claimed).toEqual(['lockup-a'])
   })
 
+  it('keeps claiming an adopted output the claim had to leave out as too close to expiry', async () => {
+    const outcome = await service.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    const pk = outcome.swap.pkScript
+    const healthy = { txid: 'lockup-a', vout: 0, value: 25_000 }
+    deps.outputs.set(pk, [healthy, { txid: 'lockup-b', vout: 0, value: 25_000 }])
+    const funded = await service.tick(outcome.swap.id)
+    expect(funded.state).toBe('awaiting_claim')
+
+    const expiring = { txid: 'lockup-b', vout: 0, value: 25_000, expiresAt: now + 60 }
+    deps.outputs.set(pk, [healthy, expiring])
+    const spent = new Set<string>()
+    deps.arkade.findLockupOutpoints = async () =>
+      [healthy, expiring].map((o) => ({ txid: o.txid, vout: 0, spent: spent.has(o.txid), unrolled: false }))
+    deps.arkade.claim = async (_row, outputs) => {
+      for (const o of outputs.filter((o) => o !== expiring)) spent.add(o.txid)
+      deps.outputs.set(pk, [expiring])
+      return 'claim-ark-txid'
+    }
+    deps.onchain.spendClaim(funded.fundingTxid!, 0, [
+      new Uint8Array([0xaa]),
+      P,
+      new Uint8Array([0xbb]),
+      new Uint8Array([0xcc]),
+    ])
+
+    await expect(service.tick(funded.id)).rejects.toThrow('lockup output(s) lockup-b:0 not yet collected')
+    expect((await deps.store.get(funded.id)).state).toBe('claiming')
+  })
+
   it('parks the row once the refund deadline passes with an adopted output still out', async () => {
     const { row } = await mixedLockupClaiming()
     now = row.refundLocktime

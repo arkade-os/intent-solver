@@ -1046,7 +1046,12 @@ export class OnchainSendSwapService {
     }
     const recourse = () => unilateralExitRecourse(covenantRowFor(row), { solverPubkey: arkade.providerPubkey })
     if (unrolled === null || unrolled.settled) {
-      const leftover = await lockupLeftover(arkade, row, txid === null ? [] : outputs, unrolled)
+      const leftover = await lockupLeftover(
+        arkade,
+        row,
+        txid === null ? [] : boundedSpendInputs(outputs, this.now()),
+        unrolled,
+      )
       if (leftover.length > 0) {
         return awaitLeftover(store, row.id, txid, leftover, this.now() >= row.refundLocktime, recourse)
       }
