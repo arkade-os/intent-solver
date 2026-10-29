@@ -507,6 +507,15 @@ export const satsOutputs = <O extends { assets?: readonly unknown[] }>(outputs: 
   outputs.filter((o) => !o.assets?.length)
 
 /**
+ * What a claim spends: the asset-free outputs when they cover `amountSats`, else every output, so a
+ * lockup that was paid out against an asset vtxo is still collected (the claim declares its assets).
+ */
+export const claimOutputs = (outputs: readonly FundedOutput[], amountSats: number): FundedOutput[] => {
+  const clean = satsOutputs(outputs)
+  return totalValue(clean) >= amountSats ? clean : [...outputs]
+}
+
+/**
  * Every outpoint this script has ever held — SPENT ONES INCLUDED, unlike {@link findLockups},
  * so {@link findClaimPreimage} can still find the claimed outpoint. `value` lets the receive
  * leg tell its own funding from a dust payment to a public address. Paged like findLockups;

@@ -33,7 +33,7 @@ import { FREE, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { fixedFeePricing, type PricingStrategy } from '@arkade-os/solver-core/core/pricing.js'
 import { paymentHashFromPreimage, scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
-import { satsOutputs } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { claimOutputs, satsOutputs } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
 import { buildOnchainHtlc, ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import {
@@ -935,9 +935,7 @@ export class OnchainSendSwapService {
       await store.fail(row.id, 'claiming', 'claiming state with no preimage')
       return false
     }
-    // Only the asset-free outputs: a claim carries no asset packet, so arkd
-    // refuses one that includes an asset vtxo sent to this public script.
-    const outputs = satsOutputs(await arkade.findLockups(row.pkScript))
+    const outputs = claimOutputs(await arkade.findLockups(row.pkScript), row.amountSats)
     if (outputs.length === 0) {
       // Proof of neither our claim nor the lockup's spend: `findLockups` is
       // spendableOnly. {@link pushRefund}'s refusal applies here too, and harder —

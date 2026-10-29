@@ -52,7 +52,7 @@ import {
 } from '@arkade-os/solver-core/invoice/decode.js'
 import { preimageMatchesHash, scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
-import { satsOutputs } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { claimOutputs, satsOutputs } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
 import type { HoldState, ReceiveBackend, SendBackend, SendHtlcState } from '@arkade-os/solver-core/ports/lightning.js'
 import { PaymentHashRegistered, PaymentNotStarted } from '@arkade-os/solver-core/ports/lightning.js'
@@ -1726,9 +1726,7 @@ export class SendSwapService {
       await store.fail(row.id, 'claiming', 'claiming state with no preimage')
       return false
     }
-    // Only the asset-free outputs: a claim carries no asset packet, so arkd
-    // refuses one that includes an asset vtxo someone sent to this public script.
-    const outputs = satsOutputs(await arkade.findLockups(row.pkScript))
+    const outputs = claimOutputs(await arkade.findLockups(row.pkScript), row.amountSats)
     if (outputs.length === 0) {
       // The script is empty, but we hold no claim txid — so we have NO positive
       // proof our claim landed. `findLockups` returns [] for a swept, renewed or

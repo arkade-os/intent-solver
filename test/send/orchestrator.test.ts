@@ -756,6 +756,20 @@ describe('tick: the full drive', () => {
     expect(arkade.claimCalls.map((c) => c.outputs)).toEqual([[funding]])
   })
 
+  it('claims the asset vtxo too when the asset-free outputs cannot cover what was paid', async () => {
+    const outcome = await service.quote(FORGED.invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+    if (!outcome.accepted) throw new Error(`forged quote refused: ${outcome.reason}`)
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
+    expect((await service.tick(outcome.swap.id)).state).toBe('paid')
+
+    const carrying = { txid: 'f1', vout: 0, value: AMOUNT, assets: [{ assetId: 'ab'.repeat(34), amount: 1n }] }
+    arkade.lockups = [carrying]
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'succeeded', preimage: FORGED_PREIMAGE })
+    expect((await service.tick(outcome.swap.id)).state).toBe('claimed')
+    expect(arkade.claimCalls.map((c) => c.outputs)).toEqual([[carrying]])
+  })
+
   it('refuses an overfunded lockup rather than claim the excess', async () => {
     // The claim leaf sweeps whole vtxos, so paying an overfunded lockup would
     // keep the excess with no way for the client to recover it. Refusing routes

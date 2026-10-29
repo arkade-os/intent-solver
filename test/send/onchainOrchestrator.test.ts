@@ -900,6 +900,37 @@ describe('OnchainSendSwapService', () => {
     expect(claimed).toEqual([[funding]])
   })
 
+  it('claims the asset vtxo too when the asset-free outputs cannot cover what was paid', async () => {
+    const outcome = await service.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    deps.outputs.set(outcome.swap.pkScript, [{ txid: 'lockup-tx', vout: 0, value: 50_000 }])
+    let row = await service.tick(outcome.swap.id)
+    expect(row.state).toBe('awaiting_claim')
+
+    const carrying = { txid: 'lockup-tx', vout: 0, value: 50_000, assets: [{ assetId: 'ab'.repeat(34), amount: 1n }] }
+    deps.outputs.set(outcome.swap.pkScript, [carrying])
+    const claimed: unknown[] = []
+    deps.arkade.claim = ((_row: unknown, outputs: unknown) => {
+      claimed.push(outputs)
+      return Promise.resolve('claim-ark-txid')
+    }) as typeof deps.arkade.claim
+    deps.onchain.spendClaim(row.fundingTxid!, 0, [
+      new Uint8Array([0xaa]),
+      P,
+      new Uint8Array([0xbb]),
+      new Uint8Array([0xcc]),
+    ])
+    row = await service.tick(outcome.swap.id)
+    expect(row.state).toBe('claimed')
+    expect(claimed).toEqual([[carrying]])
+  })
+
   it('names the server-independent recourse on a claim it parks past the refund deadline', async () => {
     const outcome = await service.quote({
       paymentHash,
