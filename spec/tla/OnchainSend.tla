@@ -313,7 +313,7 @@ CONSTANTS
     LockupReadIsReliable,\* MUTATION: see (A7)
     AtomicAdmission,     \* MUTATION: quote() is one conditional INSERT
     AtomicFundLease,     \* MUTATION: enterFunding takes the fund lease in the entry's own write
-    CrashStrandsLease,   \* B10: a crash may land between taking the lease and fund()
+    CrashStrandsLease,   \* a crash may land between taking the lease and fund()
     PreCommitFunding,    \* signFunding + record funding_tx, THEN broadcastRaw; FALSE = one fund()
     LeaseTtl,            \* the fund lease expires, at any instant
     RecordIsCas,         \* MUTATION: the funding_tx write requires funding_tx IS NULL
@@ -652,7 +652,7 @@ HoldsLease(w, s) == At(w, s, "fundCommitted") /\ AtomicFundLease
 WinsLease(s)     == st[s] = "funding_onchain" /\ ~leased[s]
 
 \* A crash holding the lease before fund() strands the row unless LeaseTtl:
-\* nothing else clears fund_started_at, and no output exists to adopt (B10).
+\* nothing else clears fund_started_at, and no output exists to adopt.
 Crash(w) ==
     /\ CrashStrandsLease \/ ~\E s \in Swaps : HoldsLease(w, s)
     /\ CrashCore(w)
@@ -1304,7 +1304,7 @@ Perms == Permutations(Swaps) \cup Permutations(Workers)
 (*   OnchainSend_LeaseStrand.cfg   CrashStrandsLease  = TRUE, one swap     *)
 (*                                 -> GREEN with LeaseTtl (66,202          *)
 (*                                 distinct, 5s); Liveness violated        *)
-(*                                 without it: the B10 gap                 *)
+(*                                 without it: the stranded lease          *)
 (*   OnchainSend_Broken.cfg        BreakRefundRecheck = TRUE               *)
 (*                                 -> NoNetLoss violated, 24 states, 1s    *)
 (*   OnchainSend_MempoolRace.cfg   MempoolExclusive   = FALSE              *)
