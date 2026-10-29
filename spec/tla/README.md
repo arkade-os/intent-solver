@@ -1,7 +1,7 @@
 # TLA+ models of the swap corridors
 
-Formal models of the solver's six corridors — LightningSend, LightningReceive,
-OnchainSend, OnchainReceive, EvmSend, EvmReceive — checked with TLC. Each module
+Formal models of the solver's five corridors — LightningSend, LightningReceive,
+OnchainSend, EvmSend, EvmReceive — checked with TLC. Each module
 models the corridor's row as a state machine with N concurrent workers, each
 Worker's read separated from its write, and Worker crashes between the store CAS
 and the irreversible side effect. The claim under test is the one the TypeScript
@@ -18,11 +18,11 @@ planners' numbered `RULE`s. Several modules bind a short name once in their
 header (`plan`, `orchestrator`, `broadcast`) and use it throughout.
 
 A path may also be written relative to a `packages/<pkg>/src/` heading in the
-module's own header table — `arkade/wallet.ts` in `OnchainReceive.tla` resolves
+module's own header table — `arkade/wallet.ts` in `OnchainSend.tla` resolves
 against the `packages/solver-arkade/src/` heading near the top of that file. The
 rule that makes this safe rather than merely short is: **every bare relative
 path in a module sits under a group that module's header declares.** That holds
-for all 55 of them today, and it is checkable — take each bare `a/b.ts`, join it
+for all of them today, and it is checkable — take each bare `a/b.ts`, join it
 to each `packages/*/src/` heading in the same file, and one of them must exist.
 A citation that cannot be resolved that way is the bug; add the group to the
 header rather than leaving the path dangling.
@@ -39,7 +39,6 @@ loudly under `grep` rather than pointing somewhere plausible and wrong.
 | `LightningSend.tla` | quoted → funded → paying → paid → claiming |
 | `LightningReceive.tla` | quoted → armed → funded → claimed → settled |
 | `OnchainSend.tla` | The L1 HTLC leg and its mempool race. Timing invariants are conditional on the `(A2) Urgent` assumption — read that note before trusting any timing pass. The send-time `refunded` record is FIXED, so `OnchainSend_UnconfirmedRefund.cfg` mutates a guard the code really ships; `OnchainSend_MempoolRace.cfg` is kept as the residual RBF race, which the fix makes loud rather than silent. `OnchainSend_LeaseStrand.cfg` is red on the shipped code: a crash holding the fund lease strands the row (B10). |
-| `OnchainReceive.tla` | The confirmation policy and the two-sided exposure. `settled` now records a CONFIRMATION rather than a broadcast, so `Collected()` no longer counts an unopposed broadcast as collection and chain progress became a stated liveness assumption — read the fairness note. |
 | `EvmSend.tla` | The planner/shell split and the height-vs-wall margin. F2, F3, F5 and F6 are FIXED, so `EvmSend_BlindScan`, `EvmSend_NoReceipt`, `EvmSend_LockStrand` and `EvmSend_LostRefund` all mutate guards the code really ships. F4, the late lock, is the one still open — `LockLandsPromptly` is an assumption, not a guard, so read the findings before trusting a pass. The shipped watch on a closed row makes a late lock an operator event rather than a silent one; it does not move `NoNetLoss`, and `EvmSend_LateLock.cfg` still fires it. |
 | `EvmReceive.tla` | The mirror corridor: the solver funds against a lock it does not control. The parked `refunding_arkade` with an unspent covenant (F4) is a double loss under a patient client. |
 
@@ -77,8 +76,7 @@ java -XX:+UseParallelGC -cp /path/to/tla2tools.jar tlc2.TLC -config LightningSen
   violated **invariant name**, not the numbers. `LightningSend.tla`'s
   checkpoint comment shows the spread that measuring this produced.
 - `-coverage 1` after a green run prints how many times each action fired —
-  the check that no action is dead spec. (`OnchainReceive.cfg`'s checkpoint
-  comment records what its coverage run found.)
+  the check that no action is dead spec.
 - TLC writes its state queue and fingerprints to `states/` in the cwd —
   gitignored, and safe to delete at any time; it regenerates on every run.
 - Syntax-check a module without model checking:
@@ -167,8 +165,7 @@ Do not, under any circumstances:
 - Add `SYMMETRY` — unsound together with the per-swap fairness conditions;
   produces counterexamples whose cycle exists only in the quotient graph
   (trap T4, verified on LightningSend).
-- Merge or reorder fairness groups — the merged-variant liveness failure for
-  OnchainReceive is recorded in its module comment; the split exists for a
+- Merge or reorder fairness groups — the split exists for a
   real reason (trap T2).
 - Raise the swap/worker counts to look thorough — every finding lives in the
   read / side-effect / CAS interleaving, which is fully reachable with two

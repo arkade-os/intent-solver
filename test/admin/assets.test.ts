@@ -38,7 +38,6 @@ const corridorMap = <T>(value: T) => ({
   'arkade:BTC->lightning:BTC': value,
   'lightning:BTC->arkade:BTC': value,
   'arkade:BTC->onchain:BTC': value,
-  'onchain:BTC->arkade:BTC': value,
 })
 
 /** A balance shaped as the SDK returns one — asset amounts as `bigint`. */
@@ -62,7 +61,6 @@ const fakeServices = (over: { balance?: unknown; assetManager?: unknown; vtxos?:
     store: store(),
     receiveStore: store(),
     onchainStore: store(),
-    onchainReceiveStore: store(),
   }
   const config = {
     network: 'regtest',

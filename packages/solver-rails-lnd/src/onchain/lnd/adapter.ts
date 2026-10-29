@@ -39,7 +39,6 @@ import {
 import type {
   FundedOnchainOutput,
   OnchainBalance,
-  OnchainReceiveBackend,
   OnchainSendBackend,
   OnchainTxOutcome,
 } from '@arkade-os/solver-core/ports/onchain.js'
@@ -98,7 +97,7 @@ export interface AdapterConfig {
  */
 const SPEND_LOOKUP_TIMEOUT_MS = 5_000
 
-export class LndOnchainAdapter implements OnchainSendBackend, OnchainReceiveBackend {
+export class LndOnchainAdapter implements OnchainSendBackend {
   private constructor(
     private readonly lnd: AuthenticatedLnd,
     private readonly esplora: EsploraClient | undefined,

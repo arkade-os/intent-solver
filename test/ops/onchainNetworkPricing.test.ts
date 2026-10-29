@@ -3,7 +3,7 @@
  *
  * ONE: a deployment that set none of the new knobs quotes exactly what it
  * quoted before. Not "the suite still passes" — asserted as an equality
- * against `fixedFeePricing`, through the REAL orchestrators, on both amount
+ * against `fixedFeePricing`, through the REAL orchestrator, on both amount
  * sides, because the `amount_side: 'to'` path rounds up and an inverse-shaped
  * near-copy of it drifts by a sat.
  *
@@ -12,8 +12,7 @@
  * whole change exists to avoid, and it is invisible to every test that only
  * inspects config.
  *
- * Quotes go through `OnchainSendSwapService` and `OnchainReceiveSwapService`
- * themselves rather than through `PricingStrategy` in isolation: what an
+ * Quotes go through `OnchainSendSwapService` itself rather than through `PricingStrategy` in isolation: what an
  * operator sees is `payout_sats` on a row, and the strategy is only wired
  * correctly if that is the number that moves.
  */
@@ -26,9 +25,7 @@ import { hex } from '@scure/base'
 import { fixedFeePricing } from '@arkade-os/solver-core/core/pricing.js'
 import type { Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { OnchainSendSwapService } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
-import { OnchainReceiveSwapService } from '@arkade-os/solver-corridors/receive/onchainOrchestrator.js'
 import { OnchainSendSwapStore } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
-import { OnchainReceiveSwapStore } from '@arkade-os/solver-corridors/db/onchainReceiveSwaps.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { FakeOnchainBackend } from '@arkade-os/solver-rails-fake/onchain/fake/backend.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
@@ -42,7 +39,6 @@ const paymentHash = hex.encode(sha256(new Uint8Array(32).fill(9)))
 const solverPriv = new Uint8Array(32).fill(7)
 const providerPubkey = hex.encode(schnorr.getPublicKey(solverPriv))
 const clientRefundPubkey = hex.encode(keyBytes(10))
-const clientPayoutPubkey = hex.encode(keyBytes(4))
 const onchainPubkey = hex.encode(new Uint8Array(32).fill(3))
 const p2trScript = (fill: number): Uint8Array => Uint8Array.from([0x51, 0x20, ...keyBytes(fill)])
 
@@ -124,50 +120,8 @@ const sendQuote = async (
   return amountSide === 'to' ? outcome.swap.amountSats : outcome.swap.payoutSats
 }
 
-const receiveQuote = async (
-  pricing: ConstructorParameters<typeof OnchainReceiveSwapService>[0]['pricing'],
-  amountSide: 'from' | 'to',
-): Promise<number> => {
-  const store = await OnchainReceiveSwapStore.open(betterSqliteDriver(':memory:'), clock)
-  const service = new OnchainReceiveSwapService({
-    store,
-    onchain: new FakeOnchainBackend(5, 0),
-    arkade: {
-      ...arkadeCommon,
-      findLockupOutpoints: async () => [],
-      findClaimPreimage: async () => null,
-      fund: async () => 'arkade-fund-txid',
-      refund: async () => 'arkade-refund-txid',
-    },
-    limits: { minSats: 1_000, maxSats: 1_000_000 },
-    fee: FEE,
-    pricing,
-    maxExposedSats: 1_000_000,
-    totalCommitted: () => store.committedSats(),
-    admission: new AdmissionControl(),
-    network: 'regtest',
-    signer,
-    claimDestinationScript: p2trScript(12),
-    now: clock,
-  })
-  const outcome = await service.quote({
-    paymentHash,
-    amountSats: GIVE_SATS,
-    amountSide,
-    refundPubkey: onchainPubkey,
-    payoutAddress: ARKADE_ADDRESS,
-    payoutPubkey: clientPayoutPubkey,
-    claimPacket: 'ZmFrZS1zZWFsZWQtcGFja2V0',
-  })
-  if (!outcome.accepted) throw new Error(`receive quote refused: ${outcome.reason}`)
-  return amountSide === 'to' ? outcome.swap.amountSats : outcome.swap.payoutSats
-}
-
-/** Both corridors, under one name, so every property below is asserted on each. */
-const CORRIDORS = [
-  { name: 'arkade:BTC->onchain:BTC', quote: sendQuote },
-  { name: 'onchain:BTC->arkade:BTC', quote: receiveQuote },
-] as const
+/** Every live-priced corridor, under one name, so every property below is asserted on each. */
+const CORRIDORS = [{ name: 'arkade:BTC->onchain:BTC', quote: sendQuote }] as const
 
 const SIDES = ['from', 'to'] as const
 
@@ -175,7 +129,6 @@ const NO_BOUNDS = {
   'arkade:BTC->lightning:BTC': null,
   'lightning:BTC->arkade:BTC': null,
   'arkade:BTC->onchain:BTC': null,
-  'onchain:BTC->arkade:BTC': null,
 } as const
 
 describe('with nothing configured, quoted amounts are the ones the corridor always quoted', () => {
@@ -290,7 +243,7 @@ describe('the sampler behind it', () => {
     let clockMs = 0
     let rate = 4
     const sampler = onchainFeeRateSampler({
-      bounds: { ...NO_BOUNDS, 'onchain:BTC->arkade:BTC': { capSats: 1_000, minSats: 0 } },
+      bounds: { ...NO_BOUNDS, 'arkade:BTC->onchain:BTC': { capSats: 1_000, minSats: 0 } },
       estimateFeeRate: async () => rate,
       refreshAfterMs: 1_000,
       staleAfterMs: 10_000,
@@ -317,37 +270,23 @@ describe('the sampler behind it', () => {
   })
 })
 
-describe('createServices wires both onchain corridors and neither Lightning one', () => {
+describe('createServices wires the onchain corridor and neither Lightning one', () => {
   const body = createServicesBody()
 
   /** The `pricing:` property as passed to each service, with the corridor it names. */
   const pricingLines = (): string[] => body.split('\n').filter((line) => line.includes('pricing: onchainPricingFor('))
 
-  it('passes a pricing strategy to exactly the two onchain corridors', () => {
-    expect(pricingLines()).toHaveLength(2)
+  it('passes a pricing strategy to exactly the onchain corridor', () => {
+    expect(pricingLines()).toHaveLength(1)
     expect(body).toMatch(/onchainPricingFor\(\s*'arkade:BTC->onchain:BTC',/)
-    expect(body).toMatch(/onchainPricingFor\(\s*'onchain:BTC->arkade:BTC',/)
   })
 
-  it('sizes each direction off the transaction that direction broadcasts', () => {
-    // The send leg funds and the taker claims; the receive leg claims what the
-    // client funded. Swapping these bills each corridor for the other's
-    // transaction — and would still typecheck, still pass every other test
-    // here, and quietly misprice both directions.
-    const send = /'arkade:BTC->onchain:BTC',\s*fundingTxVsize\(/.test(body)
-    const receive = /'onchain:BTC->arkade:BTC',\s*claimSpendVsize\(/.test(body)
-    expect({ send, receive }).toEqual({ send: true, receive: true })
+  it('sizes the send leg off the funding transaction it broadcasts', () => {
+    expect(/'arkade:BTC->onchain:BTC',\s*fundingTxVsize\(/.test(body)).toBe(true)
   })
 
-  it('keeps each direction on its own destination script', () => {
-    // The two are hoisted out of their constructor calls so the fee sizing can
-    // read them, which makes confusing one for the other a one-token typo that
-    // still compiles and still runs — both are addresses from the same wallet.
-    // They are deliberately separate so the two flows stay separable in that
-    // wallet's history, and so each corridor is sized off the output it pays.
-    expect(body).toContain('claimDestinationScript: onchainClaimDestinationScript,')
+  it('sizes the funding change off the refund destination script', () => {
     expect(body).toContain('refundDestinationScript: onchainRefundDestinationScript,')
-    expect(body).toContain('destinationScript: onchainClaimDestinationScript,')
     expect(body).toContain('changeScript: onchainRefundDestinationScript,')
   })
 

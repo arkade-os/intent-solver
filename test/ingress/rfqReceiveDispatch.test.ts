@@ -1,5 +1,5 @@
 /**
- * Which corridor an `rfq_request` reaches, for the two RECEIVE pairs.
+ * Which corridor an `rfq_request` reaches, for the RECEIVE pair.
  *
  * Dispatch only — the corridors' own quote logic is tested against their
  * orchestrators. What is easy to get wrong here is routing: before this, both
@@ -11,7 +11,6 @@ import { describe, expect, it, vi } from 'vitest'
 import { respondToRfqRequest } from '@arkade-os/solver-transport/ingress/rfq.js'
 import { setFrom, type RfqServices } from '../support/corridorSet.js'
 import { RFQ_PAIR_RECEIVE } from '@arkade-os/solver-corridors/wire/lightningReceivePayloads.js'
-import { RFQ_PAIR_ONCHAIN_RECEIVE } from '@arkade-os/solver-corridors/wire/onchainReceivePayloads.js'
 
 const HEX32 = 'a'.repeat(64)
 const XONLY = 'b'.repeat(64)
@@ -38,22 +37,6 @@ const lightningReceivePayload = (over: Record<string, unknown> = {}) => ({
   ...over,
 })
 
-const onchainReceivePayload = () => ({
-  v: 1,
-  type: 'rfq_request',
-  rfq_id: RFQ_ID,
-  pair: RFQ_PAIR_ONCHAIN_RECEIVE,
-  amount_side: 'to',
-  amount: 5000,
-  profile: {
-    payment_hash: HEX32,
-    claim_packet: 'sealed-packet',
-    refund_pubkey: XONLY,
-    payout_address: 'tark1qexampleaddress',
-    payout_pubkey: XONLY,
-  },
-})
-
 const dispatch = (services: RfqServices, payload: unknown) => respondToRfqRequest(setFrom(services, stores), payload)
 
 describe('rfq dispatch — receive pairs', () => {
@@ -72,15 +55,6 @@ describe('rfq dispatch — receive pairs', () => {
     expect(outcome.kind).toBe('refused')
   })
 
-  it('routes onchain:BTC->arkade:BTC to the onchain receive service', async () => {
-    const quote = vi.fn().mockResolvedValue({ accepted: false, reason: 'provider_at_capacity' })
-    const outcome = await dispatch({ ...sendServices, onchainReceive: { quote } as never }, onchainReceivePayload())
-
-    expect(quote).toHaveBeenCalledTimes(1)
-    expect(quote.mock.calls[0]?.[0]).toMatchObject({ paymentHash: HEX32, refundPubkey: XONLY })
-    expect(outcome.kind).toBe('refused')
-  })
-
   /**
    * The reason the absent case is handled by name rather than left to fall
    * through: a solver that does not serve a corridor should say so, and the
@@ -88,12 +62,6 @@ describe('rfq dispatch — receive pairs', () => {
    */
   it('refuses a receive pair by name when that corridor is not served', async () => {
     const outcome = await dispatch(sendServices, lightningReceivePayload())
-    expect(outcome.kind).toBe('invalid')
-    expect(outcome.payload).toMatchObject({ reason: 'unsupported_pair' })
-  })
-
-  it('refuses the onchain receive pair the same way', async () => {
-    const outcome = await dispatch(sendServices, onchainReceivePayload())
     expect(outcome.kind).toBe('invalid')
     expect(outcome.payload).toMatchObject({ reason: 'unsupported_pair' })
   })

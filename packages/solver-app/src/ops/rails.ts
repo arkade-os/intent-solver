@@ -69,10 +69,9 @@ export interface LightningRail {
    */
   ln: LightningBackend
   /**
-   * The same wallet's onchain half, funding `arkade:BTC->onchain:BTC` and
-   * claiming `onchain:BTC->arkade:BTC`. A rail whose vendor has no onchain
-   * facility still has to answer this port — with a backend that refuses — or
-   * those two corridors cannot be served at all.
+   * The same wallet's onchain half, funding `arkade:BTC->onchain:BTC`. A rail
+   * whose vendor has no onchain facility still has to answer this port — with a
+   * backend that refuses — or that corridor cannot be served at all.
    */
   onchain: OnchainSendBackend
   createEvmPayoutFunding?(host: EvmPayoutFundingHost): Promise<EvmPayoutFundingRegistration | null>

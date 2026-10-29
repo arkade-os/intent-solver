@@ -19,9 +19,8 @@ import { createCorridorRegistry, type CorridorDescriptor } from '@arkade-os/solv
 import { LN_SEND } from './lnSend.js'
 import { LN_RECEIVE } from './lnReceive.js'
 import { ONCHAIN_SEND } from './onchainSend.js'
-import { ONCHAIN_RECEIVE } from './onchainReceive.js'
 
-export const ALL_DESCRIPTORS: readonly CorridorDescriptor[] = [LN_SEND, LN_RECEIVE, ONCHAIN_SEND, ONCHAIN_RECEIVE]
+export const ALL_DESCRIPTORS: readonly CorridorDescriptor[] = [LN_SEND, LN_RECEIVE, ONCHAIN_SEND]
 
 export const CORRIDOR_REGISTRY = createCorridorRegistry(ALL_DESCRIPTORS)
 
@@ -40,4 +39,4 @@ export const descriptorFor = (pair: string): CorridorDescriptor => {
   return descriptor
 }
 
-export { LN_SEND, LN_RECEIVE, ONCHAIN_SEND, ONCHAIN_RECEIVE }
+export { LN_SEND, LN_RECEIVE, ONCHAIN_SEND }

@@ -19,7 +19,7 @@ import {
   type TapLeafScript,
 } from '@arkade-os/sdk'
 import { base64, hex } from '@scure/base'
-import { ONCHAIN_DUST_SATS } from '@arkade-os/solver-core/core/onchainReceive.js'
+import { ONCHAIN_DUST_SATS } from '@arkade-os/solver-core/core/onchainSend.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import type { CovenantSwapScript } from './covenant.js'
 import type { ArkadeContext } from './wallet.js'

@@ -29,7 +29,6 @@ const allCorridors = <T>(value: T) => ({
   'arkade:BTC->lightning:BTC': value,
   'lightning:BTC->arkade:BTC': value,
   'arkade:BTC->onchain:BTC': value,
-  'onchain:BTC->arkade:BTC': value,
 })
 
 const card = { version: 0, name: 'test-solver', discovery_pubkey: PUBKEY, markets: [] } as unknown as SolverCard

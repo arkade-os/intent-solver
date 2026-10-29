@@ -199,19 +199,16 @@ const settingsConfig = (over: Record<string, unknown> = {}) =>
       'arkade:BTC->lightning:BTC': { minSats: 1, maxSats: 2 },
       'lightning:BTC->arkade:BTC': { minSats: 1, maxSats: 2 },
       'arkade:BTC->onchain:BTC': { minSats: 1, maxSats: 2 },
-      'onchain:BTC->arkade:BTC': { minSats: 1, maxSats: 2 },
     },
     corridorFees: {
       'arkade:BTC->lightning:BTC': { bps: 0, flatSats: 0 },
       'lightning:BTC->arkade:BTC': { bps: 0, flatSats: 0 },
       'arkade:BTC->onchain:BTC': { bps: 0, flatSats: 0 },
-      'onchain:BTC->arkade:BTC': { bps: 0, flatSats: 0 },
     },
     corridorEnabled: {
       'arkade:BTC->lightning:BTC': true,
       'lightning:BTC->arkade:BTC': true,
       'arkade:BTC->onchain:BTC': true,
-      'onchain:BTC->arkade:BTC': true,
     },
     ...over,
   }) as never
@@ -269,7 +266,6 @@ const overview = async (policy: Record<string, unknown>, rows: unknown[] = [mark
       store: swapStore(),
       receiveStore: swapStore(),
       onchainStore: swapStore(),
-      onchainReceiveStore: swapStore(),
       adminStore: {
         getOverrides: vi.fn().mockResolvedValue({}),
         listMarkets: vi.fn().mockResolvedValue(rows),

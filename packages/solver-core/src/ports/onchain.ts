@@ -9,21 +9,10 @@
  * neither subtree. Types here are plain — hex strings, sats, unix seconds — so
  * no vendor type escapes the adapter boundary.
  *
- * NOT segregated the way `SendBackend`/`ReceiveBackend` are in `src/ln/port.ts`.
- * Lightning's two directions hit genuinely disjoint node RPCs (pay an invoice
- * vs. hold-and-settle one), so a zero-overlap split costs nothing. Onchain's
- * two directions are both just "the solver's own wallet, watching addresses
- * and broadcasting transactions it built" — `fund()` (pay an address) is the
- * ONLY primitive send needs that receive does not, and every existing adapter
- * already implements everything else off the SAME underlying client. Splitting
- * cleanly would force every adapter to either duplicate
- * `findOutputs`/`findSpendWitness`/`broadcastRaw`/
- * `estimateFeeRate`/`newReceiveAddress`/`settleReceiveAddress`/`close` across
- * two interfaces or implement an intersection type — strictly more surface for
- * the same behaviour. So: one shared base, `OnchainSendBackend` adds the one
- * send-only method, `OnchainReceiveBackend` adds none today (kept as its own
- * name rather than a bare alias of the base, so a future receive-only method
- * has somewhere to land without a breaking rename).
+ * NOT segregated the way `SendBackend`/`ReceiveBackend` are in `src/ln/port.ts`:
+ * `fund()` is the ONLY send-only primitive, and the Lightning receive leg reads
+ * the rest (`findSpendWitness` on an unrolled lockup) off the same client. So:
+ * one shared base, and `OnchainSendBackend` adds `fund()`.
  */
 
 export interface FundedOnchainOutput {
@@ -77,9 +66,8 @@ export type ReceiveSettlement =
 /**
  * The shared surface: watch an address, watch for a spend, broadcast a
  * transaction this service built, estimate fees, and get money that landed
- * back into spendable balance. Every one of these is needed by BOTH
- * directions — see this file's header comment for why the port is not split
- * the way `src/ln/port.ts` is.
+ * back into spendable balance. See this file's header comment for why the port
+ * is not split the way `src/ln/port.ts` is.
  */
 export interface OnchainBackend {
   /** Outputs currently paying `address`, most useful while exactly one is expected. */
@@ -210,14 +198,3 @@ export interface OnchainSendBackend extends OnchainBackend {
     vout: number
   }>
 }
-
-/**
- * The receive leg's view of the backend. Structurally identical to
- * {@link OnchainBackend} today — the receive orchestrator never pays an
- * address itself (the CLIENT funds the onchain HTLC, out of band; the solver
- * only ever watches it, then later claims it) — but kept as its own named
- * interface rather than a bare re-export, both for call-site clarity (a
- * receive-only dependency should say so) and so a future receive-only method
- * has somewhere to land without a breaking rename.
- */
-export interface OnchainReceiveBackend extends OnchainBackend {}

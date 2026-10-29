@@ -184,7 +184,6 @@ describe('every store carrying the hook is WIRED on the shipped daemon', () => {
     ['store', 'LN_SEND.pair'],
     ['onchainStore', 'ONCHAIN_SEND.pair'],
     ['receiveStore', 'LN_RECEIVE.pair'],
-    ['onchainReceiveStore', 'ONCHAIN_RECEIVE.pair'],
     ['evmSendStore', "'arkade:BTC->ethereum'"],
     ['evmReceiveStore', "'ethereum->arkade:BTC'"],
     ['offerStore', "'arkade offer fill'"],

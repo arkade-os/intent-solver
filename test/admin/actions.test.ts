@@ -259,7 +259,7 @@ describe('tick across corridors', () => {
     // Every corridor is optional by design, so absent is a normal answer.
     const response = await post(
       'tick',
-      { id: 'swap-1', corridor: 'onchain:BTC->arkade:BTC' },
+      { id: 'swap-1', corridor: 'arkade:BTC->onchain:BTC' },
       fakeServices({ corridors: corridorSet({}) }),
     )
     expect(response.status).toBe(500)
@@ -398,19 +398,18 @@ describe('confirmKind is declared, not inferred', () => {
 })
 
 /**
- * The receive legs' operator refund — TLA+ findings F4 and F5 both need
- * a way to act on a row that has stopped moving, and until these existed there
- * was none: `stuck` is terminal, excluded from every sweep, and no action
- * touched either receive store.
+ * The receive leg's operator refund — a way to act on a row that has stopped
+ * moving: `stuck` is terminal, excluded from every sweep, and until this
+ * existed no action touched the receive store.
  *
  * The direction is the thing these pin. `refund-now` and `onchain-refund-now`
  * return the CLIENT's lockup on the two SEND corridors and can pay twice; the
- * receive corridors fund out of the solver's own float, so these recover OUR
+ * receive corridor funds out of the solver's own float, so this recovers OUR
  * sats. A future edit that got that backwards would be a double payout wearing
  * a safe-sounding name.
  */
-describe('the receive legs’ operator refund', () => {
-  for (const name of ['receive-refund-now', 'onchain-receive-refund-now']) {
+describe('the receive leg’s operator refund', () => {
+  for (const name of ['receive-refund-now']) {
     it(`${name} is armed and confirms on a swap id`, () => {
       // Armed not because it can double-pay — it cannot — but because it can
       // kill a live swap by spending the output the client was about to claim.
@@ -435,41 +434,6 @@ describe('the receive legs’ operator refund', () => {
   it('refuses without the confirmation, like every other armed action', async () => {
     const body = await (await post('receive-refund-now', { id: 'swap-1', confirm: 'nope' })).json()
     expect(body).toMatchObject({ error: 'confirm_required' })
-  })
-})
-
-/**
- * TLA+ finding F4 — the fee-dust retry, and the correction that came
- * with it.
- *
- * F4's row is at `claimed`: the client already took the Arkade lockup and
- * revealed `P`, so the solver has PAID OUT and merely cannot collect the L1
- * HTLC economically. The Arkade lockup is gone, which is why the refund
- * actions above do not answer this — a fact worth pinning, because "receive
- * leg is stuck, use the receive refund" is the wrong reach and an expensive
- * one to make at 3am.
- */
-describe('the onchain receive leg’s fee-dust claim retry', () => {
-  it('is armed and confirms on a swap id', () => {
-    const action = ACTIONS['onchain-receive-claim-now']
-    expect(action?.tier).toBe('armed')
-    if (action?.tier !== 'armed') throw new Error('not armed')
-    expect(action.confirmKind).toBe('swap-id')
-  })
-
-  it('says it is safe to repeat, because it is', () => {
-    // Every attempt spends the SAME output, so a redundant broadcast is a
-    // double-spend the network rejects. This is the one operator action here
-    // with no judgement call in it, and the warning must not imply otherwise.
-    const warning = ACTIONS['onchain-receive-claim-now']?.warning ?? ''
-    expect(warning).toMatch(/same output/i)
-    expect(warning).not.toMatch(/DOUBLE-PAYOUT/i)
-  })
-
-  it("claims the CLIENT's L1 HTLC, and says so — not the solver's lockup", () => {
-    // The direction is the whole distinction from `onchain-receive-refund-now`.
-    const warning = ACTIONS['onchain-receive-claim-now']?.warning ?? ''
-    expect(warning).toMatch(/CLIENT'S L1 HTLC|CLIENT’S L1 HTLC/i)
   })
 })
 

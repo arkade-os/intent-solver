@@ -67,13 +67,7 @@ const BASE_ENV: Record<string, string> = {
  * deployment from needing a rail at all, which is precisely the property under
  * test.
  */
-const CLEARED = [
-  'LN_SEND_ENABLED',
-  'LN_RECEIVE_ENABLED',
-  'ONCHAIN_SEND_ENABLED',
-  'ONCHAIN_RECEIVE_ENABLED',
-  'EVM_TOKENS',
-]
+const CLEARED = ['LN_SEND_ENABLED', 'LN_RECEIVE_ENABLED', 'ONCHAIN_SEND_ENABLED', 'EVM_TOKENS']
 
 let saved: Record<string, string | undefined> = {}
 

@@ -1,5 +1,5 @@
 /**
- * In-memory `OnchainSendBackend`/`OnchainReceiveBackend` for regtest
+ * In-memory `OnchainSendBackend` for regtest
  * orchestrator-level tests — no real chain interaction, mirrors the role
  * `src/ln/fake/backend.ts` plays for Lightning. Real end-to-end proof of the
  * onchain HTLC script + broadcast + confirmation watching uses the LND
@@ -14,7 +14,6 @@ import { ONCHAIN_NETWORKS, type OnchainNetworkProfile } from '@arkade-os/solver-
 import type {
   FundedOnchainOutput,
   OnchainBalance,
-  OnchainReceiveBackend,
   OnchainSendBackend,
   OnchainTxOutcome,
 } from '@arkade-os/solver-core/ports/onchain.js'
@@ -31,7 +30,7 @@ interface Output {
   spentByWitness: Uint8Array[] | null
 }
 
-export class FakeOnchainBackend implements OnchainSendBackend, OnchainReceiveBackend {
+export class FakeOnchainBackend implements OnchainSendBackend {
   private readonly outputs: Output[] = []
   private readonly broadcasts = new Map<string, number | null>()
   private currentBlock = 0
@@ -138,7 +137,7 @@ export class FakeOnchainBackend implements OnchainSendBackend, OnchainReceiveBac
     return this.receiveAddress
   }
 
-  // -- test control surface, not part of OnchainSendBackend/OnchainReceiveBackend --
+  // -- test control surface, not part of OnchainSendBackend --
 
   /**
    * Simulate a THIRD PARTY (the client, on the receive leg) paying `address`

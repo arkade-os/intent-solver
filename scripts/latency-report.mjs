@@ -48,7 +48,6 @@ const CORRIDORS = [
   { key: 'ark-ln', corridor: 'arkade:BTC->lightning:BTC', store: 'send', table: 'send_swap_event' },
   { key: 'ln-ark', corridor: 'lightning:BTC->arkade:BTC', store: 'receive', table: 'receive_swap_event' },
   { key: 'ark-l1', corridor: 'arkade:BTC->onchain:BTC', store: 'onchainSend', table: 'send_onchain_swap_event' },
-  { key: 'l1-ark', corridor: 'onchain:BTC->arkade:BTC', store: 'onchainReceive', table: 'receive_onchain_swap_event' },
 ]
 
 const only = arg('corridor')

@@ -51,8 +51,7 @@ const LEGAL_EDGES: Record<ReceiveSwapState, readonly ReceiveSwapState[]> = {
 }
 
 // `refund_locktime` is deliberately absent: it is fixed at insert and the
-// covenant's pkScript is derived from it, so no transition may move it. Same
-// as the sibling receive corridor's own set (`onchainReceiveSwaps.ts`).
+// covenant's pkScript is derived from it, so no transition may move it.
 const TRANSITION_COLUMNS = new Set([
   'htlc_expires_at',
   'arkade_lockup_txid',

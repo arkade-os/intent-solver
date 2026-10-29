@@ -77,8 +77,6 @@
     "files": [
       "sendOnchain.e2e.test.ts",
       "sendOnchainEdges.e2e.test.ts",
-      "receiveOnchain.e2e.test.ts",
-      "receiveOnchainEdges.e2e.test.ts",
       "lndMempoolSpend.e2e.test.ts",
       "rebalanceOnchain.e2e.test.ts"
     ],
