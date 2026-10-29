@@ -731,6 +731,31 @@ describe('tick: the full drive', () => {
     expect(row.lockupValue).toBe(2_100)
   })
 
+  it('never pays for sats that arrive on an asset-carrying vtxo', async () => {
+    const { swap } = await quoted()
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT, assets: [{ assetId: 'ab'.repeat(34), amount: 1n }] }]
+    expect((await service.tick(swap.id)).state).toBe('quoted')
+    clock += DEFAULT_LOCKUP_TIMEOUT + 1
+    expect((await service.tick(swap.id)).state).toBe('refused')
+    expect(await service.refundSweep()).toEqual([swap.id])
+    expect(arkade.refundCalls.map((c) => c.outputs)).toEqual([arkade.lockups])
+    expect(ln.payCalls).toHaveLength(0)
+  })
+
+  it('claims only the sats outputs when an asset vtxo lands on the paid lockup', async () => {
+    const outcome = await service.quote(FORGED.invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+    if (!outcome.accepted) throw new Error(`forged quote refused: ${outcome.reason}`)
+    const funding = { txid: 'f1', vout: 0, value: AMOUNT }
+    arkade.lockups = [funding]
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
+    expect((await service.tick(outcome.swap.id)).state).toBe('paid')
+
+    arkade.lockups = [funding, { txid: 'f2', vout: 0, value: 330, assets: [{ assetId: 'ab'.repeat(34), amount: 1n }] }]
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'succeeded', preimage: FORGED_PREIMAGE })
+    expect((await service.tick(outcome.swap.id)).state).toBe('claimed')
+    expect(arkade.claimCalls.map((c) => c.outputs)).toEqual([[funding]])
+  })
+
   it('refuses an overfunded lockup rather than claim the excess', async () => {
     // The claim leaf sweeps whole vtxos, so paying an overfunded lockup would
     // keep the excess with no way for the client to recover it. Refusing routes

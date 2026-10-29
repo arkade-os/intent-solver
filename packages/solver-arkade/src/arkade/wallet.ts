@@ -500,6 +500,14 @@ export const totalValue = (outputs: readonly FundedOutput[]): number =>
   outputs.reduce((sum, output) => sum + output.value, 0)
 
 /**
+ * The outputs a BTC lockup is made of. A claim carries no asset packet, so arkd refuses one that
+ * spends an asset vtxo — and anyone can send one to the public lockup address. Refunds still take
+ * every output.
+ */
+export const satsOutputs = <O extends { assets?: readonly unknown[] }>(outputs: readonly O[]): O[] =>
+  outputs.filter((o) => !o.assets?.length)
+
+/**
  * Every outpoint this script has ever held — SPENT ONES INCLUDED, unlike {@link findLockups},
  * so {@link findClaimPreimage} can still find the claimed outpoint. `value` lets the receive
  * leg tell its own funding from a dust payment to a public address. Paged like findLockups;

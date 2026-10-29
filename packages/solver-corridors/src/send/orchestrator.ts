@@ -52,6 +52,7 @@ import {
 } from '@arkade-os/solver-core/invoice/decode.js'
 import { preimageMatchesHash, scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { satsOutputs } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
 import type { HoldState, ReceiveBackend, SendBackend, SendHtlcState } from '@arkade-os/solver-core/ports/lightning.js'
 import { PaymentHashRegistered, PaymentNotStarted } from '@arkade-os/solver-core/ports/lightning.js'
@@ -947,7 +948,8 @@ export class SendSwapService {
 
   private async whenQuoted(row: SendSwapRow): Promise<boolean> {
     const { store, arkade } = this.deps
-    const outputs = await arkade.findLockups(row.pkScript)
+    const all = await arkade.findLockups(row.pkScript)
+    const outputs = satsOutputs(all)
     const locked = outputs.reduce((sum, o) => sum + o.value, 0)
 
     const timedOut = this.now() >= lockupDeadlineFor(row.createdAt, row.invoiceExpiresAt, this.lockupTimeout)
@@ -990,8 +992,11 @@ export class SendSwapService {
     // drive-later and crash-recovery paths cannot smuggle in a stale lockup that
     // an always-on watcher would have timed out.
     if (timedOut || expired) {
-      // Record whatever is there so the refund sweep can return it.
-      if (locked > 0) await store.patch(row.id, { lockup_value: locked })
+      // Record whatever is there so the refund sweep can return it — including
+      // an asset vtxo's value, which `satsOutputs` drops from `locked` but the
+      // refund still takes.
+      const held = all.reduce((sum, o) => sum + o.value, 0)
+      if (held > 0) await store.patch(row.id, { lockup_value: held })
       const reason = expired
         ? 'invoice expired before funding completed'
         : locked >= row.amountSats
@@ -1706,7 +1711,9 @@ export class SendSwapService {
       await store.fail(row.id, 'claiming', 'claiming state with no preimage')
       return false
     }
-    const outputs = await arkade.findLockups(row.pkScript)
+    // Only the asset-free outputs: a claim carries no asset packet, so arkd
+    // refuses one that includes an asset vtxo someone sent to this public script.
+    const outputs = satsOutputs(await arkade.findLockups(row.pkScript))
     if (outputs.length === 0) {
       // The script is empty, but we hold no claim txid — so we have NO positive
       // proof our claim landed. `findLockups` returns [] for a swept, renewed or
