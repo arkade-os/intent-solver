@@ -131,6 +131,7 @@ describe('onchainRfqQuotePayload', () => {
         min_confirmations: row.minConfirmations,
         lockup_address: row.lockupAddress,
         htlc_address: row.onchainAddress,
+        refund_without_receiver_delay: row.refundWithoutReceiverDelay,
       },
     })
   })

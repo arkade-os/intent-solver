@@ -6,6 +6,7 @@ import { hex } from '@scure/base'
 import { SigHash, Transaction } from '@scure/btc-signer'
 import {
   OnchainSendSwapService,
+  covenantRowFor,
   HTLC_REFUND_MTP_MARGIN,
   UNKNOWN_LOCKUP_RECHECK_SECONDS,
 } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
@@ -30,6 +31,8 @@ import {
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { FakeOnchainBackend } from '@arkade-os/solver-rails-fake/onchain/fake/backend.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { covenantScriptFromRow } from '@arkade-os/solver-arkade/arkade/covenantRow.js'
+import { onchainRfqQuotePayload } from '@arkade-os/solver-corridors/wire/onchainPayloads.js'
 import { MAX_LOCKUP_SPEND_INPUTS } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import type { ArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 import { ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
@@ -172,6 +175,34 @@ describe('OnchainSendSwapService', () => {
     expect(await service.quote(request(6))).toEqual({ accepted: false, reason: 'rate_limited' })
     expect(await service.quote(request(1))).toEqual({ accepted: false, reason: 'duplicate_swap' })
     expect((await service.quote(request(6, 'other-client'))).accepted).toBe(true)
+  })
+
+  const quoteSwap = async () => {
+    const quoted = await service.quote({
+      paymentHash: 'ab'.repeat(32),
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!quoted.accepted) throw new Error('expected acceptance')
+    return quoted.swap
+  }
+
+  it("keeps the client's solo refund shut until the last Arkade claim, however short the base ladder", async () => {
+    const swap = await quoteSwap()
+    expect(swap.refundWithoutReceiverDelay).toBeGreaterThanOrEqual(arkadeClaimDeadline(swap.htlcLocktime) - now)
+    expect([swap.claimDelay, swap.refundDelay]).toEqual([512, 1024])
+    expect(hex.encode(covenantScriptFromRow(covenantRowFor(swap)).pkScript)).toBe(swap.pkScript)
+    expect(onchainRfqQuotePayload(swap, now + 60, 'rfq-1').profile).toMatchObject({
+      refund_without_receiver_delay: swap.refundWithoutReceiverDelay,
+    })
+  })
+
+  it('leaves a ladder already past the last Arkade claim as the deployment derived it', async () => {
+    deps.arkade.delays = deriveUnilateralDelays(MAINNET_EXIT_DELAY)
+    const swap = await quoteSwap()
+    expect(swap.refundWithoutReceiverDelay).toBe(deps.arkade.delays.unilateralRefundWithoutReceiverDelay)
   })
 
   // `quote()` reads the committed total, compares it against the

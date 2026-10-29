@@ -142,7 +142,7 @@ describe('e2e arkade:BTC->onchain:BTC (send)', () => {
         refundLocktime: swap.refundLocktime,
         claimDelay: arkade.ctx.unilateralDelays.unilateralClaimDelay,
         client: clientRefundPub,
-        clientRefundDelay: arkade.ctx.unilateralDelays.unilateralRefundWithoutReceiverDelay,
+        clientRefundDelay: swap.refundWithoutReceiverDelay,
         refundWithoutServerDelay: arkade.ctx.unilateralDelays.unilateralRefundDelay,
         nonInteractiveParameters: {
           emulatorPubkey: hex.decode(arkade.emulator.pubkey),

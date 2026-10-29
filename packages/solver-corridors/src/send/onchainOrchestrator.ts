@@ -59,6 +59,7 @@ import {
   type SweptLockupRefund,
 } from '@arkade-os/solver-arkade/arkade/sweptLockupRefund.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { unilateralLadderFor } from '@arkade-os/solver-core/core/send.js'
 import { askApproval, type ApprovalCheck } from '@arkade-os/solver-core/core/approvalGate.js'
 import { guardedTick, sweep } from '@arkade-os/solver-core/util/sweep.js'
 import { stepFor } from '@arkade-os/solver-core/core/stateMachine.js'
@@ -360,6 +361,8 @@ export class OnchainSendSwapService {
       return { accepted: false, reason: refusal.ceiling === 'float' ? 'insufficient_float' : 'provider_at_capacity' }
     }
     try {
+      // The client's solo refund leaf has no CLTV: opening before our last claim, they could unroll, refund, then claim the HTLC.
+      const ladder = unilateralLadderFor(arkade.delays, arkadeClaimDeadline(acceptance.htlcLocktime), this.now())
       const serverKey = hex.decode(arkade.serverPubkey)
       const arkadeScript = new CovenantSwapScript({
         receiver: hex.decode(arkade.providerPubkey),
@@ -370,10 +373,10 @@ export class OnchainSendSwapService {
         // never a raw decode of the wire's sha256 form.
         preimageHash: scriptHashFromPaymentHash(request.paymentHash),
         refundLocktime: acceptance.refundLocktime,
-        claimDelay: arkade.delays.unilateralClaimDelay,
+        claimDelay: ladder.unilateralClaimDelay,
         client: hex.decode(request.clientRefundPubkey),
-        clientRefundDelay: arkade.delays.unilateralRefundWithoutReceiverDelay,
-        refundWithoutServerDelay: arkade.delays.unilateralRefundDelay,
+        clientRefundDelay: ladder.unilateralRefundWithoutReceiverDelay,
+        refundWithoutServerDelay: ladder.unilateralRefundDelay,
         // Every quote from here on carries the current, full covenant suite.
         nonInteractiveParameters: {
           emulatorPubkey: hex.decode(arkade.emulatorPubkey),
@@ -415,9 +418,9 @@ export class OnchainSendSwapService {
           refundLocktime: acceptance.refundLocktime,
           providerPubkey: arkade.providerPubkey,
           serverPubkey: arkade.serverPubkey,
-          claimDelay: arkade.delays.unilateralClaimDelay,
-          refundDelay: arkade.delays.unilateralRefundDelay,
-          refundWithoutReceiverDelay: arkade.delays.unilateralRefundWithoutReceiverDelay,
+          claimDelay: ladder.unilateralClaimDelay,
+          refundDelay: ladder.unilateralRefundDelay,
+          refundWithoutReceiverDelay: ladder.unilateralRefundWithoutReceiverDelay,
           pkScript: hex.encode(arkadeScript.pkScript),
           lockupAddress: arkadeScript.address(arkade.hrp, serverKey).encode(),
           refundPkScript: hex.encode(refundPkScript),
