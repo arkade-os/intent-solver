@@ -600,7 +600,9 @@ export class SendSwapService {
     // reads the same headroom and takes it too. Handed back in the
     // `finally`, by which point either the row counts instead or nothing
     // was committed at all.
-    const routingFeeSats = feeEstimate?.feeSats ?? maxRoutingFeeSats(decoded.amountSats)
+    // Unestimated, the quote charged only the configured fee: that is all routing may spend.
+    const routingFeeSats =
+      feeEstimate?.feeSats ?? Math.min(maxRoutingFeeSats(decoded.amountSats), lockupSats - decoded.amountSats)
     const refusal: { ceiling?: 'exposure' | 'float' } = {}
     const reservation = await this.admission.admit({
       pair: RFQ_PAIR_SEND,
@@ -679,10 +681,7 @@ export class SendSwapService {
           clientRefundPubkey: options.clientRefundPubkey,
           receiverPkScript: arkade.receiverPkScript,
           nonInteractiveParameters: true,
-          // Unestimated, the quote charged only the configured fee: that is all routing may spend.
-          quotedRoutingFeeSats:
-            feeEstimate?.feeSats ??
-            (coupled ? undefined : Math.min(maxRoutingFeeSats(decoded.amountSats), lockupSats - decoded.amountSats)),
+          quotedRoutingFeeSats: coupled ? undefined : routingFeeSats,
           rfqId: options.rfqId,
         })
         return { accepted: true, swap, lockupDeadline: acceptance.lockupDeadline }

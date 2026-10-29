@@ -410,6 +410,16 @@ describe('the solver spread', () => {
     expect(ln.payCalls[0]?.maxFeeSats).toBe(outcome.swap.amountSats - AMOUNT)
   })
 
+  it('admits Lightning float against that capped budget, not the 0.5% fallback', async () => {
+    ln.balance = { availableSats: AMOUNT + 7, incomingSats: 0 }
+
+    const outcome = await withFee({ bps: 30, flatSats: 0 }).quote(INVOICE, REFUND_ADDRESS, {
+      clientRefundPubkey: CLIENT_REFUND_PUBKEY,
+    })
+
+    expect(outcome).toMatchObject({ accepted: true, swap: { amountSats: AMOUNT + 7 } })
+  })
+
   it('rejects a billable estimate that exceeds the backend cost', async () => {
     ln.feeEstimate = { feeSats: 10, billableFeeSats: 11 }
 
