@@ -257,7 +257,7 @@ export const holdSettleDeadline = async (paymentHash: string): Promise<number> =
   if (!held) throw new Error(`no accepted HTLC on the solver's hold invoice for ${paymentHash}`)
   const height = await nodeBlockHeight(solverContainer())
   // Blocks to seconds at the repo's own constant, the same conversion
-  // `htlcLocktimeFor` (src/core/onchainReceive.ts) makes for the sibling corridor.
+  // `onchainReceiveFundingBudget` (src/core/onchainReceive.ts) makes for the sibling corridor.
   return nowSeconds() + (held.expiry_height - height) * ONCHAIN_SECONDS_PER_BLOCK
 }
 

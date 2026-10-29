@@ -599,6 +599,22 @@ describe('OnchainReceiveSwapService', () => {
   })
 
   describe('the happy path', () => {
+    it('funds the lockup from coins asked to outlive its own refund deadline', async () => {
+      const outcome = await service.quote(quoteRequest())
+      if (!outcome.accepted) throw new Error('expected acceptance')
+      const horizons: (number | undefined)[] = []
+      const fund = deps.arkadeFake.arkade.fund
+      deps.arkadeFake.arkade.fund = async (params) => {
+        horizons.push(params.horizonSeconds)
+        return fund(params)
+      }
+      deps.onchain.receiveExternal({ address: outcome.swap.onchainAddress, amountSats: 50_000 })
+      deps.onchain.mineBlocks(1)
+
+      await service.tick(outcome.swap.id)
+      expect(horizons).toEqual([outcome.swap.refundLocktime - now])
+    })
+
     it('drives quoted all the way to settled', async () => {
       const outcome = await service.quote(quoteRequest())
       if (!outcome.accepted) throw new Error('expected acceptance')

@@ -26,7 +26,7 @@
  *
  * CLOCKS AND MINING. Same two devices the onchain send edges use, for the same
  * reasons: the QUOTING clock runs {@link BACKDATE} back so the Arkade refund
- * deadline (`quote + MAX_REFUND_HORIZON`) is already three hours matured, the
+ * deadline is already three hours matured, the
  * funding steps are driven on that same clock because
  * `evaluateOnchainReceiveFunding` refuses to fund inside 90 minutes of it, and
  * blocks are MINED explicitly rather than waited for — this corridor blocks on
@@ -53,6 +53,11 @@ import { Address, OutScript } from '@scure/btc-signer'
 import { DefaultVtxo } from '@arkade-os/sdk'
 import { HOUR, MINUTE } from '@arkade-os/solver-core/core/timelocks.js'
 import {
+  DEFAULT_MIN_CONFIRMATIONS,
+  MIN_ARKADE_FUND_WINDOW,
+  onchainReceiveFundingBudget,
+} from '@arkade-os/solver-core/core/onchainReceive.js'
+import {
   OnchainReceiveSwapStore,
   type OnchainReceiveSwapRow,
 } from '@arkade-os/solver-corridors/db/onchainReceiveSwaps.js'
@@ -78,15 +83,10 @@ import {
 const AMOUNT_SATS = Number(process.env.E2E_ONCHAIN_EDGE_SATS ?? 20_000)
 
 /**
- * How far back the quoting clock runs, seconds.
- *
- * `arkadeRefundLocktimeFor` caps the deadline at `quote + MAX_REFUND_HORIZON`
- * (2h), which is the binding term here, so backdating by that plus three hours
- * leaves it three hours matured — clear of the ~50-minute median-time-past lag
- * this stack's 600s block interval produces. Same figure, same reasoning as
- * `receiveLightning.e2e.test.ts`'s own five-hour backdate.
+ * DERIVED, so a change to the deadline cannot leave this test silently not aging it.
+ * Three hours past it clears the ~50-minute median-time-past lag this stack produces.
  */
-const BACKDATE = 2 * HOUR + 3 * HOUR
+const BACKDATE = onchainReceiveFundingBudget(DEFAULT_MIN_CONFIRMATIONS) + MIN_ARKADE_FUND_WINDOW + 3 * HOUR
 
 let arkade: E2eArkade
 let store: OnchainReceiveSwapStore

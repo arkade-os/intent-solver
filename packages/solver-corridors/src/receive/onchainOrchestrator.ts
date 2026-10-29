@@ -708,7 +708,12 @@ export class OnchainReceiveSwapService {
     let txid: string
     const stamp = claimPacketStamp(row.claimPacket, covenantScriptFromRow(receiveCovenantRowFor(row)))
     try {
-      txid = await arkade.fund({ address: row.lockupAddress, amountSats: arkadePayoutSats, stamp })
+      txid = await arkade.fund({
+        address: row.lockupAddress,
+        amountSats: arkadePayoutSats,
+        stamp,
+        horizonSeconds: row.refundLocktime - this.now(),
+      })
     } catch (error) {
       // Retained on an ambiguous failure: stuck for a human, on purpose.
       if (error instanceof FundNotSubmittedError) await store.releaseFundLease(row.id)

@@ -1240,8 +1240,11 @@ solver is exposed between paying the cross side and claiming the client's
 lockup, and the client's escape hatch must not open while the solver's
 outbound commitment can still be live. For solver-funded contracts the
 mirror applies (§ 9: the solver's refund opens before the cross-side
-deadline `E`, minus a settle margin — the onchain receive leg's
-`arkadeRefundLocktimeFor` in `packages/solver-core/src/core/onchainReceive.ts`).
+deadline `E`, minus a settle margin). On `onchain:BTC->arkade:BTC` that
+ordering is the derivation rather than a check on it — `E` IS
+`arkadeRefundLocktimeFor(...) + MIN_SETTLE_WINDOW`, both in
+`packages/solver-core/src/core/onchainReceive.ts`, so the gap cannot be
+narrowed by moving some other constant.
 
 #### 7.1.5 `arkade:BTC<->ethereum:<asset>` — forward spec
 
@@ -1766,13 +1769,14 @@ the invoice) and both refused ordinary payee invoices.
 | ------------------------------ | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `MIN_CLAIM_WINDOW`             | 90 min                    | never fill within 90 min of the client's refund path opening. 90 because the refund CLTV matures against **median-time-past** (BIP-113), which lags wall clock by ~1 h on mainnet — a wall-clock margin smaller than the MTP lag is no margin at all. The same figure is the client-side funding gate ("headroom ≥ 90 min") |
 | `MIN_INVOICE_WINDOW`           | 2 min                     | never pay a BOLT11 that could lapse mid-attempt                                                                                                                                                                                                                                                                             |
-| `MIN_SETTLE_WINDOW`            | 90 min                    | receive direction: never fund unless ≥ 90 min remain before `E`                                                                                                                                                                                                                                                             |
-| `SETTLE_SAFETY_MARGIN`         | 15 min                    | receive direction: the funder's refund opens at least this long before `E`, so funds are recoverable while settlement is still possible                                                                                                                                                                                     |
-| `MAX_REFUND_HORIZON`           | 2 h                       | receive direction: cap on how long one swap may park solver capital (`refund_locktime ≤ now + 2 h`)                                                                                                                                                                                                                         |
+| `MIN_SETTLE_WINDOW`            | 90 min                    | receive direction: never fund unless ≥ 90 min remain before `E`. On `onchain:BTC->arkade:BTC` it additionally **defines** that gap — `E` is derived as `refund_locktime + MIN_SETTLE_WINDOW`, so the solver's L1 claim window is 90 min at every confirmation depth                                                        |
+| `SETTLE_SAFETY_MARGIN`         | 15 min                    | receive direction: the funder's refund opens at least this long before `E`, so funds are recoverable while settlement is still possible. A floor, not a target — the onchain receive leg leaves `MIN_SETTLE_WINDOW` there                                                                                                  |
+| `MAX_REFUND_HORIZON`           | 2 h                       | `lightning:BTC->arkade:BTC` only: cap on how long one swap may park solver capital (`refund_locktime ≤ now + 2 h`). The onchain receive leg derives `refund_locktime` from its client funding budget instead and carries no cap                                                                                            |
+| `SLOW_BLOCK_ALLOWANCE`         | 30 min                    | `onchain:BTC->arkade:BTC`: room for one long block inside the client's funding budget, `15 min + 2 · min_confirmations · 600 s + 30 min`                                                                                                                                                                                     |
 | `REFUND_SAFETY_MARGIN`         | 2 h                       | send direction: margin on top of the worst-case cross-side HTLC lifetime before the client's refund opens                                                                                                                                                                                                                   |
 | route CLTV budget              | 432 blocks @ 10 min/block | conservative over-estimate of route-added CLTV when deriving `refund_locktime` from an invoice's final CLTV delta                                                                                                                                                                                                           |
 | `ONCHAIN_CLAIM_MARGIN_SECONDS` | 90 min                    | onchain send: the client's claim-window floor, doubled into `htlcLocktimeFor` so the client's own `claim_window_too_short` guardrail passes with margin                                                                                                                                                                     |
-| `ONCHAIN_ORDER_MARGIN_SECONDS` | 2 h                       | onchain corridors: the timelock-ordering margin — the client's Arkade refund opens at least this long after the onchain HTLC's deadline (send), and the solver's Arkade refund opens before the HTLC deadline minus margin (receive)                                                                                        |
+| `ONCHAIN_ORDER_MARGIN_SECONDS` | 2 h                       | `arkade:BTC->onchain:BTC`: the timelock-ordering margin — the client's Arkade refund opens at least this long after the onchain HTLC's deadline. The receive direction orders the same two deadlines the other way round and uses `MIN_SETTLE_WINDOW` for the gap                                                          |
 | `MAX_MIN_CONFIRMATIONS`        | 6                         | cap on the `min_confirmations` a quote may carry                                                                                                                                                                                                                                                                            |
 | `ONCHAIN_DUST_SATS`            | 330                       | onchain corridors: a payout below the taproot dust floor is unquotable (`pricing_unavailable`) and a claim/refund spend that would leave a sub-dust output is refused rather than broadcast; the send corridor additionally reserves the refund spend's own fee at quote time                                               |
 
@@ -1781,6 +1785,15 @@ Additionally:
 - `refund_locktime` for a client-funded Lightning send is
   `max(now + (final_cltv + 432) · 600 + 2 h, now + unilateral_claim_delay + 2 h)`
   — the second bound covers the solver's server-independent recourse window.
+- `refund_locktime` and `htlc_locktime` for a solver-funded
+  `onchain:BTC->arkade:BTC` are both derived from the client's funding budget
+  `B = 15 min + 2 · min_confirmations · 600 s + 30 min`:
+  `refund_locktime = now + B + 90 min` and `htlc_locktime = refund_locktime +
+  MIN_SETTLE_WINDOW`. Since the solver stops funding its Arkade side 90 min
+  before `refund_locktime`, `B` is exactly how long the client has to broadcast
+  **and** confirm — twice the expected confirmation time plus a slow block,
+  because inter-block intervals are exponential. The cost is capital parked
+  longer and a later client refund on a failed swap; see `docs/deadlines.md`.
 - **Exposure cap.** The solver bounds the sum of amounts across all
   non-terminal swaps and refuses new quotes above it with reason
   `exposure_cap`. This is the only invariant with **no action-time

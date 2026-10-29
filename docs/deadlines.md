@@ -48,7 +48,7 @@ who funded what, which is why `arkadeRefundLocktimeFor` and
 
 ### 90 minutes — three different reasons, and they are not the same quantity
 
-The single most confusing thing in this codebase: **90 minutes appears five
+The single most confusing thing in this codebase: **90 minutes appears six
 times for three unrelated reasons.** They are not aliases and must be free to
 move independently.
 
@@ -56,9 +56,10 @@ move independently.
 |---|---|---|
 | `MIN_CLAIM_WINDOW` | `core/send.ts` | Timelocks mature against **median-time-past**, which lags wall clock by ~1 h. A margin smaller than the lag is no margin. |
 | `LOCKUP_RECOVERY_MTP_MARGIN_SECONDS` | `arkade/vtxoLifecycle.ts` | The same MTP lag, applied to recovery. Deliberately the same figure. |
-| `MIN_SETTLE_WINDOW` | `core/receive.ts`, `core/onchainReceive.ts` | Operational, not MTP: time to **notice** a preimage, settle, and retry. |
+| `MIN_SETTLE_WINDOW` | `core/receive.ts`, `core/onchainReceive.ts` | Operational, not MTP: time to **notice** a preimage, settle, and retry. On the onchain receive leg it is also the whole L1 claim window — see "One derivation, four deadlines". |
 | `ONCHAIN_CLAIM_MARGIN_SECONDS` | `core/onchainSend.ts` | Mirrors the client SDK's constant **by name and value**, so the two sides visibly agree. |
 | `MIN_ONCHAIN_FUND_WINDOW` | `core/onchainSend.ts` | Re-checked immediately before funding, not at quote time. |
+| `MIN_ARKADE_FUND_WINDOW` | `core/onchainReceive.ts` | The same, on the onchain receive leg — and the SDK's own `MIN_HEADROOM_SECONDS`, so the two sides stop funding together. |
 
 > If you change one of these because "90 seems long", check which reason you are
 > arguing with. Three of them will not care.
@@ -94,8 +95,7 @@ number's job is to agree with whoever derives the same script.
 |---|---|---|
 | `REFUND_SAFETY_MARGIN` | `core/send.ts` | Margin on top of the **worst-case HTLC lifetime** before the client's refund may open. Not derived from the 90 above. |
 | `MAX_LOCKUP_TIMEOUT` | `core/send.ts` | `= REFUND_SAFETY_MARGIN`. A funding window longer than the margin would quote a deadline the refund cannot sit behind. |
-| `MAX_REFUND_HORIZON` | `core/receive.ts` | The **Lightning** receive leg's own refund deadline. Also the horizon `selectLockupFunding` prefers coins to outlive. |
-| `MAX_REFUND_HORIZON` | `core/onchainReceive.ts` | The **onchain** receive leg's. A separate declaration supplying a different quantity — see "Two horizons, not one". |
+| `MAX_REFUND_HORIZON` | `core/receive.ts` | The **Lightning** receive leg's own refund deadline, and the horizon `selectLockupFunding` prefers that leg's coins to outlive. The onchain receive leg passes the time left to its own refund instead. |
 | `ONCHAIN_ORDER_MARGIN_SECONDS` | `core/onchainSend.ts` | Ordering margin between the two legs' deadlines. |
 | `EVM_ORDER_MARGIN_SECONDS` | `core/evmSend.ts` | Same role on the EVM corridors. |
 
@@ -111,8 +111,15 @@ number's job is to agree with whoever derives the same script.
 |---|---|---|
 | `DEFAULT_LOCKUP_TIMEOUT` | `core/send.ts` | How long a send quote stays fundable. Operator-tunable via `LOCKUP_TIMEOUT_SECONDS`. |
 | `DEFAULT_ONCHAIN_LOCKUP_TIMEOUT` | `core/onchainSend.ts` | The same, for the onchain send leg. |
-| `DEFAULT_ONCHAIN_RECEIVE_LOCKUP_TIMEOUT` | `core/onchainReceive.ts` | The same, client-funded side. |
-| `SETTLE_SAFETY_MARGIN` | `core/receive.ts`, `core/onchainReceive.ts` | Slack between the solver's Arkade refund and the cross-side deadline. |
+| `DEFAULT_ONCHAIN_RECEIVE_LOCKUP_TIMEOUT` | `core/onchainReceive.ts` | The same, client-funded side. Also the first term of `onchainReceiveFundingBudget`. |
+| `SETTLE_SAFETY_MARGIN` | `core/receive.ts`, `core/onchainReceive.ts` | Slack between the solver's Arkade refund and the cross-side deadline. The onchain receive leg now leaves `MIN_SETTLE_WINDOW` there instead, so its copy is the protocol floor that gap clears rather than the gap. |
+
+### 30 minutes
+
+| Constant | Where | Why |
+|---|---|---|
+| `UNILATERAL_RECOURSE_MARGIN` | `core/receive.ts` | Room to run an on-chain unilateral exit before `E`. Reasoned, not measured — no exit has been driven to completion on any network. |
+| `SLOW_BLOCK_ALLOWANCE` | `core/onchainReceive.ts` | One long block, on top of the doubled confirmation wait in `onchainReceiveFundingBudget`. |
 
 ### 20 minutes
 
@@ -161,41 +168,69 @@ late, it never reached the cap before the deadline.
 | `MAX_LOCKUP_TIMEOUT` | `= REFUND_SAFETY_MARGIN` |
 | `DEFAULT_HOLD_INVOICE_WINDOW` | `= MAX_REFUND_HORIZON - MIN_CLAIM_WINDOW`, the `core/receive.ts` copy |
 | `refundLocktimeFor(...)` | `max(worstCaseHtlcBlocks * 600 + REFUND_SAFETY_MARGIN, unilateralClaimDelay + REFUND_SAFETY_MARGIN)` |
-| `htlcLocktimeFor(...)` | `now + minConfirmations * 600 + 2 * ONCHAIN_CLAIM_MARGIN_SECONDS` |
+| `htlcLocktimeFor(...)`, `core/onchainSend.ts` | `now + minConfirmations * 600 + 2 * ONCHAIN_CLAIM_MARGIN_SECONDS` |
+| `onchainReceiveFundingBudget(c)` | `= DEFAULT_ONCHAIN_RECEIVE_LOCKUP_TIMEOUT + 2 * c * 600 + SLOW_BLOCK_ALLOWANCE` |
+| `arkadeRefundLocktimeFor(c, now)`, `core/onchainReceive.ts` | `now + onchainReceiveFundingBudget(c) + MIN_ARKADE_FUND_WINDOW` |
+| `htlcLocktimeFor(c, now)`, `core/onchainReceive.ts` | `arkadeRefundLocktimeFor(c, now) + MIN_SETTLE_WINDOW` |
 
 **Prefer adding to this table over adding to the ones above.** A derived value
 cannot drift from the quantity it depends on; two hand-picked numbers can, and
 have — see the history note at the end.
 
-### Two horizons, not one
+### One derivation, four deadlines
 
-`MAX_REFUND_HORIZON` is **declared twice, and the two are independent.** They
-hold the same value today and `test/interop/constantsParity.test.ts` pins them
-to each other, so neither can move alone in silence — but that is a tripwire,
-not a rule. Diverging them is a legitimate choice; it just has to be a deliberate
-one, because **the two do not buy the same thing.**
+The `onchain:BTC->arkade:BTC` leg builds every deadline from one quantity and
+stacks the rest on top of it, so no gap is anybody's leftover (#160):
 
-| declaration | what it supplies | raising it |
-|---|---|---|
-| `core/receive.ts` | the payer's window, via `DEFAULT_HOLD_INVOICE_WINDOW` — 30 min today — and the minimum final CLTV the minted invoice demands | more time for a human paying by hand; costs float eligibility and narrows the routes that can pay |
-| `core/onchainReceive.ts` | the solver's own **L1 claim window**: what is left after the cap out-binds `htlcLocktime - SETTLE_SAFETY_MARGIN`, which it does across the whole reachable input range | **shrinks** that window, second for second |
+```
+budget = DEFAULT_ONCHAIN_RECEIVE_LOCKUP_TIMEOUT + 2*c*600 + SLOW_BLOCK_ALLOWANCE
+R      = now + budget + MIN_ARKADE_FUND_WINDOW          the solver's Arkade refund
+E      = R   + MIN_SETTLE_WINDOW                        the client's L1 CLTV
+```
 
-The second is the one whose miss costs real money rather than a failed swap:
-past it the lockup has been refunded while the counterparty can still sweep the
-HTLC.
+| `min_confirmations` | funding budget | `R` | `E` | L1 claim window `E - R` |
+|---|---|---|---|---|
+| 1 (default) | 65 min | +2 h 35 m | +4 h 05 m | 90 min |
+| 3 | 105 min | +3 h 15 m | +4 h 45 m | 90 min |
+| 6 (max) | 165 min | +4 h 15 m | +5 h 45 m | 90 min |
 
-| onchain horizon | L1 claim window at 1 conf (default) | at 6 conf (max) |
-|---|---|---|
-| 2 h — today | 70 min | 120 min |
-| 2 h 55 m | 15 min — the `SETTLE_SAFETY_MARGIN` floor | 65 min |
-| 3 h | 15 min | 60 min |
-| 4 h | 15 min | 15 min |
+**The budget is what the client gets**, because the solver funds Arkade only
+while `now < R - MIN_ARKADE_FUND_WINDOW`. It has to cover the client's own
+broadcast window *and* the confirmation wait — at twice the expected time,
+since inter-block intervals are exponential and a budget sized to the mean
+loses a coin flip. Before #160 it was 30 minutes whatever the depth, which one
+slow block beat at the default and three confirmations could not fit at all;
+each miss stranded the client's L1 funds until `E` and cost them a refund fee.
 
-At the default depth the window hits the floor at **2 h 55 m**, not gradually at
-4 h, so any raise past that point leaves this leg `SETTLE_SAFETY_MARGIN` and
-nothing else. Note also that 70 min is already under this module's own
-`MIN_SETTLE_WINDOW` of 90. That contradiction is open (#160), and whether the
-Lightning horizon should rise for payer UX is open alongside it (#161).
+**`E - R` is what the solver gets**, and it is the one deadline on this leg
+whose miss costs real money rather than a failed swap: past it the lockup has
+been refunded while the counterparty can still sweep the HTLC. It was 70 min at
+the default depth — under this module's own `MIN_SETTLE_WINDOW`, with no L1
+retry or fee-bump room to make up the difference — because it was whatever a
+`MAX_REFUND_HORIZON` cap happened to leave over. That declaration is gone; the
+floor is the formula.
+
+**`E - R` also bounds a client that unrolls the lockup.** The unroll restarts
+both solo CSVs at a confirmation the client times. arkd co-signs our
+`refundWithoutReceiver` on L1 only until the client's own exit is 300 s from
+opening, and our solo refund opens `SOLO_REFUND_HEADROOM_SECONDS` (4096 s)
+after the client's solo claim. If `E - R` is under 4396 s, the client can time
+the unroll so arkd stops co-signing before `R`. It then refunds the HTLC at `E`
+and still claims the lockup before our solo leaf opens. The old 70 min was
+196 s short of this; 90 min clears it by 1,004 s.
+`test/core/onchainReceive.test.ts` pins the bound.
+
+What it costs: the solver's capital can sit in an unclaimed lockup until `R`,
+which at one confirmation is ≈145 min after funding against a ten-minute block
+(up from ≈110), and a failed swap's client refund opens at `E` — 4 h 05 m after
+the quote rather than 3 h 10 m. Both are the price of not failing honest swaps.
+
+`MAX_REFUND_HORIZON` is now declared once, in `core/receive.ts`, where it is
+the Lightning payer's window via `DEFAULT_HOLD_INVOICE_WINDOW` and that leg's
+coin-selection horizon. This leg passes `selectLockupFunding` the time left
+until its own `R` instead, so it prefers coins that outlive this swap's
+refund; it still warns rather than refuses when none do. Whether the Lightning
+horizon should rise for payer UX is open (#161).
 
 The evidence #161 asked for is now collected rather than argued: every Lightning
 receive arm writes a `cltv headroom <E - now>s — <spare>s spare` note against its
@@ -233,13 +268,15 @@ still be refused by every client, because the client applies its own:
 | Client gate | Demands |
 |---|---|
 | `assertReceivable` | `refund_locktime - min(invoice.expiresAt, valid_until) >= 1800s` |
-| `assertFundable` | its own headroom check, written in terms of `ONCHAIN_CLAIM_MARGIN_SECONDS` |
+| `assertFundable` | `refund_locktime - now >= MIN_HEADROOM_SECONDS` (90 min), plus an L1 claim-window check in terms of `ONCHAIN_CLAIM_MARGIN_SECONDS` |
 
 `core/onchainSend.ts` sizes `htlcLocktimeFor` against the client's guardrail
 explicitly — *"passes with margin to spare, not right at the boundary"* — and
-that is the discipline to copy. Nothing in this repo currently runs a client
-gate against a quote we produced; that is the check that would have caught the
-bug below before a user did.
+that is the discipline to copy. `test/interop/clientGates.test.ts` runs the
+shipped gates against quotes built by our own wire builders, on every corridor
+that has one; that is the check that would have caught the bug below before a
+user did, and it is why a change to any quoted deadline belongs in that file
+too.
 
 ---
 
