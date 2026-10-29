@@ -2,11 +2,12 @@
 
 import { describe, it, expect } from 'vitest'
 import {
-  FEE_BUMP_FACTOR,
+  FEE_BUMP_ALL_IN_SECONDS,
   FEE_BUMP_INTERVAL_SECONDS,
+  FEE_BUMP_RAMP_SECONDS,
   affordableFee,
   outcomeOfAny,
-  replacementFeeRate,
+  urgencyFeeRate,
 } from '@arkade-os/solver-rails/onchain/feeBump.js'
 import type { OnchainTxOutcome } from '@arkade-os/solver-core/ports/onchain.js'
 
@@ -21,26 +22,45 @@ const backendOver = (outcomes: Record<string, OnchainTxOutcome>) => {
   }
 }
 
-describe('replacementFeeRate', () => {
-  const last = { feeRate: 10, broadcastAt: 1_800_000_000 }
+describe('urgencyFeeRate', () => {
+  const deadline = 1_800_000_000
+  const estimate = 5
+  const cap = 650
 
-  it('refuses a replacement before the interval is up', () => {
-    expect(replacementFeeRate(last, 50, last.broadcastAt)).toBeNull()
-    expect(replacementFeeRate(last, 50, last.broadcastAt + FEE_BUMP_INTERVAL_SECONDS - 1)).toBeNull()
+  it('only follows the estimate while the deadline is further than the ramp', () => {
+    expect(urgencyFeeRate(estimate, cap, deadline, deadline - FEE_BUMP_RAMP_SECONDS)).toBe(estimate)
+    expect(urgencyFeeRate(estimate, cap, deadline, deadline - 7 * 24 * 3600)).toBe(estimate)
   })
 
-  it('replaces at the factor once the interval is up, even with the estimate unmoved', () => {
-    const now = last.broadcastAt + FEE_BUMP_INTERVAL_SECONDS
-    expect(replacementFeeRate(last, last.feeRate, now)).toBe(last.feeRate * FEE_BUMP_FACTOR)
+  it('pays everything above dust inside the last window', () => {
+    expect(urgencyFeeRate(estimate, cap, deadline, deadline - FEE_BUMP_ALL_IN_SECONDS)).toBe(cap)
+    expect(urgencyFeeRate(estimate, cap, deadline, deadline + 3600)).toBe(cap)
   })
 
-  it('follows the estimate when the mempool has run past the factor', () => {
-    expect(replacementFeeRate(last, 200, last.broadcastAt + FEE_BUMP_INTERVAL_SECONDS)).toBe(200)
+  it('climbs geometrically between the two, strictly upward', () => {
+    const halfway = deadline - (FEE_BUMP_RAMP_SECONDS + FEE_BUMP_ALL_IN_SECONDS) / 2
+    expect(urgencyFeeRate(estimate, cap, deadline, halfway)).toBeCloseTo(Math.sqrt(estimate * cap))
+    const rates = [6, 5, 4, 3].map((steps) =>
+      urgencyFeeRate(estimate, cap, deadline, deadline - steps * FEE_BUMP_INTERVAL_SECONDS),
+    )
+    expect(rates).toEqual([...rates].sort((a, b) => a - b))
+    expect(new Set(rates).size).toBe(rates.length)
   })
 
-  it('always clears the previous rate by a whole sat/vB', () => {
-    const tiny = { feeRate: 1, broadcastAt: last.broadcastAt }
-    expect(replacementFeeRate(tiny, 1, tiny.broadcastAt + FEE_BUMP_INTERVAL_SECONDS)).toBe(2)
+  it('never asks more than the cap, even when the estimate does', () => {
+    expect(urgencyFeeRate(1_000, cap, deadline, deadline - 7 * 24 * 3600)).toBe(cap)
+  })
+
+  it('ramps from the relay minimum when the estimator answers zero', () => {
+    const halfway = deadline - (FEE_BUMP_RAMP_SECONDS + FEE_BUMP_ALL_IN_SECONDS) / 2
+    expect(urgencyFeeRate(0, cap, deadline, halfway)).toBeCloseTo(Math.sqrt(cap))
+  })
+
+  it('reaches the cap on the 20-minute cadence however late the spend starts inside the ramp', () => {
+    // The receive leg's worst case: P learned 70 minutes before htlc_locktime.
+    const start = deadline - 70 * 60
+    const bumps = [0, 1, 2].map((n) => start + n * FEE_BUMP_INTERVAL_SECONDS)
+    expect(bumps.some((at) => urgencyFeeRate(estimate, cap, deadline, at) === cap)).toBe(true)
   })
 })
 
