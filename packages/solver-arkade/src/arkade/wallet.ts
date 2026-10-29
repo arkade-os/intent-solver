@@ -82,17 +82,6 @@ export interface ArkadeWalletConfig {
   isMainnet: boolean
   arkadeHrp: string
   /**
-   * Lowers the SDK's minimum accepted checkpoint exit delay, in seconds.
-   *
-   * Unset leaves the SDK's own per-network floor — 86400 off regtest, 1200 on
-   * it — which is what a deployment should want: the floor bounds how long our
-   * server-independent recourse takes if the Arkade Service stops cooperating.
-   * It exists because a hosted test Service may advertise a far shorter delay
-   * for its own convenience (mutinynet advertises 4096), and `Wallet.create`
-   * refuses to build against it at all. Config decides when that is allowed.
-   */
-  minCheckpointExitDelaySeconds?: number
-  /**
    * Believe THIS unilateral exit delay instead of the one the server advertises
    * at `/v1/info`, in seconds. Unset means believe the server.
    *
@@ -277,14 +266,7 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
       walletRepository: new SQLiteWalletRepository(executor),
       contractRepository: new SQLiteContractRepository(executor),
     },
-    // Passing undefined is safe and is NOT the same as passing a hole: the SDK
-    // folds this into its policy only when set (`!== void 0` in the SDK's
-    // `Wallet.create`), so unset keeps the per-network floor.
-    // Spreading it conditionally here would read as more careful and do the
-    // same thing; the explicit undefined is what makes that checkable.
-    minCheckpointExitDelaySeconds:
-      config.minCheckpointExitDelaySeconds === undefined ? undefined : BigInt(config.minCheckpointExitDelaySeconds),
-    // Safe for the same reason, by a different operator: the SDK takes
+    // Passing undefined is safe and is NOT the same as passing a hole: the SDK takes
     // `config.onchainProvider || new EsploraProvider(default)` (SDK
     // `ReadonlyWallet.setupWalletConfig`), so an explicit undefined falls through
     // to the per-network default rather than blanking the provider.
