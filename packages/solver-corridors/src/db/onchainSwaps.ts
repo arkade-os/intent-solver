@@ -37,6 +37,8 @@ import { OnchainSendMachine, type OnchainSendSwapState } from '../machines/oncha
 
 export type { OnchainSendSwapState }
 
+export const FUND_LEASE_TTL_SECONDS = 10 * 60
+
 const TRANSITION_COLUMNS = new Set([
   'onchain_lockup_txid',
   'onchain_lockup_vout',
@@ -161,6 +163,8 @@ export interface OnchainSendSwapRow {
    * @see OnchainSendSwapStore.claimFundLease
    */
   fundStartedAt: number | null
+  /** The signed funding, recorded before it is broadcast: every later pass resends this one. */
+  fundingTx: string | null
 }
 
 const SEND_ONCHAIN_SWAP_COLUMNS = `
@@ -206,6 +210,7 @@ const SEND_ONCHAIN_SWAP_COLUMNS = `
   failure_reason                TEXT,
   rfq_id                        TEXT,
   fund_started_at               INTEGER,
+  funding_tx                    TEXT,
   unrolled_claim                TEXT,
   lockup_outpoints              TEXT
 `
@@ -281,6 +286,7 @@ const toRow = (raw: Raw): OnchainSendSwapRow => ({
   failureReason: raw.failure_reason === null ? null : String(raw.failure_reason),
   rfqId: text(raw.rfq_id),
   fundStartedAt: numberOrNull(raw.fund_started_at),
+  fundingTx: text(raw.funding_tx),
   unrolledClaim: text(raw.unrolled_claim),
   lockupOutpoints: text(raw.lockup_outpoints),
 })
@@ -410,6 +416,7 @@ export class OnchainSendSwapStore extends BaseSwapStore<OnchainSendSwapRow, Onch
       ['onchain_refund_prior_txids', 'TEXT'],
       ['unrolled_claim', 'TEXT'],
       ['lockup_outpoints', 'TEXT'],
+      ['funding_tx', 'TEXT'],
     ])
   }
 
@@ -428,8 +435,24 @@ export class OnchainSendSwapStore extends BaseSwapStore<OnchainSendSwapRow, Onch
     return Number(row?.total ?? 0)
   }
 
+  /** Expires: a row taken over after a crash only resends the `funding_tx` it recorded. */
   override async claimFundLease(id: string, from: OnchainSendSwapState): Promise<boolean> {
-    return super.claimFundLease(id, from)
+    return super.claimFundLease(id, from, this.now() - FUND_LEASE_TTL_SECONDS)
+  }
+
+  /** Never over a recorded funding: a worker past an expired lease may be broadcasting it. */
+  async refuseUnrecorded(id: string, reason: string): Promise<boolean> {
+    return this.transitionWhere(id, 'funding_onchain', 'refused', { failure_reason: reason }, 'funding_tx IS NULL')
+  }
+
+  /** Single-winner, so a worker that loses it never broadcasts the funding it signed. */
+  async recordFundingTx(id: string, tx: string): Promise<boolean> {
+    const result = await this.driver.run(
+      `UPDATE send_onchain_swap SET funding_tx = ?, updated_at = ?
+       WHERE id = ? AND state = 'funding_onchain' AND funding_tx IS NULL`,
+      [tx, this.now(), id],
+    )
+    return result.changes === 1
   }
 
   override async releaseFundLease(id: string): Promise<void> {

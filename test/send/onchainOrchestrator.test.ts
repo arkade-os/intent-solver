@@ -23,6 +23,7 @@ import {
 } from '@arkade-os/solver-core/core/onchainSend.js'
 import type { Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import {
+  FUND_LEASE_TTL_SECONDS,
   OnchainSendSwapStore,
   type OnchainSendSwapState,
   type OnchainSendSwapRow,
@@ -614,8 +615,8 @@ describe('OnchainSendSwapService', () => {
     expect(row.fundingTxid).toBeTruthy()
   })
 
-  it('does not fund the onchain HTLC twice when the process dies between fund() and the persist', async () => {
-    // The crash-safety hole this guards: onchain.fund() broadcasts a real,
+  it('does not fund the onchain HTLC twice when the process dies between the broadcast and the persist', async () => {
+    // The crash-safety hole this guards: the funding broadcast is a real,
     // irreversible transaction and THEN the process dies (or the store write
     // fails) before funding_txid reaches disk. findRecoverable() hands the row
     // straight back in funding_onchain with a null txid — which, from the row
@@ -655,14 +656,14 @@ describe('OnchainSendSwapService', () => {
     localDeps.outputs.set(outcome.swap.pkScript, [{ txid: 'lockup-tx', vout: 0, value: 50_000 }])
 
     const funded: { txid: string; vout: number }[] = []
-    const originalFund = localDeps.onchain.fund.bind(localDeps.onchain)
-    localDeps.onchain.fund = async (params) => {
-      const result = await originalFund(params)
+    const originalSign = localDeps.onchain.signFunding.bind(localDeps.onchain)
+    localDeps.onchain.signFunding = async (params) => {
+      const result = await originalSign(params)
       funded.push(result)
       return result
     }
 
-    // Kill the persist, not the broadcast: fund() runs for real and its output
+    // Kill the persist, not the broadcast: the funding goes out for real and its output
     // lands on the fake chain, then the transition that would have recorded it
     // throws. That is precisely the window the money is exposed in.
     const originalTransition = localDeps.store.transition.bind(localDeps.store)
@@ -703,7 +704,7 @@ describe('OnchainSendSwapService', () => {
    * exercises that set and nothing else. `inFlight` is per-process and is
    * exactly what a second worker, a restart, or the Go rewrite removes.
    *
-   * Without the lease both instances reach `onchain.fund` and both broadcast an
+   * Without the lease both instances reach `onchain.signFunding` and both broadcast an
    * L1 payment to the client's HTLC address, from different UTXOs, because coin
    * selection is per-process. The compare-and-swap on `state` afterwards gates
    * RECORDING, not spending.
@@ -743,10 +744,10 @@ describe('OnchainSendSwapService', () => {
     await deps.store.transition(outcome.swap.id, 'funded', 'funding_onchain', {})
 
     const funded: string[] = []
-    const originalFund = deps.onchain.fund.bind(deps.onchain)
-    deps.onchain.fund = async (params) => {
+    const originalSign = deps.onchain.signFunding.bind(deps.onchain)
+    deps.onchain.signFunding = async (params) => {
       funded.push(params.address)
-      return originalFund(params)
+      return originalSign(params)
     }
 
     // Started together, deliberately not awaited in turn: awaiting the first
@@ -769,7 +770,7 @@ describe('OnchainSendSwapService', () => {
       })
       if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
       deps.outputs.set(outcome.swap.pkScript, [{ txid: 'lockup-tx', vout: 0, value: 50_000 }])
-      const fund = vi.spyOn(deps.onchain, 'fund')
+      const fund = vi.spyOn(deps.onchain, 'signFunding')
       return { swap: outcome.swap, fund }
     }
 
@@ -874,12 +875,13 @@ describe('OnchainSendSwapService', () => {
       await deps.store.transition(outcome.swap.id, 'quoted', 'funded', {})
       await deps.store.transition(outcome.swap.id, 'funded', 'funding_onchain', {})
       const fundForReal = deps.onchain.fund.bind(deps.onchain)
+      const signForReal = deps.onchain.signFunding.bind(deps.onchain)
       const attempts: string[] = []
-      deps.onchain.fund = async (params) => {
+      deps.onchain.signFunding = async (params) => {
         attempts.push(params.address)
         throw new Error('insufficient funds: 0 sat available')
       }
-      return { row: await deps.store.get(outcome.swap.id), attempts, fundForReal }
+      return { row: await deps.store.get(outcome.swap.id), attempts, fundForReal, signForReal }
     }
 
     it('retries while the client could still claim what would be funded', async () => {
@@ -891,10 +893,10 @@ describe('OnchainSendSwapService', () => {
     })
 
     it('re-reads the lockup before a retry, and parks the row once it has gone', async () => {
-      const { row, attempts, fundForReal } = await stalled()
+      const { row, attempts, signForReal } = await stalled()
       await expect(service.tick(row.id)).rejects.toThrow('insufficient funds')
       deps.outputs.delete(row.pkScript)
-      deps.onchain.fund = fundForReal
+      deps.onchain.signFunding = signForReal
       const parked = await service.tick(row.id)
       expect(attempts).toHaveLength(1)
       expect(parked.state).toBe('stuck')
@@ -903,8 +905,8 @@ describe('OnchainSendSwapService', () => {
     })
 
     it('hands the lease back when that lockup read fails, so the next tick still funds', async () => {
-      const { row, fundForReal } = await stalled()
-      deps.onchain.fund = fundForReal
+      const { row, signForReal } = await stalled()
+      deps.onchain.signFunding = signForReal
       vi.spyOn(deps.arkade, 'findLockups').mockRejectedValueOnce(new Error('indexer 429'))
       await expect(service.tick(row.id)).rejects.toThrow('indexer 429')
       expect((await service.tick(row.id)).state).toBe('awaiting_claim')
@@ -941,14 +943,8 @@ describe('OnchainSendSwapService', () => {
       expect(attempts).toHaveLength(0)
     })
 
-    /**
-     * The deadline runs AFTER the fund lease. Parking a row a second worker is
-     * inside `fund()` on would lose that worker's compare-and-swap, leaving the
-     * sats out with no `funding_txid` — the outpoint `reclaimOnchainHtlc` needs.
-     * Two instances because `tick()`'s `inFlight` set hides this within one.
-     */
-    it('does not park a row another worker is already funding, deadline or not', async () => {
-      const second = new OnchainSendSwapService({
+    const secondWorker = () =>
+      new OnchainSendSwapService({
         store: deps.store,
         onchain: deps.onchain,
         arkade: deps.arkade,
@@ -961,6 +957,70 @@ describe('OnchainSendSwapService', () => {
         refundDestinationScript,
         now: clock,
       })
+
+    /** A first worker holding the lease inside `signFunding` until `release()`. */
+    const signingHeld = async ({ row, signForReal }: Awaited<ReturnType<typeof stalled>>) => {
+      let entered!: () => void
+      let release!: () => void
+      const inSign = new Promise<void>((resolve) => (entered = resolve))
+      const held = new Promise<void>((resolve) => (release = resolve))
+      deps.onchain.signFunding = async (params) => {
+        entered()
+        await held
+        return signForReal(params)
+      }
+      const first = service.tick(row.id)
+      await inSign
+      deps.onchain.signFunding = signForReal
+      return { row, first, release }
+    }
+
+    /** Two instances because `tick()`'s `inFlight` set hides this within one. */
+    it('does not park a row another worker holds a live lease on, deadline or not', async () => {
+      const stall = await stalled()
+      const { row } = stall
+      now = row.htlcLocktime - claimWindow(row) - 60
+      const { first, release } = await signingHeld(stall)
+      now += 60
+
+      await secondWorker().tick(row.id)
+      expect((await deps.store.get(row.id)).state).toBe('funding_onchain')
+
+      release()
+      await first
+      const settled = await deps.store.get(row.id)
+      expect(settled.state).toBe('awaiting_claim')
+      expect(settled.fundingTxid).toBeTruthy()
+    })
+
+    it('takes over a lease its holder left behind once the lease is older than its TTL', async () => {
+      const { row, signForReal } = await stalled()
+      deps.onchain.signFunding = signForReal
+      await deps.driver.run('UPDATE send_onchain_swap SET fund_started_at = ? WHERE id = ?', [now, row.id])
+
+      now += FUND_LEASE_TTL_SECONDS - 1
+      expect((await service.tick(row.id)).state).toBe('funding_onchain')
+      now += 1
+      const funded = await service.tick(row.id)
+      expect(funded.state).toBe('awaiting_claim')
+      expect(await deps.onchain.findOutputs({ address: row.onchainAddress })).toHaveLength(1)
+    })
+
+    it('never broadcasts a funding it signed after another worker recorded its own', async () => {
+      const { row, first, release } = await signingHeld(await stalled())
+      now += FUND_LEASE_TTL_SECONDS
+      // The second worker's funding goes out and it dies before the move out of funding_onchain.
+      vi.spyOn(deps.store, 'transition').mockRejectedValueOnce(new Error('simulated crash after broadcast'))
+      await expect(secondWorker().tick(row.id)).rejects.toThrow('simulated crash after broadcast')
+      const [paid] = await deps.onchain.findOutputs({ address: row.onchainAddress })
+
+      release()
+      await first
+      expect(await deps.onchain.findOutputs({ address: row.onchainAddress })).toHaveLength(1)
+      expect((await service.tick(row.id)).fundingTxid).toBe(paid!.txid)
+    })
+
+    it('does not refuse over a funding another worker recorded after its lease expired', async () => {
       const outcome = await service.quote({
         paymentHash,
         amountSats: 50_000,
@@ -969,35 +1029,65 @@ describe('OnchainSendSwapService', () => {
         clientRefundPubkey,
       })
       if (!outcome.accepted) throw new Error('expected acceptance')
-      deps.outputs.set(outcome.swap.pkScript, [{ txid: 'lockup-tx', vout: 0, value: 50_000 }])
+      const full = [{ txid: 'lockup-tx', vout: 0, value: 50_000 }]
+      deps.outputs.set(outcome.swap.pkScript, full)
       await deps.store.transition(outcome.swap.id, 'quoted', 'funded', {})
-      await deps.store.transition(outcome.swap.id, 'funded', 'funding_onchain', {})
-      const row = await deps.store.get(outcome.swap.id)
 
-      let entered!: () => void
-      let release!: () => void
-      const inFund = new Promise<void>((resolve) => (entered = resolve))
-      const held = new Promise<void>((resolve) => (release = resolve))
-      const originalFund = deps.onchain.fund.bind(deps.onchain)
-      deps.onchain.fund = async (params) => {
-        entered()
-        await held
-        return originalFund(params)
-      }
+      // The fresh worker's re-read after the lease stalls, and comes back to a lockup that has gone.
+      let reread!: () => void
+      let goneNow!: (outputs: typeof full) => void
+      const stalledRead = new Promise<void>((resolve) => (reread = resolve))
+      const gone = new Promise<typeof full>((resolve) => (goneNow = resolve))
+      vi.spyOn(deps.arkade, 'findLockups')
+        .mockResolvedValueOnce(full)
+        .mockImplementationOnce(async () => (reread(), gone))
+      const first = service.tick(outcome.swap.id)
+      await stalledRead
 
-      const first = service.tick(row.id)
-      await inFund
-      // The deadline matures while the other worker is still in flight.
-      now = row.htlcLocktime - claimWindow(row)
+      // Past the TTL a second worker takes the lease and records its funding, then broadcasts it once the refusal lands.
+      now += FUND_LEASE_TTL_SECONDS
+      let refused!: () => void
+      const afterRefusal = new Promise<void>((resolve) => (refused = resolve))
+      const broadcast = deps.onchain.broadcastRaw.bind(deps.onchain)
+      vi.spyOn(deps.onchain, 'broadcastRaw').mockImplementationOnce(async (tx) => (await afterRefusal, broadcast(tx)))
+      const second = secondWorker().tick(outcome.swap.id)
+      await vi.waitFor(async () => expect((await deps.store.get(outcome.swap.id)).fundingTx).toBeTruthy())
 
-      await second.tick(row.id)
-      expect((await deps.store.get(row.id)).state).toBe('funding_onchain')
-
-      release()
+      goneNow([])
       await first
-      const settled = await deps.store.get(row.id)
-      expect(settled.state).toBe('awaiting_claim')
-      expect(settled.fundingTxid).toBeTruthy()
+      refused()
+      await second
+      const row = await deps.store.get(outcome.swap.id)
+      expect(await deps.onchain.findOutputs({ address: row.onchainAddress })).toHaveLength(1)
+      expect(row.state).toBe('awaiting_claim')
+    })
+
+    it('resends the funding it recorded when the broadcast never went out, signing nothing new', async () => {
+      const { row, signForReal } = await stalled()
+      deps.onchain.signFunding = signForReal
+      vi.spyOn(deps.onchain, 'broadcastRaw').mockRejectedValueOnce(new Error('ECONNRESET'))
+      await expect(service.tick(row.id)).rejects.toThrow('ECONNRESET')
+      const recorded = await deps.store.get(row.id)
+      expect(recorded.fundingTx).toBeTruthy()
+
+      const signs = vi.spyOn(deps.onchain, 'signFunding')
+      const funded = await service.tick(row.id)
+      expect(signs.mock.calls).toHaveLength(0)
+      expect(funded.state).toBe('awaiting_claim')
+      expect(await deps.onchain.findOutputs({ address: row.onchainAddress })).toHaveLength(1)
+    })
+
+    it('parks a recorded funding no chain has seen once the gates have closed, broadcasting nothing', async () => {
+      const { row, signForReal } = await stalled()
+      deps.onchain.signFunding = signForReal
+      vi.spyOn(deps.onchain, 'broadcastRaw').mockRejectedValueOnce(new Error('ECONNRESET'))
+      await expect(service.tick(row.id)).rejects.toThrow('ECONNRESET')
+
+      now = row.htlcLocktime - claimWindow(row)
+      const parked = await service.tick(row.id)
+      expect(parked.state).toBe('stuck')
+      expect(parked.failureReason).toContain('was never seen on chain')
+      expect(await deps.onchain.findOutputs({ address: row.onchainAddress })).toHaveLength(0)
     })
 
     /**
@@ -1050,7 +1140,8 @@ describe('OnchainSendSwapService', () => {
     // Strand the row in funding_onchain with NOTHING broadcast — the other
     // half of the ambiguity recovery has to resolve.
     const originalFund = deps.onchain.fund.bind(deps.onchain)
-    deps.onchain.fund = async () => {
+    const originalSign = deps.onchain.signFunding.bind(deps.onchain)
+    deps.onchain.signFunding = async () => {
       throw new Error('simulated broadcast failure')
     }
     await expect(service.tick(outcome.swap.id)).rejects.toThrow('simulated broadcast failure')
@@ -1062,7 +1153,7 @@ describe('OnchainSendSwapService', () => {
     // key from the solver's own funding, since it is not the solver's payment.
     const dust = await originalFund({ address: row.onchainAddress, amountSats: 1, idempotencyKey: 'stranger-dust' })
 
-    deps.onchain.fund = originalFund
+    deps.onchain.signFunding = originalSign
     row = await service.tick(outcome.swap.id)
     expect(row.state).toBe('awaiting_claim')
     expect(row.fundingTxid).not.toBe(dust.txid)

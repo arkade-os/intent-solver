@@ -176,8 +176,9 @@
 (*       submitFunding: the funding call — LND's                           *)
 (*       sendToChainAddress — takes no idempotency key.  Today the only    *)
 (*       thing standing in for it is the in-process `inFlight` Set plus a  *)
-(*       chain read that may lag.  OnchainSend_DoubleFund.cfg sets this    *)
-(*       FALSE.                                                            *)
+(*       chain read that may lag.  PreCommitFunding (shipped) removes the  *)
+(*       dependence: the shipped cfgs set this FALSE and are green.        *)
+(*       OnchainSend_DoubleFund.cfg drops the pre-commit as well.          *)
 (*                                                                         *)
 (*  (A5) The client's claim witness is parseable.  preimageFromClaimWitness*)
 (*       is literally `witness[1] ?? null` — POSITIONAL and                *)
@@ -206,7 +207,7 @@
 (*       lockupProvablySpent second read pushRefund insists on.            *)
 (*       LockupReadIsReliable = TRUE is the idealisation; FALSE is the     *)
 (*       code.  OnchainSend_LaggingLockupRead.cfg sets it FALSE and TLC    *)
-(*       violates NoNetLoss in 25 states with no crash, no lost CAS and no *)
+(*       violates NoNetLoss in 26 states with no crash, no lost CAS and no *)
 (*       concurrency: the client claims the L1 HTLC, a lagging read parks  *)
 (*       the row in `stuck` while it still holds P, and at refund_locktime *)
 (*       the client pulls the Arkade lockup back too.  The fix in the Go   *)
@@ -259,11 +260,13 @@
 (*     txid says the spend mined, so RBF on the refund is no longer a way  *)
 (*     to lose money silently.  See (A9) and OnchainSend_MempoolRace.cfg,  *)
 (*     which is green on the shipped guard and red without it.             *)
-(*  3. funded -> funding_onchain is committed BEFORE onchain.fund, but the *)
-(*     CAS gates ENTRY and not OCCUPANCY: the row sits in funding_onchain  *)
-(*     for the whole RPC and a second worker sees the same preconditions.  *)
-(*     A lease or a backend idempotency key is required.  See SubmitFunding*)
-(*     and OnchainSend_DoubleFund.cfg.                                     *)
+(*  3. The funding tx is SIGNED, then RECORDED with a CAS on               *)
+(*     `funding_tx IS NULL`, and only the recorded tx is ever broadcast;   *)
+(*     recovery re-sends it and never re-signs.  The lease TTL may expire  *)
+(*     under a live holder, so every write that can end funding_onchain    *)
+(*     without the tx — the fresh refusal included — must also require     *)
+(*     `funding_tx IS NULL`.  See SignAndRecord, RefuseCommitted and       *)
+(*     OnchainSend_RecordNotCas / _RefuseRecorded / _DoubleFund.cfg.       *)
 (*  4. The exposure cap must be enforced by the same write that consumes   *)
 (*     it.  See AtomicAdmission and OnchainSend_Overexposed.cfg.           *)
 (*  5. The recovery branch is chosen from the ROW and from the CHAIN       *)
@@ -274,20 +277,23 @@
 (*                                                                         *)
 (*   OnchainSend.cfg           2 swaps, 2 workers, wall clock 0..3,        *)
 (*                             median-time-past trailing by up to 1.       *)
-(*                             GREEN, lease modelled: 114,686,556 states,  *)
-(*                             12,900,506 distinct, depth 55, 2m07s. Every *)
-(*                             action fires bar RefundSeesAlien, see (A9). *)
+(*                             GREEN with PreCommitFunding, LeaseTtl and   *)
+(*                             FundIsIdempotent = FALSE: 232,960,764       *)
+(*                             states, 25,989,946 distinct, depth 56,      *)
+(*                             9m35s (TLC 2.19, 8 workers).  Every action  *)
+(*                             fires bar RefundSeesAlien, see (A9), and    *)
+(*                             ParkUnseenFunding, unreachable under (A2).  *)
 (*                             (Counts fell from 4,275,514/624,790 when    *)
 (*                             RefundBroadcastable/ConfirmL1 were tightened*)
 (*                             from `chainTime >= HtlcLocktime` to `>`, per *)
 (*                             BIP113; see RefundBroadcastable.)           *)
 (*   OnchainSend_Liveness.cfg  the same model on ONE swap, adding the      *)
-(*                             temporal property.  GREEN: 227,057 states,  *)
-(*                             37,590 distinct, depth 33, 11s.  Liveness is*)
+(*                             temporal property.  GREEN: 399,522 states,  *)
+(*                             66,026 distinct, depth 34, 6s.  Liveness is *)
 (*                             split out because TLC's tableau over the    *)
 (*                             two-swap graph does not converge; see that  *)
 (*                             cfg and the note in OnchainSend.cfg.        *)
-(*   ten mutation cfgs         see the results block at the end.           *)
+(*   mutation cfgs             see the results block at the end.           *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets, TLC, SwapCore
 
@@ -308,6 +314,10 @@ CONSTANTS
     AtomicAdmission,     \* MUTATION: quote() is one conditional INSERT
     AtomicFundLease,     \* MUTATION: enterFunding takes the fund lease in the entry's own write
     CrashStrandsLease,   \* B10: a crash may land between taking the lease and fund()
+    PreCommitFunding,    \* signFunding + record funding_tx, THEN broadcastRaw; FALSE = one fund()
+    LeaseTtl,            \* the fund lease expires, at any instant
+    RecordIsCas,         \* MUTATION: the funding_tx write requires funding_tx IS NULL
+    RefuseNeedsNoTx,     \* MUTATION: the fresh refusal's CAS requires funding_tx IS NULL
     ClientMayUnroll,     \* the client may land the lockup on Bitcoin
     ExitDelay,           \* the lockup's shortest CSV, counted from the unroll
     ClaimsUnrolled       \* MUTATION: whenClaiming claims an unrolled lockup on L1
@@ -343,12 +353,16 @@ VARIABLES
     l1,         \* [Swaps -> L1Status] the L1 HTLC outpoint: what has been
                 \* broadcast for it and what the chain has confirmed.
     unrolledAt, \* [Swaps -> 0..MaxClock+1] the +1-shifted confirm tick of an unroll; 0 = none
-    leased      \* [Swaps -> BOOLEAN] fund_started_at IS NOT NULL.  Survives a crash.
+    leased,     \* [Swaps -> BOOLEAN] fund_started_at IS NOT NULL.  Survives a crash.
+    fundTx,     \* [Swaps -> 0..2] funding_tx: 0 = NULL, k = the k-th tx signed.  Survives a crash.
+    fundSent    \* [Swaps -> SUBSET {1, 2}] signed txs ever broadcast; fundOut counts them
 
-OsVars == << chainTime, lockup, fundOut, fundConf, l1, unrolledAt, leased >>
-OsRest == << lockup, fundOut, fundConf, l1, unrolledAt, leased >>
+OsVars == << chainTime, lockup, fundOut, fundConf, l1, unrolledAt, leased,
+             fundTx, fundSent >>
+OsRest == << lockup, fundOut, fundConf, l1, unrolledAt, leased, fundTx, fundSent >>
 vars   == << clock, st, loc, conf, serverUp,
-             chainTime, lockup, fundOut, fundConf, l1, unrolledAt, leased >>
+             chainTime, lockup, fundOut, fundConf, l1, unrolledAt, leased,
+             fundTx, fundSent >>
 
 (***************************************************************************)
 (* SwapCore constants supplied by cfg definition override.                 *)
@@ -359,9 +373,9 @@ vars   == << clock, st, loc, conf, serverUp,
 (* no vocabulary for; `L1Status` and `l1` are local.  See the report.      *)
 (* report: this is the one gap in the shared module.                       *)
 (***************************************************************************)
-OSPhases     == { "idle", "read", "fundCommitted", "fundCalled",
+OSPhases     == { "idle", "read", "fundCommitted", "fundRecorded", "fundCalled",
                   "refundSent", "claimSent" }
-OSResults    == { "none", "capOk", "capFull" }
+OSResults    == { "none", "capOk", "capFull", "tx1", "tx2" }   \* tx k: the signed tx held
 OSSpendKinds == { "solverClaim", "clientRefund" }   \* the ARKADE lockup
 
 (***************************************************************************)
@@ -493,7 +507,7 @@ ClientFunds(s) ==
     /\ ~lockup[s]
     /\ lockup' = [lockup EXCEPT ![s] = TRUE]
     /\ UNCHANGED << clock, st, loc, conf, serverUp >>
-    /\ UNCHANGED << chainTime, fundOut, fundConf, l1, unrolledAt, leased >>
+    /\ UNCHANGED << chainTime, fundOut, fundConf, l1, unrolledAt, leased, fundTx, fundSent >>
 
 \* A block lands on top of the solver's funding transaction.  Depth 0 means
 \* the output is not even visible to findOutputs yet, which is the residual
@@ -504,7 +518,7 @@ ConfirmFunding(s) ==
     /\ fundConf[s] < MinConfirmations
     /\ fundConf' = [fundConf EXCEPT ![s] = fundConf[s] + 1]
     /\ UNCHANGED << clock, st, loc, conf, serverUp >>
-    /\ UNCHANGED << chainTime, lockup, fundOut, l1, unrolledAt, leased >>
+    /\ UNCHANGED << chainTime, lockup, fundOut, l1, unrolledAt, leased, fundTx, fundSent >>
 
 \* THE CLAIM LEAF HAS NO TIMELOCK.  The client may broadcast at ANY instant
 \* once the funding output is as deep as the quote promised — before the
@@ -520,7 +534,7 @@ ClientClaimsL1(s) ==
           /\ ~MempoolExclusive             \* — which sequence 0xfffffffd invites
           /\ l1' = [l1 EXCEPT ![s] = "contested"]
     /\ UNCHANGED << clock, st, loc, conf, serverUp >>
-    /\ UNCHANGED << chainTime, lockup, fundOut, fundConf, unrolledAt, leased >>
+    /\ UNCHANGED << chainTime, lockup, fundOut, fundConf, unrolledAt, leased, fundTx, fundSent >>
 
 \* A miner picks ONE of the broadcast spends of the L1 outpoint.  Bitcoin
 \* consensus permits exactly one; the conflicting transaction is evicted.
@@ -537,7 +551,7 @@ ConfirmL1(s) ==
              \/ /\ chainTime > HtlcLocktime
                 /\ l1' = [l1 EXCEPT ![s] = "refunded"]
     /\ UNCHANGED << clock, st, loc, conf, serverUp >>
-    /\ UNCHANGED << chainTime, lockup, fundOut, fundConf, unrolledAt, leased >>
+    /\ UNCHANGED << chainTime, lockup, fundOut, fundConf, unrolledAt, leased, fundTx, fundSent >>
 
 \* THE ADVERSARIAL SPEND ON THE ARKADE SIDE.  The client's own
 \* refundWithoutReceiver leaf, open from refund_locktime and needing the
@@ -561,7 +575,7 @@ ClientUnrolls(s) ==
     /\ ~Unrolled(s)
     /\ unrolledAt' = [unrolledAt EXCEPT ![s] = clock + 1]
     /\ UNCHANGED << clock, st, loc, conf, serverUp >>
-    /\ UNCHANGED << chainTime, lockup, fundOut, fundConf, l1, leased >>
+    /\ UNCHANGED << chainTime, lockup, fundOut, fundConf, l1, leased, fundTx, fundSent >>
 
 Censor == CensorCore /\ UNCHANGED OsVars
 
@@ -637,9 +651,8 @@ GiveUp(w) ==
 HoldsLease(w, s) == At(w, s, "fundCommitted") /\ AtomicFundLease
 WinsLease(s)     == st[s] = "funding_onchain" /\ ~leased[s]
 
-\* A crash holding the lease before fund() strands the row: nothing clears
-\* fund_started_at, and no output exists to adopt.  Known gap B10, shown by
-\* OnchainSend_LeaseStrand.cfg; the other liveness cfg rules that window out.
+\* A crash holding the lease before fund() strands the row unless LeaseTtl:
+\* nothing else clears fund_started_at, and no output exists to adopt (B10).
 Crash(w) ==
     /\ CrashStrandsLease \/ ~\E s \in Swaps : HoldsLease(w, s)
     /\ CrashCore(w)
@@ -715,7 +728,7 @@ FundGate(w, s) ==
           /\ Park(w)
           /\ UNCHANGED leased
     /\ UNCHANGED << clock, conf, serverUp >>
-    /\ UNCHANGED << chainTime, lockup, fundOut, fundConf, l1, unrolledAt >>
+    /\ UNCHANGED << chainTime, lockup, fundOut, fundConf, l1, unrolledAt, fundTx, fundSent >>
 
 \* MIN_ONCHAIN_FUND_WINDOW declined.  Nothing has been broadcast, so this is a
 \* refusal, not an incident — and `refused` is structurally unreachable from
@@ -750,15 +763,17 @@ RefuseFund(w, s) ==
 CanSubmitFunding(w, s) ==
     \/ HoldsLease(w, s)
     \/ (At(w, s, "fundCommitted") /\ WinsLease(s))
-    \/ (Saw(w, s, "funding_onchain") /\ fundConf[s] = 0 /\ WinsLease(s))
+    \/ /\ Saw(w, s, "funding_onchain") /\ fundConf[s] = 0 /\ WinsLease(s)
+       /\ PreCommitFunding => fundTx[s] = 0   \* a recorded tx is never re-signed
 
+\* PreCommitFunding = FALSE: one fund() that signs AND broadcasts.
 \* IRREVERSIBLE.  Real Bitcoin leaves the solver's wallet, and neither backend
 \* accepts an idempotency key (submitFunding), so nothing except FundIsIdempotent
 \* (A4) bounds how many times this fires.  The `fundOut >= 2` branch is the
 \* model's counter cap, not a code behaviour: NoDoublePay has already failed
 \* by then and the branch only exists so the action never becomes disabled and
 \* fakes a livelock.
-SubmitFunding(w, s) ==
+FundOnce(w, s) ==
     /\ CanSubmitFunding(w, s)
     /\ \/ /\ (FundIsIdempotent \/ fundOut[s] >= 2)
           /\ fundOut[s] >= 1
@@ -769,7 +784,68 @@ SubmitFunding(w, s) ==
     /\ Advance(w, "fundCalled", "none")
     /\ leased' = [leased EXCEPT ![s] = TRUE]
     /\ UNCHANGED << clock, st, conf, serverUp >>
-    /\ UNCHANGED << chainTime, lockup, fundConf, l1, unrolledAt >>
+    /\ UNCHANGED << chainTime, lockup, fundConf, l1, unrolledAt, fundTx, fundSent >>
+
+\* PreCommitFunding: signFunding and the funding_tx CAS as one step, since
+\* signing moves no money.  The fresh entry does not re-check its lease, so
+\* after a TTL expiry two workers may both get here; the CAS picks one.
+SignAndRecord(w, s) ==
+    /\ CanSubmitFunding(w, s)
+    /\ IF st[s] = "funding_onchain" /\ (fundTx[s] = 0 \/ (~RecordIsCas /\ fundTx[s] < 2))
+         THEN /\ fundTx' = [fundTx EXCEPT ![s] = fundTx[s] + 1]
+              /\ Advance(w, "fundRecorded", IF fundTx[s] = 0 THEN "tx1" ELSE "tx2")
+         ELSE /\ Park(w)
+              /\ UNCHANGED fundTx
+    /\ leased' = [leased EXCEPT ![s] = leased[s] \/ ~HoldsLease(w, s)]
+    /\ UNCHANGED << clock, st, conf, serverUp >>
+    /\ UNCHANGED << chainTime, lockup, fundOut, fundConf, l1, unrolledAt, fundSent >>
+
+SubmitFunding(w, s) ==
+    IF PreCommitFunding THEN SignAndRecord(w, s) ELSE FundOnce(w, s)
+
+\* broadcastRaw of one signed tx.  Re-sending it is never a second payment.
+SendTx(s, k) ==
+    /\ fundSent' = [fundSent EXCEPT ![s] = fundSent[s] \cup {k}]
+    /\ fundOut'  = [fundOut EXCEPT ![s] = Cardinality(fundSent'[s])]
+
+\* The tx this worker recorded, whatever the row has moved to since.
+BroadcastFunding(w, s) ==
+    /\ At(w, s, "fundRecorded")
+    /\ SendTx(s, IF loc[w].res = "tx1" THEN 1 ELSE 2)
+    /\ Advance(w, "fundCalled", "none")
+    /\ UNCHANGED << clock, st, conf, serverUp >>
+    /\ UNCHANGED << chainTime, lockup, fundConf, l1, unrolledAt, leased, fundTx >>
+
+\* whenFundingOnchain with funding_tx recorded and not yet on the chain
+\* (seen: AdoptFunding).  No lease: the same signed tx again.
+RebroadcastFunding(w, s) ==
+    /\ Saw(w, s, "funding_onchain")
+    /\ fundTx[s] # 0 /\ fundConf[s] = 0
+    /\ FundGateOpen
+    /\ SendTx(s, fundTx[s])
+    /\ Advance(w, "fundCalled", "none")
+    /\ UNCHANGED << clock, st, conf, serverUp >>
+    /\ UNCHANGED << chainTime, lockup, fundConf, l1, unrolledAt, leased, fundTx >>
+
+\* Gate closed and the recorded tx never seen.  Unreachable under (A2), which
+\* freezes the clock while any row is in funding_onchain.
+ParkUnseenFunding(w, s) ==
+    /\ Saw(w, s, "funding_onchain")
+    /\ fundTx[s] # 0 /\ fundConf[s] = 0
+    /\ ~FundGateOpen
+    /\ \/ CasWon(s, "funding_onchain", "stuck")
+       \/ CasLost(s, "funding_onchain")
+    /\ Park(w)
+    /\ UNCHANGED << clock, conf, serverUp >>
+    /\ UNCHANGED OsVars
+
+\* The 10-minute TTL, taken as shorter than any in-flight step.
+LeaseExpires(s) ==
+    /\ LeaseTtl
+    /\ st[s] = "funding_onchain" /\ leased[s]
+    /\ leased' = [leased EXCEPT ![s] = FALSE]
+    /\ UNCHANGED << clock, st, loc, conf, serverUp >>
+    /\ UNCHANGED << chainTime, lockup, fundOut, fundConf, l1, unrolledAt, fundTx, fundSent >>
 
 \* fund() threw after the backend may already have paid: submitFunding's catch
 \* hands the lease back and leaves the ambiguity to recoverFunding.  Unfair.
@@ -778,22 +854,25 @@ FundThrows(w, s) ==
     /\ leased' = [leased EXCEPT ![s] = FALSE]
     /\ Park(w)
     /\ UNCHANGED << clock, st, conf, serverUp >>
-    /\ UNCHANGED << chainTime, lockup, fundOut, fundConf, l1, unrolledAt >>
+    /\ UNCHANGED << chainTime, lockup, fundOut, fundConf, l1, unrolledAt, fundTx, fundSent >>
 
 \* submitFunding's re-check, refused on the fresh entry only: off a recovered
 \* row a fund() that threw may still land, so that refusal is not modelled
 \* here and the code parks it in `stuck`.  The CAS precedes the release.
+\* With a TTL, HoldsLease may be stale and another worker may already have
+\* recorded a tx it is about to broadcast: RefuseNeedsNoTx adds
+\* `AND funding_tx IS NULL` to this CAS (OnchainSend_RefuseRecorded.cfg).
 RefuseCommitted(w, s) ==
     /\ At(w, s, "fundCommitted")
     /\ HoldsLease(w, s) \/ WinsLease(s)
     /\ ~FundGateOpen \/ Unrolled(s)
-    /\ \/ /\ CasWon(s, "funding_onchain", "refused")
-          /\ leased' = [leased EXCEPT ![s] = FALSE]
-       \/ /\ CasLost(s, "funding_onchain")
-          /\ UNCHANGED leased
+    /\ IF st[s] = "funding_onchain" /\ (RefuseNeedsNoTx => fundTx[s] = 0)
+         THEN /\ st' = [st EXCEPT ![s] = "refused"]
+              /\ leased' = [leased EXCEPT ![s] = FALSE]
+         ELSE UNCHANGED << st, leased >>
     /\ Park(w)
     /\ UNCHANGED << clock, conf, serverUp >>
-    /\ UNCHANGED << chainTime, lockup, fundOut, fundConf, l1, unrolledAt >>
+    /\ UNCHANGED << chainTime, lockup, fundOut, fundConf, l1, unrolledAt, fundTx, fundSent >>
 
 \* funding_txid AND funding_vout are written in the SAME UPDATE as the state
 \* change (submitFunding's CAS), so a lost CAS records nothing — which leaves the
@@ -971,7 +1050,7 @@ BroadcastRefund(w, s) ==
                                                     ELSE "contested"]
     /\ IF RefundNeedsConfirmation THEN Park(w) ELSE Advance(w, "refundSent", "none")
     /\ UNCHANGED << clock, st, conf, serverUp >>
-    /\ UNCHANGED << chainTime, lockup, fundOut, fundConf, unrolledAt, leased >>
+    /\ UNCHANGED << chainTime, lockup, fundOut, fundConf, unrolledAt, leased, fundTx, fundSent >>
 
 \* `refunded` RECORDS A CONFIRMATION.  The txid is patched onto the row
 \* BEFORE broadcastRaw, so the verdict is a LATER READ — `transactionOutcome`
@@ -1025,7 +1104,7 @@ DriveRow(w, s) ==
     \/ InsertQuote(w, s)
     \/ SeeLockup(w, s)        \/ RefuseQuoted(w, s)
     \/ FundGate(w, s)         \/ RefuseFund(w, s)
-    \/ AdoptFunding(w, s)
+    \/ AdoptFunding(w, s)     \/ ParkUnseenFunding(w, s)
     \/ SeeClaim(w, s)         \/ ArmRefund(w, s)
     \/ ClaimSeesEmpty(w, s)   \/ ClaimRefused(w, s)
     \/ RefundSeesClaim(w, s)  \/ RefundSeesAlien(w, s)
@@ -1039,12 +1118,16 @@ DriveRow(w, s) ==
 \* infinitely often cannot discharge its own fairness obligation vacuously.
 PushSpend(w, s) ==
     \/ BroadcastRefund(w, s)     \/ RecordRefunded(w, s)
+    \/ BroadcastFunding(w, s)
     \/ ArkadeClaimAccepted(w, s) \/ RecordArkadeClaim(w, s)
+
+\* Both re-enabled by a crash at fundCalled, hence one group apart from RecordFunding.
+FundStep(w, s) == SubmitFunding(w, s) \/ RebroadcastFunding(w, s)
 
 \* Everything a worker can do to swap s other than reading it or giving up.
 Progress(w, s) ==
     \/ DriveRow(w, s)
-    \/ SubmitFunding(w, s) \/ RecordFunding(w, s)
+    \/ FundStep(w, s)      \/ RecordFunding(w, s)
     \/ FundThrows(w, s)     \/ RefuseCommitted(w, s)
     \/ PushSpend(w, s)
 
@@ -1058,7 +1141,7 @@ Next ==
           \/ Crash(w)
     \/ \E s \in Swaps :
           ClientFunds(s) \/ ClientClaimsL1(s) \/ ChainConfirms(s)
-            \/ ClientRefundLockup(s) \/ ClientUnrolls(s)
+            \/ ClientRefundLockup(s) \/ ClientUnrolls(s) \/ LeaseExpires(s)
     \/ Censor
     \/ Tick
     \/ ChainTick
@@ -1072,6 +1155,8 @@ Init ==
     /\ l1        = [s \in Swaps |-> "unspent"]
     /\ unrolledAt = [s \in Swaps |-> 0]
     /\ leased    = [s \in Swaps |-> FALSE]
+    /\ fundTx    = [s \in Swaps |-> 0]
+    /\ fundSent  = [s \in Swaps |-> {}]
 
 (***************************************************************************)
 (* FAIRNESS.  Copy this shape; do not simplify it.  SwapCore's T1 (a       *)
@@ -1080,8 +1165,8 @@ Init ==
 (* Censor, ClientFunds, ClientClaimsL1 and ClientRefundLockup are          *)
 (* deliberately UNFAIR — the environment owes us nothing.                  *)
 (***************************************************************************)
-\* FOURTEEN conditions after expansion, which is already at SwapCore's trap
-\* T3 ceiling: the first version of this block had EIGHTEEN and the JVM was
+\* FIFTEEN conditions after expansion (LeaseExpires added one), at SwapCore's
+\* trap T3 ceiling: the first version of this block had EIGHTEEN and the JVM was
 \* killed part-way through building the liveness graph on ~390,000 states.
 \* Everything merged below fires a BOUNDED number of times per swap, so the
 \* merge cannot discharge an obligation vacuously; nothing that can repeat
@@ -1089,13 +1174,14 @@ Init ==
 Fairness ==
     /\ \A w \in Workers : WF_vars(GiveUp(w))
     /\ WF_vars(\E s \in Swaps : ChainConfirms(s))
+    /\ WF_vars(\E s \in Swaps : LeaseExpires(s))   \* LeaseTtl; vacuous without it
     /\ WF_vars(Tick \/ ChainTick)
     \* "some worker eventually does this for this swap".  The \E is over
     \* WORKERS, never over swaps: swaps must each be driven, workers are
     \* interchangeable.
     /\ \A s \in Swaps : SF_vars(\E w \in Workers : ReadSwap(w, s))
     /\ \A s \in Swaps : SF_vars(\E w \in Workers : DriveRow(w, s))
-    /\ \A s \in Swaps : SF_vars(\E w \in Workers : SubmitFunding(w, s))
+    /\ \A s \in Swaps : SF_vars(\E w \in Workers : FundStep(w, s))
     /\ \A s \in Swaps : SF_vars(\E w \in Workers : RecordFunding(w, s))
     /\ \A s \in Swaps : SF_vars(\E w \in Workers : PushSpend(w, s))
 
@@ -1115,6 +1201,8 @@ TypeOK ==
     /\ l1        \in [Swaps -> L1Status]
     /\ unrolledAt \in [Swaps -> 0..MaxClock + 1]
     /\ leased    \in [Swaps -> BOOLEAN]
+    /\ fundTx    \in [Swaps -> 0..2]
+    /\ fundSent  \in [Swaps -> SUBSET {1, 2}]
 
 \* Every state change is an edge of LEGAL_EDGES.  An ACTION property.
 ForwardOnly == [][ ForwardOnlyStep(Edges) ]_vars
@@ -1190,8 +1278,8 @@ Perms == Permutations(Swaps) \cup Permutations(Workers)
 (* MUTATION CHECKS — RESULTS                                               *)
 (*                                                                         *)
 (* A spec that passes because it is too weak to fail is worse than none.   *)
-(* Nine guards were broken one at a time, each by a single constant, each *)
-(* with its own .cfg.  EIGHT produce a counterexample; RefundTiming is     *)
+(* Guards are broken one at a time, each by a single constant, each with   *)
+(* its own .cfg.  All but RefundTiming produce a counterexample; it is     *)
 (* shipped precisely BECAUSE it does not, and that is a finding about the  *)
 (* guard rather than a hole in the invariants.                             *)
 (*                                                                         *)
@@ -1199,44 +1287,49 @@ Perms == Permutations(Swaps) \cup Permutations(Workers)
 (* the longer traces are enumerated step by step further down.  It is NOT  *)
 (* the number of states explored.  Where a run's generated/distinct pair   *)
 (* is quoted it says so, and names the model it was measured on.           *)
+(* Lengths re-measured with PreCommitFunding (TLC 2.19): sign/record and   *)
+(* broadcast are two steps, so most traces grew by one.                    *)
 (*                                                                         *)
-(*   OnchainSend_FundLease.cfg     AtomicFundLease    = FALSE              *)
-(*                                 -> RefusedNeverPaid violated            *)
+(*   OnchainSend_RecordNotCas.cfg  RecordIsCas = FALSE, one swap           *)
+(*                                 -> NoDoublePay violated, 14 states      *)
+(*   OnchainSend_RefuseRecorded.cfg RefuseNeedsNoTx = FALSE, one swap      *)
+(*                                 -> RefusedNeverPaid violated, 14 states *)
+(*   OnchainSend_DoubleFund.cfg    PreCommitFunding = FALSE over           *)
+(*                                 FundIsIdempotent = FALSE                *)
+(*                                 -> NoDoublePay violated, 12 states      *)
+(*   OnchainSend_FundLease.cfg     AtomicFundLease = FALSE, on the old     *)
+(*                                 design (PreCommitFunding, LeaseTtl      *)
+(*                                 FALSE) -> RefusedNeverPaid, 13 states.  *)
+(*                                 GREEN with the pre-commit.              *)
 (*   OnchainSend_LeaseStrand.cfg   CrashStrandsLease  = TRUE, one swap     *)
-(*                                 -> Liveness violated: the B10 gap,      *)
-(*                                 RED ON THE SHIPPED CODE until fund()    *)
-(*                                 has a deadline a lease TTL can trust    *)
+(*                                 -> GREEN with LeaseTtl (66,202          *)
+(*                                 distinct, 5s); Liveness violated        *)
+(*                                 without it: the B10 gap                 *)
 (*   OnchainSend_Broken.cfg        BreakRefundRecheck = TRUE               *)
-(*                                 -> NoNetLoss violated, 23 states, 5s    *)
+(*                                 -> NoNetLoss violated, 24 states, 1s    *)
 (*   OnchainSend_MempoolRace.cfg   MempoolExclusive   = FALSE              *)
-(*                                 -> NoNetLoss violated, 25 states, 4s    *)
-(*                                 (451,888 generated / 79,592 distinct,   *)
-(*                                 depth 25, measured on this model at     *)
-(*                                 8367b70 with TLC 2.19).  It fired       *)
+(*                                 -> NoNetLoss violated, 26 states, 1s    *)
+(*                                 (1,195,226 generated / 172,769          *)
+(*                                 distinct, depth 26).  It fired          *)
 (*                                 NoSilentLoss until (A9) shipped; that   *)
 (*                                 half is unreachable there now, and the  *)
 (*                                 cfg header says so.                     *)
 (*   OnchainSend_UnconfirmedRefund.cfg                                     *)
 (*                                 RefundNeedsConfirmation = FALSE over    *)
 (*                                 MempoolExclusive = FALSE.  See (A9)     *)
-(*                                 -> NoSilentLoss violated, 24 states     *)
-(*                                 (360,282 generated / 64,481 distinct,   *)
-(*                                 depth 24, measured on this model at     *)
-(*                                 8367b70 with TLC 2.19).  That is the    *)
-(*                                 trace narrated below, reproduced at the *)
-(*                                 same length under THIS cfg's mutation   *)
-(*                                 on today's spec.  The shipped guard     *)
+(*                                 -> NoSilentLoss violated, 25 states     *)
+(*                                 (901,468 generated / 133,054 distinct,  *)
+(*                                 depth 25).  That is the trace narrated  *)
+(*                                 below.  The shipped guard               *)
 (*                                 (RefundNeedsConfirmation = TRUE) cannot *)
 (*                                 reach it, which is the point of (A9).   *)
-(*   OnchainSend_DoubleFund.cfg    FundIsIdempotent   = FALSE              *)
-(*                                 -> NoDoublePay violated, 11 states, 1s  *)
 (*   OnchainSend_Overexposed.cfg   AtomicAdmission = FALSE, MaxExposed = 1 *)
 (*                                 -> ExposureBounded violated, 5 states,1s*)
 (*   OnchainSend_LaggingLockupRead.cfg                                     *)
 (*                                 LockupReadIsReliable = FALSE   see (A7) *)
-(*                                 -> NoNetLoss violated, 25 states, 6s    *)
+(*                                 -> NoNetLoss violated, 26 states, 1s    *)
 (*   OnchainSend_LateUnroll.cfg    ClaimsUnrolled     = FALSE              *)
-(*                                 -> NoNetLoss violated, 26 states        *)
+(*                                 -> NoNetLoss violated, 27 states        *)
 (*   OnchainSend_RefundTiming.cfg  BreakRefundTiming  = TRUE               *)
 (*                                 -> NO ERROR.  See below.                *)
 (*                                                                         *)
@@ -1246,7 +1339,7 @@ Perms == Permutations(Swaps) \cup Permutations(Workers)
 (*                                                                         *)
 (* THE MANDATED ONE, IN FULL.  OnchainSend_Broken.cfg removes only the     *)
 (* pre-broadcast findSpendWitness re-read from whenRefundingOnchain        *)
-(* (whenRefundingOnchain).  23 states:                                     *)
+(* (whenRefundingOnchain).  24 states:                                     *)
 (*                                                                         *)
 (*   1-6   both swaps quoted at clock 0 (two workers, interleaved reads    *)
 (*         and inserts)                                                    *)
@@ -1255,33 +1348,34 @@ Perms == Permutations(Swaps) \cup Permutations(Workers)
 (*   9-10  ReadSwap, FundGate   funded -> funding_onchain.  THE INTENT     *)
 (*                              COMMIT: the CAS is won BEFORE the money    *)
 (*                              moves, and only the winner proceeds.       *)
-(*   11    SubmitFunding        onchain.fund.  fundOut[s1] = 1.  Real      *)
-(*                              Bitcoin has left the solver's wallet.      *)
-(*   12    RecordFunding        funding_onchain -> awaiting_claim, with    *)
+(*   11    SubmitFunding        signFunding, funding_tx recorded by CAS.   *)
+(*   12    BroadcastFunding     fundOut[s1] = 1.  Real Bitcoin has left    *)
+(*                              the solver's wallet.                       *)
+(*   13    RecordFunding        funding_onchain -> awaiting_claim, with    *)
 (*                              funding_txid/vout in the same UPDATE       *)
-(*   14    ConfirmFunding       the funding output reaches depth 1, which  *)
+(*   15    ConfirmFunding       the funding output reaches depth 1, which  *)
 (*                              is the depth the quote promised the client *)
-(*   15-17 Tick, ChainTick,     clock 0 -> 2, median-time-past 0 -> 1.     *)
+(*   16-18 Tick, ChainTick,     clock 0 -> 2, median-time-past 0 -> 1.     *)
 (*         Tick                 Nothing is Urgent: the client has not      *)
 (*                              claimed and the refund is not yet armed.   *)
-(*   18    ArmRefund(s1)        clock 2 = HtlcLocktime 1 + margin 1, so    *)
+(*   19    ArmRefund(s1)        clock 2 = HtlcLocktime 1 + margin 1, so    *)
 (*                              awaiting_claim -> refunding_onchain.  A    *)
 (*                              ONE-WAY DOOR: LEGAL_EDGES has no way back. *)
-(*   19    ClientClaimsL1(s1)   THE CLAIM LEAF HAS NO TIMELOCK.  The       *)
+(*   20    ClientClaimsL1(s1)   THE CLAIM LEAF HAS NO TIMELOCK.  The       *)
 (*                              client broadcasts a perfectly valid claim  *)
 (*                              in the same instant, before the solver's   *)
 (*                              refund goes out.                           *)
-(*   20    ConfirmL1(s1)        the chain confirms the CLIENT's claim.     *)
+(*   21    ConfirmL1(s1)        the chain confirms the CLIENT's claim.     *)
 (*                              l1[s1] = "claimed": the solver's L1 sats   *)
 (*                              are gone and P is on that witness, in      *)
 (*                              public, for anyone who looks.              *)
-(*   21-22 ChainTick, Tick      clock 2 -> 3.  The solver's own refund can *)
+(*   22-23 ChainTick, Tick      clock 2 -> 3.  The solver's own refund can *)
 (*                              never be broadcast now (the outpoint is    *)
 (*                              spent), and WITHOUT THE RE-READ there is   *)
 (*                              no action that can move the row: it is     *)
 (*                              parked in refunding_onchain, retrying a    *)
 (*                              double-spend that can never confirm.       *)
-(*   23    ClientRefundLockup   clock 3 = RefundLocktime, so the client's  *)
+(*   24    ClientRefundLockup   clock 3 = RefundLocktime, so the client's  *)
 (*                              refundWithoutReceiver leaf on the ARKADE   *)
 (*                              side opens and the server co-signs it.     *)
 (*                                                                         *)
@@ -1296,29 +1390,29 @@ Perms == Permutations(Swaps) \cup Permutations(Workers)
 (*   A spec that only asked about terminal states would have missed this,  *)
 (*   which is why both money invariants are carried.                       *)
 (*                                                                         *)
-(* THE SECOND-SHARPEST ONE, AS IT RAN BEFORE (A9).  These 24 states were   *)
+(* THE SECOND-SHARPEST ONE, AS IT RAN BEFORE (A9).  These 25 states were   *)
 (* OnchainSend_MempoolRace.cfg's; with RefundNeedsConfirmation shipped     *)
 (* that cfg cannot reach them, and OnchainSend_UnconfirmedRefund.cfg is    *)
 (* where the shape lives now — it sets the flag FALSE over the same        *)
-(* MempoolExclusive = FALSE — and reproduces there at the same 24, so the  *)
-(* count below is measured, not inherited.  The first 18 are identical;    *)
-(* then:                                                                   *)
+(* MempoolExclusive = FALSE.  The first 18 reach ArmRefund as above (one   *)
+(* step sooner, the other swap's reads interleaved differently); then:     *)
 (*                                                                         *)
-(*   19-21 ReadSwap, ChainTick, the re-read finds NOTHING (l1 "unspent"),  *)
-(*         BroadcastRefund      so the solver broadcasts its refund — but  *)
+(*   19-22 ReadSwap, Confirm-   the re-read finds NOTHING (l1 "unspent"),  *)
+(*         Funding, ChainTick,  so the solver broadcasts its refund — but  *)
+(*         BroadcastRefund                                                 *)
 (*                              only once median-time-past has passed      *)
 (*                              htlc_locktime STRICTLY (chainTime 2 >      *)
 (*                              HtlcLocktime 1), which is the extra state. *)
-(*   22    RecordRefunded       refunding_onchain -> `refunded`, TERMINAL. *)
-(*                              findRecoverable() will never return this   *)
-(*                              row again.                                 *)
 (*   23    ClientClaimsL1       the client's claim is relayed anyway and   *)
 (*                              REPLACES the refund — which is exactly     *)
 (*                              what onchain/refund.ts invites by          *)
 (*                              setting sequence 0xfffffffd (nLockTime     *)
 (*                              enabled AND opt-in RBF; 0xfffffffe would   *)
 (*                              enable the locktime without the second).   *)
-(*   24    ConfirmL1            the chain confirms the CLAIM.              *)
+(*   24    RecordRefunded       refunding_onchain -> `refunded`, TERMINAL. *)
+(*                              findRecoverable() will never return this   *)
+(*                              row again.                                 *)
+(*   25    ConfirmL1            the chain confirms the CLAIM.              *)
 (*                                                                         *)
 (*   Final state: st[s1] = "refunded" /\ l1[s1] = "claimed" /\ conf = {}   *)
 (*   NoSilentLoss violated.  The row says the solver refunded; the chain   *)
@@ -1328,14 +1422,14 @@ Perms == Permutations(Swaps) \cup Permutations(Workers)
 (*                                                                         *)
 (*   What OnchainSend_MempoolRace.cfg shows TODAY is the loud residual —   *)
 (*   NoNetLoss, not this — and its header carries that argument in full.   *)
-(*   Its trace is 25 states against this one's 24: near-identical size,    *)
+(*   Its trace is 26 states against this one's 25: near-identical size,    *)
 (*   different invariant.  Compare the NAME, not the verdict or the size.  *)
 (*                                                                         *)
 (* THE ONE THAT STAYS GREEN, AND WHY THAT IS THE RIGHT ANSWER.             *)
 (* OnchainSend_RefundTiming.cfg drops HTLC_REFUND_MTP_MARGIN and the       *)
 (* htlc_locktime check entirely, so the solver may arm and try to          *)
 (* broadcast its refund at any instant.  TLC completes with no error       *)
-(* (499,382 distinct states in the safety-only configuration).  That is    *)
+(* (1,992,000 distinct states, safety-only configuration).  That is        *)
 (* not a weak invariant; it is what the margin actually buys:              *)
 (*                                                                         *)
 (*   (1) transaction validity.  A refund whose nLockTime has not matured   *)
@@ -1367,7 +1461,7 @@ Perms == Permutations(Swaps) \cup Permutations(Workers)
 (* AUDIT ADDENDA (independent re-run, all cfgs reproduced as documented):  *)
 (*                                                                         *)
 (*   OnchainSend_LaggingLockupRead.cfg  LockupReadIsReliable = FALSE       *)
-(*                                 -> NoNetLoss violated, 25 states.       *)
+(*                                 -> NoNetLoss violated, 26 states.       *)
 (*                                 (A7), and the only mutation that needs  *)
 (*                                 neither a crash, a lost CAS, nor two    *)
 (*                                 workers.                                *)
