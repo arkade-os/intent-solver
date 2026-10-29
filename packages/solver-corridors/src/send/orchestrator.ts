@@ -951,6 +951,7 @@ export class SendSwapService {
     const all = await arkade.findLockups(row.pkScript)
     const outputs = satsOutputs(all)
     const locked = outputs.reduce((sum, o) => sum + o.value, 0)
+    const held = all.reduce((sum, o) => sum + o.value, 0)
 
     const timedOut = this.now() >= lockupDeadlineFor(row.createdAt, row.invoiceExpiresAt, this.lockupTimeout)
     const expired = this.now() >= row.invoiceExpiresAt
@@ -964,6 +965,21 @@ export class SendSwapService {
     if (locked > row.amountSats) {
       await store.patch(row.id, { lockup_value: locked })
       await store.fail(row.id, 'quoted', `overfunded lockup: ${locked} > ${row.amountSats} sats`)
+      return false
+    }
+
+    // Funded, but (some of) the value sits on an asset vtxo a claim can never
+    // spend — so we would never collect even after paying. Refuse at once rather
+    // than wait out the lockup timeout for the same end: the refund sweep then
+    // returns the WHOLE lockup, asset included, through the cooperative leaf.
+    // `held >= amountSats` is what separates this from a client still funding.
+    if (locked < row.amountSats && held >= row.amountSats) {
+      await store.patch(row.id, { lockup_value: held })
+      await store.fail(
+        row.id,
+        'quoted',
+        `lockup funded on an asset vtxo a claim cannot spend: ${held} held, ${locked} spendable`,
+      )
       return false
     }
 
@@ -995,7 +1011,6 @@ export class SendSwapService {
       // Record whatever is there so the refund sweep can return it — including
       // an asset vtxo's value, which `satsOutputs` drops from `locked` but the
       // refund still takes.
-      const held = all.reduce((sum, o) => sum + o.value, 0)
       if (held > 0) await store.patch(row.id, { lockup_value: held })
       const reason = expired
         ? 'invoice expired before funding completed'

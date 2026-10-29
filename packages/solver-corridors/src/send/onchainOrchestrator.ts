@@ -724,10 +724,23 @@ export class OnchainSendSwapService {
     const all = await arkade.findLockups(row.pkScript)
     const outputs = satsOutputs(all)
     const locked = outputs.reduce((sum, o) => sum + o.value, 0)
+    const held = all.reduce((sum, o) => sum + o.value, 0)
     const timedOut = this.now() >= row.createdAt + DEFAULT_ONCHAIN_LOCKUP_TIMEOUT
 
     if (locked > row.amountSats) {
       await store.fail(row.id, 'quoted', `overfunded lockup: ${locked} > ${row.amountSats} sats`)
+      return false
+    }
+    // Funded, but (some of) the value sits on an asset vtxo a claim can never
+    // spend. Refuse at once rather than wait out the timeout for the same end;
+    // the refund sweep returns the whole lockup through the cooperative leaf.
+    if (locked < row.amountSats && held >= row.amountSats) {
+      await store.patch(row.id, { onchain_lockup_value: held })
+      await store.fail(
+        row.id,
+        'quoted',
+        `lockup funded on an asset vtxo a claim cannot spend: ${held} held, ${locked} spendable`,
+      )
       return false
     }
     if (locked === row.amountSats && !timedOut) {
@@ -740,7 +753,6 @@ export class OnchainSendSwapService {
     }
     if (timedOut) {
       // The full held value, asset vtxo included, so the refund sweep returns it.
-      const held = all.reduce((sum, o) => sum + o.value, 0)
       if (held > 0) await store.patch(row.id, { onchain_lockup_value: held })
       await store.fail(row.id, 'quoted', locked > 0 ? `lockup timeout with partial ${locked} sats` : 'lockup timeout')
     }

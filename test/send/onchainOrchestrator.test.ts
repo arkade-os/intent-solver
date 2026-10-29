@@ -851,7 +851,7 @@ describe('OnchainSendSwapService', () => {
     expect(row.claimArkTxid).toBe('claim-ark-txid')
   })
 
-  it('never funds the HTLC for sats that arrive on an asset-carrying vtxo', async () => {
+  it('refuses at once a lockup whose sats arrive on an asset-carrying vtxo', async () => {
     const outcome = await service.quote({
       paymentHash,
       amountSats: 50_000,
@@ -863,7 +863,7 @@ describe('OnchainSendSwapService', () => {
     deps.outputs.set(outcome.swap.pkScript, [
       { txid: 'lockup-tx', vout: 0, value: 50_000, assets: [{ assetId: 'ab'.repeat(34), amount: 1n }] },
     ])
-    expect((await service.tick(outcome.swap.id)).state).toBe('quoted')
+    expect((await service.tick(outcome.swap.id)).state).toBe('refused')
   })
 
   it('claims only the sats outputs when an asset vtxo lands on the lockup before the claim', async () => {

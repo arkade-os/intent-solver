@@ -731,15 +731,15 @@ describe('tick: the full drive', () => {
     expect(row.lockupValue).toBe(2_100)
   })
 
-  it('never pays for sats that arrive on an asset-carrying vtxo', async () => {
+  it('refuses at once, and refunds, a lockup funded on an asset-carrying vtxo', async () => {
     const { swap } = await quoted()
     arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT, assets: [{ assetId: 'ab'.repeat(34), amount: 1n }] }]
-    expect((await service.tick(swap.id)).state).toBe('quoted')
-    clock += DEFAULT_LOCKUP_TIMEOUT + 1
+    // One tick, no timeout wait: the value is here but unclaimable, so refuse now.
     expect((await service.tick(swap.id)).state).toBe('refused')
+    expect(ln.payCalls).toHaveLength(0)
+    // The whole lockup, asset vtxo included, goes back through the cooperative refund.
     expect(await service.refundSweep()).toEqual([swap.id])
     expect(arkade.refundCalls.map((c) => c.outputs)).toEqual([arkade.lockups])
-    expect(ln.payCalls).toHaveLength(0)
   })
 
   it('claims only the sats outputs when an asset vtxo lands on the paid lockup', async () => {
