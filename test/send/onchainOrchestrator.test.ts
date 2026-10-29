@@ -9,7 +9,9 @@ import {
   HTLC_REFUND_MTP_MARGIN,
   UNKNOWN_LOCKUP_RECHECK_SECONDS,
 } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
-import { FEE_BUMP_FACTOR, FEE_BUMP_INTERVAL_SECONDS } from '@arkade-os/solver-rails/onchain/feeBump.js'
+import { FEE_BUMP_ALL_IN_SECONDS, FEE_BUMP_INTERVAL_SECONDS } from '@arkade-os/solver-rails/onchain/feeBump.js'
+import { deriveUnilateralDelays } from '@arkade-os/solver-core/core/timelocks.js'
+import { onchainRefundConfirmDeadline } from '@arkade-os/solver-core/core/onchainSend.js'
 import {
   ARKADE_CLAIM_WINDOW_SECONDS,
   CLIENT_LOCKUP_RELEASE_DELAY_SECONDS,
@@ -29,6 +31,7 @@ import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { FakeOnchainBackend } from '@arkade-os/solver-rails-fake/onchain/fake/backend.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { MAX_LOCKUP_SPEND_INPUTS } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import type { ArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 import { ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import { refundSpendVsize } from '@arkade-os/solver-rails/onchain/sizing.js'
 import type { OnchainSigner } from '@arkade-os/solver-rails/onchain/refund.js'
@@ -68,6 +71,7 @@ const signer: OnchainSigner = {
 }
 /** Any valid 34-byte P2TR script — the fake backend doesn't care where refunds go. */
 const refundDestinationScript = Uint8Array.from([0x51, 0x20, ...keyBytes(8)])
+const MAINNET_EXIT_DELAY = 605_184
 const REFUND_VSIZE = refundSpendVsize({ network: ONCHAIN_NETWORKS.regtest, destinationScript: refundDestinationScript })
 
 // A real, decodable Arkade address for the client's refund destination —
@@ -113,7 +117,7 @@ const buildDeps = async (fundingVout = 0) => {
   const spent = new Set<string>()
   // `outputs` goes empty both for a script that never held anything and for a lagging view; this separates them.
   const known = new Map<string, { txid: string; vout: number; value: number }[]>()
-  const arkade = {
+  const arkade: ArkadeOps = {
     providerPubkey,
     serverPubkey,
     emulatorPubkey,
@@ -495,6 +499,47 @@ describe('OnchainSendSwapService', () => {
     expect(row.fundingTxid).toBeNull()
   })
 
+  it('keeps refunding an over-limit lockup until every piece is back', async () => {
+    const outcome = await service.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    const pieces = MAX_LOCKUP_SPEND_INPUTS + 1
+    const lockups = Array.from({ length: pieces }, (_, vout) => ({ txid: 'lockup-tx', vout, value: 1_000 }))
+    lockups.push({ txid: 'lockup-tx', vout: pieces, value: 50_000 - pieces * 1_000 })
+    deps.outputs.set(outcome.swap.pkScript, lockups)
+    expect((await service.tick(outcome.swap.id)).state).toBe('refused')
+
+    expect(await service.refundSweep()).toEqual([outcome.swap.id])
+    expect((await deps.store.get(outcome.swap.id)).refundOutcome).toBeNull()
+    deps.outputs.set(outcome.swap.pkScript, lockups.slice(MAX_LOCKUP_SPEND_INPUTS))
+    expect(await service.refundSweep()).toEqual([outcome.swap.id])
+    expect((await deps.store.get(outcome.swap.id)).refundOutcome).toBe('pushed')
+  })
+
+  it('keeps refunding a lockup whose refund had to leave a near-expiry output behind', async () => {
+    const outcome = await service.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    deps.outputs.set(outcome.swap.pkScript, [
+      { txid: 'lockup-tx', vout: 0, value: 50_000 },
+      { txid: 'lockup-tx', vout: 1, value: 10_000, expiresAt: now + 60 },
+    ])
+    expect((await service.tick(outcome.swap.id)).state).toBe('refused')
+
+    expect(await service.refundSweep()).toEqual([outcome.swap.id])
+    expect((await deps.store.get(outcome.swap.id)).refundOutcome).toBeNull()
+  })
+
   // Regtest is exempt from the lockup-expiry gate, so these go through a network that is not.
   const gated = () =>
     new OnchainSendSwapService({
@@ -713,6 +758,104 @@ describe('OnchainSendSwapService', () => {
     expect((await deps.store.get(outcome.swap.id)).state).toBe('awaiting_claim')
   })
 
+  describe('refusing before anything is broadcast', () => {
+    const lockedQuote = async (svc: OnchainSendSwapService = service) => {
+      const outcome = await svc.quote({
+        paymentHash,
+        amountSats: 50_000,
+        payoutPubkey,
+        refundAddress: REFUND_ADDRESS,
+        clientRefundPubkey,
+      })
+      if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+      deps.outputs.set(outcome.swap.pkScript, [{ txid: 'lockup-tx', vout: 0, value: 50_000 }])
+      const fund = vi.spyOn(deps.onchain, 'fund')
+      return { swap: outcome.swap, fund }
+    }
+
+    const expectRefusedUnfunded = async (id: string, reason: string, fund: { mock: { calls: unknown[] } }) => {
+      const row = await deps.store.get(id)
+      expect(row.state).toBe('refused')
+      expect(row.failureReason).toContain(reason)
+      expect(fund.mock.calls).toHaveLength(0)
+      expect((await deps.store.findRefundable(now)).map((r) => r.id)).toContain(id)
+    }
+
+    it('refuses a swap whose provider key rotated since the quote', async () => {
+      const { swap, fund } = await lockedQuote()
+      deps.arkade.providerPubkey = hex.encode(keyBytes(42))
+      await service.tick(swap.id)
+      await expectRefusedUnfunded(swap.id, 'provider key rotated', fund)
+    })
+
+    it('refuses when the lockup is gone by the read taken after the lease', async () => {
+      const { swap, fund } = await lockedQuote()
+      const full = deps.outputs.get(swap.pkScript)!
+      vi.spyOn(deps.arkade, 'findLockups')
+        .mockResolvedValueOnce(full)
+        .mockResolvedValueOnce(full)
+        .mockResolvedValueOnce([])
+      await service.tick(swap.id)
+      await expectRefusedUnfunded(swap.id, 'lockup holds 0 of 50000 sats', fund)
+      expect((await deps.store.get(swap.id)).fundStartedAt).toBeNull()
+    })
+
+    it('keeps a recovery pass out between the funding entry and the lease', async () => {
+      const { swap, fund } = await lockedQuote()
+      const second = new OnchainSendSwapService({
+        store: deps.store,
+        onchain: deps.onchain,
+        arkade: deps.arkade,
+        limits: { minSats: 1_000, maxSats: 1_000_000 },
+        maxExposedSats: 1_000_000,
+        totalCommitted: () => deps.store.committedSats(),
+        admission: new AdmissionControl(),
+        network: 'regtest',
+        signer,
+        refundDestinationScript,
+        now: clock,
+      })
+      const get = deps.store.get.bind(deps.store)
+      let fundedBySecond: number | null = null
+      vi.spyOn(deps.store, 'get').mockImplementation(async (id) => {
+        const row = await get(id)
+        if (row.state === 'funding_onchain' && fundedBySecond === null) {
+          fundedBySecond = -1
+          await second.tick(id)
+          fundedBySecond = fund.mock.calls.length
+        }
+        return row
+      })
+      await service.tick(swap.id)
+      expect(fundedBySecond).toBe(0)
+      expect(fund.mock.calls).toHaveLength(1)
+    })
+
+    it('refuses when the funding window closes between the decision and the lease', async () => {
+      const gated = new OnchainSendSwapService({
+        store: deps.store,
+        onchain: deps.onchain,
+        arkade: deps.arkade,
+        limits: { minSats: 1_000, maxSats: 1_000_000 },
+        maxExposedSats: 1_000_000,
+        totalCommitted: () => deps.store.committedSats(),
+        admission: new AdmissionControl(),
+        network: 'regtest',
+        signer,
+        refundDestinationScript,
+        approvalGate: async () => {
+          now = (await deps.store.get(swap.id)).htlcLocktime
+          return { proceed: true }
+        },
+        now: clock,
+      })
+      const { swap, fund } = await lockedQuote(gated)
+      await gated.tick(swap.id)
+      expect((await deps.store.get(swap.id)).state).toBe('refused')
+      expect(fund.mock.calls).toHaveLength(0)
+    })
+  })
+
   /** Mutinynet: 82 minutes in `funding_onchain`, `funding_txid` null, every tick's fund failing. */
   describe('a fund that keeps failing', () => {
     const claimWindow = (row: OnchainSendSwapRow) =>
@@ -745,6 +888,26 @@ describe('OnchainSendSwapService', () => {
       await expect(service.tick(row.id)).rejects.toThrow('insufficient funds')
       expect(attempts).toHaveLength(1)
       expect((await deps.store.get(row.id)).state).toBe('funding_onchain')
+    })
+
+    it('re-reads the lockup before a retry, and parks the row once it has gone', async () => {
+      const { row, attempts, fundForReal } = await stalled()
+      await expect(service.tick(row.id)).rejects.toThrow('insufficient funds')
+      deps.outputs.delete(row.pkScript)
+      deps.onchain.fund = fundForReal
+      const parked = await service.tick(row.id)
+      expect(attempts).toHaveLength(1)
+      expect(parked.state).toBe('stuck')
+      expect(parked.failureReason).toContain('lockup holds 0 of 50000 sats')
+      expect(await deps.onchain.findOutputs({ address: row.onchainAddress })).toHaveLength(0)
+    })
+
+    it('hands the lease back when that lockup read fails, so the next tick still funds', async () => {
+      const { row, fundForReal } = await stalled()
+      deps.onchain.fund = fundForReal
+      vi.spyOn(deps.arkade, 'findLockups').mockRejectedValueOnce(new Error('indexer 429'))
+      await expect(service.tick(row.id)).rejects.toThrow('indexer 429')
+      expect((await service.tick(row.id)).state).toBe('awaiting_claim')
     })
 
     it('stops attempting once the L1 claim window is gone, and parks the row', async () => {
@@ -1028,6 +1191,135 @@ describe('OnchainSendSwapService', () => {
     now = row.refundLocktime
 
     expect((await service.tick(row.id)).state).toBe('stuck')
+  })
+
+  /** Two adopted outputs; the client unrolls one, whose L1 claim confirms while the other reads empty. */
+  const mixedLockupClaiming = async () => {
+    const outcome = await service.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    const pk = outcome.swap.pkScript
+    const arkadeOutput = { txid: 'lockup-a', vout: 0, value: 25_000 }
+    deps.outputs.set(pk, [arkadeOutput, { txid: 'lockup-b', vout: 0, value: 25_000 }])
+    const funded = await service.tick(outcome.swap.id)
+    expect(funded.state).toBe('awaiting_claim')
+
+    deps.outputs.set(pk, [arkadeOutput])
+    deps.arkade.findLockupOutpoints = async () => [
+      { txid: 'lockup-a', vout: 0, spent: !deps.outputs.has(pk), unrolled: false },
+      { txid: 'lockup-b', vout: 0, spent: false, unrolled: true },
+    ]
+    deps.arkade.claimUnrolled = async () => ({
+      kind: 'confirmed',
+      record: { txid: 'l1-claim', tx: null, feeRate: 10, broadcastAt: now, cpfpTxid: null },
+    })
+    const claimed: string[] = []
+    deps.arkade.claim = async (_row, outputs) => {
+      claimed.push(...outputs.map((o) => o.txid))
+      deps.outputs.delete(pk)
+      return 'claim-ark-txid'
+    }
+    const lagging = vi.spyOn(deps.arkade, 'findLockups').mockResolvedValue([])
+    deps.onchain.spendClaim(funded.fundingTxid!, 0, [
+      new Uint8Array([0xaa]),
+      P,
+      new Uint8Array([0xbb]),
+      new Uint8Array([0xcc]),
+    ])
+    return { row: funded, lagging, claimed }
+  }
+
+  it('stays claiming while an adopted output is hidden by a lagging read, then claims it', async () => {
+    const { row, lagging, claimed } = await mixedLockupClaiming()
+    await expect(service.tick(row.id)).rejects.toThrow('lockup output(s) lockup-a:0 not yet collected')
+    expect((await deps.store.get(row.id)).state).toBe('claiming')
+
+    lagging.mockRestore()
+    expect((await service.tick(row.id)).state).toBe('claimed')
+    expect(claimed).toEqual(['lockup-a'])
+  })
+
+  it('keeps claiming an adopted output the claim had to leave out as too close to expiry', async () => {
+    const outcome = await service.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    const pk = outcome.swap.pkScript
+    const healthy = { txid: 'lockup-a', vout: 0, value: 25_000 }
+    deps.outputs.set(pk, [healthy, { txid: 'lockup-b', vout: 0, value: 25_000 }])
+    const funded = await service.tick(outcome.swap.id)
+    expect(funded.state).toBe('awaiting_claim')
+
+    const expiring = { txid: 'lockup-b', vout: 0, value: 25_000, expiresAt: now + 60 }
+    deps.outputs.set(pk, [healthy, expiring])
+    const spent = new Set<string>()
+    deps.arkade.findLockupOutpoints = async () =>
+      [healthy, expiring].map((o) => ({ txid: o.txid, vout: 0, spent: spent.has(o.txid), unrolled: false }))
+    deps.arkade.claim = async (_row, outputs) => {
+      for (const o of outputs.filter((o) => o !== expiring)) spent.add(o.txid)
+      deps.outputs.set(pk, [expiring])
+      return 'claim-ark-txid'
+    }
+    deps.onchain.spendClaim(funded.fundingTxid!, 0, [
+      new Uint8Array([0xaa]),
+      P,
+      new Uint8Array([0xbb]),
+      new Uint8Array([0xcc]),
+    ])
+
+    await expect(service.tick(funded.id)).rejects.toThrow('lockup output(s) lockup-b:0 not yet collected')
+    expect((await deps.store.get(funded.id)).state).toBe('claiming')
+  })
+
+  it('parks the row once the refund deadline passes with an adopted output still out', async () => {
+    const { row } = await mixedLockupClaiming()
+    now = row.refundLocktime
+    const parked = await service.tick(row.id)
+    expect(parked.state).toBe('stuck')
+    expect(parked.failureReason).toContain('lockup-a:0 uncollected at the refund deadline')
+  })
+
+  it('claims a lockup output the client unrolled on L1, recording claimed once that claim confirms', async () => {
+    const row = await claiming()
+    deps.outputs.set(row.pkScript, [{ txid: 'lockup-tx', vout: 0, value: 25_000 }])
+    deps.arkade.findLockupOutpoints = async () => [
+      { txid: 'lockup-tx', vout: 0, spent: !deps.outputs.has(row.pkScript), unrolled: false },
+      { txid: 'lockup-tx-2', vout: 0, spent: false, unrolled: true },
+    ]
+    const confirmed = { now: false }
+    const preimages: string[] = []
+    deps.arkade.claimUnrolled = async (_row, lockup, record, save, preimage) => {
+      preimages.push(preimage)
+      const claim = record ?? {
+        txid: `l1-claim-${lockup.txid}`,
+        tx: null,
+        feeRate: 10,
+        broadcastAt: now,
+        cpfpTxid: null,
+      }
+      if (!record) await save(claim)
+      return { kind: confirmed.now ? 'confirmed' : 'pending', record: claim }
+    }
+
+    const first = await service.tick(row.id)
+    expect(first.state).toBe('claiming')
+    expect(first.claimArkTxid).toBe('claim-ark-txid')
+    expect(preimages).toEqual([hex.encode(P)])
+
+    deps.outputs.delete(row.pkScript)
+    confirmed.now = true
+    const done = await service.tick(row.id)
+    expect(done.state).toBe('claimed')
+    expect(JSON.parse(done.unrolledClaim!)).toMatchObject({ 'lockup-tx-2:0': { kind: 'confirmed' } })
   })
 
   /**
@@ -1398,7 +1690,9 @@ describe('OnchainSendSwapService', () => {
     expect(after.refundArkTxid).toBeNull()
   })
 
-  const driveToBroadcastRefund = async (): Promise<OnchainSendSwapRow> => {
+  /** `exitDelay` 605184 is mainnet's: `refund_locktime`, and with it the refund's deadline, a week out. */
+  const driveToBroadcastRefund = async (exitDelay?: number): Promise<OnchainSendSwapRow> => {
+    if (exitDelay !== undefined) deps.arkade.delays = deriveUnilateralDelays(exitDelay)
     const outcome = await service.quote({
       paymentHash,
       amountSats: 50_000,
@@ -1469,7 +1763,7 @@ describe('OnchainSendSwapService', () => {
    * stretches that window towards `refund_locktime`.
    */
   it('leaves a refund alone until the bump interval is up', async () => {
-    const row = await driveToBroadcastRefund()
+    const row = await driveToBroadcastRefund(MAINNET_EXIT_DELAY)
     expect(row.onchainRefundFeeRate).toBe(5)
     expect(row.onchainRefundBroadcastAt).toBe(now)
     const broadcasts = captureBroadcasts()
@@ -1492,15 +1786,16 @@ describe('OnchainSendSwapService', () => {
     await expect(service.tick(row.id)).resolves.toMatchObject({ state: 'refunding_onchain' })
   })
 
-  it('replaces a refund at the factor once the interval is up, keeping the old version tracked', async () => {
-    const first = await driveToBroadcastRefund()
+  it('replaces a refund the estimate has overtaken, keeping the old version tracked', async () => {
+    const first = await driveToBroadcastRefund(MAINNET_EXIT_DELAY)
 
     now += FEE_BUMP_INTERVAL_SECONDS
+    deps.onchain.setFeeRate(8)
     const bumped = await service.tick(first.id)
 
     expect(bumped.state).toBe('refunding_onchain')
     expect(bumped.onchainRefundTxid).not.toBe(first.onchainRefundTxid)
-    expect(bumped.onchainRefundFeeRate).toBe(5 * FEE_BUMP_FACTOR)
+    expect(bumped.onchainRefundFeeRate).toBe(8)
     expect(bumped.onchainRefundPriorTxids).toEqual([first.onchainRefundTxid])
     expect(bumped.onchainRefundBroadcastAt).toBe(now)
   })
@@ -1540,7 +1835,41 @@ describe('OnchainSendSwapService', () => {
 
     expect(bumped.onchainRefundTxid).not.toBe(first.onchainRefundTxid)
     expect(bumped.onchainRefundPriorTxids).toEqual([first.onchainRefundTxid])
-    expect(bumped.onchainRefundFeeRate).toBe(5 * FEE_BUMP_FACTOR)
+    // On the ramp, so above both the estimate and the rate the first version went out at.
+    expect(bumped.onchainRefundFeeRate).toBeGreaterThan(first.onchainRefundFeeRate!)
+  })
+
+  it('does not escalate a refund merely waiting, a week from its deadline', async () => {
+    const first = await driveToBroadcastRefund(MAINNET_EXIT_DELAY)
+    const broadcasts = captureBroadcasts()
+
+    for (let bump = 0; bump < 18; bump++) {
+      now += FEE_BUMP_INTERVAL_SECONDS
+      await service.tick(first.id)
+    }
+
+    expect(broadcasts).toEqual([])
+    expect((await deps.store.get(first.id)).onchainRefundTxid).toBe(first.onchainRefundTxid)
+  })
+
+  it('pays everything above dust before a deadline only an hour away', async () => {
+    const first = await driveToBroadcastRefund()
+    const deadline = onchainRefundConfirmDeadline(first.refundLocktime)
+    expect(deadline - now).toBeLessThan(3600)
+    expect(first.onchainRefundFeeRate).toBeGreaterThan(5)
+    const broadcasts = captureBroadcasts()
+
+    while (now < deadline - FEE_BUMP_ALL_IN_SECONDS) {
+      now += FEE_BUMP_INTERVAL_SECONDS
+      await service.tick(first.id)
+    }
+
+    const last = Transaction.fromRaw(hex.decode(broadcasts.at(-1)!), {
+      allowUnknownOutputs: true,
+      allowUnknownInputs: true,
+    })
+    expect(last.getOutput(0).amount).toBe(BigInt(ONCHAIN_DUST_SATS))
+    expect(now).toBeLessThan(deadline)
   })
 
   it('reclaimOnchainHtlc() replaces a refund still in the mempool rather than repeating it', async () => {
@@ -2283,6 +2612,19 @@ describe('OnchainSendSwapService', () => {
       expect(await deps.onchain.findOutputs({ address: row.onchainAddress })).toHaveLength(0)
     })
 
+    it('refuses to fund a lockup the client unrolled while the gate held it', async () => {
+      let proceed = false
+      const svc = gated(async () => (proceed ? { proceed: true } : { proceed: false, reason: APPROVAL_REFUSAL }))
+      const swap = await fundedRow(svc)
+      expect((await svc.tick(swap.id)).state).toBe('funded')
+
+      deps.outputs.delete(swap.pkScript)
+      proceed = true
+      const row = await svc.tick(swap.id)
+      expect(row.state).toBe('refused')
+      expect(await deps.onchain.findOutputs({ address: row.onchainAddress })).toHaveLength(0)
+    })
+
     it('broadcasts once the gate proceeds', async () => {
       const svc = gated(async () => ({ proceed: true }))
       const swap = await fundedRow(svc)
@@ -2319,5 +2661,90 @@ describe('OnchainSendSwapService', () => {
       const row = await deps.store.get(swap.id)
       expect(await deps.onchain.findOutputs({ address: row.onchainAddress })).toHaveLength(1)
     })
+  })
+})
+
+/**
+ * `findLockups` is `spendableOnly`, so once the batch is swept `pushRefund`
+ * throws every pass and the output wedges float recovery. Reaching it costs a
+ * batch round, so the unattended sweep must not.
+ */
+describe('the swept Arkade lockup', () => {
+  const SWEPT = [{ txid: 'e'.repeat(64), vout: 0, value: 50_000 }]
+  let deps: Awaited<ReturnType<typeof buildDeps>>
+  let service: OnchainSendSwapService
+
+  beforeEach(async () => {
+    now = 1_800_000_000
+    deps = await buildDeps()
+    service = new OnchainSendSwapService({
+      store: deps.store,
+      onchain: deps.onchain,
+      arkade: deps.arkade,
+      limits: { minSats: 1_000, maxSats: 1_000_000 },
+      maxExposedSats: 1_000_000,
+      totalCommitted: () => deps.store.committedSats(),
+      admission: new AdmissionControl(),
+      network: 'regtest',
+      signer,
+      refundDestinationScript,
+      now: clock,
+    })
+  })
+
+  const quoteRefused = async (paymentHash: string) => {
+    const outcome = await service.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+      requesterKey: 'client',
+    })
+    if (!outcome.accepted) throw new Error(`fixture quote refused: ${outcome.reason}`)
+    await deps.store.fail(outcome.swap.id, 'quoted', 'lockup timeout')
+    return deps.store.get(outcome.swap.id)
+  }
+
+  const withSweptOps = () => {
+    const refundSwept = vi.fn(async () => 'batch-txid')
+    Object.assign(deps.arkade, { findSweptLockups: async () => SWEPT, refundSwept })
+    return refundSwept
+  }
+
+  it('refundSweptLockup refunds a refused row and records the outcome', async () => {
+    const refundSwept = withSweptOps()
+    const row = await quoteRefused('11'.repeat(32))
+
+    expect(await service.refundSweptLockup(row.pkScript)).toEqual({
+      swapId: row.id,
+      txid: 'batch-txid',
+      recorded: true,
+    })
+    expect(refundSwept).toHaveBeenCalledOnce()
+    const after = await deps.store.get(row.id)
+    expect(after.refundOutcome).toBe('pushed')
+    expect(after.refundArkTxid).toBe('batch-txid')
+  })
+
+  it('refundNow reaches the batch refund; the unattended sweep does not', async () => {
+    const refundSwept = withSweptOps()
+    const row = await quoteRefused('22'.repeat(32))
+
+    // The sweep reads an empty spendable set and refuses to record anything —
+    // the existing discipline, unchanged.
+    expect(await service.refundSweep()).toEqual([])
+    expect(refundSwept).not.toHaveBeenCalled()
+
+    expect(await service.refundNow(row.id)).toBe('batch-txid')
+    expect(refundSwept).toHaveBeenCalledOnce()
+  })
+
+  it('refundNow still refuses an empty script rather than recording a refund', async () => {
+    // No swept outputs either: `nothing-at-script` is unprovable, so the
+    // existing refusal stands.
+    Object.assign(deps.arkade, { findSweptLockups: async () => [], refundSwept: vi.fn() })
+    const row = await quoteRefused('33'.repeat(32))
+    await expect(service.refundNow(row.id)).rejects.toThrow(/no spend is provable/)
   })
 })

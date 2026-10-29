@@ -1,13 +1,13 @@
 import type { CorridorDescriptor } from '@arkade-os/solver-core/core/corridorDescriptor.js'
-import type { OnchainSendSwapState } from '../db/onchainSwaps.js'
+import { OnchainSendMachine, type OnchainSendSwapState } from '../machines/onchainSend.js'
 
 export const ONCHAIN_SEND: CorridorDescriptor<OnchainSendSwapState> = {
   pair: 'arkade:BTC->onchain:BTC',
   envStem: 'ONCHAIN_SEND',
   payoutRail: 'onchain',
   states: {
-    live: ['quoted', 'funded', 'funding_onchain', 'awaiting_claim', 'claiming', 'refunding_onchain'],
-    exposed: ['funding_onchain', 'awaiting_claim', 'claiming', 'refunding_onchain'],
+    live: OnchainSendMachine.live,
+    exposed: OnchainSendMachine.exposed,
     delivered: ['claimed'],
   },
 }

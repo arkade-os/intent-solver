@@ -55,7 +55,8 @@ import {
 import { preimageMatchesHash, scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
-import { MAX_LOCKUP_SPEND_INPUTS } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { advanceUnrolledClaims, awaitLeftover, lockupLeftover, settleUnrolledClaims } from '../unrolledSpendStep.js'
+import { boundedSpendInputs, MAX_LOCKUP_SPEND_INPUTS } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import type { HoldState, ReceiveBackend, SendBackend, SendHtlcState } from '@arkade-os/solver-core/ports/lightning.js'
 import { PaymentHashRegistered, PaymentNotStarted } from '@arkade-os/solver-core/ports/lightning.js'
 import type { ReceiveSwapRow } from '../db/receiveSwaps.js'
@@ -69,6 +70,16 @@ export type { CovenantScriptRow }
 
 import type { ArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 export type { ArkadeOps }
+
+import {
+  refundSweptLockupFor,
+  sweptOpsFrom,
+  type SweptLockupRefund,
+  type SweptRefundDecision,
+} from '@arkade-os/solver-arkade/arkade/sweptLockupRefund.js'
+
+/** Each has a legal edge to `refused`. `claiming` must stay absent: it holds a revealed preimage, so a refund there pays twice. */
+export const RECONCILABLE_SWEPT_STATES: readonly SendSwapState[] = ['paying', 'paid', 'stuck']
 
 const SEND_FEE_ESTIMATE_TIMEOUT_MS = 5_000
 
@@ -884,8 +895,35 @@ export class SendSwapService {
       return false
     }
     const txid = await arkade.refund(row, outputs)
-    await store.patch(row.id, { refund_outcome: 'pushed', refund_ark_txid: txid })
+    // The wallet spends only what boundedSpendInputs selects: the row stays refundable for what it left.
+    const all = boundedSpendInputs(outputs, this.now()).length === outputs.length
+    await store.patch(row.id, all ? { refund_outcome: 'pushed', refund_ark_txid: txid } : { refund_ark_txid: txid })
     return true
+  }
+
+  /**
+   * Not reachable from {@link refundSweep}, which never sees most of these: it
+   * skips a refused row with no recorded lockup value, the shape a funding seen
+   * too late leaves. The float pass finds them through the recovery guard.
+   * `decide` is the caller's because the evidence lives on the Lightning rail.
+   */
+  async refundSweptLockup(
+    pkScript: string,
+    decide?: (row: SendSwapRow) => Promise<SweptRefundDecision>,
+  ): Promise<SweptLockupRefund> {
+    const { store, arkade } = this.deps
+    const ops = sweptOpsFrom<SendSwapRow>(arkade, (row) => row)
+    if (!ops) return null
+    return refundSweptLockupFor(pkScript, {
+      ...ops,
+      find: (script) => store.findByPkScript(script),
+      record: (row, fields) => store.patch(row.id, { ...fields }),
+      ...(decide ? { decide } : {}),
+      close: async (row, reason) => {
+        await store.transition(row.id, row.state, 'refused', { failure_reason: reason })
+      },
+      closableStates: RECONCILABLE_SWEPT_STATES,
+    })
   }
 
   /** @returns true when the swap moved to a new state and the next step should run. */
@@ -927,6 +965,7 @@ export class SendSwapService {
     }
     // One claim spends at most this many; the rest would stay for the client to refund.
     if (locked === row.amountSats && outputs.length > MAX_LOCKUP_SPEND_INPUTS) {
+      await store.patch(row.id, { lockup_value: locked })
       await store.fail(row.id, 'quoted', `lockup funded in ${outputs.length} outputs, over ${MAX_LOCKUP_SPEND_INPUTS}`)
       return false
     }
@@ -944,6 +983,7 @@ export class SendSwapService {
         lockup_txid: first?.txid ?? null,
         lockup_vout: first?.vout ?? null,
         lockup_value: locked,
+        lockup_outpoints: JSON.stringify(outputs.map(({ txid, vout, value }) => ({ txid, vout, value }))),
       })
     }
 
@@ -1474,12 +1514,22 @@ export class SendSwapService {
    * sweep would keep both sides.
    */
   private async payDeadline(row: SendSwapRow, refundDeadline: number): Promise<number> {
-    if (this.deps.network === 'regtest') return refundDeadline
     const outputs = await this.deps.arkade.findLockups(row.pkScript)
     const held = outputs.reduce((sum, o) => sum + o.value, 0)
+    const funded = row.lockupValue ?? held
     // Swept or spent before we paid, in whole or part: no deadline protects that, so refuse.
-    if (outputs.length === 0 || held < (row.lockupValue ?? 0)) return this.now()
-    return Math.min(refundDeadline, ...outputs.flatMap((o) => (o.expiresAt === undefined ? [] : [o.expiresAt])))
+    if (outputs.length === 0 || held < funded) return this.now()
+    if (this.deps.network === 'regtest') return refundDeadline
+    // Only the latest-expiring outputs that cover the funding: anyone can add a soon-swept
+    // output to the public lockup address, and the claim leaves out one that has expired.
+    let deadline = refundDeadline
+    let covered = 0
+    for (const output of [...outputs].sort((a, b) => (b.expiresAt ?? Infinity) - (a.expiresAt ?? Infinity))) {
+      if (covered >= funded) break
+      covered += output.value
+      if (output.expiresAt !== undefined) deadline = Math.min(deadline, output.expiresAt)
+    }
+    return deadline
   }
 
   private async refuseUnsubmittedPayment(row: SendSwapRow, detail: string): Promise<void> {
@@ -1697,7 +1747,9 @@ export class SendSwapService {
       return false
     }
     const outputs = await arkade.findLockups(row.pkScript)
-    if (outputs.length === 0) {
+    // `findLockups` leaves out an output the client unrolled: arkd refuses it every offchain spend.
+    const unrolled = await advanceUnrolledClaims(store, row, arkade, row, row.preimage)
+    if (outputs.length === 0 && unrolled === null) {
       // The script is empty, but we hold no claim txid — so we have NO positive
       // proof our claim landed. `findLockups` returns [] for a swept, renewed or
       // lagging vtxo exactly as it does after our own spend (`spendableOnly`
@@ -1706,8 +1758,8 @@ export class SendSwapService {
       // full-amount loss — a swept lockup, or a client refund after we paid — as
       // `claimed`. Route to `stuck` for a human: a false `stuck` (we really did
       // claim and a crash ate the record) costs a glance; a false `claimed` costs
-      // the funds. The only path that ever records `claimed` is the one below,
-      // which has our own claim txid in hand.
+      // the funds. The only paths that ever record `claimed` are below, each
+      // with our own claim txids in hand.
       // Nor is it proof the lockup is GONE, and `stuck` is terminal — so parking
       // on a lagging view ends collection of an invoice we already paid.
       const evidence = await arkade.lockupSpendEvidence(row.pkScript)
@@ -1719,10 +1771,9 @@ export class SendSwapService {
     }
 
     // Funds still present. Try the collaborative claim.
+    let txid: string | null = null
     try {
-      const txid = await arkade.claim(row, outputs, row.preimage)
-      await store.transition(row.id, 'claiming', 'claimed', { claim_ark_txid: txid })
-      return false
+      if (outputs.length > 0) txid = await arkade.claim(row, outputs, row.preimage)
     } catch (error) {
       // Past the deadline, a persistently failing claim means the Arkade Service
       // is censoring or down while the client's refund is open and racing us.
@@ -1744,5 +1795,24 @@ export class SendSwapService {
       }
       throw error
     }
+    const recourse = () => unilateralExitRecourse(row, { solverPubkey: arkade.providerPubkey })
+    if (unrolled === null || unrolled.settled) {
+      const leftover = await lockupLeftover(
+        arkade,
+        row,
+        txid === null ? [] : boundedSpendInputs(outputs, this.now()),
+        unrolled,
+      )
+      if (leftover.length > 0) {
+        const pastDeadline = await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip)
+        return awaitLeftover(store, row.id, txid, leftover, pastDeadline, recourse)
+      }
+    }
+    if (unrolled === null) {
+      await store.transition(row.id, 'claiming', 'claimed', { claim_ark_txid: txid })
+      return false
+    }
+    if (txid !== null) await store.patch(row.id, { claim_ark_txid: txid })
+    return settleUnrolledClaims(store, row.id, { from: 'claiming', to: 'claimed' }, unrolled, recourse)
   }
 }

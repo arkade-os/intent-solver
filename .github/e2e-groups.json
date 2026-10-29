@@ -27,6 +27,17 @@
     "arkdTimelocks": "blocks"
   },
   {
+    "name": "swept-refund",
+    "why": "Mines past the batch expiry so arkd sweeps a send lockup, and that sweeps every float batch on the stack with it, so this file gets a stack of its own rather than starving the next one. Block-typed because the compose default expiry is 180 BLOCKS, which a test can mine past; a seconds-typed 6144s expiry would have to be waited out.",
+    "profiles": "emulator",
+    "files": ["sweptSendRefund.e2e.test.ts"],
+    "mintAsset": false,
+    "lnd": false,
+    "covclaimdImage": "",
+    "evmChain": false,
+    "arkdTimelocks": "blocks"
+  },
+  {
     "name": "pool",
     "why": "Reshapes the solver's own float: it mints seventy coins and merges fifty, which would change what every corridor file's coin selection sees. Seconds-typed because the planner judges renewal by wall-clock expiry, and on a block-typed arkd every expiry is a height.",
     "profiles": "emulator",
@@ -41,7 +52,7 @@
     "name": "send-lightning",
     "why": "Needs the boltz profile: the counterparty is the base `lnd`, the solver's own node is `boltz-lnd`, and setupBoltz() is the only thing that funds that node and opens the channel between them. Seconds-typed, like every corridor group: the receive orchestrator refuses to write a block-height refund deadline without a chainTip provider, and these tests wire none. sendLightningApproval rides here because it is the same stack and the same corridor: it sets the approval threshold on its OWN service rather than in the shared env, so no other group's swaps are gated.",
     "profiles": "emulator,boltz",
-    "files": ["sendLightning.e2e.test.ts", "sendLightningEdges.e2e.test.ts", "sendLightningApproval.e2e.test.ts"],
+    "files": ["sendLightning.e2e.test.ts", "sendLightningEdges.e2e.test.ts", "sendLightningApproval.e2e.test.ts", "rebalanceLightning.e2e.test.ts"],
     "mintAsset": false,
     "lnd": true,
     "covclaimdImage": "",
@@ -61,14 +72,15 @@
   },
   {
     "name": "onchain",
-    "why": "Same stack as send-lightning; split for run time and for attribution, since these five files confirm real transactions and are the slowest set here.",
+    "why": "Same stack as send-lightning; split for run time and for attribution, since these files confirm real transactions and are the slowest set here.",
     "profiles": "emulator,boltz",
     "files": [
       "sendOnchain.e2e.test.ts",
       "sendOnchainEdges.e2e.test.ts",
       "receiveOnchain.e2e.test.ts",
       "receiveOnchainEdges.e2e.test.ts",
-      "lndMempoolSpend.e2e.test.ts"
+      "lndMempoolSpend.e2e.test.ts",
+      "rebalanceOnchain.e2e.test.ts"
     ],
     "mintAsset": false,
     "lnd": true,

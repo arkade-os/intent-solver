@@ -127,17 +127,33 @@ number's job is to agree with whoever derives the same script.
 |---|---|---|
 | `FEE_BUMP_INTERVAL_SECONDS` | `onchain/feeBump.ts` | How long an L1 spend of ours may sit in the mempool before it is replaced at a higher fee. About two blocks, so an ordinary confirmation beats the replacement rather than racing it. |
 
-### Not a duration: the fee-bump factor
+### The fee-bump schedule
 
-`FEE_BUMP_FACTOR` (`onchain/feeBump.ts`) is **1.5**, and a replacement pays
-`max(estimate, 1.5 x previous, previous + 1 sat/vB)`. The `+ 1` is BIP125 rule
-4: the vsize is identical across versions, so a factor that rounded to the same
-sat/vB would relay as a duplicate rather than as a replacement.
+Every version of an L1 spend of ours, the first one included, pays the rate the
+time left before its deadline calls for (`urgencyFeeRate`, `onchain/feeBump.ts`):
 
-It belongs on this page because it answers the same question everything else
-here does. Both onchain legs race a deadline they cannot move — `htlc_locktime`
-for the receive claim, `refund_locktime` for the send refund — and once the
-spend is broadcast the fee is the only lever left.
+| Time left | Rate |
+|---|---|
+| more than `FEE_BUMP_RAMP_SECONDS` (2 h) | the estimate |
+| between the two | geometric from the estimate to the cap |
+| at most `FEE_BUMP_ALL_IN_SECONDS` (40 min) | the cap: everything above dust |
+
+A replacement goes out only when that rate beats the standing version by BIP125
+rule 4's 1 sat/vB (the vsize is identical across versions). A spend that is
+merely waiting far from its deadline is left alone; it is replaced only when the
+estimate overtakes it.
+
+The deadlines:
+
+| Spend | Deadline | Why |
+|---|---|---|
+| receive-leg claim | `htlc_locktime` | The claim leaf needs our signature, so `P` being public races nothing: only the client's CLTV refund does. MTP lag makes the real deadline later; it is not counted on. |
+| send-leg refund | `onchainRefundConfirmDeadline` = `refund_locktime − ARKADE_CLAIM_WINDOW_SECONDS` | A client claim replacing an unconfirmed refund after this reveals `P` too late to claim the Arkade lockup before the client's refund opens. |
+
+Deadline-blind compounding was wrong both ways. On mainnet the send refund's
+deadline is a week out and 1.5x every interval burned the HTLC to dust within
+hours. Where the exit delay is short, and on the receive leg when `P` arrives
+late, it never reached the cap before the deadline.
 
 ### 2 minutes
 

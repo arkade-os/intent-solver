@@ -35,6 +35,13 @@ const DEFAULT_ATTEMPTS = 3
 const DEFAULT_MAX_QUEUE = 100
 const DEFAULT_BASE_DELAY_MS = 500
 
+export const limitNotification = (text: string): string => {
+  const limit = 4000
+  if (text.length <= limit) return text
+  const cut = `… (message cut at ${limit} characters)`
+  return text.slice(0, limit - cut.length) + cut
+}
+
 export const createNotifier = (options: NotifierOptions): Notifier => {
   const { sinks, onDeliveryFailed } = options
   const attempts = options.attempts ?? DEFAULT_ATTEMPTS

@@ -28,8 +28,8 @@ import {
 } from '@arkade-os/solver-core/core/corridor.js'
 import { NON_TERMINAL as LN_SEND_LIVE } from '../db/swaps.js'
 import { NON_TERMINAL as LN_RECEIVE_LIVE } from '../db/receiveSwaps.js'
-import { NON_TERMINAL as ONCHAIN_SEND_LIVE } from '../db/onchainSwaps.js'
-import { NON_TERMINAL as ONCHAIN_RECEIVE_LIVE } from '../db/onchainReceiveSwaps.js'
+import { OnchainSendMachine } from '../machines/onchainSend.js'
+import { OnchainReceiveMachine } from '../machines/onchainReceive.js'
 import type { CorridorDescriptor } from '@arkade-os/solver-core/core/corridorDescriptor.js'
 import type { CovenantScriptRow } from '@arkade-os/solver-arkade/arkade/covenantRow.js'
 import { covenantRowFor } from '../send/onchainOrchestrator.js'
@@ -137,31 +137,43 @@ const readerFor = <Row extends { id: string; pkScript: string; preimage: string 
   close: () => store.close(),
 })
 
-export const lightningSendReader = (store: SwapStore): CorridorReader =>
-  readerFor(LN_SEND, store, projectSend, rfqStatusPayload, (row) => row, sendEconomics)
+export const lightningSendReader = (store: SwapStore): CorridorReader => ({
+  ...readerFor(LN_SEND, store, projectSend, rfqStatusPayload, (row) => row, sendEconomics),
+  outstandingArkadeSats: async () => 0,
+})
 
-export const lightningReceiveReader = (store: ReceiveSwapStore): CorridorReader =>
-  readerFor(
+export const lightningReceiveReader = (store: ReceiveSwapStore): CorridorReader => ({
+  ...readerFor(
     LN_RECEIVE,
     store,
     projectReceive,
     lightningReceiveRfqStatusPayload,
     receiveCovenantRowFor,
     receiveEconomics,
-  )
+  ),
+  outstandingArkadeSats: async () =>
+    (await store.findRecoverable())
+      .filter((row) => !row.arkadeLockupTxid)
+      .reduce((sum, row) => sum + row.payoutSats, 0),
+})
 
-export const onchainSendReader = (store: OnchainSendSwapStore): CorridorReader =>
-  readerFor(ONCHAIN_SEND, store, projectOnchainSend, onchainRfqStatusPayload, covenantRowFor, onchainSendEconomics)
+export const onchainSendReader = (store: OnchainSendSwapStore): CorridorReader => ({
+  ...readerFor(ONCHAIN_SEND, store, projectOnchainSend, onchainRfqStatusPayload, covenantRowFor, onchainSendEconomics),
+  outstandingArkadeSats: async () => 0,
+})
 
-export const onchainReceiveReader = (store: OnchainReceiveSwapStore): CorridorReader =>
-  readerFor(
+export const onchainReceiveReader = (store: OnchainReceiveSwapStore): CorridorReader => ({
+  ...readerFor(
     ONCHAIN_RECEIVE,
     store,
     projectOnchainReceive,
     onchainReceiveRfqStatusPayload,
     onchainReceiveCovenantRowFor,
     onchainReceiveEconomics,
-  )
+  ),
+  outstandingArkadeSats: async () =>
+    (await store.findRecoverable()).filter((row) => !row.arkadeFundTxid).reduce((sum, row) => sum + row.payoutSats, 0),
+})
 
 /**
  * Where a parked row lands, for all four BTC corridors.
@@ -203,7 +215,7 @@ export const onchainSendCorridor = (service: OnchainSendSwapService, store: Onch
     await service.tick(id)
   },
   tickAll: async () => (await service.tickAll()).length,
-  park: (id, reason) => parkVia(store, { live: ONCHAIN_SEND_LIVE, parked: BTC_PARKED }, id, reason),
+  park: (id, reason) => parkVia(store, { live: OnchainSendMachine.live, parked: BTC_PARKED }, id, reason),
   refundSweep: () => service.refundSweep(),
   refundNow: (id) => service.refundNow(id),
 })
@@ -218,7 +230,7 @@ export const onchainReceiveCorridor = (
     await service.tick(id)
   },
   tickAll: async () => (await service.tickAll()).length,
-  park: (id, reason) => parkVia(store, { live: ONCHAIN_RECEIVE_LIVE, parked: BTC_PARKED }, id, reason),
+  park: (id, reason) => parkVia(store, { live: OnchainReceiveMachine.live, parked: BTC_PARKED }, id, reason),
   claimNow: (id) => service.claimNow(id),
   refundNow: (id) => service.refundNow(id),
 })

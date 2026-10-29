@@ -74,6 +74,7 @@ const build = async (over: Partial<EvmReceiveServiceDeps> = {}) => {
     arkadePreimage: vi.fn().mockResolvedValue(null),
     lockFor: vi.fn().mockReturnValue({}) as unknown as EvmReceiveServiceDeps['lockFor'],
     blockHeight: vi.fn().mockResolvedValue(20_000_000),
+    timelockHeight: vi.fn().mockResolvedValue(20_000_000),
     // Quote-time deps. Every test here drives `tick`, which reads none of them;
     // they are inert on purpose, so a tick test that started depending on one
     // would fail rather than pick up a plausible default.
@@ -97,7 +98,7 @@ const build = async (over: Partial<EvmReceiveServiceDeps> = {}) => {
       chainId: 8453,
       minConfirmations: 12,
       minAgeSeconds: 780,
-      cadence: { fastestSecondsPerBlock: 12, slowestSecondsPerBlock: 15 },
+      timelockCadence: { fastestSecondsPerBlock: 12, slowestSecondsPerBlock: 15 },
       quoteValiditySeconds: 60,
     },
     maxExposedSats: 100_000_000,
@@ -136,7 +137,7 @@ describe('RULE 2 is re-asked at the moment the sats are committed', () => {
     const chain = [FUNDABLE, CLOSED]
     const fundArkade = vi.fn()
     const { store, service } = await build({
-      blockHeight: vi.fn().mockImplementation(async () => chain.shift() ?? CLOSED),
+      timelockHeight: vi.fn().mockImplementation(async () => chain.shift() ?? CLOSED),
       fundArkade,
     })
     await service.tick('swap-1')
@@ -151,6 +152,7 @@ describe('RULE 2 is re-asked at the moment the sats are committed', () => {
     const fundArkade = vi.fn().mockResolvedValue('ark-fund-txid')
     const { store, service } = await build({
       blockHeight: vi.fn().mockResolvedValue(FUNDABLE),
+      timelockHeight: vi.fn().mockResolvedValue(FUNDABLE),
       fundArkade,
     })
     await service.tick('swap-1')

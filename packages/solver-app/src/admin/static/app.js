@@ -3,9 +3,10 @@
  *
  * No framework and no build step. `h()` below is ~20 lines and the whole page
  * re-renders on every change, which is the right trade for a dashboard whose
- * data arrives on a two-second SSE tick: there is no state to reconcile, no
- * diffing to get wrong, and nothing to vendor. A framework here would be more
- * bytes than the application.
+ * data arrives on a two-second SSE tick: there is no state to reconcile and
+ * nothing to vendor. `morph` hands each render to the live page without
+ * replacing what is unchanged. A framework here would be more bytes than the
+ * application.
  *
  * The one rule the styling encodes, restated because it drives the markup:
  * COLOUR IS RESERVED FOR RISK. `phase` is rendered as the primary chip and the
@@ -18,8 +19,16 @@
 import { barsChart, categoryChart, cumulativeChart, decayChart } from './charts.js'
 import { applyPricing } from './pricingSave.js'
 import { PricingDraft } from './pricingDraft.js'
+import { RebalancePanel } from './rebalance.js'
 
 /* ---- tiny element helper ------------------------------------------------ */
+
+/** Through a per-node table, so `morph` can hand a kept node the handlers of its replacement. */
+const attach = (node, type, handler) => {
+  if (!node.handlers) node.handlers = {}
+  if (!(type in node.handlers)) node.addEventListener(type, (event) => node.handlers[type]?.(event))
+  node.handlers[type] = handler
+}
 
 /** h('td.num', 'text') | h('div', {onclick}, child, child) */
 const h = (spec, ...rest) => {
@@ -31,7 +40,7 @@ const h = (spec, ...rest) => {
   if (first && typeof first === 'object' && !(first instanceof Node) && !Array.isArray(first)) {
     for (const [key, value] of Object.entries(first)) {
       if (value === undefined || value === null || value === false) continue
-      if (key.startsWith('on') && typeof value === 'function') node.addEventListener(key.slice(2), value)
+      if (key.startsWith('on') && typeof value === 'function') attach(node, key.slice(2), value)
       else if (key === 'class') node.className = [node.className, value].filter(Boolean).join(' ')
       else node.setAttribute(key, value === true ? '' : String(value))
     }
@@ -48,13 +57,51 @@ const h = (spec, ...rest) => {
   return node
 }
 
+/** A cleared node is repainted later through a held reference, so `morph` must adopt it, not patch a twin. */
 const clear = (node) => {
+  node.painted = true
   while (node.firstChild) node.removeChild(node.firstChild)
 }
 
 const refill = (node, ...children) => {
   clear(node)
   node.appendChild(h('span', ...children))
+}
+
+const FORM_FIELD = new Set(['INPUT', 'SELECT', 'TEXTAREA'])
+
+/**
+ * Patch `live` until it matches `next`, keeping every node that already does.
+ *
+ * Swapping a new tree in on every stream tick reset what the browser holds per
+ * node: pane scroll, text selection, an open dropdown, the caret. A `<details>`
+ * keeps what the operator last toggled; a focused field keeps what is being typed.
+ */
+const morph = (live, next) => {
+  if (next.painted || live.nodeName !== next.nodeName) return void live.replaceWith(next)
+  if (live.nodeType !== 1) {
+    if (live.nodeValue !== next.nodeValue) live.nodeValue = next.nodeValue
+    return
+  }
+  const owned = (name) => name === 'open' && live.nodeName === 'DETAILS'
+  // A `style` the tree never set came from the browser, such as a resized textarea.
+  for (const { name } of [...live.attributes])
+    if (!next.hasAttribute(name) && !owned(name) && name !== 'style') live.removeAttribute(name)
+  for (const { name, value } of [...next.attributes])
+    if (live.getAttribute(name) !== value && !owned(name)) live.setAttribute(name, value)
+  for (const type of Object.keys(live.handlers ?? {})) live.handlers[type] = next.handlers?.[type]
+  for (const [type, handler] of Object.entries(next.handlers ?? {})) attach(live, type, handler)
+  morphChildren(live, next)
+  if (FORM_FIELD.has(live.nodeName) && live !== document.activeElement) {
+    if (live.value !== next.value) live.value = next.value
+    if (live.checked !== next.checked) live.checked = next.checked
+  }
+}
+
+const morphChildren = (live, next) => {
+  const wanted = [...next.childNodes]
+  wanted.forEach((child, i) => (live.childNodes[i] ? morph(live.childNodes[i], child) : live.appendChild(child)))
+  while (live.childNodes.length > wanted.length) live.lastChild.remove()
 }
 
 /* ---- api ---------------------------------------------------------------- */
@@ -203,8 +250,11 @@ const corridorLabel = (corridor) =>
     'onchain:BTC->arkade:BTC': 'L1→ark',
   })[corridor] ?? corridor
 
+/** Ended with nothing out — no delivery, but no harm — so the `failed` chip drops its colour. */
+const NO_HARM = new Set(['refused', 'refunded'])
+
 /** The chip. Phase first, always. */
-const phaseChip = (phase) => h(`span.phase.phase-${phase}`, phase)
+const phaseChip = (phase, state) => h(`span.phase.phase-${phase}${NO_HARM.has(state) ? '.quiet' : ''}`, phase)
 
 /**
  * How a state READS to a human, next to the name the row actually carries.
@@ -249,6 +299,12 @@ const stateWord = (state, raw) => {
   return h(`span.state${state === 'stuck' ? ' state-stuck' : ''}`, state, gloss ? h('span.faint', ` (${gloss})`) : null)
 }
 
+/** In a table the gloss stays only where the word alone misleads; a finished row keeps it on hover. */
+const stateCell = (row) =>
+  row.phase === 'open' || row.phase === 'exposed' || row.state === 'stuck'
+    ? stateWord(row.state)
+    : h('span.state', { title: stateRead(row.state) }, row.state)
+
 /**
  * What the last `read-payment` on THIS swap concluded, and what it licenses.
  *
@@ -283,12 +339,8 @@ const state = {
   data: {},
   activityErrors: {},
   filters: { corridor: '', phase: '', q: '' },
-  /**
-   * The P&L view's own controls. Bucket empty means "let the server choose from
-   * the window"; `focus` is the toolbar control to restore after a reload
-   * rebuilds the tree.
-   */
-  pnl: { window: '7d', bucket: '', focus: null },
+  /** The P&L view's own controls. Bucket empty means "let the server choose from the window". */
+  pnl: { window: '7d', bucket: '' },
   detail: null,
   dialog: null,
   /** The action currently in flight, or null. See `runAction`. */
@@ -299,15 +351,24 @@ const state = {
 
 const VIEWS = [
   ['overview', 'overview'],
-  ['pnl', 'p&l'],
   ['activity', 'activity'],
+  ['pnl', 'p&l'],
   ['wallet', 'wallet'],
-  ['backends', 'backends'],
-  ['diagnostics', 'diagnostics'],
-  ['discovery', 'discovery'],
   ['pricing', 'pricing'],
+  ['health', 'health'],
   ['audit', 'audit'],
 ]
+
+/** Each page's heading, and its name in the sidebar. */
+const PAGES = {
+  overview: 'Overview',
+  activity: 'Activity',
+  pnl: 'Profit & loss',
+  wallet: 'Wallet',
+  pricing: 'Pricing',
+  health: 'Health',
+  audit: 'Audit',
+}
 
 const fail = (error) => {
   state.banner = error instanceof Error ? error.message : String(error)
@@ -318,29 +379,37 @@ const fail = (error) => {
 
 const statusBar = () => {
   if (state.overviewError)
-    return h('div.status', h('span.phase.phase-failed', 'status unavailable'), h('span.muted', state.overviewError))
+    return h(
+      'div.status',
+      h('div.brand', 'solver'),
+      h('span.phase.phase-failed', 'status unavailable'),
+      h('p.faint', state.overviewError),
+    )
   const o = state.overview
-  if (!o) return h('div.status', h('span.muted', 'connecting…'))
+  if (!o) return h('div.status', h('div.brand', 'solver'), h('p.muted', 'connecting…'))
   const exposed = o.exposure.exposedCount
   const pct = o.exposure.capSats ? Math.min(100, (o.exposure.committedSats / o.exposure.capSats) * 100) : 0
   return h(
     'div.status',
-    h('span', h('b', o.mode), ' ', h('span.faint', o.network)),
-    h('span', h('span.muted', 'up '), duration(o.uptimeSeconds)),
+    h('div.brand', 'solver', h('span.faint', ` ${o.mode} · ${o.network}`)),
+    h('div.bar' + (exposed > 0 ? '.at-risk' : ''), h('span', { style: `width:${pct}%` })),
     h(
-      'span',
-      h('span.muted', 'committed '),
-      sats(o.exposure.committedSats),
-      h('span.faint', ' / '),
-      sats(o.exposure.capSats),
-      ' ',
-      h('span.faint', `(${pct.toFixed(0)}%)`),
+      'p',
+      h('span.mono', sats(o.exposure.committedSats)),
+      h('span.faint', ` / ${sats(o.exposure.capSats)} committed (${pct.toFixed(0)}%)`),
     ),
     // The number an operator is actually looking for, and the only coloured
     // thing in the bar.
     exposed > 0
-      ? h('span.at-risk', `${exposed} exposed`)
-      : h('span.muted', `${o.exposure.liveCount} live, none exposed`),
+      ? h(
+          'button.flag',
+          {
+            title: 'Show the exposed swaps',
+            onclick: () => ((state.filters.phase = 'exposed'), (state.activityTab = 'swaps'), go('activity')),
+          },
+          `${exposed} exposed`,
+        )
+      : h('p.muted', `${o.exposure.liveCount} live, none exposed`),
     // Rows waiting on a HUMAN, in the one place an operator always looks.
     //
     // `stuck` is terminal and excluded from every sweep, so nothing else will
@@ -351,7 +420,14 @@ const statusBar = () => {
     //
     // Rendered only when non-zero. A permanent "0 stuck" trains the eye to skip
     // the position, which is exactly where the number needs to be seen.
-    o.attention?.stuckCount ? h('span.at-risk', `${o.attention.stuckCount} stuck — needs you`) : null,
+    o.attention?.stuckCount
+      ? h(
+          'button.flag',
+          { title: 'Show the swaps waiting on you', onclick: () => go('overview') },
+          `${o.attention.stuckCount} stuck — needs you`,
+        )
+      : null,
+    h('p.faint', `up ${duration(o.uptimeSeconds)}`),
   )
 }
 
@@ -413,9 +489,7 @@ setTheme(preferredTheme())
 const nav = () =>
   h(
     'nav',
-    VIEWS.map(([id, label]) =>
-      h('button', { 'aria-current': String(state.view === id), onclick: () => go(id) }, label),
-    ),
+    VIEWS.map(([id]) => h('button', { 'aria-current': String(state.view === id), onclick: () => go(id) }, PAGES[id])),
     h('span.spacer'),
     h(
       'button.theme',
@@ -423,7 +497,7 @@ const nav = () =>
         title: `Switch to ${currentTheme() === 'light' ? 'dark' : 'light'} mode. Follows your system until you pick one.`,
         onclick: () => (chooseTheme(currentTheme() === 'light' ? 'dark' : 'light'), render()),
       },
-      currentTheme() === 'light' ? 'dark mode' : 'light mode',
+      currentTheme() === 'light' ? 'Dark mode' : 'Light mode',
     ),
   )
 
@@ -449,11 +523,10 @@ const attentionPanel = (o) => {
   // status bar, on a pair that IS proven; this panel only has to say WHICH.
   return h(
     'section.panel',
-    h('h2', `${stuck.length} swap${stuck.length === 1 ? '' : 's'} need you`),
     h(
-      'p.muted',
-      'Terminal, and excluded from every sweep — these will wait indefinitely. ' +
-        'Open one and use read payment before pushing anything.',
+      'h2',
+      { title: 'Terminal and excluded from every sweep: these wait until someone acts.' },
+      `${stuck.length} swap${stuck.length === 1 ? '' : 's'} need you`,
     ),
     h(
       'table',
@@ -461,10 +534,10 @@ const attentionPanel = (o) => {
         'tbody',
         ...stuck.map((row) =>
           h(
-            'tr',
+            'tr.clickable',
             // `openDetail` takes the row and reads `corridor`/`id` off it —
             // both of which the attention projection already carries.
-            { onclick: () => openDetail(row), style: 'cursor:pointer' },
+            { tabindex: '0', onclick: () => openDetail(row), onkeydown: (e) => e.key === 'Enter' && openDetail(row) },
             h('td.muted', ago(row.updatedAt)),
             h('td', corridorLabel(row.corridor)),
             h('td', sats(row.amountSats)),
@@ -527,11 +600,10 @@ const marketCard = (market) =>
       h('dt', 'fee'),
       h(
         'dd',
-        `${market.feeBps} bps; flat ${market.sellBaseFeeFlat} `,
-        legName(market.base),
-        ` atomic units when selling base, ${market.buyBaseFeeFlat} `,
-        legName(market.quote),
-        ` atomic units when buying base; ${market.toleranceBps} bps band`,
+        {
+          title: `flat ${market.sellBaseFeeFlat} selling base, ${market.buyBaseFeeFlat} buying base (atomic units)`,
+        },
+        `${market.feeBps} bps · ${market.toleranceBps} bps band`,
       ),
     ),
   )
@@ -543,74 +615,82 @@ const marketsPanel = (o) => {
   return markets.length === 0 ? null : h('div.panels', ...markets.map(marketCard))
 }
 
+/** The two balances a swap pays out of; the breakdown lives on the wallet page. */
 const overviewBalancesPanel = () => {
-  const balances = state.data.overviewBalances ?? state.overview?.balances
+  const b = state.data.overviewBalances ?? state.overview?.balances
+  const error = state.data.overviewBalanceError
   return h(
-    'section.panel',
-    { id: 'overview-balances' },
-    h('h2', 'balances'),
-    balances
-      ? h(
-          'dl.kv',
-          h('dt', 'lightning'),
-          h('dd', balances.lightningError ? h('span.muted', balances.lightningError) : sats(balances.lightningSats)),
-          h('dt', 'arkade'),
-          h('dd', balances.arkadeError ? h('span.muted', balances.arkadeError) : balanceRows(balances.arkade)),
-          ...(balances.arkadeError ? [] : assetRowsPair(balances.arkade)),
-          h('dt', 'pubkey'),
-          h('dd.faint', shortId(state.overview?.providerPubkey)),
-        )
-      : h('p.muted', state.data.overviewBalanceError ?? 'loading balances…'),
+    'div.figure',
+    { id: 'overview-balances', title: error ?? undefined },
+    h('b', !b ? (error ? 'unavailable' : '…') : b.arkadeError ? 'unavailable' : sats(b.arkade?.available)),
+    h('span', 'arkade available'),
+    b ? h('span.faint', ` · lightning ${b.lightningError ? 'unavailable' : sats(b.lightningSats)}`) : null,
   )
 }
 
 const paintOverviewBalances = () => {
-  document.getElementById('overview-balances')?.replaceWith(overviewBalancesPanel())
+  const live = document.getElementById('overview-balances')
+  if (live) morph(live, overviewBalancesPanel())
 }
 
 const overviewView = () => {
   const o = state.overview
   if (!o)
     return state.overviewError
-      ? h('p.banner', state.overviewError, ' ', h('button.act', { onclick: () => load('overview') }, 'retry'))
+      ? h('p.banner', state.overviewError, ' ', h('button.act', { onclick: () => load('overview') }, 'Retry'))
       : h('p.muted', 'loading…')
+  const { committedSats, capSats, exposedCount, liveCount } = o.exposure
+  const share = capSats ? Math.min(100, (committedSats / capSats) * 100) : 0
+  const stuck = o.attention?.stuckCount ?? 0
   return h(
-    'div',
+    'div.overview',
+    h(
+      'div.figures',
+      h(
+        'div.figure',
+        h('b', exposedCount > 0 ? { class: 'c-risk' } : null, sats(committedSats)),
+        h('span', `committed of ${sats(capSats)}`),
+        h('div.bar' + (exposedCount > 0 ? '.at-risk' : ''), h('span', { style: `width:${share}%` })),
+      ),
+      figure('exposed', String(exposedCount), `of ${liveCount} live`, exposedCount > 0 ? 'c-risk' : null),
+      figure('stuck', String(stuck), 'need you', stuck > 0 ? 'c-risk' : null),
+      overviewBalancesPanel(),
+    ),
     attentionPanel(o),
     h(
-      'div.panels',
-      ...o.corridors.map((c) =>
+      'section.panel',
+      h('h2', 'corridors'),
+      h(
+        'table',
         h(
-          'section.panel',
-          h('h2', corridorLabel(c.corridor)),
+          'thead',
           h(
-            'dl.kv',
-            h('dt', 'serving'),
-            h('dd', c.enabled ? 'yes' : h('span.muted', 'no')),
-            h('dt', 'fee'),
-            h('dd', `${c.fee.bps} bps + ${sats(c.fee.flatSats)} sat`),
-            h('dt', 'range'),
-            h('dd', `${sats(c.limits.minSats)} – ${sats(c.limits.maxSats)}`),
-            h('dt', 'live'),
-            h('dd', String(c.liveCount)),
-            h('dt', 'exposed'),
-            h('dd', c.exposedCount > 0 ? h('span.at-risk', String(c.exposedCount)) : '0'),
+            'tr',
+            h('th', 'corridor'),
+            h('th', 'status'),
+            h('th.right', 'fee'),
+            h('th.right', 'range, sat'),
+            h('th.right', 'live'),
+            h('th.right', 'exposed'),
+          ),
+        ),
+        h(
+          'tbody',
+          o.corridors.map((c) =>
+            h(
+              'tr',
+              h('td', corridorLabel(c.corridor)),
+              h('td.state', c.enabled ? 'serving' : h('span.faint', 'off')),
+              h('td.num', `${c.fee.bps} bps + ${sats(c.fee.flatSats)}`),
+              h('td.num', `${sats(c.limits.minSats)} – ${sats(c.limits.maxSats)}`),
+              h('td.num', String(c.liveCount)),
+              h('td.num', c.exposedCount > 0 ? h('span.at-risk', String(c.exposedCount)) : '0'),
+            ),
           ),
         ),
       ),
-      h(
-        'section.panel',
-        h('h2', 'exposure'),
-        h(
-          'div.bar' + (o.exposure.exposedCount > 0 ? '.at-risk' : ''),
-          h('span', {
-            style: `width:${o.exposure.capSats ? Math.min(100, (o.exposure.committedSats / o.exposure.capSats) * 100) : 0}%`,
-          }),
-        ),
-        h('p.muted', `${sats(o.exposure.committedSats)} of ${sats(o.exposure.capSats)} sat cap`),
-      ),
-      overviewBalancesPanel(),
     ),
+    (o.markets ?? []).length > 0 ? h('h2.section-title', 'markets') : null,
     marketsPanel(o),
   )
 }
@@ -621,6 +701,23 @@ const swapsView = () => {
     'div',
     h(
       'div.toolbar',
+      h(
+        'span.seg',
+        { role: 'group', 'aria-label': 'swap phase' },
+        ['', 'exposed', 'open', 'failed', 'done'].map((p) =>
+          h(
+            'button',
+            {
+              'aria-pressed': String(state.filters.phase === p),
+              onclick: () => {
+                state.filters.phase = p
+                load('swaps')
+              },
+            },
+            p || 'all',
+          ),
+        ),
+      ),
       h(
         'select',
         {
@@ -638,25 +735,11 @@ const swapsView = () => {
           'onchain:BTC->arkade:BTC',
         ].map((c) => h('option', { value: c, selected: state.filters.corridor === c }, corridorLabel(c))),
       ),
-      h(
-        'select',
-        {
-          'aria-label': 'swap phase',
-          onchange: (e) => {
-            state.filters.phase = e.target.value
-            load('swaps')
-          },
-        },
-        h('option', { value: '', selected: state.filters.phase === '' }, 'any phase'),
-        ...['open', 'exposed', 'done', 'failed'].map((p) =>
-          h('option', { value: p, selected: state.filters.phase === p }, p),
-        ),
-      ),
       h('input.search', {
         type: 'search',
         'aria-label': 'find swaps',
         value: state.filters.q,
-        placeholder: 'find: id, payment hash, invoice, address, txid, rfq id',
+        placeholder: 'Search id, hash, invoice, address, txid',
         title: `Substring match across every identifier the row carries. At least ${MIN_SEARCH} characters.`,
         // `input`, not `change`: an operator pasting a txid expects the table to
         // answer, not to have to press enter. Debounced because every keystroke
@@ -671,7 +754,7 @@ const swapsView = () => {
         ? h('span.faint', `${MIN_SEARCH - state.filters.q.trim().length} more character(s) to search`)
         : null,
       h('span.spacer'),
-      h('span.muted', `${rows.length} rows`),
+      h('span.faint', `${rows.length} rows`),
     ),
     state.activityErrors.swaps
       ? activityError('swaps')
@@ -688,9 +771,8 @@ const swapsView = () => {
                   h('th', 'phase'),
                   h('th', 'state'),
                   h('th', 'corridor'),
+                  h('th.right', 'amount, sat'),
                   h('th', 'id'),
-                  h('th.right', 'amount'),
-                  h('th.right', 'payout'),
                   h('th', 'age'),
                   h('th', 'updated'),
                 ),
@@ -700,14 +782,17 @@ const swapsView = () => {
                 rows.map((row) =>
                   h(
                     'tr.clickable',
-                    { onclick: () => openDetail(row) },
+                    {
+                      tabindex: '0',
+                      onclick: () => openDetail(row),
+                      onkeydown: (e) => e.key === 'Enter' && openDetail(row),
+                    },
                     // Phase first and state second, deliberately: see the module header.
-                    h('td', phaseChip(row.phase)),
-                    h('td', stateWord(row.state)),
+                    h('td', phaseChip(row.phase, row.state)),
+                    h('td', stateCell(row)),
                     h('td.muted', corridorLabel(row.corridor)),
-                    h('td.faint', shortId(row.id)),
                     h('td.num', sats(row.amountSats)),
-                    h('td.num.muted', sats(row.payoutSats)),
+                    h('td.faint', shortId(row.id)),
                     h('td.muted', ago(row.createdAt)),
                     h('td.muted', ago(row.updatedAt)),
                   ),
@@ -730,9 +815,9 @@ const quotesView = () => {
     // and lives under swaps, and an expired or refused one goes terminal and
     // drops off entirely. Reading "no quotes" as "no demand" is exactly the
     // wrong conclusion, and it is the one an operator actually drew.
-    h('p.notice', 'Quotes still awaiting funding. Once funded they move to swaps; expired or refused ones drop off.'),
+    h('p.notice', 'Awaiting funding. Funded ones move to swaps.'),
     d.quoted.length === 0
-      ? h('p.muted', 'nothing awaiting funding right now — funded and refused quotes are under swaps')
+      ? h('p.muted', 'Nothing awaiting funding.')
       : h(
           'table',
           h('thead', h('tr', h('th', 'corridor'), h('th', 'id'), h('th.right', 'amount'), h('th', 'age'))),
@@ -741,7 +826,11 @@ const quotesView = () => {
             d.quoted.map((row) =>
               h(
                 'tr.clickable',
-                { onclick: () => openDetail(row) },
+                {
+                  tabindex: '0',
+                  onclick: () => openDetail(row),
+                  onkeydown: (e) => e.key === 'Enter' && openDetail(row),
+                },
                 h('td.muted', corridorLabel(row.corridor)),
                 h('td.faint', shortId(row.id)),
                 h('td.num', sats(row.amountSats)),
@@ -754,9 +843,9 @@ const quotesView = () => {
     // Said plainly, because an empty list here means "nothing since boot", not
     // "this solver has made no bids" — and reading the second from the first
     // would be exactly the wrong conclusion about a quiet market.
-    h('p.notice', `Held in memory only and cleared on restart (keeps the last ${d.bids.capacity}).`),
+    h('p.notice', `Memory only, cleared on restart. Last ${d.bids.capacity}.`),
     d.bids.entries.length === 0
-      ? h('p.muted', 'no bids recorded since this process started')
+      ? h('p.muted', 'No bids since this process started.')
       : h(
           'table',
           h('thead', h('tr', h('th', 'pair'), h('th.right', 'amount'), h('th.right', 'bps'), h('th', 'age'))),
@@ -792,11 +881,9 @@ const offersView = () => {
   return h(
     'div',
     h('h2.sans', 'offer fills'),
-    d.serving
-      ? null
-      : h('p.notice', 'This deployment serves no offer market — OFFER_MARKETS is unset, so no offer is considered.'),
+    d.serving ? null : h('p.notice', 'No offer market served: OFFER_MARKETS is unset.'),
     d.offers.length === 0
-      ? h('p.muted', d.serving ? 'no offer has been recorded yet' : 'nothing to show while no market is served')
+      ? h('p.muted', d.serving ? 'No offers yet.' : 'Nothing to show.')
       : h(
           'table',
           h(
@@ -827,13 +914,9 @@ const offersView = () => {
           ),
         ),
     h('h2.sans', 'recent offer refusals'),
-    h(
-      'p.notice',
-      `Offers this solver declined. Held in memory only and cleared on restart (keeps the last ${d.refusals.capacity}) — ` +
-        'a refusal is not stored, because offers arrive from a public relay.',
-    ),
+    h('p.notice', `Memory only, cleared on restart. Last ${d.refusals.capacity}.`),
     d.refusals.entries.length === 0
-      ? h('p.muted', 'no offer has been refused since this process started')
+      ? h('p.muted', 'None since this process started.')
       : h(
           'table',
           h('thead', h('tr', h('th', 'reason'), h('th', 'outpoint'), h('th', 'detail'), h('th', 'age'))),
@@ -858,10 +941,9 @@ const refusalsView = () => {
   if (!d) return h('p.muted', 'loading…')
   return h(
     'div',
-    h('h2.sans', 'request refusals'),
-    h('p.notice', `The latest ${d.capacity} RFQ refusals, newest first. Cleared when this solver restarts.`),
+    h('p.notice', `Last ${d.capacity}, cleared on restart.`),
     d.entries.length === 0
-      ? h('p.muted', 'no request refusals recorded since this process started')
+      ? h('p.muted', 'None since this process started.')
       : h(
           'table.rfq-refusals',
           h('thead', h('tr', h('th', 'time'), h('th', 'request'), h('th', 'reason and detail'))),
@@ -886,29 +968,36 @@ const refusalsView = () => {
 
 const ACTIVITY_SECTIONS = ['swaps', 'quotes', 'offers', 'refusals']
 const activityError = (key) =>
-  h('p.banner', state.activityErrors[key], ' ', h('button.act', { onclick: () => load(key) }, 'retry'))
+  h('p.banner', state.activityErrors[key], ' ', h('button.act', { onclick: () => load(key) }, 'Retry'))
 
 const activityView = () => {
   const bodies = { swaps: swapsView, quotes: quotesView, offers: offersView, refusals: refusalsView }
-  const labels = { swaps: 'swaps', quotes: 'open quotes', offers: 'offer fills', refusals: 'request refusals' }
+  const labels = { swaps: 'Swaps', quotes: 'Open quotes', offers: 'Offers', refusals: 'Refusals' }
+  const counts = {
+    swaps: state.data.swaps?.swaps?.length,
+    quotes: state.data.quotes?.quoted?.length,
+    offers: state.data.offers?.offers?.length,
+    refusals: state.data.refusals?.entries?.length,
+  }
+  const tab = state.activityTab ?? 'swaps'
   return h(
     'div.activity',
     h(
-      'div.toolbar',
-      h('h1.sans', 'activity'),
-      ...ACTIVITY_SECTIONS.map((key) =>
-        h('button.act', { onclick: () => document.getElementById(`activity-${key}`)?.scrollIntoView() }, labels[key]),
+      'div.tabs',
+      { role: 'tablist' },
+      ACTIVITY_SECTIONS.map((key) =>
+        h(
+          'button',
+          { role: 'tab', 'aria-selected': String(tab === key), onclick: () => ((state.activityTab = key), render()) },
+          labels[key],
+          counts[key] === undefined ? null : h('span.count', String(counts[key])),
+        ),
       ),
-      h('span.spacer'),
-      h('button.act', { onclick: () => load('activity') }, 'refresh activity'),
     ),
-    ...ACTIVITY_SECTIONS.map((key) =>
-      h(
-        'section.activity-section',
-        { id: `activity-${key}`, 'aria-label': labels[key] },
-        key === 'swaps' || state.activityErrors[key] ? h('h2.sans', labels[key]) : null,
-        state.activityErrors[key] && key !== 'swaps' ? activityError(key) : h('div.activity-content', bodies[key]()),
-      ),
+    h(
+      'section.activity-section',
+      { id: `activity-${tab}`, 'aria-label': labels[tab] },
+      state.activityErrors[tab] ? activityError(tab) : h('div.activity-content', bodies[tab]()),
     ),
   )
 }
@@ -996,36 +1085,35 @@ const loadFunds = async () => {
   render()
 }
 
+/** The withdrawal being typed, per source. Under `state.data`, which `load()` never overwrites for this key. */
+const withdrawDraft = (id) => ((state.data.withdrawDrafts ??= {})[id] ??= { address: '', amount: '' })
+
 /**
- * Collect a destination and an amount, then hand both to the ordinary armed
- * dialog.
+ * Hand the typed destination and amount to the ordinary armed dialog.
  *
- * `window.prompt` for the same reason `editKnob` uses it: the whole page
- * re-renders on a two-second stream tick, so a form field living in the tree
- * would be rebuilt out from under whoever is typing into it.
- *
- * The `override` argument is the second gate. It renders the source, amount and
- * destination back as a banner with a checkbox that must be ticked before the
- * confirm box does anything — so the operator sees what they are about to send
- * spelled out, and then has to type the address itself. The server checks that
- * address independently; this is the part that stops a reflex.
+ * The `override` argument spells the source, amount and full destination out in
+ * the confirmation, so the operator reads what is about to leave before the one
+ * click that sends it. The server checks the address independently.
  */
 const fundWithdraw = (source) => {
-  const typed = window.prompt(
-    `Withdraw from ${source.label} to which address?\n\nThis leaves the solver and cannot be undone.`,
-  )
-  if (typed === null) return
-  const address = typed.trim()
-  if (!address) return
-  const raw = window.prompt(`How much (${source.unit}) to ${address}?`)
-  if (raw === null) return
-  const amount = String(raw).trim()
-  if (!amount) return
+  const draft = withdrawDraft(source.id)
+  const address = draft.address.trim()
+  const amount = draft.amount.trim()
+  if (!address || !amount) {
+    state.data.fundRead = {
+      source: source.id,
+      name: 'fund-withdraw',
+      result: null,
+      error: 'Type an address and an amount first.',
+    }
+    return render()
+  }
+  if (state.data.fundRead?.name === 'fund-withdraw') delete state.data.fundRead
   return armDialog(
     'fund-withdraw',
     { source: source.id, address, amount },
-    `About to send ${fundAmount(amount)} ${source.unit} from ${source.label} to ${address}. It is irreversible, ` +
-      'and each attempt is a separate payment.',
+    `About to send ${fundAmount(amount)} ${source.unit} from ${source.label} to ${address}.`,
+    'Irreversible.',
   )
 }
 
@@ -1047,7 +1135,7 @@ const fundFigureRows = (balance) =>
     h(
       'dd',
       f.amount === null ? h('span.sans', f.note ?? '—') : `${fundAmount(f.amount)} ${balance.unit}`,
-      f.amount !== null && f.note ? h('span.faint', ` ${f.note}`) : null,
+      f.amount !== null && f.note ? h('span.faint.note', ` ${f.note}`) : null,
     ),
   ])
 
@@ -1129,37 +1217,75 @@ const fundResult = (read) => {
  */
 const fundSourcePanel = (source, slot) => {
   const read = state.data.fundRead?.source === source.id ? state.data.fundRead : null
+  const draft = withdrawDraft(source.id)
+  const typed = (key) => (e) => (draft[key] = e.target.value)
+  const withdrawing = source.can.withdraw && state.withdrawing === source.id
+  const toggle = () => {
+    state.withdrawing = withdrawing ? null : source.id
+    render()
+    if (!withdrawing) document.querySelector(`[data-source=${JSON.stringify(source.id)}] .withdraw input`)?.focus()
+  }
+  // Each optional part keeps a slot, so one appearing never shifts the buttons under the operator's focus.
   return h(
     'section.panel',
+    { 'data-source': source.id },
     h('h2', source.label),
-    slot?.error ? h('p.banner', slot.error) : slot?.balance ? h('dl.kv', fundFigureRows(slot.balance)) : null,
-    read ? fundResult(read) : null,
+    h(
+      'div.fund-figures',
+      slot?.error ? h('p.banner', slot.error) : slot?.balance ? h('dl.kv', fundFigureRows(slot.balance)) : null,
+    ),
+    h('div.fund-result', read ? fundResult(read) : null),
+    h(
+      'div.withdraw',
+      withdrawing
+        ? h(
+            'div.wallet-form-grid',
+            h('label.wallet-field', 'To address', h('input.mono', { value: draft.address, oninput: typed('address') })),
+            h(
+              'label.wallet-field',
+              `Amount (${source.unit})`,
+              h('input.mono', { value: draft.amount, inputmode: 'numeric', oninput: typed('amount') }),
+            ),
+          )
+        : null,
+    ),
     h(
       'div.toolbar',
-      source.can.deposit
-        ? actButton(
-            'button.act',
-            { 'data-action': 'fund-deposit-address', onclick: () => fundAction('fund-deposit-address', source.id) },
-            // PLURAL, because every source that has one has more than one and
-            // the singular label read as "here is the address" — which sent an
-            // operator holding VTXOs out to L1 to wait for a settlement.
-            'deposit options',
-          )
-        : null,
-      source.can.settle
-        ? actButton(
-            'button.act',
-            { 'data-action': 'fund-settle-deposits', onclick: () => fundAction('fund-settle-deposits', source.id) },
-            'settle deposits',
-          )
-        : null,
-      source.can.withdraw
-        ? actButton(
-            'button.act.armed',
-            { 'data-action': 'fund-withdraw', onclick: () => fundWithdraw(source) },
-            'withdraw…',
-          )
-        : null,
+      withdrawing
+        ? [
+            actButton(
+              'button.act.armed.primary',
+              { 'data-action': 'fund-withdraw', onclick: () => fundWithdraw(source) },
+              'Review…',
+            ),
+            h('button.act', { onclick: toggle }, 'Cancel'),
+          ]
+        : [
+            source.can.deposit
+              ? actButton(
+                  'button.act',
+                  {
+                    'data-action': 'fund-deposit-address',
+                    onclick: () => fundAction('fund-deposit-address', source.id),
+                  },
+                  // PLURAL, because every source that has one has more than one and
+                  // the singular label read as "here is the address" — which sent an
+                  // operator holding VTXOs out to L1 to wait for a settlement.
+                  'Deposit options',
+                )
+              : null,
+            source.can.withdraw ? h('button.act', { onclick: toggle }, 'Withdraw') : null,
+            source.can.settle
+              ? actButton(
+                  'button.link',
+                  {
+                    'data-action': 'fund-settle-deposits',
+                    onclick: () => fundAction('fund-settle-deposits', source.id),
+                  },
+                  'settle deposits',
+                )
+              : null,
+          ],
     ),
   )
 }
@@ -1181,130 +1307,169 @@ const fundsPanel = () => {
     return h('section.panel', h('h2', 'funding'), h('p.muted', 'loading…'))
   }
   return h(
-    'div',
-    h('h2.sans', 'funding'),
-    // The honest headline, and the reason no button here is called "fund
-    // lightning". Neither the Lightning port nor the onchain one has a channel
-    // primitive, so a deposit lands in a wallet and becomes channel liquidity
-    // only if someone opens a channel with it at the node.
+    'section.wallet-section',
     h(
-      'p.notice',
-      'Deposits and withdrawals move a source’s own wallet. Nothing here opens Lightning channels, so inbound and ' +
-        'outbound capacity still change only at the node itself.',
+      'div.wallet-section-heading',
+      h('h2', 'Sources'),
+      actButton('button.link', { 'data-action': 'fund-balance', onclick: () => loadFunds() }, 'refresh'),
     ),
+    // The reason no button here is called "fund lightning": neither port has a
+    // channel primitive, so a deposit becomes channel liquidity only at the node.
+    h('p.notice', 'Deposits move a wallet, not channel capacity.'),
     f.error ? h('p.banner', f.error) : null,
     h(
       'div.panels',
       f.sources.map((source) => fundSourcePanel(source, f.balances[source.id])),
-    ),
-    h(
-      'div.toolbar',
-      actButton('button.act', { 'data-action': 'fund-balance', onclick: () => loadFunds() }, 're-read balances'),
     ),
   )
 }
 
 /* ---- fund sources: END --------------------------------------------------- */
 
+const rebalancePanel = new RebalancePanel(api, () => {
+  if (state.view === 'wallet') render()
+})
+
 const walletView = () => {
   const w = state.data.wallet
   if (!w) return h('p.muted', 'loading…')
   const pool = w.arkade.pool
   return h(
-    'div',
+    'div.wallet-page',
     h(
-      'div.panels',
+      'div.panels.wallet-balances',
       h(
         'section.panel',
-        h('h2', 'arkade'),
+        h('h2', 'Arkade'),
         h(
-          'dl.kv',
-          h('dt', 'address'),
-          h('dd.faint', w.arkade.addressError ? h('span.muted', w.arkade.addressError) : (w.arkade.address ?? '—')),
-          h('dt', 'balance'),
-          h('dd', w.arkade.balanceError ? h('span.muted', w.arkade.balanceError) : balanceRows(w.arkade.balance)),
-          /* assets: begin */
-          ...(w.arkade.balanceError ? [] : assetRowsPair(w.arkade.balance)),
-          /* assets: end */
+          'p.wallet-number',
+          w.arkade.balanceError ? 'Unavailable' : sats(w.arkade.balance?.available),
+          w.arkade.balanceError ? null : h('span', ' sat available'),
+        ),
+        h(
+          'details.wallet-balance-more',
+          {
+            open: state.walletDetailsOpen,
+            ontoggle: (e) => {
+              state.walletDetailsOpen = e.target.open
+            },
+          },
+          h('summary', 'Details'),
+          h(
+            'dl.kv',
+            h('dt', 'Address'),
+            h('dd.faint', w.arkade.addressError ? h('span.muted', w.arkade.addressError) : (w.arkade.address ?? '—')),
+            h('dt', 'Balance details'),
+            h(
+              'dd.balance-list',
+              w.arkade.balanceError ? h('span.muted', w.arkade.balanceError) : balanceRows(w.arkade.balance),
+            ),
+            /* assets: begin */
+            ...(w.arkade.balanceError ? [] : assetRowsPair(w.arkade.balance)),
+            /* assets: end */
+          ),
         ),
       ),
       h(
         'section.panel',
-        h('h2', 'lightning'),
+        h('h2', 'Lightning'),
+        h(
+          'p.wallet-number',
+          w.lightning.error ? 'Unavailable' : sats(w.lightning.balance?.availableSats),
+          w.lightning.error ? null : h('span', ' sat available'),
+        ),
+        w.lightning.error ? h('p.banner', w.lightning.error) : null,
         h(
           'dl.kv',
-          h('dt', 'available'),
-          h('dd', w.lightning.error ? h('span.muted', w.lightning.error) : sats(w.lightning.balance?.availableSats)),
-          h('dt', 'incoming'),
+          h('dt', 'Incoming (sat)'),
           h('dd', w.lightning.error ? h('span.muted', '—') : sats(w.lightning.balance?.incomingSats)),
         ),
       ),
       h(
         'section.panel',
-        h('h2', 'onchain'),
+        h('h2', 'Onchain'),
         h(
-          'dl.kv',
-          h('dt', 'fee rate'),
-          h('dd', w.onchain.error ? h('span.muted', w.onchain.error) : `${w.onchain.feeRate} sat/vB`),
+          'p.wallet-number',
+          w.onchain.error ? 'Unavailable' : w.onchain.feeRate,
+          w.onchain.error ? null : h('span', ' sat/vB'),
         ),
+        h('p.muted', w.onchain.error ?? 'Estimated network fee'),
       ),
     ),
     /* fund sources: the one call into the block above. */
     fundsPanel(),
-    h('h2.sans', 'vtxo pool'),
-    // The number that actually constrains throughput: funding pins the coins it
-    // spends, so one fat coin funds one swap and refuses the next however large.
-    h('p.notice', 'How many swaps this float can fund AT ONCE — not how many sats it holds.'),
-    w.arkade.poolError
-      ? h('p.banner', w.arkade.poolError)
-      : pool
-        ? h(
-            'div',
-            h('p', `${pool.pieces.length} piece(s): `, h('span.faint', pool.pieces.slice(0, 16).map(sats).join('  '))),
-            h('p.muted', pool.plan.reason),
-            /* assets: begin — why the pieces above add up to less than the balance */
-            pool.assetEncumberedSats
-              ? h(
-                  'p.muted',
-                  `${sats(pool.assetEncumberedSats)} sat across ${pool.assetBearingPieces} piece(s) cannot fund a swap: ` +
-                    'those sats are carrying an asset, and an asset has to ride on sats.',
-                )
-              : null,
-            /* assets: end */
-            h(
+    rebalancePanel.render(h),
+    h(
+      'section.wallet-section',
+      // The number that actually constrains throughput: funding pins the coins it
+      // spends, so one fat coin funds one swap and refuses the next however large.
+      h(
+        'div.wallet-section-heading',
+        h('h2', { title: 'Each coin can fund one concurrent swap.' }, 'VTXO pool'),
+        pool
+          ? h(
               'div.toolbar',
               actButton(
-                'button.act',
+                'button.link',
                 { 'data-action': 'pool-plan', onclick: () => runAction('pool-plan', {}) },
-                're-plan (read-only)',
+                're-plan',
               ),
               actButton(
                 'button.act.armed',
                 { 'data-action': 'pool-mint', onclick: () => armDialog('pool-mint', {}) },
-                'reshape pool…',
+                'Reshape…',
               ),
-            ),
-          )
-        : h('p.muted', '—'),
+            )
+          : null,
+      ),
+      w.arkade.poolError
+        ? h('p.banner', w.arkade.poolError)
+        : pool
+          ? h(
+              'div',
+              h(
+                'p',
+                h('b', `${pool.pieces.length} coins `),
+                h('span.faint.mono', pool.pieces.slice(0, 12).map(sats).join('  ')),
+              ),
+              h('p.muted', pool.plan.reason),
+              /* assets: begin — why the pieces above add up to less than the balance */
+              pool.assetEncumberedSats
+                ? h(
+                    'p.muted',
+                    `${sats(pool.assetEncumberedSats)} sat in ${pool.assetBearingPieces} coin(s) carry an asset and cannot fund a swap.`,
+                  )
+                : null,
+              /* assets: end */
+            )
+          : h('p.muted', '—'),
+    ),
   )
 }
 
+/** Every probe with the host it reached, on the health page. */
 const backendsView = () => {
-  const b = state.data.backends
-  if (!b) return h('p.muted', 'loading…')
   return h(
-    'table',
-    h('thead', h('tr', h('th', ''), h('th', 'backend'), h('th', 'detail'), h('th', 'target'))),
+    'section.panel',
+    h('h2', 'probes'),
     h(
-      'tbody',
-      b.backends.map((backend) =>
-        h(
-          'tr',
-          h('td', h(`span.dot${backend.ok ? '' : '.down'}`)),
-          h('td', backend.name),
-          h('td', backend.ok ? h('span.muted', backend.detail) : h('span', { class: 'sans' }, backend.error)),
-          h('td.faint', backend.target ?? '—'),
-        ),
+      'table',
+      h('thead', h('tr', h('th', ''), h('th', 'backend'), h('th', 'detail'), h('th', 'target'), h('th', 'checked'))),
+      h(
+        'tbody',
+        state.data.diagnostics.backends.map((backend) => {
+          const said = backend.ok ? backend.detail : backend.error
+          return h(
+            'tr',
+            h('td', h(`span.dot${backend.ok ? '' : '.down'}`)),
+            h('td', backend.name),
+            h('td', h(`span.clip${backend.ok ? '.muted' : '.sans'}`, { title: said }, said)),
+            h('td.faint', h('span.clip', { title: backend.target ?? '' }, backend.target ?? '—')),
+            // The timestamp is the point: without it a frozen probe and a fresh
+            // one look identical.
+            h('td.faint', ago(backend.lastCheckedAt)),
+          )
+        }),
       ),
     ),
   )
@@ -1363,9 +1528,8 @@ const settingsView = () => {
  * scalars, and a market is a record an operator ADDS and DROPS.
  *
  * The draft lives here rather than on `state` so that typing into the form does
- * not re-render the console — the same trick the confirm dialog uses, and for
- * the same reason: a rebuild hands back a new input with no focus and a caret
- * at zero, so the field looks fine and silently stops accepting input.
+ * not re-render the console on every keystroke: a render resets the draft
+ * preview beside it.
  * ========================================================================== */
 
 /** The market being edited, or null when the form is closed. */
@@ -1588,6 +1752,8 @@ const field = (label, key, hint, explain) => [
       state.data.markets?.markets.some((row) => row.marketKey === pricingSelection?.key) &&
       (key === 'base' || key === 'quote'),
     value: String(marketDraft[key] ?? ''),
+    // The static hint is the empty field's placeholder; the column beside it is for live feedback only.
+    placeholder: hint,
     oninput: (e) => (
       (marketDraft[key] = e.target.value),
       paintLegHint('base'),
@@ -1595,19 +1761,19 @@ const field = (label, key, hint, explain) => [
       schedulePreview()
     ),
   }),
-  legHint(key) ?? h('span.hint', hint ?? ''),
+  legHint(key) ?? h('span.hint'),
 ]
 
 const checkbox = (label, key, hint) =>
   h(
-    'p.toolbar',
-    h('span.muted', label),
+    'label.check.toolbar',
+    { title: hint },
     h('input', {
       type: 'checkbox',
       ...(marketDraft[key] ? { checked: true } : {}),
       oninput: (e) => ((marketDraft[key] = e.target.checked), schedulePreview()),
     }),
-    hint ? h('span.faint', hint) : null,
+    label,
   )
 
 const CARRIER_MODES = ['inherit', 'off', 'priced']
@@ -1616,26 +1782,26 @@ const CARRIER_MODES = ['inherit', 'off', 'priced']
  *  the one save that spans both stores, and the ordered save has nothing to sequence until one exists. */
 const carrierDefaultField = () =>
   h(
-    'p.toolbar',
-    h('span.muted', 'deployment default'),
+    'label.check.toolbar',
+    { title: 'ASSET_CARRIER_PRICING, deployment-wide — saved with this market, in one ordered save' },
     h('input', {
       type: 'checkbox',
       ...(carrierDefaultDraft ? { checked: true } : {}),
       oninput: (e) => ((carrierDefaultDraft = e.target.checked), schedulePreview()),
     }),
-    h('span.faint', 'ASSET_CARRIER_PRICING, deployment-wide — saved with this market, in one ordered save'),
+    'price the carrier by default',
   )
 
 const carrierModeField = () =>
   h(
-    'p.toolbar',
-    h('span.muted', 'carrier mode'),
+    'label.check.toolbar',
+    { title: 'Whether an RFQ quote prices the carrier in; inherit follows ASSET_CARRIER_PRICING.' },
+    'carrier mode ',
     h(
       'select',
       { onchange: (e) => ((marketDraft.carrierMode = e.target.value), schedulePreview()) },
       ...CARRIER_MODES.map((mode) => h('option', { value: mode, selected: marketDraft.carrierMode === mode }, mode)),
     ),
-    h('span.faint', 'whether an RFQ quote prices the carrier in; inherit follows ASSET_CARRIER_PRICING'),
   )
 
 /** The carrier default rides the same request rather than a second one: the ordering this
@@ -1943,20 +2109,22 @@ const rfqDirectionLine = () => {
 const boundsHint =
   'Bounds on what we pay out in this direction, not on what the customer sends. Set both to 0 to close this direction while leaving everything else configured.'
 
-const marketForm = (save = saveMarket, close = () => ((marketDraft = null), render()), saveLabel = 'save') =>
+const marketForm = (save = saveMarket, close = () => ((marketDraft = null), render()), saveLabel = 'Save') =>
   h(
     'section.panel',
-    h('h2', 'market'),
+    // Said here as well as in the notice above the table, which is read after the save.
+    h(
+      'h2',
+      {
+        title:
+          'Tightening the price, tolerance or bounds also re-judges maker offers already recorded as fillable: ' +
+          'they are refused rather than filled at the old terms, and the maker is not told why their offer went unfilled.',
+      },
+      'market',
+    ),
     // The key is derived from the legs, so re-submitting a pair edits it. Said
     // out loud because there is no id field to make that obvious.
     h('p.faint', 'A pair may be configured once. Submitting one that exists edits it.'),
-    // Said here as well as in the notice above the table, which is read after the save.
-    h(
-      'p.faint',
-      'Tightening the price, tolerance or bounds below also re-judges maker offers ' +
-        'already recorded as fillable: they are refused rather than filled at the old ' +
-        'terms, and the maker is not told why their offer went unfilled.',
-    ),
     h(
       'div.form-grid',
       group('identity'),
@@ -2092,7 +2260,7 @@ const marketForm = (save = saveMarket, close = () => ((marketDraft = null), rend
     checkbox('rfq buy base', 'rfqBuyBase'),
     carrierModeField(),
     state.view === 'pricing' ? null : carrierDefaultField(),
-    h('p.toolbar', h('button.act', { onclick: save }, saveLabel), h('button.act', { onclick: close }, 'close editor')),
+    h('p.toolbar', h('button.act', { onclick: save }, saveLabel), h('button.act', { onclick: close }, 'Close editor')),
   )
 
 const NOTHING_TITLE =
@@ -2336,32 +2504,28 @@ const paintPricingChanges = () => {
       value: value === null ? 'use environment value' : value,
     })),
   ]
-  pricingChangesNode.appendChild(
-    h(
-      'div.pricing-apply',
+  // Nothing to apply, nothing to show: a permanent "0 pending" bar is one more thing to read past.
+  if (entries.length || pricingDraft.busy)
+    pricingChangesNode.appendChild(
       h(
-        'div',
-        h('b', pricingDraft.busy ? 'Applying changes…' : `${entries.length} pending changes`),
+        'div.pricing-apply',
+        {
+          title:
+            'Changes stay in this tab until you apply or discard them. Restrictions are applied before relaxations.',
+        },
         h(
-          'p.faint',
-          'Changes stay in this tab until you apply or discard them. Restrictions are applied before relaxations.',
+          'b',
+          pricingDraft.busy
+            ? 'Applying changes…'
+            : `${entries.length} unsaved change${entries.length === 1 ? '' : 's'}`,
+        ),
+        h(
+          'div.toolbar',
+          h('button.act', { disabled: pricingDraft.busy, onclick: discardPricingDraft }, 'Discard'),
+          h('button.act.primary', { disabled: pricingDraft.busy, onclick: applyPricingDraft }, 'Apply'),
         ),
       ),
-      h(
-        'div.toolbar',
-        h(
-          'button.act',
-          { disabled: !entries.length || pricingDraft.busy, onclick: applyPricingDraft },
-          'apply changes',
-        ),
-        h(
-          'button.act',
-          { disabled: !entries.length || pricingDraft.busy, onclick: discardPricingDraft },
-          'discard changes',
-        ),
-      ),
-    ),
-  )
+    )
   if (entries.length)
     pricingChangesNode.appendChild(
       h(
@@ -2418,7 +2582,7 @@ const pricingKnobField = (knob, label, explanation) => {
                 render()
               },
             },
-            'use env',
+            'Use env',
           )
         : null,
     ),
@@ -2442,10 +2606,7 @@ const corridorForm = () => {
   return h(
     'section.panel',
     h('h2', corridor.label),
-    h(
-      'p.notice',
-      'Stored fees, limits and enabled flags take effect after a solver restart. The preview shows the draft configuration.',
-    ),
+    h('p.notice', 'Applies after a restart. The preview shows the draft.'),
     h(
       'div.form-grid',
       definitions.flatMap(([suffix, label, explanation]) => {
@@ -2453,7 +2614,7 @@ const corridorForm = () => {
         return knob ? pricingKnobField(knob, label, explanation) : []
       }),
     ),
-    h('p.toolbar', h('button.act', { onclick: () => selectPricing(null) }, 'close editor')),
+    h('p.toolbar', h('button.act', { onclick: () => selectPricing(null) }, 'Close editor')),
   )
 }
 
@@ -2495,10 +2656,7 @@ const corridorPreviewBody = () =>
         ),
       ),
     ),
-    h(
-      'p.faint',
-      'Fees are not profit: network costs are separate. This preview does not check inventory or Lightning routing.',
-    ),
+    h('p.faint', 'Network costs are separate; inventory and routing are not checked.'),
   )
 
 const pricingRows = () => {
@@ -2507,52 +2665,40 @@ const pricingRows = () => {
   return rows
 }
 
+/** A row opens its editor; the open one is marked. */
+const pricingRow = (selected, open, ...cells) =>
+  h(
+    'tr.clickable',
+    { tabindex: '0', class: selected ? 'selected' : '', onclick: open, onkeydown: (e) => e.key === 'Enter' && open() },
+    ...cells,
+  )
+
 const pricingTable = (overrides, marketRows) =>
   h(
     'tbody',
     BTC_CORRIDORS.map((corridor) =>
-      h(
-        'tr',
+      pricingRow(
+        pricingSelection?.key === corridor.key,
+        () => selectPricing({ kind: 'corridor', ...corridor }),
         h('td', corridor.label),
-        h('td', `${overrides[`${corridor.stem}_FEE_BPS`]} bps + ${overrides[`${corridor.stem}_FEE_FLAT_SATS`]} sats`),
-        h('td', overrides[`${corridor.stem}_ENABLED`] === 'true' ? 'enabled' : 'disabled'),
-        h('td.muted', 'after restart'),
-        h('td', h('button.act', { onclick: () => selectPricing({ kind: 'corridor', ...corridor }) }, 'edit & preview')),
+        h('td.num', `${overrides[`${corridor.stem}_FEE_BPS`]} bps + ${overrides[`${corridor.stem}_FEE_FLAT_SATS`]}`),
+        h('td.state', overrides[`${corridor.stem}_ENABLED`] === 'true' ? 'enabled' : h('span.faint', 'disabled')),
+        h('td.faint', 'after restart'),
       ),
     ),
     [...marketRows].map(([key, row]) =>
-      h(
-        'tr',
+      pricingRow(
+        pricingSelection?.key === key,
+        () => selectPricing({ kind: 'market', key }, pricingMarketForms.get(key) ?? draftFrom(row)),
         h('td', row.symbol ? h('b', row.symbol, ' ') : null, legNode(row.base), ' / ', legNode(row.quote)),
-        h('td', `${row.feeBps} bps`),
+        h('td.num', `${row.feeBps} bps`),
         h(
-          'td',
+          'td.state',
           row.enabled
             ? `${row.servesRfq ? 'RFQ ' : ''}${row.servesOffer ? 'offers' : ''}`.trim() || 'no serving path'
-            : 'disabled',
+            : h('span.faint', 'disabled'),
         ),
-        h('td.muted', pricingDraft.markets.has(key) ? 'draft; market terms live after apply' : 'market terms live'),
-        h(
-          'td',
-          h(
-            'button.act',
-            {
-              onclick: () => selectPricing({ kind: 'market', key }, pricingMarketForms.get(key) ?? draftFrom(row)),
-            },
-            'edit & preview',
-          ),
-          state.data.markets.markets.some((saved) => saved.marketKey === key)
-            ? h(
-                'button.act',
-                {
-                  disabled: pricingDraft.size > 0,
-                  title: 'Remove immediately. Apply or discard pending changes first.',
-                  onclick: () => removePricingMarket(row),
-                },
-                'remove',
-              )
-            : null,
-        ),
+        h('td.faint', pricingDraft.markets.has(key) ? 'draft' : 'live'),
       ),
     ),
   )
@@ -2571,44 +2717,47 @@ const pricingView = () => {
   const overrides = pricingOverrides()
   const marketRows = pricingRows()
   pricingTableNode = pricingTable(overrides, marketRows)
+  // Repainted through this reference while editing; see `clear`.
+  pricingTableNode.painted = true
   pricingChangesNode = h('section.pricing-changes')
   paintPricingChanges()
   const close = () => selectPricing(null)
+  const saved =
+    pricingSelection?.kind === 'market' ? markets.markets.find((row) => row.marketKey === pricingSelection.key) : null
   return h(
     'fieldset.pricing-page',
     { disabled: pricingDraft.busy },
-    h('h1', 'Pricing'),
-    h('p.muted', 'Configure markets and Bitcoin corridors together. Preview customer amounts before applying.'),
     pricingChangesNode,
     h(
       'div.pricing-table',
       h(
         'table',
-        h(
-          'thead',
-          h(
-            'tr',
-            h('th', 'market or corridor'),
-            h('th', 'fees'),
-            h('th', 'state'),
-            h('th', 'takes effect'),
-            h('th', ''),
-          ),
-        ),
+        h('thead', h('tr', h('th', 'market or corridor'), h('th.right', 'fees'), h('th', 'state'), h('th', 'applies'))),
         pricingTableNode,
       ),
     ),
     h(
       'p.toolbar',
-      h('button.act', { onclick: () => selectPricing({ kind: 'market', key: null }, blankMarket()) }, 'add market'),
+      h('button.act', { onclick: () => selectPricing({ kind: 'market', key: null }, blankMarket()) }, 'Add market'),
+      marketRows.size === 0 ? h('span.faint', 'No asset markets yet.') : null,
+      h('span.spacer'),
+      // Removal is immediate, so it lives with the market being edited rather than on every row.
+      saved
+        ? h(
+            'button.link.danger',
+            {
+              disabled: pricingDraft.size > 0,
+              title: 'Remove immediately. Apply or discard pending changes first.',
+              onclick: () => removePricingMarket(saved),
+            },
+            `Remove ${saved.symbol || 'this market'}`,
+          )
+        : null,
     ),
-    marketRows.size === 0
-      ? h('p.faint', 'No asset markets configured. Bitcoin corridors can still be configured above.')
-      : null,
     pricingSelection
       ? h(
           'div.split',
-          pricingSelection.kind === 'corridor' ? corridorForm() : marketForm(close, close, 'keep in draft'),
+          pricingSelection.kind === 'corridor' ? corridorForm() : marketForm(close, close, 'Keep in draft'),
           previewPanel(),
         )
       : null,
@@ -2681,7 +2830,8 @@ const auditView = () => {
               h('td', row.action),
               h('td.faint', shortId(row.target)),
               h('td', row.outcome === 'ok' ? h('span.muted', 'ok') : h('span.phase.phase-failed', 'error')),
-              h('td.faint', row.detail ?? ''),
+              // Clipped to one line with the whole text on hover: a raw result can run to kilobytes.
+              h('td.faint', { title: row.detail ?? '' }, h('span.clip', row.detail ?? '')),
             ),
           ),
         ),
@@ -2697,12 +2847,18 @@ const discoveryView = () => {
   const cardJson = d.card ? JSON.stringify(d.card, null, 2) : null
   const publish = d.publish ?? { mode: 'off', lastPublishedAt: null, lastError: null }
   return h(
-    'div.panels',
+    'div.panels.discovery',
     h(
       'section.panel',
       h('h2', 'solver card'),
       // Whatever the card did: an unnameable corridor otherwise reads as unserved.
-      (d.cardOmitted ?? []).map((note) => h('p.muted', note)),
+      (d.cardOmitted ?? []).length
+        ? h(
+            'details.why',
+            h('summary', `${d.cardOmitted.length} market(s) left off the card`),
+            d.cardOmitted.map((note) => h('p', note)),
+          )
+        : null,
       d.cardError
         ? h('p.muted', d.cardError)
         : h(
@@ -2711,11 +2867,11 @@ const discoveryView = () => {
             // a human pastes into a pull request, so it has to be readable and
             // copyable even when the clipboard API is unavailable (no HTTPS,
             // older browser). The button is the convenience, not the only way.
-            h('pre.faint', cardJson ?? '—'),
+            h('details', h('summary', 'card JSON'), h('pre.faint', cardJson ?? '—')),
             h(
               'p.toolbar',
               h(
-                'button.act',
+                'button.link',
                 {
                   onclick: async () => {
                     try {
@@ -2734,19 +2890,22 @@ const discoveryView = () => {
                   },
                   disabled: cardJson ? undefined : true,
                 },
-                'copy card JSON',
+                'Copy card JSON',
               ),
             ),
           ),
     ),
     h(
       'section.panel',
-      h('h2', 'nostr'),
       h(
-        'p.muted',
-        publish.mode === 'manual'
-          ? 'post now publishes the card above as kind 38859; every 30 min the last posted card is re-sent unchanged'
-          : 'publishes the card above as kind 38859',
+        'h2',
+        {
+          title:
+            publish.mode === 'manual'
+              ? 'Post now publishes the card as kind 38859; every 30 min the last posted card is re-sent unchanged.'
+              : 'Publishes the card as kind 38859.',
+        },
+        'nostr',
       ),
       h(
         'dl.kv',
@@ -2770,7 +2929,7 @@ const discoveryView = () => {
             // would come back 409.
             disabled: publish.mode === 'off' || !publish.publisher ? true : undefined,
           },
-          'post now',
+          'Post now',
         ),
         publish.mode === 'off'
           ? h('span.muted', ' NOSTR_AD_PUBLISH is off')
@@ -2795,7 +2954,7 @@ const postAd = async () => {
     const result = await api('/api/actions/post-ad', { method: 'POST', body: JSON.stringify({}) })
     state.banner = null
     state.result = { name: 'post-ad', result: result.publish }
-    await load('discovery')
+    await load('health')
   } catch (error) {
     if (error.status === 409) {
       state.result = { name: 'post-ad', result: error.body?.detail ?? error.message }
@@ -2806,107 +2965,102 @@ const postAd = async () => {
       // reading `last error —`, which reads as the console contradicting
       // itself. For `off` and `no_publisher` nothing moved and the reload is
       // merely redundant.
-      await load('discovery')
+      await load('health')
       return
     }
     fail(error)
   }
 }
 
-/** "Is this solver healthy right now?" — probes, rails and headroom in one read. */
-const diagnosticsView = () => {
+/** "Is this solver healthy right now?" — probes, payout headroom and advertising on one page. */
+const healthView = () => {
   const d = state.data.diagnostics
   if (!d) return h('p.muted', 'loading…')
+  const down = d.backends.filter((backend) => !backend.ok).length
+  const short = d.corridors.filter((row) => !row.canHonourMax).length
+  const relayDown = d.relay && !d.relay.connected
+  const p = d.publish
   return h(
     'div',
     d.overridesError ? h('p.banner', d.overridesError) : null,
     h(
-      'table',
-      h('thead', h('tr', h('th', ''), h('th', 'backend'), h('th', 'detail'), h('th', 'checked'))),
+      'div.figures',
+      figure('backends down', String(down), `of ${d.backends.length}`, down > 0 ? 'c-loss' : null),
+      figure('short of max', String(short), 'corridors', short > 0 ? 'c-risk' : null),
+      figure('relay', d.relay ? (relayDown ? 'down' : 'connected') : '—', null, relayDown ? 'c-loss' : null),
+      // Advertising belongs on the health page: "am I publishing?" is part of
+      // "is this solver healthy", and the heartbeat says when the next republish falls due.
+      figure(
+        'card published',
+        p?.lastPublishedAt ? `${ago(p.lastPublishedAt)} ago` : 'never',
+        p
+          ? `${p.mode}${p.publisher ? '' : ', nothing wired'}${p.heartbeatSeconds ? `, every ${duration(p.heartbeatSeconds)}` : ''}`
+          : '',
+      ),
+      figure('uptime', duration(d.uptimeSeconds), d.mode),
+    ),
+    backendsView(),
+    h(
+      'section.panel',
+      h('h2', 'payout headroom'),
       h(
-        'tbody',
-        d.backends.map((backend) =>
-          h(
-            'tr',
-            h('td', h(`span.dot${backend.ok ? '' : '.down'}`)),
-            h('td', backend.name),
-            h('td', backend.ok ? h('span.muted', backend.detail) : h('span.sans', backend.error)),
-            // The timestamp is the point: without it a frozen probe and a fresh
-            // one look identical.
-            h('td.faint', ago(backend.lastCheckedAt)),
+        'table',
+        h(
+          'thead',
+          h('tr', h('th', ''), h('th', 'corridor'), h('th', 'rail'), h('th.right', 'available'), h('th.right', 'max')),
+        ),
+        h(
+          'tbody',
+          d.corridors.map((row) =>
+            h(
+              'tr',
+              h('td', h(`span.dot${row.canHonourMax ? '' : '.down'}`)),
+              h('td', corridorLabel(row.corridor)),
+              h('td.faint', row.payoutRail),
+              h('td.num', row.balanceError ? h('span.sans', row.balanceError) : sats(row.availableSats)),
+              h('td.num.faint', sats(row.advertisedMaxSats)),
+            ),
           ),
         ),
       ),
     ),
-    h(
-      'table',
-      h('thead', h('tr', h('th', ''), h('th', 'corridor'), h('th', 'rail'), h('th', 'available'), h('th', 'max'))),
-      h(
-        'tbody',
-        d.corridors.map((row) =>
-          h(
-            'tr',
-            h('td', h(`span.dot${row.canHonourMax ? '' : '.down'}`)),
-            h('td', corridorLabel(row.corridor)),
-            h('td.faint', row.payoutRail),
-            h('td', row.balanceError ? h('span.sans', row.balanceError) : sats(row.availableSats)),
-            h('td.faint', sats(row.advertisedMaxSats)),
-          ),
-        ),
-      ),
-    ),
-    // Advertising state belongs on the health page, not only on discovery: "am
-    // I publishing?" is part of "is this solver healthy", and `heartbeatSeconds`
-    // is produced here specifically so the page can say when the next
-    // republish falls due.
-    d.publish
-      ? h(
-          'p.muted',
-          `nostr card ${d.publish.mode}`,
-          d.publish.publisher ? '' : ' (nothing wired to publish)',
-          ` · last ${d.publish.lastPublishedAt ? ago(d.publish.lastPublishedAt) : 'never'}`,
-          d.publish.heartbeatSeconds ? ` · heartbeat ${duration(d.publish.heartbeatSeconds)}` : '',
-          d.publish.lastError ? h('span.sans', ` · ${d.publish.lastError}`) : null,
-        )
-      : null,
-    h(
-      'p.muted',
-      `uptime ${duration(d.uptimeSeconds)} · mode ${d.mode}`,
-      d.relay ? ` · relay ${d.relay.connected ? 'connected' : 'down'}` : '',
-    ),
+    state.data.discovery ? discoveryView() : null,
   )
 }
 
-const openDetail = async (row) => {
+/** The swap last asked for. A slower read, or a background re-read of any other, is dropped on arrival. */
+let detailWanted = null
+/** Where focus returns when the pane closes. */
+let detailOpener = null
+
+const openDetail = async (row, reread = false) => {
+  if (!reread) detailWanted = row.id
   try {
     // A result belonging to a DIFFERENT swap is dropped rather than carried
     // over. Left in place it would neither render here (the modal keys on the
     // swap id) nor be readable there (the page banner sits behind the scrim) —
     // an answer about another row, hidden, next to buttons that move money.
     if (state.result && state.result.forSwap && state.result.forSwap !== row.id) state.result = null
-    state.detail = await api(`/api/swaps/${encodeURIComponent(row.corridor)}/${encodeURIComponent(row.id)}`)
+    const detail = await api(`/api/swaps/${encodeURIComponent(row.corridor)}/${encodeURIComponent(row.id)}`)
+    if (row.id !== detailWanted || (reread && state.detail?.swap.id !== row.id)) return
+    const opening = !state.detail
+    state.detail = detail
     render()
+    if (opening) {
+      detailOpener = document.activeElement
+      document.querySelector('.dialog.detail')?.focus()
+    }
   } catch (error) {
-    fail(error)
+    if (!reread) fail(error)
   }
 }
 
-/**
- * One explanation block, or nothing when the server had none.
- *
- * Server-resolved rather than a lookup table here: the prose has one home in
- * `src/core/refusalReasons.ts`, so it cannot drift from the codes it explains
- * and anything else reading the admin API gets it too.
- */
-const explain = (title, explanation) =>
-  explanation
-    ? h(
-        'div.explain',
-        h('p.explain-title', title),
-        h('p', explanation.meaning),
-        h('p.muted', h('strong', 'what to do: '), explanation.whatToDo),
-      )
-    : null
+const closeDetail = () => {
+  state.detail = null
+  detailWanted = null
+  render()
+  if (detailOpener?.isConnected) detailOpener.focus()
+}
 
 /** Shorten an id for display; the link carries the whole thing. */
 const short = (value) => (value.length > 20 ? `${value.slice(0, 10)}…${value.slice(-6)}` : value)
@@ -3016,17 +3170,38 @@ const nextStep = (d) => {
   const read = readVerdict(d.swap.id)
   if (!read) {
     return d.swap.state === 'stuck' || d.swap.phase === 'exposed'
-      ? 'Start with READ PAYMENT. It asks the backend what became of this payment and decides refund vs claim. Nothing below moves money until you do.'
-      : 'Start with RECHECK. It drives the swap one step, which resolves most rows on its own.'
+      ? 'Check the payment before moving any money.'
+      : 'A recheck resolves most rows on its own.'
   }
   const says = {
-    'paid-do-not-refund': 'READ SAYS: the solver PAID. Claim the lockup — refunding would pay the client twice.',
-    'self-payment-do-not-refund': 'READ SAYS: our own node may still collect. Do NOT refund; read the node by hand.',
-    'not-paid-refund-is-safe': 'READ SAYS: the payment did not settle. Refunding the client is the correct resolution.',
-    'never-submitted': 'READ SAYS: nothing was submitted. Refunding is safe IF the backend confirmed it holds nothing.',
-    'undecided-push-nothing': 'READ SAYS: undecided. Push NOTHING. Re-read, or read the wallet by hand.',
+    'paid-do-not-refund': 'Paid. Claim the lockup — a refund would pay twice.',
+    'self-payment-do-not-refund': 'Our own node may still collect. Do not refund.',
+    'not-paid-refund-is-safe': 'Not paid. Refunding the client is safe.',
+    'never-submitted': 'Never sent. Refund only if the backend holds nothing.',
+    'undecided-push-nothing': 'Undecided. Move nothing yet.',
   }
-  return says[read.verdict] ?? `READ SAYS: ${read.verdict}.`
+  return says[read.verdict] ?? `Read says: ${read.verdict}.`
+}
+
+/** What the pane leads with: the step the evidence so far points at. Everything else sits in the menu. */
+const primaryAction = (d, armed) => {
+  const read = readVerdict(d.swap.id)
+  if (read?.supports['refund-now'] && armed.includes('refund-now')) return 'refund-now'
+  if (read?.supports['claim-now'] && armed.includes('claim-now')) return 'claim-now'
+  const unread = !read && (d.swap.state === 'stuck' || d.swap.phase === 'exposed')
+  return unread && d.swap.corridor === 'arkade:BTC->lightning:BTC' ? 'read-payment' : 'tick'
+}
+
+/** Names an operator reads; the wire name stays on `data-action`. */
+const ACTION_LABELS = {
+  'refund-now': 'Refund',
+  'claim-now': 'Claim',
+  'onchain-refund-now': 'Refund on L1',
+  'reclaim-l1-htlc': 'Reclaim L1 HTLC',
+  'park-swap': 'Park',
+  'fund-withdraw': 'Send',
+  'pool-mint': 'Reshape pool',
+  'restart-solver': 'Restart',
 }
 
 /** One armed button, marked by whether the last read supports it. */
@@ -3047,24 +3222,14 @@ const armedButton = (name, d) => {
       title: because ?? undefined,
       onclick: () => {
         if (name !== 'park-swap') return armDialog(name, { id: d.swap.id }, contrary ? because : null)
-        const why = window.prompt('Why is this swap being parked? Recorded on the row.')
-        if (!why || !why.trim()) return
         // `corridor` because park-swap is offered on EVERY row and now dispatches
         // through the registry: a swap id is unique only within its own store.
-        return armDialog(name, { id: d.swap.id, corridor: d.swap.corridor, reason: why.trim() })
+        // The reason is typed in the confirmation itself.
+        return armDialog(name, { id: d.swap.id, corridor: d.swap.corridor })
       },
     },
-    name,
-    contrary ? h('span.faint', ' ⚠ not what the read supports') : null,
+    `${ACTION_LABELS[name] ?? name}${contrary ? ' anyway' : ''}…`,
   )
-}
-
-/** One labelled group, so the action row stops reading as a menu of equals. */
-const actionGroup = (label, hint, ...buttons) => {
-  const live = buttons.filter(Boolean)
-  return live.length === 0
-    ? null
-    : h('div.actgroup', h('div.actlabel', h('b', label), h('span.faint', ` ${hint}`)), h('div.row', ...live))
 }
 
 /**
@@ -3166,13 +3331,28 @@ const detailDialog = () => {
         // problem, and this is the only thing that stops the sweep re-driving it.
         'park-swap',
       ].filter(Boolean)
+  const why = [d.swap.stateNote, d.swap.failureExplanation].filter(Boolean)
   return h(
-    'div.scrim',
-    { onclick: (e) => e.target.classList.contains('scrim') && ((state.detail = null), render()) },
+    'div.scrim.drawer',
+    { onclick: (e) => e.target.classList.contains('scrim') && closeDetail() },
     h(
       'div.dialog.detail',
-      h('h2', `${corridorLabel(d.swap.corridor)} · ${d.swap.id}`),
-      h('p', phaseChip(d.swap.phase), ' ', stateWord(d.swap.state, d.raw)),
+      { role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'detail-title', tabindex: '-1' },
+      h(
+        'header.detail-head',
+        h(
+          'div',
+          h('h2', { id: 'detail-title' }, `${corridorLabel(d.swap.corridor)} · ${sats(d.swap.amountSats)} sat`),
+          h('p.mono.faint', d.swap.id),
+        ),
+        h('button.icon', { 'aria-label': 'close', title: 'Close (Esc)', onclick: closeDetail }, '✕'),
+      ),
+      h('p.detail-state', phaseChip(d.swap.phase, d.swap.state), ' ', stateWord(d.swap.state, d.raw)),
+      h(
+        'p.faint',
+        d.swap.payoutSats === null ? '' : `payout ${sats(d.swap.payoutSats)} sat · `,
+        `created ${ago(d.swap.createdAt)} ago · updated ${ago(d.swap.updatedAt)} ago`,
+      ),
       d.swap.failureReason ? h('p.banner', d.swap.failureReason) : null,
       // `stuck` beside a pushed refund reads as an unresolved loss. It is not:
       // the two facts are about different people. `stuck` says an operator
@@ -3185,17 +3365,46 @@ const detailDialog = () => {
             'p.settled',
             h('b', 'The client has been refunded'),
             d.raw.refundOutcome === 'external' ? ' (by someone else). ' : '. ',
-            'Nothing is outstanding for them. This row is parked so a human can see WHY the payment failed.',
+            'Nothing is outstanding for them.',
           )
         : null,
+      // The answer to whatever was last pressed, HERE and in full.
+      //
+      // Above the buttons rather than below them: an operator who has just read
+      // `paid-do-not-refund` is about to decide whether to press `refund now`,
+      // and the verdict has to be between them and that button, not underneath
+      // it where the dialog may already have scrolled past.
+      state.result && state.result.forSwap === d.swap.id
+        ? h(
+            'div.result',
+            h(
+              'details',
+              { open: true },
+              h('summary', `${state.result.name} result`),
+              h(
+                'pre.faint',
+                typeof state.result.result === 'string'
+                  ? state.result.result
+                  : JSON.stringify(state.result.result, null, 2),
+              ),
+            ),
+            h('button.link', { onclick: () => ((state.result = null), render()) }, 'dismiss'),
+          )
+        : h('div.result'),
+      decision(d, armed),
       // The raw reason above stays: it is the exact string the row carries, and
       // an operator comparing against logs needs it verbatim. What follows is
       // what it MEANS, resolved server-side (src/core/refusalReasons.ts).
-      explain('what this state means', d.swap.stateNote),
-      explain('why it stopped here', d.swap.failureExplanation),
-      h('h2', 'timeline'),
+      why.length
+        ? h(
+            'details.why',
+            h('summary', 'What this means'),
+            why.map((note) => [h('p', note.meaning), h('p.muted', note.whatToDo)]),
+          )
+        : null,
+      h('h3', 'timeline'),
       h(
-        'table',
+        'table.timeline',
         h(
           'tbody',
           d.history.map((step) => {
@@ -3231,79 +3440,64 @@ const detailDialog = () => {
           }),
         ),
       ),
-      // The answer to whatever was last pressed, HERE and in full.
-      //
-      // Above the buttons rather than below them: an operator who has just read
-      // `paid-do-not-refund` is about to decide whether to press `refund now`,
-      // and the verdict has to be between them and that button, not underneath
-      // it where the dialog may already have scrolled past.
-      state.result && state.result.forSwap === d.swap.id
-        ? h(
-            'div',
-            h('h2', `${state.result.name} result`),
-            h(
-              'pre.faint',
-              { style: 'overflow:auto;max-height:16rem' },
-              typeof state.result.result === 'string'
-                ? state.result.result
-                : JSON.stringify(state.result.result, null, 2),
-            ),
-            h('div.row', h('button.act', { onclick: () => ((state.result = null), render()) }, 'dismiss result')),
+      // The raw row last and folded: reference material, not the point of the screen.
+      h('details.raw', h('summary', 'raw row'), h('pre.faint', JSON.stringify(d.raw, null, 2))),
+    ),
+  )
+}
+
+/** A pick inside a menu closes it; morph leaves `<details>` the way the operator left it. */
+const closeMenu = (e) => e.target.closest('.menu-list button') && e.currentTarget.removeAttribute('open')
+
+/** The pane's one decision: what to do next in words, the step it points at, and the rest folded away. */
+const decision = (d, armed) => {
+  const buttons = {
+    tick: actButton(
+      'button.act',
+      {
+        'data-action': 'tick',
+        title: 'Re-poll the backend and drive this swap one step, as the sweep does.',
+        onclick: () => runAction('tick', { id: d.swap.id, corridor: d.swap.corridor }),
+      },
+      'recheck',
+    ),
+    'read-payment':
+      d.swap.corridor === 'arkade:BTC->lightning:BTC'
+        ? actButton(
+            'button.act',
+            {
+              'data-action': 'read-payment',
+              title: 'Ask the Lightning backend what became of this payment. Read-only; decides refund vs claim.',
+              onclick: () => runAction('read-payment', { id: d.swap.id, corridor: d.swap.corridor }),
+            },
+            'read payment',
           )
         : null,
-      // What to do, before which button. The row used to answer "which of
-      // these?" with six equal options; this answers it in words first.
-      h('p.nextstep', nextStep(d)),
-      actionGroup(
-        '1 · look',
-        'safe — moves nothing',
-        actButton(
-          'button.act',
-          {
-            'data-action': 'tick',
-            title: 'Re-poll the backend and drive this swap one step. Exactly what the sweep does on its own cadence.',
-            onclick: () => runAction('tick', { id: d.swap.id, corridor: d.swap.corridor }),
-          },
-          'recheck',
-        ),
-        d.swap.corridor === 'arkade:BTC->lightning:BTC'
-          ? actButton(
-              'button.act',
-              {
-                'data-action': 'read-payment',
-                title: 'Ask the Lightning backend what became of this payment. Read-only. Decides refund vs claim.',
-                onclick: () => runAction('read-payment', { id: d.swap.id, corridor: d.swap.corridor }),
-              },
-              'read payment',
-            )
-          : null,
-        // On EVERY row, with no corridor gate and no `corridor` in the body:
-        // the action iterates the registry to find whichever corridor holds the
-        // id, so gating it here would re-close what that opened. The answer it
-        // gives — which leaf the solver can spend without the Arkade Service,
-        // and how long its CSV runs — is the same question on every corridor.
-        actButton(
-          'button.act',
-          {
-            'data-action': 'unilateral-exit-plan',
-            title:
-              'Which covenant leaf the solver can spend WITHOUT the Arkade Service, and how long its CSV runs. ' +
-              'Read-only. Performing the exit is `cli unilateral-exit <id> --go`.',
-            onclick: () => runAction('unilateral-exit-plan', { id: d.swap.id }),
-          },
-          'exit plan',
-        ),
-      ),
-      actionGroup(
-        '2 · resolve',
-        'moves money — pick the one the read supports',
-        ...armed.filter((n) => n !== 'park-swap').map((name) => armedButton(name, d)),
-      ),
-      actionGroup('3 · give up', 'stops the sweep driving it; moves nothing', armedButton('park-swap', d)),
-      h('div.row', h('span.spacer'), h('button.act', { onclick: () => ((state.detail = null), render()) }, 'close')),
-      // The raw row last: reference material, not the point of the screen.
-      h('h2', 'row'),
-      h('pre.faint', { style: 'overflow:auto;max-height:14rem' }, JSON.stringify(d.raw, null, 2)),
+    // On EVERY row, with no corridor gate and no `corridor` in the body: the
+    // action iterates the registry to find whichever corridor holds the id.
+    'unilateral-exit-plan': actButton(
+      'button.act',
+      {
+        'data-action': 'unilateral-exit-plan',
+        title: 'Which leaf the solver can spend without the Arkade Service, and its CSV. Read-only.',
+        onclick: () => runAction('unilateral-exit-plan', { id: d.swap.id }),
+      },
+      'exit plan',
+    ),
+    ...Object.fromEntries(armed.map((name) => [name, armedButton(name, d)])),
+  }
+  const lead = primaryAction(d, armed)
+  buttons[lead].classList.add('primary')
+  const rest = Object.entries(buttons)
+    .filter(([name, node]) => node && name !== lead)
+    .map(([, node]) => node)
+  return h(
+    'div.decision',
+    h('p.nextstep', nextStep(d)),
+    h(
+      'div.row',
+      buttons[lead],
+      h('details.menu', { onclick: closeMenu }, h('summary', 'More'), h('div.menu-list', rest)),
     ),
   )
 }
@@ -3327,14 +3521,23 @@ const runAction = async (name, body) => {
     const result = await api(`/api/actions/${name}`, { method: 'POST', body: JSON.stringify(body) })
     state.banner = null
     state.dialog = null
+    // Each withdrawal is typed fresh, as the prompts these fields replaced required.
+    if (name === 'fund-withdraw') {
+      delete state.data.withdrawDrafts?.[body.source]
+      state.withdrawing = null
+    }
     // WHERE the action was pressed decides where its answer goes. An action run
     // from the detail modal is a question about the row the operator is already
     // looking at — `read payment`'s verdict most of all, which is the thing they
     // then act on — so the answer belongs in that modal, in full. Rendered
     // behind the scrim as a page banner it was both hidden and cut to 160
     // characters, which is enough to show `{` and lose the verdict.
-    state.result = { name, result: result.result, forSwap: state.detail?.swap.id ?? null }
+    // The swap it was pressed ON, not whichever pane is open when it lands: a
+    // verdict for one swap shown in another's pane picks that swap's refund.
+    state.result = { name, result: result.result, forSwap: state.running.forSwap }
     await load(state.view)
+    // A refunded or parked row leaves the live set, so no stream event will ever name it.
+    if (state.detail) await openDetail(state.detail.swap, true)
   } catch (error) {
     // A failure belongs INSIDE the dialog that caused it. The page banner
     // renders behind the scrim, so an operator would have to dismiss the
@@ -3357,32 +3560,37 @@ const runAction = async (name, body) => {
   }
 }
 
+/** A swap action's question names its amount; the rest name what they act on. */
+const CONFIRM_TITLES = {
+  'park-swap': 'Park this swap?',
+  'fund-withdraw': 'Send this withdrawal?',
+  'pool-mint': 'Reshape the VTXO pool?',
+  'restart-solver': 'Restart the solver?',
+}
+
 /**
- * The arm-to-confirm step.
+ * The arm-to-confirm step: one question, one click.
  *
- * A convenience only — the server checks the same value independently, before
- * running anything, so bypassing this dialog with a bare fetch gets refused.
- * The warning text comes from the API rather than being duplicated here.
+ * The server still checks the confirmation value independently, so a bare fetch
+ * is refused; the dialog supplies it rather than making the operator retype an
+ * id. The API's warning text stays one click away instead of on the face of it.
  */
 const armDialog = async (name, body, override = null, overrideTitle = null) => {
   const catalogue = state.data.actions ?? (await api('/api/actions'))
   state.data.actions = catalogue
   const definition = catalogue.actions.find((a) => a.name === name)
+  const amount = body.id && state.detail?.swap.id === body.id ? state.detail.swap.amountSats : null
   state.dialog = {
     name,
     body,
-    /**
-     * Set when the last read-payment does not support this action, or when
-     * none has been run. Renders as a second, louder gate that must be ticked
-     * before the confirm box does anything — friction, deliberately, on the
-     * client, since the SERVER's own confirm is the boundary and this is the
-     * step that stops a reflex.
-     */
+    title:
+      CONFIRM_TITLES[name] ??
+      `${ACTION_LABELS[name] ?? name}${amount === null ? '' : ` ${sats(amount)} sat`}${override ? ' anyway' : ''}?`,
+    /** Set when the last read-payment does not support this action, or when none has been run. */
     override,
-    // The gate's headline. `restart-solver` opens it with no read-payment
+    // The line's headline. `restart-solver` opens it with no read-payment
     // behind it, where the default sentence would be false.
     overrideTitle,
-    overridden: false,
     warning: definition?.warning ?? null,
     // Parsed from the KIND, never matched against one action's name. The server
     // used to hardcode `name === 'pool-mint'` here too, and this line was its
@@ -3400,61 +3608,60 @@ const armDialog = async (name, body, override = null, overrideTitle = null) => {
         : definition?.confirmKind?.startsWith('literal:')
           ? definition.confirmKind.slice('literal:'.length)
           : body.id,
-    typed: '',
+    typed: '', // the reason `park-swap` records on the row; no other action takes typed input
+    armedAt: performance.now(),
+    opener: document.activeElement,
   }
   render()
+  // Cancel holds focus, so Enter is the safe answer; a reason field takes it instead.
+  document.querySelector('.dialog.confirm input.reason, .dialog.confirm button.cancel')?.focus()
+}
+
+/** Back out of the confirmation, handing focus to whatever opened it. */
+const closeConfirm = () => {
+  const opener = state.dialog?.opener
+  state.dialog = null
+  render()
+  if (opener?.isConnected && opener.offsetParent) opener.focus()
+  else document.querySelector('.dialog.detail')?.focus()
 }
 
 const confirmDialog = () => {
   const d = state.dialog
   if (!d) return null
-  const ok = d.typed === d.expects && (!d.override || d.overridden)
+  const needsReason = d.name === 'park-swap'
   return h(
     'div.scrim',
-    { onclick: (e) => e.target.classList.contains('scrim') && ((state.dialog = null), render()) },
+    // Not mid-action: the answer, a failure above all, has to land in this dialog.
+    { onclick: (e) => e.target.classList.contains('scrim') && !state.running && closeConfirm() },
     h(
-      'div.dialog',
-      h('h2', d.name),
-      d.warning ? h('p.warning', d.warning) : null,
-      // The override gate, above the warning an operator has already learned to
-      // scroll past. It names what the read actually said rather than asking a
-      // generic "are you sure", because the generic one is the question people
-      // answer without reading.
+      'div.dialog.confirm',
+      { role: 'alertdialog', 'aria-modal': 'true', 'aria-labelledby': 'confirm-title' },
+      h('h2', { id: 'confirm-title' }, d.title),
+      // It names what the read actually said rather than asking a generic "are
+      // you sure", because the generic one is the question people answer
+      // without reading.
       d.override
-        ? h(
-            'div.banner',
-            h('p', h('b', d.overrideTitle ?? 'This is not the action the last check supports.')),
-            h('p', d.override),
-            h(
-              'label.row',
-              h('input', {
-                type: 'checkbox',
-                onchange: (e) => {
-                  d.overridden = e.target.checked
-                  const run = e.target.closest('.dialog').querySelector('button.armed')
-                  if (run) run.disabled = !(d.overridden && d.typed === d.expects)
-                },
-              }),
-              ' I have read this and want to proceed anyway',
-            ),
-          )
+        ? h('p.warning', h('b', d.overrideTitle ?? 'This is not the action the last check supports.'), ' ', d.override)
+        : null,
+      needsReason
+        ? h('input.reason', {
+            'aria-label': 'reason',
+            placeholder: 'Why? Recorded on the row.',
+            value: d.typed,
+            oninput: (e) => {
+              d.typed = e.target.value
+              e.target.closest('.dialog').querySelector('button.armed').disabled = !d.typed.trim()
+            },
+          })
         : null,
       // The action was attempted and failed. It stays here rather than in the
-      // page banner, which the scrim covers.
-      d.error ? h('p.banner', d.error) : null,
-      h('p.sans', 'Type ', h('b', d.expects), ' to confirm. This is checked by the server too.'),
+      // page banner, which the scrim covers. Always a slot, so its arrival keeps the buttons in place.
+      h('div.dialog-error', d.error ? h('p.banner', d.error) : null),
+      d.warning ? h('details.fine', h('summary', 'What this does'), h('p', d.warning)) : null,
       h(
-        'div.row',
-        h('input', {
-          value: d.typed,
-          autofocus: true,
-          oninput: (e) => {
-            d.typed = e.target.value
-            // Re-render only the button state; a full render would steal focus.
-            e.target.parentElement.querySelector('button.armed').disabled =
-              e.target.value !== d.expects || (d.override && !d.overridden)
-          },
-        }),
+        'div.row.end',
+        actButton('button.act.cancel', { onclick: closeConfirm }, 'Cancel'),
         actButton(
           'button.act.armed',
           {
@@ -3462,12 +3669,16 @@ const confirmDialog = () => {
             // The one button that actually moves money. `runAction` refuses a
             // second call on its own, but a live button during a multi-second
             // refund invites the click that produces the confusing log line.
-            disabled: !ok,
-            onclick: () => runAction(d.name, { ...d.body, confirm: d.typed }),
+            disabled: needsReason && !d.typed.trim(),
+            onclick: (e) => {
+              // A double-click on the menu item that opened this lands its second click
+              // here; only a fresh, deliberate click counts.
+              if (e.detail > 1 || performance.now() - d.armedAt < 500) return
+              runAction(d.name, { ...d.body, ...(needsReason ? { reason: d.typed.trim() } : {}), confirm: d.expects })
+            },
           },
-          'run it',
+          `${ACTION_LABELS[d.name] ?? d.name}${d.override && d.body.id ? ' anyway' : ''}`,
         ),
-        h('button.act', { onclick: () => ((state.dialog = null), render()) }, 'cancel'),
       ),
     ),
   )
@@ -3532,53 +3743,48 @@ const figure = (label, value, note, tone) =>
     note ? h('span.faint', ` ${note}`) : null,
   )
 
-/**
- * Which toolbar control was last pressed, so `render` can give focus back.
- *
- * Every button here reloads, and a reload ends in `render`, which rebuilds the
- * whole tree — so the pressed button leaves the document and focus falls to
- * `body`. `render` restores focus for `input.search` alone, and there is no
- * search box on this view, so a keyboard user had to tab from the top of the
- * page after every window or bucket change.
- */
 const pnlToolbar = () =>
   h(
     'div.toolbar',
     h('span.muted', 'window'),
-    ...['1h', '6h', '24h', '7d', '30d', '90d'].map((name) =>
-      h(
-        'button',
-        {
-          'data-pnl-control': `window:${name}`,
-          'aria-current': String(state.pnl.window === name),
-          onclick: () => {
-            state.pnl.focus = `window:${name}`
-            state.pnl.window = name
-            // Cleared, not preserved: a 5-minute bucket chosen for an hour
-            // window is sixteen thousand points over ninety days. The server
-            // picks a readable default for whatever window is now in force.
-            state.pnl.bucket = ''
-            load('pnl')
+    h(
+      'span.seg',
+      { role: 'group', 'aria-label': 'window' },
+      ['1h', '6h', '24h', '7d', '30d', '90d'].map((name) =>
+        h(
+          'button',
+          {
+            'aria-pressed': String(state.pnl.window === name),
+            onclick: () => {
+              state.pnl.window = name
+              // Cleared, not preserved: a 5-minute bucket chosen for an hour
+              // window is sixteen thousand points over ninety days. The server
+              // picks a readable default for whatever window is now in force.
+              state.pnl.bucket = ''
+              load('pnl')
+            },
           },
-        },
-        name,
+          name,
+        ),
       ),
     ),
     h('span.spacer'),
     h('span.muted', 'bucket'),
-    ...['5m', '1h', '6h', '1d'].map((name) =>
-      h(
-        'button',
-        {
-          'data-pnl-control': `bucket:${name}`,
-          'aria-current': String(state.pnl.bucket === name),
-          onclick: () => {
-            state.pnl.focus = `bucket:${name}`
-            state.pnl.bucket = state.pnl.bucket === name ? '' : name
-            load('pnl')
+    h(
+      'span.seg',
+      { role: 'group', 'aria-label': 'bucket' },
+      ['5m', '1h', '6h', '1d'].map((name) =>
+        h(
+          'button',
+          {
+            'aria-pressed': String(state.pnl.bucket === name),
+            onclick: () => {
+              state.pnl.bucket = state.pnl.bucket === name ? '' : name
+              load('pnl')
+            },
           },
-        },
-        name,
+          name,
+        ),
       ),
     ),
   )
@@ -3636,22 +3842,21 @@ const pnlFigures = (summary) =>
     summary.unpricedCount > 0 ? figure('unpriced', String(summary.unpricedCount), 'cross-asset, see FX below') : null,
   )
 
+// The headline caveat stays on screen; the paragraph behind it is one hover away.
 const pnlBasis = (coverage) =>
   h(
     'p.basis',
-    h('b', coverage.basis === 'mixed' ? 'These figures are PART net, part gross. ' : 'These are GROSS figures. '),
-    coverage.note ??
-      'No corridor records what execution actually cost, so chain fees and routing fees are missing from every ' +
-        'total here rather than deducted from it.',
-    ' A corridor whose cost is unreported shows a profit here even where a fee market took more than its spread.',
+    {
+      title:
+        (coverage.note ??
+          'No corridor records what execution actually cost, so chain fees and routing fees are missing from every ' +
+            'total here rather than deducted from it.') +
+        ' A corridor whose cost is unreported shows a profit here even where a fee market took more than its spread.',
+    },
+    h('b', coverage.basis === 'mixed' ? 'Part net, part gross.' : 'Gross figures.'),
+    ' Unreported execution costs are missing, not deducted.',
     coverage.unmeasured.length > 0
-      ? h(
-          'span',
-          h('br'),
-          h('b', 'Not measured: '),
-          coverage.unmeasured.join(', '),
-          ' — reported as unknown, not counted as zero.',
-        )
+      ? h('span', h('br'), h('b', 'Not measured: '), coverage.unmeasured.join(', '), ' — unknown, not zero.')
       : null,
     // A corridor that HAS the capability and threw is a fault, not a gap, and
     // someone should go and look. Shown separately from `unmeasured` for that
@@ -3671,8 +3876,7 @@ const pnlBasis = (coverage) =>
           'span',
           h('br'),
           h('b', 'Truncated: '),
-          `${coverage.truncated.join(', ')} had more rows in this window than were read. These totals cover part ` +
-            'of the book. Narrow the window.',
+          `${coverage.truncated.join(', ')} had more rows than were read; narrow the window.`,
         )
       : null,
   )
@@ -3830,10 +4034,13 @@ const corridorTable = (corridors) =>
 const durationPanel = (bands) =>
   h(
     'section.panel',
-    h('h2', 'margin by time to fill'),
     h(
-      'p.muted',
-      'A quote holds a price while the market moves. Margin falling down this table is the cost of a slow fill.',
+      'h2',
+      {
+        title:
+          'A quote holds a price while the market moves. Margin falling down this table is the cost of a slow fill.',
+      },
+      'margin by time to fill',
     ),
     categoryChart(bands, {
       // Basis points of MARGIN, not sats of gross — the default label would
@@ -3845,30 +4052,34 @@ const durationPanel = (bands) =>
         `${band.label}: ${band.count} swap(s), ${bps(band.marginBps)} on ${band.volumeSats.toLocaleString('en-US')} sats`,
     }),
     h(
-      'table',
+      'details',
+      h('summary', 'table'),
       h(
-        'thead',
+        'table',
         h(
-          'tr',
-          h('th', 'time to fill'),
-          h('th.right', 'swaps'),
-          h('th.right', 'margin'),
-          h('th.right', 'median'),
-          h('th.right', 'gross'),
-          h('th.right', 'volume'),
-        ),
-      ),
-      h(
-        'tbody',
-        ...bands.map((band) =>
+          'thead',
           h(
             'tr',
-            h('td', band.label),
-            h('td.right', String(band.count)),
-            h('td.right', bps(band.marginBps)),
-            h('td.right', bps(band.medianBps)),
-            h('td.right', band.pricedCount === 0 ? h('span.faint', '—') : signedSats(band.grossSats)),
-            h('td.right', sats(band.volumeSats)),
+            h('th', 'time to fill'),
+            h('th.right', 'swaps'),
+            h('th.right', 'margin'),
+            h('th.right', 'median'),
+            h('th.right', 'gross'),
+            h('th.right', 'volume'),
+          ),
+        ),
+        h(
+          'tbody',
+          ...bands.map((band) =>
+            h(
+              'tr',
+              h('td', band.label),
+              h('td.right', String(band.count)),
+              h('td.right', bps(band.marginBps)),
+              h('td.right', bps(band.medianBps)),
+              h('td.right', band.pricedCount === 0 ? h('span.faint', '—') : signedSats(band.grossSats)),
+              h('td.right', sats(band.volumeSats)),
+            ),
           ),
         ),
       ),
@@ -3893,13 +4104,15 @@ const fxPanel = (leg) => {
   const worst = [...leg.points].sort((a, b) => (a.driftBps ?? 0) - (b.driftBps ?? 0)).slice(0, 5)
   return h(
     'section.panel',
-    h('h2', leg.leg),
     h(
-      'p.muted',
-      `${leg.count} fill${leg.count === 1 ? '' : 's'} on `,
-      h('span.mono', leg.corridor),
-      '. Drift is measured against this window’s volume-weighted mean rate — this solver’s own book. ' +
-        'Below the line is a fill that came in worse than its peers.',
+      'h2',
+      {
+        title:
+          'Drift is measured against this window’s volume-weighted mean rate — this solver’s own book. ' +
+          'Below the line is a fill that came in worse than its peers.',
+      },
+      leg.leg,
+      h('span.faint', ` · ${leg.count} fill${leg.count === 1 ? '' : 's'} on ${leg.corridor}`),
     ),
     // The leg-level verdict peer drift cannot give. Coloured only against the
     // solver, and it carries its own denominator: a median over an unstated
@@ -3911,11 +4124,12 @@ const fxPanel = (leg) => {
         )
       : h(
           'p.muted',
-          'Against the market when it filled, the median fill on this leg priced ',
+          { title: 'Against the market when it filled. The spread is included, so zero is breakeven.' },
+          'Median fill vs market: ',
           leg.medianMarketDriftBps < 0
             ? h('span.at-risk', `${bps(leg.medianMarketDriftBps)} under water`)
             : h('b', `${bps(leg.medianMarketDriftBps)} ahead`),
-          `, over ${leg.markedCount ?? 0} of ${leg.count} marked. The spread is included, so zero is breakeven.`,
+          ` (${leg.markedCount ?? 0} of ${leg.count} marked)`,
         ),
     // Named per leg, so N of these are distinguishable in a screen reader's
     // list of figures rather than N repeats of one sentence.
@@ -3972,10 +4186,9 @@ const pnlView = () => {
       'section.panel',
       h('h2', 'cumulative gross'),
       cumulativeChart(data.series),
-      h('h2', 'per bucket'),
-      h('p.muted', 'Profit up, sats at risk down. A loss is not a smaller profit.'),
+      h('h2', { title: 'Profit up, sats at risk down. A loss is not a smaller profit.' }, 'per bucket'),
       barsChart(data.series),
-      seriesTable(data.series),
+      h('details', h('summary', 'table'), seriesTable(data.series)),
     ),
     h(
       'section.panel',
@@ -4070,17 +4283,18 @@ const load = async (view) => {
     },
   )
   let balancesRead = Promise.resolve()
+  // Kept until the new read lands: blanking them on every tick reflowed the grid.
   if (view === 'overview') {
-    delete state.data.overviewBalances
-    delete state.data.overviewBalanceError
     balancesRead = readOverviewBalances().then(
       (balances) => {
         if (overviewGeneration !== overviewLoadGeneration || state.view !== 'overview') return
         state.data.overviewBalances = balances
+        delete state.data.overviewBalanceError
         paintOverviewBalances()
       },
       (error) => {
         if (overviewGeneration !== overviewLoadGeneration || state.view !== 'overview') return
+        delete state.data.overviewBalances
         state.data.overviewBalanceError = error instanceof Error ? error.message : String(error)
         paintOverviewBalances()
       },
@@ -4111,6 +4325,13 @@ const load = async (view) => {
       if (overviewGeneration !== overviewLoadGeneration) return
       state.data.markets = markets
       state.data.settings = settings
+    } else if (view === 'health') {
+      const [diagnostics, discovery] = await Promise.all(
+        // Not `/api/backends` as well: it runs the same probes, and diagnostics already carries each target.
+        ['diagnostics', 'discovery'].map((key) => readView(ENDPOINTS[key]())),
+      )
+      if (overviewGeneration !== overviewLoadGeneration) return
+      Object.assign(state.data, { diagnostics, discovery })
     } else return
     if (ownsView()) render()
   })().catch((error) => {
@@ -4124,11 +4345,13 @@ const load = async (view) => {
 const viewFromHash = () => {
   const view = (location.hash || '#overview').slice(1)
   if (view === 'markets' || view === 'settings') return 'pricing'
+  if (view === 'backends' || view === 'diagnostics' || view === 'discovery') return 'health'
   if (ACTIVITY_SECTIONS.includes(view)) return 'activity'
   return BODIES[view] ? view : 'overview'
 }
 
 const go = (view) => {
+  if (view === 'wallet' && state.view !== 'wallet') rebalancePanel.loaded = false
   state.view = view
   // A result belongs to the view it happened on; carrying it across would have
   // an operator reading a refund's outcome on the settings page.
@@ -4146,9 +4369,7 @@ const BODIES = {
   pnl: pnlView,
   activity: activityView,
   wallet: walletView,
-  backends: backendsView,
-  diagnostics: diagnosticsView,
-  discovery: discoveryView,
+  health: healthView,
   settings: settingsView,
   markets: marketsView,
   audit: auditView,
@@ -4156,10 +4377,8 @@ const BODIES = {
 
 // From the figures on screen: one fetched at click time could differ.
 const inFlightLine = (o) =>
-  `${o.exposure.liveCount} swap(s) in flight, ${o.exposure.exposedCount} of them exposed, with ` +
-  `${sats(o.exposure.committedSats)} sat committed. ${o.attention?.stuckCount ?? 0} row(s) are already waiting ` +
-  'for you. Boot re-drives every non-terminal row, but a payment in flight right now stays undecided until its ' +
-  'next tick.'
+  `${o.exposure.liveCount} in flight (${o.exposure.exposedCount} exposed), ` +
+  `${sats(o.exposure.committedSats)} sat committed, ${o.attention?.stuckCount ?? 0} waiting on you.`
 
 // `KNOB 0 → 25` — whether the change is worth interrupting swaps for. `.muted`
 // not `.faint`: these are the banner's substance, and --text-faint reads 4.02:1
@@ -4177,8 +4396,7 @@ const restartBanner = () => {
     { role: 'status' },
     h(
       'span',
-      h('b', `${pending.length} change${pending.length === 1 ? '' : 's'} pending a restart`),
-      h('span.faint', ' — this process is still quoting what it booted with: '),
+      h('b', `${pending.length} change${pending.length === 1 ? '' : 's'} wait for a restart: `),
       ...pending.flatMap((item, index) => (index === 0 ? [pendingItem(item)] : [', ', pendingItem(item)])),
     ),
     o.restartEnabled
@@ -4189,7 +4407,7 @@ const restartBanner = () => {
             'data-action': 'restart-solver',
             onclick: () => armDialog('restart-solver', {}, inFlightLine(o), 'This is what a restart interrupts.'),
           },
-          'restart solver',
+          'Restart solver',
         )
       : h(
           'span.muted',
@@ -4206,44 +4424,18 @@ const restartBanner = () => {
 const paintStatus = () => {
   if (state.view === 'overview') return render()
   const root = document.getElementById('root')
-  root.querySelector('.status')?.replaceWith(statusBar())
-  const old = root.querySelector('.restart-banner')
-  const next = restartBanner()
-  if (old) {
-    if (next) old.replaceWith(next)
-    else old.remove()
-  } else if (next) root.querySelector('nav')?.after(next)
+  const status = root.querySelector('.status')
+  if (status) morph(status, statusBar())
+  const slot = root.querySelector('.restart-banner, .restart-slot')
+  if (slot) morph(slot, restartBanner() ?? h('div.restart-slot'))
 }
 
 const render = () => {
   const root = document.getElementById('root')
-  // `render` rebuilds the whole tree, so the detail modal that comes back is a
-  // NEW node scrolled to the top. Every action now re-renders on the way in to
-  // show its spinner, and the actions sit below a timeline long enough to
-  // scroll — so without this, clicking one throws the operator to the top and
-  // hides the very thing the click was meant to show. The same rebuild already
-  // did this at the END of every action, and on every `swaps` event from the
-  // stream, which skips a reload for the confirm dialog but not for this one.
-  const detailScroll = root.querySelector('.dialog.detail')?.scrollTop ?? 0
-
-  // The search box re-renders on a debounce while the operator is still typing,
-  // and the rebuild hands back a NEW input with no focus and a caret at zero.
-  // The text survives — it lives in `state.filters.q` — so the field looks fine
-  // and simply stops accepting input, which is worse than losing it. Same fault
-  // as the modal scroll above, same fix: read it now, put it back after.
-  const active = document.activeElement
-  const typing =
-    active && active.tagName === 'INPUT' && active.classList.contains('search')
-      ? { start: active.selectionStart, end: active.selectionEnd }
-      : null
-
-  clear(root)
-  root.appendChild(statusBar())
-  root.appendChild(nav())
-  const pendingBanner = restartBanner()
-  if (pendingBanner) root.appendChild(pendingBanner)
-  const main = h('main')
-  if (state.banner) main.appendChild(h('p.banner', state.banner))
+  // Messages share one box, so one arriving never moves the page body to a new position.
+  const messages = h('div.messages')
+  const main = h('main', h('header.page-head', h('h1', PAGES[state.view] ?? PAGES.overview)), messages)
+  if (state.banner) messages.appendChild(h('p.banner', state.banner))
   // An action's result, inline. This used to be window.alert(), which blocks
   // the whole tab and cannot be read alongside the table it just changed —
   // the wrong shape for a console an operator is scanning.
@@ -4251,9 +4443,9 @@ const render = () => {
   // renders it itself, in full. Still shown when the modal has since been
   // closed, so an answer is never lost by dismissing the dialog.
   if (state.result && !(state.result.forSwap && state.detail?.swap.id === state.result.forSwap)) {
-    main.appendChild(
+    messages.appendChild(
       h(
-        'p.notice',
+        'p.toast',
         h('b', state.result.name),
         ' → ',
         // Capped: `tick` returns a whole swap row, and an unbounded dump pushes
@@ -4268,45 +4460,14 @@ const render = () => {
           return text.length > 160 ? `${text.slice(0, 160)}…` : text
         })(),
         ' ',
-        h('button.act', { onclick: () => ((state.result = null), render()) }, 'dismiss'),
+        h('button.link', { onclick: () => ((state.result = null), render()) }, 'dismiss'),
       ),
     )
   }
   main.appendChild((BODIES[state.view] ?? overviewView)())
-  root.appendChild(main)
-  const detail = detailDialog()
-  if (detail) {
-    root.appendChild(detail)
-    // The scrim is not the scroller; the pane inside it is. Assigning to the
-    // scrim is silently a no-op, which is how this read as fixed while the
-    // modal still jumped to the top.
-    const pane = detail.querySelector('.dialog.detail')
-    if (pane) pane.scrollTop = detailScroll
-  }
-  const dialog = confirmDialog()
-  if (dialog) root.appendChild(dialog)
-
-  // After everything is in the document: focusing a detached node does nothing,
-  // which is how the modal scroll fix was wrong the first time.
-  // The P&L toolbar's equivalent of the search-box restore above, and needed
-  // for the same reason: the rebuild removed the button that was pressed. Read
-  // once and cleared, so a later render caused by anything else does not steal
-  // focus back to a control nobody touched.
-  if (state.pnl.focus) {
-    const control = root.querySelector(`[data-pnl-control="${state.pnl.focus}"]`)
-    state.pnl.focus = null
-    if (control) control.focus()
-  }
-
-  if (typing) {
-    const box = root.querySelector('input.search')
-    if (box) {
-      box.focus()
-      // The caret, not just the field. Editing the middle of a pasted hash
-      // otherwise jumps to the end on every debounce.
-      box.setSelectionRange(typing.start, typing.end)
-    }
-  }
+  // The restart banner always takes a slot, for the same reason as `messages`.
+  const content = h('div.content', restartBanner() ?? h('div.restart-slot'), main)
+  morphChildren(root, h('div', h('aside.sidebar', statusBar(), nav()), content, detailDialog(), confirmDialog()))
   armExpiryTick()
 }
 
@@ -4324,19 +4485,17 @@ const render = () => {
  *
  * Armed from `render` rather than started once, so it exists only while there is
  * something to count down. Three guards, each removing a way a periodic
- * whole-tree rebuild does harm:
+ * render does harm:
  *
  *  - only on the view that shows deposit options, and only when one of them
  *    actually carries an expiry — an address never expires and must not put a
  *    timer on the page;
  *  - never while a dialog is open, the same guard the `swaps` listener uses;
- *  - never while a field has focus. `render` restores the caret for `.search`
- *    alone, so a rebuild under any other input would eat what is being typed —
- *    and an operator pasting a withdrawal address is the case that must not be
- *    disturbed by a countdown.
+ *  - never while a field has focus: an operator pasting a withdrawal address is
+ *    the case that must not be disturbed by a countdown.
  *
  * 15 seconds, not one: the display is minute-granular apart from `<1m`, so a
- * faster tick would rebuild the tree sixty times to change nothing.
+ * faster tick would render sixty times to change nothing.
  */
 let expiryTick = null
 
@@ -4346,9 +4505,9 @@ const countingDown = () =>
   (state.data.fundRead?.result?.options ?? []).some(
     // STILL IN THE FUTURE, not merely present. An option that has already lapsed
     // has nothing left to count: its banner is final, and every later tick
-    // rebuilds the tree to render the identical sentence. Without this the timer
-    // never stops — an operator who leaves the wallet page open goes on
-    // rebuilding the DOM every 15s until they navigate away or close the tab.
+    // renders the identical sentence. Without this the timer never stops — an
+    // operator who leaves the wallet page open goes on rendering the page every
+    // 15s until they navigate away or close the tab.
     //
     // The banner still arrives, because `armExpiryTick` runs at the END of
     // `render`: the tick that observes the expiry renders it and only then
@@ -4376,23 +4535,21 @@ const armExpiryTick = () => {
 
 const listen = () => {
   const source = new EventSource('/api/events')
-  source.addEventListener('swaps', () => {
+  source.addEventListener('swaps', (event) => {
     // Reload rather than patching in place: the payload says WHICH swaps moved,
     // and re-asking is both simpler and guaranteed consistent with what the
     // other panels show.
     // `markets` joins `settings` here: neither is derived from swap state, so a
-    // reload buys nothing — and it would rebuild an open market form, handing
-    // back an input with no focus and a caret at zero while someone is typing a
-    // 68-character asset id into it.
+    // reload buys nothing — and a render would reset the draft preview of an
+    // open market form.
     //
     // `pnl` joins them for a different reason, and a stronger one. It IS
     // derived from swap state, but it is the most expensive read this console
     // has — one full window scan of every swap store per request — and it
     // answers a question about a window rather than about right now. Reloading
     // it on every swap event turns the console into a load generator against
-    // the one endpoint built to avoid that, and drops keyboard focus off its
-    // toolbar each time (`render` restores focus only for `.search`). An
-    // operator who wants it fresher re-picks the window, which reloads.
+    // the one endpoint built to avoid that. An operator who wants it fresher
+    // re-picks the window, which reloads.
     if (
       state.view !== 'pricing' &&
       state.view !== 'settings' &&
@@ -4401,6 +4558,9 @@ const listen = () => {
       !state.dialog
     )
       load(state.view)
+    // Re-read the open swap when it moved, or the pane shows a state the table has left.
+    const moved = JSON.parse(event.data).changes?.some((change) => change.id === state.detail?.swap.id)
+    if (moved && !state.dialog && !state.running) void openDetail(state.detail.swap)
   })
   // EventSource reconnects on its own; nothing to do but not treat it as fatal.
   source.addEventListener('error', () => {})
@@ -4409,11 +4569,36 @@ const listen = () => {
 // Back/forward and pasted deep links are same-document navigations, so the
 // module never re-runs and the view has to be re-read here. Without this,
 // `#swaps` in the address bar rendered the overview.
+// An old section link such as `#quotes` opens that tab of the activity page.
+const tabFromHash = () => ACTIVITY_SECTIONS.find((key) => location.hash === `#${key}`)
+
 window.addEventListener('hashchange', () => {
   const view = viewFromHash()
-  if (view === state.view) return
+  const tab = tabFromHash()
+  if (tab) state.activityTab = tab
+  if (view === state.view) return tab ? render() : undefined
+  // The same resets as `go`: Back into the wallet must not show an old quote as sendable.
+  if (view === 'wallet') rebalancePanel.loaded = false
+  state.result = null
   state.view = view
   load(view)
+})
+
+// A menu closes on any click outside it.
+document.addEventListener('click', (e) => {
+  for (const menu of document.querySelectorAll('details.menu[open]')) if (!menu.contains(e.target)) menu.open = false
+})
+
+// Escape backs out one layer: an open menu, then the confirm box, then the swap pane under it.
+// Not mid-action: a failure has to land in the dialog that caused it.
+window.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape' || state.running) return
+  const menu = document.querySelector('details.menu[open]')
+  if (menu) {
+    menu.open = false
+    menu.querySelector('summary')?.focus()
+  } else if (state.dialog) closeConfirm()
+  else if (state.detail) closeDetail()
 })
 
 window.addEventListener('beforeunload', (event) => {
@@ -4423,6 +4608,7 @@ window.addEventListener('beforeunload', (event) => {
 })
 
 state.view = viewFromHash()
+state.activityTab = tabFromHash()
 render()
 load(state.view)
 listen()

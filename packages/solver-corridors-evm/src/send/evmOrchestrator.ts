@@ -25,10 +25,17 @@ import {
   type EvmCall,
   type EvmHtlcBackend,
   type EvmTransactionOutcome,
+  type TimelockHeight,
 } from '@arkade-os/solver-core/ports/evm.js'
 import { EVM_SEND_EXPOSED } from '@arkade-os/solver-core/core/evmSwapState.js'
 import type { Erc20SwapLock } from '@arkade-os/solver-rails-evm/evm/erc20Swap.js'
 import type { ArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
+import {
+  refundColumnsOnly,
+  refundSweptLockupFor,
+  sweptOpsFrom,
+  type SweptLockupRefund,
+} from '@arkade-os/solver-arkade/arkade/sweptLockupRefund.js'
 import { provenDepth } from '@arkade-os/solver-rails-evm/evm/lockDepth.js'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
@@ -76,8 +83,10 @@ export interface EvmSendServiceDeps {
   claimArkade(row: EvmSendSwapRow, preimage: string): Promise<string>
   /** The lock as the contract keys it - built from the ROW, never from live config. */
   lockFor(row: EvmSendSwapRow): Erc20SwapLock
-  /** Current EVM block height. */
+  /** `eth_blockNumber`: claim-scan floors and confirmations. */
   blockHeight(): Promise<number>
+  /** `block.number`: the clock `evmTimeout` is set and compared in. */
+  timelockHeight(): Promise<TimelockHeight>
   /**
    * The solver's own EVM address, 20 bytes.
    *
@@ -126,8 +135,10 @@ export interface EvmSendServiceDeps {
     chainId: number
     minConfirmations: number
     minAgeSeconds: number
-    /** The two cadence bounds — quoted in to convert the seconds deadline to a height. */
+    /** `eth_blockNumber` cadence, for the claim-scan floor of a row whose lock height is unknown. */
     cadence: EvmBlockCadence
+    /** `block.number` cadence, to convert the seconds deadline to a timelock. */
+    timelockCadence: EvmBlockCadence
     /** How long the quoted rate binds, seconds. @see EvmChainConfig.quoteValiditySeconds */
     quoteValiditySeconds: number
     /** Optional override for the Arkade-after-EVM deadline margin. */
@@ -312,10 +323,11 @@ export class EvmSendSwapService {
    */
   private async observe(row: EvmSendSwapRow): Promise<EvmSendObservation> {
     const lock = this.deps.lockFor(row)
-    const [funded, present, height, lockReverted, refundOutcome, refundLanded] = await Promise.all([
+    const [funded, present, height, clock, lockReverted, refundOutcome, refundLanded] = await Promise.all([
       this.deps.arkadeLockupFunded(row),
       this.deps.evm.isLocked(lock),
       this.deps.blockHeight(),
+      this.deps.timelockHeight(),
       this.lockReverted(row),
       this.refundOutcome(row),
       this.refundLanded(row),
@@ -364,7 +376,7 @@ export class EvmSendSwapService {
       evmLockAgeSeconds: depth.ageSeconds,
       preimage,
       nowSeconds: this.now(),
-      evmBlockHeight: height,
+      evmTimelockHeight: clock,
     }
   }
 
@@ -373,7 +385,12 @@ export class EvmSendSwapService {
     if (adapter === undefined) return
     const binding = payoutFundingBinding(adapter.identity, row, this.deps.lockFor(row))
     const result = await adapter.ensure(
-      { binding, nowSeconds: this.now(), blockHeight: await this.deps.blockHeight() },
+      {
+        binding,
+        nowSeconds: this.now(),
+        blockHeight: await this.deps.blockHeight(),
+        timelockHeight: await this.deps.timelockHeight(),
+      },
       mode,
     )
     const txid = checkedActivationTxid(result)
@@ -554,7 +571,8 @@ export class EvmSendSwapService {
     // timelock", blockTime.ts) so the refund opens no later than sized. The row
     // stores the height: the contract keys the lock by exactly this timelock.
     const evmTimeoutHeight =
-      (await this.deps.blockHeight()) + Number(blocksForDuration(acceptance.evmTimeout - nowSeconds, chain.cadence))
+      (await this.deps.timelockHeight()) +
+      Number(blocksForDuration(acceptance.evmTimeout - nowSeconds, chain.timelockCadence))
     // The quote binds for the configured window, NOT until the refund locktime:
     // every second past it is an unhedged option on a live pair (rfq-protocol.md
     // §5). Snapshotted onto the row so a later config change can neither
@@ -715,6 +733,7 @@ export class EvmSendSwapService {
               binding: preparedBinding,
               nowSeconds: this.now(),
               blockHeight: await this.deps.blockHeight(),
+              timelockHeight: await this.deps.timelockHeight(),
               tokenDecimals: token.decimals,
               orderMarginSeconds: chain.orderMarginSeconds ?? EVM_ORDER_MARGIN_SECONDS,
               quoteValiditySeconds: chain.quoteValiditySeconds,
@@ -896,5 +915,20 @@ export class EvmSendSwapService {
       }
     }
     return pushed
+  }
+
+  /**
+   * `refused` rows only, and no verdict hook: an exposed row here means an EVM
+   * payout is out, which the chain answers rather than a Lightning rail.
+   */
+  async refundSweptLockup(pkScript: string): Promise<SweptLockupRefund> {
+    const { store, arkade } = this.deps
+    const ops = sweptOpsFrom(arkade, evmSendCovenantRowFor)
+    if (!ops) return null
+    return refundSweptLockupFor(pkScript, {
+      ...ops,
+      find: (script) => store.findByPkScript(script),
+      record: (row, fields) => store.patch(row.id, refundColumnsOnly(fields)),
+    })
   }
 }

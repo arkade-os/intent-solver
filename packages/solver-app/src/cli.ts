@@ -33,6 +33,7 @@
  *                                     minted from the rail's own payee wallet where it has one
  *   card [name] [--pointer]           this deployment's signed solver card on stdout; --pointer: the registry pointer
  *   balances                          both wallet balances
+ *   balance-checkpoint                persist balances and check for decreases
  *
  * Secrets come only from the environment; errors are printed as messages, never
  * as whole objects, because config objects carry mnemonics.
@@ -52,6 +53,7 @@ import { loadConfig, sentryOptionsFromEnv, swapDbPath, type Config } from './con
 import { createErrorReporter, type ErrorReporter } from './ops/sentry.js'
 import { SwapStore, type SendSwapRow } from '@arkade-os/solver-corridors/db/swaps.js'
 import { type OnchainSendSwapRow } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
+import { OnchainSendMachine } from '@arkade-os/solver-corridors/machines/onchainSend.js'
 import { findLockups, refundSwapScript } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { lazyContractSource } from '@arkade-os/solver-arkade/arkade/lazyContractSource.js'
 import { LockupWatcher } from '@arkade-os/solver-arkade/arkade/lockupWatcher.js'
@@ -98,6 +100,7 @@ import { poolPlan, mintPool } from './ops/pool.js'
 import { maybeMintPool, runFloatLifecycle } from './ops/float.js'
 import { withEvmSendSweep } from './ops/evmSendSweep.js'
 import { startCadence } from './ops/cadence.js'
+import { recordBalanceCheckpoint, withBalanceCheckpoints } from './ops/balanceCheckpoints.js'
 import { lightningRailFor, requireLn, requireOnchain } from './ops/rails.js'
 
 /**
@@ -204,7 +207,14 @@ const watchUntilStopped = async (services: Services): Promise<void> => {
       recoverySweep: services.evmSendService ? () => services.evmSendService!.payoutFundingRecoverySweep() : undefined,
       intervalMs: FULL_SWEEP_MS,
       signal: controller.signal,
-      run: (startSweep) => watchSwaps(services, startSweep, controller.signal),
+      run: (startSweep) =>
+        withBalanceCheckpoints({
+          checkpoint: () => recordBalanceCheckpoint(services),
+          run: () => watchSwaps(services, startSweep, controller.signal),
+          signal: controller.signal,
+          log,
+          onCheckpoint: services.onBalanceCheckpoint,
+        }),
       onError: (error) => log('EVM send sweep failed:', error instanceof Error ? error.message : String(error)),
     })
   } finally {
@@ -289,6 +299,16 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
           `advertises). Quotes are refused rather than funded: funding would strand the client's L1 HTLC`,
       )
     }
+  }
+  if (
+    services.config.corridorEnabled['lightning:BTC->arkade:BTC'] &&
+    services.config.lnBackend === 'lnd' &&
+    !services.config.lnd?.esploraUrl
+  ) {
+    log(
+      'lightning receive has no LND_ESPLORA_URL to read Bitcoin with: a client that unrolls its lockup and claims ' +
+        'it on L1 reveals P only there, so that swap is reported and left for review instead of settled',
+    )
   }
   // Said out loud at every boot, not just recorded in the console. This is the
   // only setting here that accepts a LOSS, and an operator who inherits a
@@ -693,7 +713,7 @@ const driveToTerminal = async (service: SendSwapService, id: string, attempts = 
   )
 
 /** Onchain terminal states: nothing further will ever happen to these rows. */
-const ONCHAIN_TERMINAL = new Set(['claimed', 'refused', 'stuck'])
+const ONCHAIN_TERMINAL: ReadonlySet<string> = new Set(OnchainSendMachine.terminal)
 
 /** Tick one onchain swap until it reaches any state in `until` (terminal or an intermediate wait point). */
 const driveOnchainUntil = async (
@@ -1986,6 +2006,10 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     console.log(JSON.stringify(printed, null, 2))
     console.error(`registry path: solvers/${config.network}/${card.name}.json`)
     for (const note of cardOmissions(source)) console.error(note)
+  },
+
+  async 'balance-checkpoint'() {
+    await withServices({}, async (services) => log(json(await recordBalanceCheckpoint(services))))
   },
 
   async balances() {

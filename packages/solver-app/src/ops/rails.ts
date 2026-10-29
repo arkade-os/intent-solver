@@ -34,6 +34,7 @@
 import type { LightningBackend } from '@arkade-os/solver-core/ports/lightning.js'
 import type { OnchainSendBackend } from '@arkade-os/solver-core/ports/onchain.js'
 import type { Config } from '../config.js'
+import type { RebalanceBackend } from '@arkade-os/solver-core/ports/rebalance.js'
 import type { EvmPayoutFundingAdapter } from '@arkade-os/solver-core/ports/evmPayoutFunding.js'
 import type { EvmHtlcBackend, JsonRpc } from '@arkade-os/solver-core/ports/evm.js'
 import type { EvmChainConfig } from '@arkade-os/solver-rails-evm/evm/config.js'
@@ -61,6 +62,7 @@ export interface EvmPayoutFundingRegistration {
 }
 
 export interface LightningRail {
+  rebalance?: RebalanceBackend
   /**
    * Both legs, not just `SendBackend`: the receive corridor needs the
    * hold-invoice half (`createHoldInvoice`/`getHoldState`/`settleHold`).

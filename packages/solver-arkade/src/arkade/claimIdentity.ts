@@ -18,7 +18,7 @@
 
 import { ConditionWitness, setArkPsbtField, Transaction, type Identity } from '@arkade-os/sdk'
 
-export const claimIdentity = (identity: Identity, preimage: Uint8Array): Identity => ({
+export const claimIdentity = <T extends Pick<Identity, 'sign'>>(identity: T, preimage: Uint8Array): T => ({
   ...identity,
   sign: async (tx: Transaction, inputIndexes?: number[]): Promise<Transaction> => {
     // Clone so a caller's transaction is never mutated out from under it, and

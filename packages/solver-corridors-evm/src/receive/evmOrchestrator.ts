@@ -22,7 +22,7 @@ import {
 } from '@arkade-os/solver-core/core/evmReceivePlan.js'
 import type { EvmReceiveSwapRow, EvmReceiveSwapStore } from '../db/evmReceiveSwaps.js'
 import type { EvmBroadcaster } from '../send/evmOrchestrator.js'
-import type { EvmHtlcBackend, EvmTransactionOutcome } from '@arkade-os/solver-core/ports/evm.js'
+import type { EvmHtlcBackend, EvmTransactionOutcome, TimelockHeight } from '@arkade-os/solver-core/ports/evm.js'
 import type { Erc20SwapLock } from '@arkade-os/solver-rails-evm/evm/erc20Swap.js'
 import { hex } from '@scure/base'
 import { ArkAddress } from '@arkade-os/sdk'
@@ -61,7 +61,10 @@ export interface EvmReceiveServiceDeps {
   arkadePreimage(row: EvmReceiveSwapRow): Promise<string | null>
   /** The CLIENT's lock as the contract keys it - rebuilt from the ROW. */
   lockFor(row: EvmReceiveSwapRow): Erc20SwapLock
+  /** `eth_blockNumber`: confirmations. */
   blockHeight(): Promise<number>
+  /** `block.number`: the client's `evmTimeout`. */
+  timelockHeight(): Promise<TimelockHeight>
 
   // ---- quote-time only ------------------------------------------------------
   // Read once, when a quote is admitted. Every later step rebuilds from the ROW.
@@ -76,7 +79,8 @@ export interface EvmReceiveServiceDeps {
     chainId: number
     minConfirmations: number
     minAgeSeconds: number
-    cadence: EvmBlockCadence
+    /** The cadence of `block.number`, which `evmTimeout` is in. */
+    timelockCadence: EvmBlockCadence
     /** How long the quoted rate binds, seconds. @see EvmChainConfig.quoteValiditySeconds */
     quoteValiditySeconds: number
     /** Optional override for the Arkade-refund-before-EVM-timeout margin. */
@@ -193,10 +197,11 @@ export class EvmReceiveSwapService {
    */
   private async observe(row: EvmReceiveSwapRow): Promise<EvmReceiveObservation> {
     const lock = this.deps.lockFor(row)
-    const [present, funded, height, claimOutcome] = await Promise.all([
+    const [present, funded, height, clock, claimOutcome] = await Promise.all([
       this.deps.evm.isLocked(lock),
       this.deps.arkadeLockupFunded(row),
       this.deps.blockHeight(),
+      this.deps.timelockHeight(),
       this.claimOutcome(row),
     ])
     // Only worth asking once the lockup exists to be claimed FROM.
@@ -226,7 +231,7 @@ export class EvmReceiveSwapService {
       evmClaimOutcome: claimOutcome,
       preimage,
       nowSeconds: this.now(),
-      evmBlockHeight: height,
+      evmTimelockHeight: clock,
     }
   }
 
@@ -250,7 +255,7 @@ export class EvmReceiveSwapService {
       case 'fund_arkade': {
         // RULE 2 again on a height read NOW - the planner's came from this tick's
         // observation. Before the CAS, so a closed window refuses rather than parks.
-        if (evmReceiveFundWindowClosed(await this.deps.blockHeight(), row.evmTimeout)) {
+        if (evmReceiveFundWindowClosed(await this.deps.timelockHeight(), row.evmTimeout)) {
           await store.transition(row.id, row.state, 'refused', {
             failure_reason: EVM_RECEIVE_FUND_WINDOW_REFUSAL,
           })
@@ -395,9 +400,9 @@ export class EvmReceiveSwapService {
     const nowSeconds = this.now()
     const evmTimeoutSeconds = deadlineSecondsForBlock({
       timeoutBlock: BigInt(request.evmTimeout),
-      currentBlock: BigInt(await this.deps.blockHeight()),
+      currentBlock: BigInt(await this.deps.timelockHeight()),
       nowSeconds,
-      cadence: chain.cadence,
+      cadence: chain.timelockCadence,
     })
     const refundLocktime = arkadeRefundLocktimeFor({
       evmTimeout: evmTimeoutSeconds,

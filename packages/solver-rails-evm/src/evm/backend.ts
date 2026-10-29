@@ -48,6 +48,8 @@ export type {
   EvmHtlcBackendDeps,
 } from '@arkade-os/solver-core/ports/evm.js'
 import type { EvmCall, EvmHtlcBackend, EvmHtlcBackendDeps, JsonRpc } from '@arkade-os/solver-core/ports/evm.js'
+import { asTimelockHeight } from '@arkade-os/solver-core/ports/evm.js'
+import { readTimelockClock } from './timelockClock.js'
 
 /** `swaps(bytes32)` — the public mapping getter, cross-checked in tests. */
 const SWAPS_SELECTOR_SIGNATURE = 'swaps(bytes32)'
@@ -84,7 +86,7 @@ const quantityOf = (value: unknown, label: string): bigint => {
 const DEFAULT_LOG_SCAN_RANGE = 10_000
 
 export const createEvmHtlcBackend = (deps: EvmHtlcBackendDeps): EvmHtlcBackend => {
-  const { contractAddress, rpc, logScanRange = DEFAULT_LOG_SCAN_RANGE } = deps
+  const { contractAddress, rpc, logScanRange = DEFAULT_LOG_SCAN_RANGE, timelockClockIsHeight = true } = deps
   if (contractAddress.length !== 20) {
     throw new Error(`contractAddress must be 20 bytes, got ${contractAddress.length}`)
   }
@@ -148,6 +150,18 @@ export const createEvmHtlcBackend = (deps: EvmHtlcBackendDeps): EvmHtlcBackend =
   return {
     async currentBlock() {
       return quantityOf(await rpc('eth_blockNumber', []), 'eth_blockNumber')
+    },
+
+    // Pinned to the tip just read: a `latest` call may execute in a pending block one height ahead.
+    async timelockClock() {
+      const tip = quantityOf(await rpc('eth_blockNumber', []), 'eth_blockNumber')
+      const clock = await readTimelockClock(rpc, tip)
+      if (timelockClockIsHeight && clock !== tip)
+        throw new Error(
+          `block.number ${clock} differs from height ${tip}: ` +
+            'set EVM_TIMELOCK_FASTEST_SECONDS_PER_BLOCK and EVM_TIMELOCK_SLOWEST_SECONDS_PER_BLOCK for this chain',
+        )
+      return asTimelockHeight(clock)
     },
 
     // 'latest' rather than a pinned height: this answers "is it funded NOW",

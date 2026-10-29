@@ -96,6 +96,10 @@ export const onchainRefundLocktimeFor = (htlcLocktime: number, unilateralClaimDe
 export const arkadeClaimDeadline = (htlcLocktime: number): number =>
   latestClaimArrival(htlcLocktime) + ARKADE_CLAIM_WINDOW_SECONDS
 
+/** By when the solver's L1 refund must confirm: a client claim replacing it later reveals `P` too late to answer before `refundLocktime`. */
+export const onchainRefundConfirmDeadline = (refundLocktime: number): number =>
+  refundLocktime - ARKADE_CLAIM_WINDOW_SECONDS
+
 /**
  * A lockup inherits its inputs' batch expiry. Swept, nothing is left for the solver to claim
  * offchain — the SDK recovers through the SENDER's leaf only — while the client's refund still

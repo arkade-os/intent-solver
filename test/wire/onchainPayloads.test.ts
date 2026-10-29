@@ -51,6 +51,8 @@ const row: OnchainSendSwapRow = {
   failureReason: null,
   rfqId: null,
   fundStartedAt: null,
+  unrolledClaim: null,
+  lockupOutpoints: null,
 }
 
 describe('RfqRequest for arkade:BTC->onchain:BTC', () => {
