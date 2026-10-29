@@ -500,9 +500,8 @@ export const totalValue = (outputs: readonly FundedOutput[]): number =>
   outputs.reduce((sum, output) => sum + output.value, 0)
 
 /**
- * The outputs a BTC lockup is made of. A claim carries no asset packet, so arkd refuses one that
- * spends an asset vtxo — and anyone can send one to the public lockup address. Refunds still take
- * every output.
+ * The outputs a BTC lockup is made of. Anyone can send an asset vtxo to the public lockup address,
+ * and sats riding on one are not what the quote asked for. Refunds still take every output.
  */
 export const satsOutputs = <O extends { assets?: readonly unknown[] }>(outputs: readonly O[]): O[] =>
   outputs.filter((o) => !o.assets?.length)
@@ -567,6 +566,8 @@ export const claimSwapScript = async (
   destination: string,
 ): Promise<string> => {
   if (funded.length === 0) throw new Error('nothing to claim: no funded outputs')
+  // Anyone can add an asset to a lockup; without its packet arkd refuses the claim, after we already paid.
+  const assetPacket = refundAssetPacket(funded, 'aggregate')
   return signAndSubmitOffchainTx({
     identity: claimWithPreimageIdentity(ctx.identity, preimage),
     provider: ctx.wallet.arkProvider,
@@ -578,7 +579,10 @@ export const claimSwapScript = async (
       tapLeafScript: script.claim(),
       tapTree: script.encode(),
     })),
-    outputs: [{ script: ArkAddress.decode(destination).pkScript, amount: BigInt(totalValue(funded)) }],
+    outputs: [
+      { script: ArkAddress.decode(destination).pkScript, amount: BigInt(totalValue(funded)) },
+      ...(assetPacket ? [Extension.create([assetPacket]).txOut()] : []),
+    ],
     serverUnrollScript: ctx.wallet.serverUnrollScript,
     // The leaf's own key, not the wallet's live one: a lockup quoted before a signer rotation is co-signed under it.
     verifyServerSignatures: { serverPubkey: script.vhtlcOptions.server },
@@ -609,7 +613,7 @@ export const attachEmulatorPackets = (tx: Transaction, packets: Parameters<typeo
 export type RefundOutputLayout = 'per-input' | 'aggregate'
 
 /**
- * The asset packet a refund of `funded` needs, or null when it carries none.
+ * The asset packet a refund or claim of `funded` needs, or null when it carries none.
  * EVERY asset on EVERY input must be declared, not just the denominating one:
  * omitting one is refused with ASSET_NOT_FOUND, omitting all with `no asset packet`.
  */

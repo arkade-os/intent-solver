@@ -94,16 +94,12 @@ const withAsset = (outputs: readonly FundedOutput[]) => outputs.filter((o) => (o
 
 describe('e2e asset dust on a BTC send lockup', () => {
   it(
-    'arkd refuses a claim over the asset vtxo and accepts one over the sats outputs',
+    'a claim over the sats outputs leaves the asset vtxo at the script',
     async () => {
       const preimage = randomBytes(32)
       const { script, pkScriptHex, outputs } = await dustedLockup(preimage, Math.floor(Date.now() / 1000) + 7_200)
       const destination = await arkade.ctx.wallet.getAddress()
       expect(withAsset(outputs)).toHaveLength(1)
-
-      await expect(claimSwapScript(arkade.ctx, script, outputs, preimage, destination)).rejects.toThrow(
-        /ASSET_VALIDATION_FAILED/,
-      )
 
       const txid = await claimSwapScript(arkade.ctx, script, satsOutputs(outputs), preimage, destination)
       expect(txid).toMatch(/^[0-9a-f]{64}$/)
