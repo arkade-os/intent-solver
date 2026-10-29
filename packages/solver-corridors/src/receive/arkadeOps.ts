@@ -22,7 +22,13 @@ import {
   refundWithoutReceiverSwapScript,
   type ArkadeContext,
 } from '@arkade-os/solver-arkade/arkade/wallet.js'
-import { assertScriptMatchesRow, covenantScriptFromRow, type EmulatorInfo } from '../send/arkadeOps.js'
+import { unrolledSpenderFor, type UnrolledSpender } from '@arkade-os/solver-arkade/arkade/unrolledSpend.js'
+import {
+  assertScriptMatchesRow,
+  covenantScriptFromRow,
+  unrolledLockupOf,
+  type EmulatorInfo,
+} from '../send/arkadeOps.js'
 import { fundLockup } from './fundLockup.js'
 
 import type { ReceiveArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
@@ -39,6 +45,11 @@ export const refundReceiveLockup =
     assertScriptMatchesRow(script, row)
     return refundWithoutReceiverSwapScript(ctx, script, [...outputs], hex.decode(row.refundPkScript!))
   }
+
+export const refundUnrolledLockup =
+  (refunder: UnrolledSpender): NonNullable<ReceiveArkadeOps['refundUnrolled']> =>
+  async (row, lockup, record, save) =>
+    refunder.advance({ ...unrolledLockupOf(row, lockup), refundLocktime: row.refundLocktime }, record, save)
 
 export const receiveArkadeOpsFromContext = async (
   ctx: ArkadeContext,
@@ -61,5 +72,6 @@ export const receiveArkadeOpsFromContext = async (
     fund: (address, amountSats, stamp) => fundLockup(ctx, address, amountSats, stamp),
     refund: refundReceiveLockup(ctx),
     findClaimPreimage: (outpoints, paymentHashHex) => findClaimPreimage(ctx, outpoints, paymentHashHex),
+    refundUnrolled: refundUnrolledLockup(unrolledSpenderFor(ctx)),
   }
 }

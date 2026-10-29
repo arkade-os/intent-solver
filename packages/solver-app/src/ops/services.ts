@@ -39,6 +39,7 @@ import { createEsploraClient } from '@arkade-os/solver-rails-esplora/esplora.js'
 import type { Corridor } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { SwapStore } from '@arkade-os/solver-corridors/db/swaps.js'
 import { OnchainSendSwapStore } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
+import { OnchainSendMachine } from '@arkade-os/solver-corridors/machines/onchainSend.js'
 import { EvmSendSwapStore } from '@arkade-os/solver-corridors-evm/db/evmSendSwaps.js'
 import { EvmReceiveSwapStore } from '@arkade-os/solver-corridors-evm/db/evmReceiveSwaps.js'
 import { loadEvmChainConfig } from '@arkade-os/solver-rails-evm/evm/config.js'
@@ -802,14 +803,7 @@ export const createServices = async (
           assertNoPendingOutgoing: async () => {
             const pending =
               (await store.countByStates(['funded', 'paying', 'paid', 'claiming', 'stuck'])) +
-              (await onchainStore.countByStates([
-                'funded',
-                'funding_onchain',
-                'awaiting_claim',
-                'claiming',
-                'refunding_onchain',
-                'stuck',
-              ]))
+              (await onchainStore.countByStates(OnchainSendMachine.where('outgoing')))
             if (pending > 0) throw new Error('cannot initialize wallet budget with pending outgoing swaps')
           },
         })
@@ -1214,6 +1208,8 @@ export const createServices = async (
         ln: rail!.ln,
         backendName: config.lnBackend ?? undefined,
         arkade: receiveOps,
+        // LND reads a third party's spend through Esplora alone; without one that read throws every tick.
+        ...(config.lnBackend === 'lnd' && !config.lnd?.esploraUrl ? {} : { onchain: rail!.onchain }),
         limits: policy.corridorLimits['lightning:BTC->arkade:BTC'],
         fee: policy.corridorFees['lightning:BTC->arkade:BTC'],
         // From `config`, not `policy`: this is not a console-editable knob and

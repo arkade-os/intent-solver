@@ -7,9 +7,10 @@
  */
 
 import { arkadeOpsFromContext, type EmulatorInfo } from '../send/arkadeOps.js'
-import { refundReceiveLockup } from './arkadeOps.js'
+import { refundReceiveLockup, refundUnrolledLockup } from './arkadeOps.js'
 import { fundLockup } from './fundLockup.js'
-import type { ClaimPacketStamp } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
+import type { ClaimPacketStamp, ReceiveArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
+import { unrolledSpenderFor } from '@arkade-os/solver-arkade/arkade/unrolledSpend.js'
 import { findClaimPreimage, findLockupOutpoints, type ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import type { ArkadeOps } from '../send/orchestrator.js'
 
@@ -38,7 +39,9 @@ export interface OnchainReceiveArkadeOps extends Pick<
    * `unrolled` means it has left Arkade, so a spend of it reveals `P` in an L1
    * witness {@link findClaimPreimage} cannot read.
    */
-  findLockupOutpoints(pkScriptHex: string): Promise<{ txid: string; vout: number; unrolled: boolean }[]>
+  findLockupOutpoints(
+    pkScriptHex: string,
+  ): Promise<{ txid: string; vout: number; value: number; spent: boolean; unrolled: boolean }[]>
 
   /**
    * The preimage out of whatever claimed one of `outpoints`, verified against
@@ -51,6 +54,8 @@ export interface OnchainReceiveArkadeOps extends Pick<
     outpoints: readonly { txid: string; vout: number }[],
     paymentHashHex: string,
   ): Promise<Uint8Array | null>
+
+  refundUnrolled?: ReceiveArkadeOps['refundUnrolled']
 }
 
 export const onchainReceiveArkadeOpsFromContext = async (
@@ -72,5 +77,6 @@ export const onchainReceiveArkadeOpsFromContext = async (
     // The SHARED funding path, not `wallet.send`: coin selection and the
     // reservation ledger apply here too. @see fundLockup.ts
     fund: async (params) => fundLockup(ctx, params.address, params.amountSats, params.stamp),
+    refundUnrolled: refundUnrolledLockup(unrolledSpenderFor(ctx)),
   }
 }

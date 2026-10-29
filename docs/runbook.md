@@ -631,7 +631,8 @@ the reasons to take one.
   "Working a `stuck` row" below.**
 - **`claimed` with `claim_ark_txid: null`** = claim landed but a crash ate the
   txid (only recorded as success BEFORE the refund deadline, where nobody else
-  could spend). Verify once by hand if you care about the txid.
+  could spend). Verify once by hand if you care about the txid. A row carrying
+  `unrolled_claim` is the exception: it claimed on L1 (see below).
 - **`claimed` carrying an `onchain_claim_txid`, or `refunding_onchain` carrying
   an `onchain_refund_txid`, is a row WAITING FOR A BLOCK** and needs nothing.
   The spend is broadcast and the row stays non-terminal until it confirms,
@@ -639,6 +640,41 @@ the reasons to take one.
   moved. If one sits for many blocks, look the txid up: still in the mempool is
   a fee-rate problem, and absent from the chain entirely means the broadcast
   never stuck — the next sweep rebuilds it at today's rate on its own.
+- **A receive row in `refunding` or `refunding_arkade` carrying
+  `unrolled_refund` is refunding a lockup the client unrolled onto Bitcoin.**
+  arkd co-signs the refund on L1 through `CosignOnchainTx`, so this needs arkd
+  v0.9.22 or later. The refund pays the solver's boarding address, and the
+  float's boarding settle brings it back into Arkade.
+  - arkd co-signs an outpoint once, so the refund is never replaced. If it
+    drops, the row rebroadcasts the same transaction. If it has not confirmed
+    after 20 minutes, it gets one co-signed CPFP child.
+  - A refund that dropped before any explorer kept it cannot be resent. arkd
+    refuses to co-sign the outpoint again, so every retry shows up as a tick
+    error naming arkd's refusal. The row escalates once arkd's window closes,
+    and the failure reason names the solo leaf.
+  - On arkd older than v0.9.22 the co-sign endpoint returns 404. That also
+    shows up as a tick error every interval, not as a startup check.
+  - The row escalates to `stuck` only once `P` can no longer be collected.
+    That happens when the lockup was spent with no `P` in the witness, or when
+    arkd stops co-signing because the client's own exit is near. The failure
+    reason then names the solo leaf.
+- **A send row in `claiming` carrying `unrolled_claim` is claiming lockup
+  outputs the client unrolled onto Bitcoin**, one co-signed L1 claim per output,
+  through the same arkd endpoint. It records `claimed` once every claim
+  confirms. If every output was unrolled, `claim_ark_txid` stays null and
+  `unrolled_claim` holds the L1 txids.
+  - A `claiming` row can already carry `claim_ark_txid`. It is not done: the
+    outputs still on Arkade were claimed, and the L1 claims have not all
+    confirmed.
+  - The row escalates to `stuck` once an output is lost and no claim is still
+    pending. An output is lost when another transaction spent it, or when arkd
+    stopped co-signing. The failure reason names each lost output and the solo
+    `unilateralClaim` leaf. An output the client unrolled after the solver had
+    already claimed it on Arkade also ends up here: arkd spends it with its own
+    checkpoint transaction, and the solver's claim stands.
+  - A `stuck` row carrying `unrolled_claim` can still have claims in the
+    mempool. For example, the Arkade claim of the other outputs may have failed
+    past the refund deadline. Look up each txid before acting.
 - **`settled` with `onchain_claim_txid: null` on onchain-receive** is a LEGACY
   recovery path, not a missing write, and only a row quoted before the txid was
   pre-committed can show it. The solver crashed after broadcasting its

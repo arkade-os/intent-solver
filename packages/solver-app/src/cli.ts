@@ -53,6 +53,7 @@ import { loadConfig, sentryOptionsFromEnv, swapDbPath, type Config } from './con
 import { createErrorReporter, type ErrorReporter } from './ops/sentry.js'
 import { SwapStore, type SendSwapRow } from '@arkade-os/solver-corridors/db/swaps.js'
 import { type OnchainSendSwapRow } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
+import { OnchainSendMachine } from '@arkade-os/solver-corridors/machines/onchainSend.js'
 import { findLockups, refundSwapScript } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { lazyContractSource } from '@arkade-os/solver-arkade/arkade/lazyContractSource.js'
 import { LockupWatcher } from '@arkade-os/solver-arkade/arkade/lockupWatcher.js'
@@ -298,6 +299,16 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
           `advertises). Quotes are refused rather than funded: funding would strand the client's L1 HTLC`,
       )
     }
+  }
+  if (
+    services.config.corridorEnabled['lightning:BTC->arkade:BTC'] &&
+    services.config.lnBackend === 'lnd' &&
+    !services.config.lnd?.esploraUrl
+  ) {
+    log(
+      'lightning receive has no LND_ESPLORA_URL to read Bitcoin with: a client that unrolls its lockup and claims ' +
+        'it on L1 reveals P only there, so that swap is reported and left for review instead of settled',
+    )
   }
   // Said out loud at every boot, not just recorded in the console. This is the
   // only setting here that accepts a LOSS, and an operator who inherits a
@@ -702,7 +713,7 @@ const driveToTerminal = async (service: SendSwapService, id: string, attempts = 
   )
 
 /** Onchain terminal states: nothing further will ever happen to these rows. */
-const ONCHAIN_TERMINAL = new Set(['claimed', 'refused', 'stuck'])
+const ONCHAIN_TERMINAL: ReadonlySet<string> = new Set(OnchainSendMachine.terminal)
 
 /** Tick one onchain swap until it reaches any state in `until` (terminal or an intermediate wait point). */
 const driveOnchainUntil = async (

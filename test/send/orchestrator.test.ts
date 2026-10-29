@@ -32,6 +32,7 @@ import {
 import { QUOTE_RATE_LIMIT } from '@arkade-os/solver-core/core/rateLimit.js'
 import { TickErrorTracker } from '@arkade-os/solver-app/ops/tickErrors.js'
 import { MAX_LOCKUP_SPEND_INPUTS, type FundedOutput } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import type { UnrolledSpendRecord } from '@arkade-os/solver-arkade/arkade/unrolledSpend.js'
 import { PaymentHashRegistered, PaymentNotStarted } from '@arkade-os/solver-core/ports/lightning.js'
 import type {
   EstimateSendFeeParams,
@@ -2166,6 +2167,165 @@ describe('tick: failure and recovery', () => {
     expect(done.failureReason).toContain('unilateralClaim')
     expect(done.failureReason).not.toContain('unilateralRefundWithoutReceiver')
     expect(done.failureReason).toContain(String(row.claimDelay))
+  })
+
+  // The client, holding the HTLC as payee, unrolls a lockup output before settling it.
+  describe('an output the client unrolled', () => {
+    let outpoints: { txid: string; vout: number; unrolled: boolean }[]
+    const l1 = {
+      calls: [] as { lockup: string; record: UnrolledSpendRecord | null; preimage: string }[],
+      confirmed: new Set<string>(),
+      spent: new Set<string>(),
+      failing: new Set<string>(),
+    }
+
+    beforeEach(() => {
+      outpoints = [{ txid: 'u1', vout: 0, unrolled: true }]
+      l1.calls.length = 0
+      l1.confirmed.clear()
+      l1.spent.clear()
+      l1.failing.clear()
+      arkade.lockups = []
+      arkade.findLockupOutpoints = async () => outpoints.map((o) => ({ ...o, spent: false }))
+      arkade.claimUnrolled = async (_row, lockup, record, save, preimage) => {
+        const key = `${lockup.txid}:${lockup.vout}`
+        l1.calls.push({ lockup: key, record, preimage })
+        if (l1.failing.has(key)) throw new Error(`explorer cannot serve ${key}`)
+        if (l1.spent.has(key)) return { kind: 'spent' }
+        const claim = record ?? { txid: `l1-claim-${key}`, tx: null, feeRate: 10, broadcastAt: clock, cpfpTxid: null }
+        if (!record) await save(claim)
+        return { kind: l1.confirmed.has(key) ? 'confirmed' : 'pending', record: claim }
+      }
+    })
+
+    it('claims it on L1 with the preimage, and records claimed once that claim confirms', async () => {
+      const row = await claiming()
+      arkade.lockups = []
+
+      expect((await service.tick(row.id)).state).toBe('claiming')
+      expect(l1.calls).toEqual([{ lockup: 'u1:0', record: null, preimage: 'cc'.repeat(32) }])
+
+      l1.confirmed.add('u1:0')
+      const done = await service.tick(row.id)
+      expect(done.state).toBe('claimed')
+      expect(l1.calls[1]!.record).toMatchObject({ txid: 'l1-claim-u1:0' })
+      expect(JSON.parse(done.unrolledClaim!)).toMatchObject({ 'u1:0': { kind: 'confirmed' } })
+      expect(arkade.claimCalls).toHaveLength(0)
+    })
+
+    it('claims what is still on Arkade at once, but records claimed only once the L1 claim confirms', async () => {
+      const row = await claiming()
+      arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT / 2 }]
+      outpoints = [{ txid: 'f1', vout: 0, unrolled: false }, ...outpoints]
+
+      const first = await service.tick(row.id)
+      expect(first.state).toBe('claiming')
+      expect(first.claimArkTxid).toBe('claim-txid')
+      expect(l1.calls.map((c) => c.lockup)).toEqual(['u1:0'])
+
+      arkade.lockups = []
+      l1.confirmed.add('u1:0')
+      const done = await service.tick(row.id)
+      expect(done.state).toBe('claimed')
+      expect(done.claimArkTxid).toBe('claim-txid')
+      expect(arkade.claimCalls).toHaveLength(1)
+    })
+
+    it('stays claiming while an adopted output is hidden by a lagging read, then claims it', async () => {
+      const { swap } = await quoted()
+      const adopted = [
+        { txid: 'f1', vout: 0, value: AMOUNT / 2 },
+        { txid: 'u1', vout: 0, value: AMOUNT / 2 },
+      ]
+      await store.transition(swap.id, 'quoted', 'funded', {
+        lockup_value: AMOUNT,
+        lockup_outpoints: JSON.stringify(adopted),
+      })
+      await store.transition(swap.id, 'funded', 'paying', { idempotency_key: 'k' })
+      await store.transition(swap.id, 'paying', 'paid', { payment_id: 'pay-1' })
+      await store.transition(swap.id, 'paid', 'claiming', { preimage: 'cc'.repeat(32) })
+      arkade.lockups = []
+      outpoints = [{ txid: 'f1', vout: 0, unrolled: false }, ...outpoints]
+      l1.confirmed.add('u1:0')
+
+      await expect(service.tick(swap.id)).rejects.toThrow('lockup output(s) f1:0 not yet collected')
+      expect((await store.get(swap.id)).state).toBe('claiming')
+
+      arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT / 2 }]
+      expect((await service.tick(swap.id)).state).toBe('claimed')
+      expect(arkade.claimCalls).toHaveLength(1)
+    })
+
+    it('stays claiming for an adopted output the claim left out as too close to expiry', async () => {
+      const { swap } = await quoted()
+      const healthy = { txid: 'f1', vout: 0, value: AMOUNT / 2 }
+      const expiring = { txid: 'f2', vout: 0, value: AMOUNT / 2, expiresAt: clock + 60 }
+      await store.transition(swap.id, 'quoted', 'funded', {
+        lockup_value: AMOUNT,
+        lockup_outpoints: JSON.stringify([healthy, { txid: 'f2', vout: 0, value: AMOUNT / 2 }]),
+      })
+      await store.transition(swap.id, 'funded', 'paying', { idempotency_key: 'k' })
+      await store.transition(swap.id, 'paying', 'paid', { payment_id: 'pay-1' })
+      await store.transition(swap.id, 'paid', 'claiming', { preimage: 'cc'.repeat(32) })
+      arkade.lockups = [healthy, expiring]
+      outpoints = [healthy, expiring].map((o) => ({ txid: o.txid, vout: 0, unrolled: false }))
+
+      await expect(service.tick(swap.id)).rejects.toThrow('lockup output(s) f2:0 not yet collected')
+      expect((await store.get(swap.id)).state).toBe('claiming')
+    })
+
+    it('follows a claim through when a later read stops reporting its output', async () => {
+      const row = await claiming()
+      expect((await service.tick(row.id)).state).toBe('claiming')
+
+      outpoints = []
+      arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT / 2 }]
+      const second = await service.tick(row.id)
+      expect(second.state).toBe('claiming')
+      expect(second.claimArkTxid).toBe('claim-txid')
+
+      arkade.lockups = []
+      l1.confirmed.add('u1:0')
+      expect((await service.tick(row.id)).state).toBe('claimed')
+      expect(l1.calls.map((c) => c.lockup)).toEqual(['u1:0', 'u1:0', 'u1:0'])
+    })
+
+    it('keeps a claim saved before arkd answered when the step then throws', async () => {
+      const row = await claiming()
+      arkade.claimUnrolled = async (_row, _lockup, record, save) => {
+        if (record) return { kind: 'pending', record }
+        await save({ txid: 'l1-claim', tx: null, feeRate: 10, broadcastAt: clock, cpfpTxid: null })
+        throw new Error('arkd broadcast it, and the reply never arrived')
+      }
+
+      await expect(service.tick(row.id)).rejects.toThrow('reply never arrived')
+      const kept = JSON.parse((await store.get(row.id)).unrolledClaim!)
+      expect(kept).toEqual({ 'u1:0': { kind: 'pending', record: expect.objectContaining({ txid: 'l1-claim' }) } })
+    })
+
+    it('advances every unrolled output when one throws, then surfaces the error', async () => {
+      const row = await claiming()
+      outpoints = [...outpoints, { txid: 'u2', vout: 1, unrolled: true }]
+      l1.failing.add('u1:0')
+
+      await expect(service.tick(row.id)).rejects.toThrow('explorer cannot serve u1:0')
+      expect(l1.calls.map((c) => c.lockup)).toEqual(['u1:0', 'u2:1'])
+      expect(JSON.parse((await store.get(row.id)).unrolledClaim!)).toMatchObject({ 'u2:1': { kind: 'pending' } })
+    })
+
+    it('parks the row once one is lost, naming the solo claim, but not while another is still out', async () => {
+      const row = await claiming()
+      outpoints = [...outpoints, { txid: 'u2', vout: 1, unrolled: true }]
+      l1.spent.add('u1:0')
+
+      expect((await service.tick(row.id)).state).toBe('claiming')
+
+      l1.confirmed.add('u2:1')
+      const done = await service.tick(row.id)
+      expect(done.state).toBe('stuck')
+      expect(done.failureReason).toContain('u1:0 spent on L1 by a transaction that is not ours')
+      expect(done.failureReason).toContain('unilateralClaim')
+    })
   })
 })
 

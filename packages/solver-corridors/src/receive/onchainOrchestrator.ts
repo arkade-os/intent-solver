@@ -45,9 +45,12 @@ import type { Limits } from '@arkade-os/solver-core/core/limits.js'
 import { FREE, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { fixedFeePricing, type PricingStrategy } from '@arkade-os/solver-core/core/pricing.js'
 import { RFQ_PAIR_ONCHAIN_RECEIVE } from '../wire/onchainReceivePayloads.js'
-import { paymentHashFromPreimage, scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
+import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
+import { LockupPreimageReader } from './lockupPreimage.js'
+import { applyUnrolledSpendStep } from '../unrolledSpendStep.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
+import { parseUnrolledSpend, type UnrolledSpendRecord } from '@arkade-os/solver-arkade/arkade/unrolledSpend.js'
 import { covenantScriptFromRow } from '../send/arkadeOps.js'
 import type { CovenantScriptRow } from '../send/orchestrator.js'
 import { buildOnchainHtlc, ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
@@ -65,6 +68,9 @@ import type { CovclaimdClient } from './covclaimd.js'
 import type { SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { guardedTick, sweep } from '@arkade-os/solver-core/util/sweep.js'
+import { stepFor } from '@arkade-os/solver-core/core/stateMachine.js'
+import { OnchainReceiveMachine } from '../machines/onchainReceive.js'
+import { adoptFunding } from '../legs/arkadeLockup.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
@@ -237,10 +243,11 @@ export class OnchainReceiveSwapService {
 
   private readonly admission: AdmissionStrategy
   private claimVsize?: number
-  private readonly unrolledReported = new Set<string>()
+  private readonly preimages: LockupPreimageReader
 
   constructor(private readonly deps: OnchainReceiveServiceDeps) {
     this.admission = deps.admission
+    this.preimages = new LockupPreimageReader(deps.arkade, deps.onchain, (id, error) => this.onTickError?.(id, error))
     this.now = deps.now ?? nowSeconds
     this.quoteLimiter = deps.quoteLimiter ?? new RateLimiter(QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, this.now)
     this.fee = deps.fee ?? FREE
@@ -493,24 +500,18 @@ export class OnchainReceiveSwapService {
     return sweep(page.rows, this, this.deps.store, { inFlight: this.inFlight })
   }
 
-  private async step(row: OnchainReceiveSwapRow): Promise<boolean> {
-    switch (row.state) {
-      case 'quoted':
-        return this.whenQuoted(row)
-      case 'awaiting_confirmations':
-        return this.whenAwaitingConfirmations(row)
-      case 'funding_arkade':
-        return this.whenFundingArkade(row)
-      case 'awaiting_claim':
-        return this.whenAwaitingClaim(row)
-      case 'claimed':
-        return this.whenClaimed(row)
-      case 'refunding_arkade':
-        return this.whenRefundingArkade(row)
-      default:
-        return false
-    }
-  }
+  private readonly step = stepFor<OnchainReceiveSwapRow['state'], OnchainReceiveSwapRow>(OnchainReceiveMachine, {
+    quoted: (row) => this.whenQuoted(row),
+    awaiting_confirmations: (row) => this.whenAwaitingConfirmations(row),
+    funding_arkade: (row) => this.whenFundingArkade(row),
+    awaiting_claim: (row) => this.whenAwaitingClaim(row),
+    claimed: (row) => this.whenClaimed(row),
+    refunding_arkade: (row) => this.whenRefundingArkade(row),
+    settled: null,
+    refunded: null,
+    refused: null,
+    stuck: null,
+  })
 
   /**
    * Watch the CLIENT's onchain HTLC address for their funding output.
@@ -653,11 +654,9 @@ export class OnchainReceiveSwapService {
    * Recovery path mirrors `send/onchainOrchestrator.ts`'s `recoverFunding`:
    * `IWallet.send` carries no idempotency key, so a blind resubmit after a
    * crash between broadcast and this transition recording it would fund the
-   * Arkade lockup a SECOND time out of the solver's own pocket. Asking
-   * `findLockups` what already landed at this swap's own (unique) script —
-   * the same source of truth `whenQuoted` (send and receive) and
-   * `pushRefund` already trust — closes that gap without needing a
-   * persisted "did we already call fund" flag.
+   * Arkade lockup a SECOND time out of the solver's own pocket. Asking what
+   * this swap's own (unique) script has ever held closes that gap without a
+   * persisted "did we already call fund" flag. @see adoptFunding
    */
   private async whenFundingArkade(row: OnchainReceiveSwapRow): Promise<boolean> {
     const { store, arkade } = this.deps
@@ -666,10 +665,9 @@ export class OnchainReceiveSwapService {
     // paid at the amended amount would otherwise read as under-funded on the
     // next pass and be paid twice.
     const { arkadePayoutSats } = onchainReceiveFundedAmounts(row)
-    const existing = await arkade.findLockups(row.pkScript)
-    const alreadyFunded = existing.reduce((sum, o) => sum + o.value, 0) >= arkadePayoutSats
-    if (alreadyFunded) {
-      return store.transition(row.id, 'funding_arkade', 'awaiting_claim', {})
+    const adopted = adoptFunding(await arkade.findLockupOutpoints(row.pkScript), arkadePayoutSats)
+    if (adopted) {
+      return store.transition(row.id, 'funding_arkade', 'awaiting_claim', { arkade_fund_txid: adopted.txid })
     }
     // Re-checked here, immediately before the pay, and NOT before the adoption
     // above. The gate decides whether to CREATE exposure; exposure that already
@@ -723,39 +721,6 @@ export class OnchainReceiveSwapService {
     return store.transition(row.id, 'funding_arkade', 'awaiting_claim', { arkade_fund_txid: txid })
   }
 
-  /** An unrolled outpoint was spent on Bitcoin, so its `P` is in an L1 witness the Arkade read never sees. */
-  private async findPreimage(
-    row: OnchainReceiveSwapRow,
-    outpoints: readonly { txid: string; vout: number; unrolled: boolean }[],
-  ): Promise<Uint8Array | null> {
-    if (outpoints.length === 0) return null
-    const claimed = await this.deps.arkade.findClaimPreimage(outpoints, row.paymentHash)
-    if (claimed) return claimed
-
-    const unrolled = outpoints.filter((outpoint) => outpoint.unrolled)
-    if (unrolled.length === 0) return null
-    // Once per row per process: this is re-read on every tick of the wait.
-    if (!this.unrolledReported.has(row.id)) {
-      this.unrolledReported.add(row.id)
-      const named = unrolled.map((outpoint) => `${outpoint.txid}:${outpoint.vout}`).join(', ')
-      this.onTickError?.(
-        row.id,
-        new Error(`arkade lockup unrolled onto L1 (${named}) — reading the claim witness onchain`),
-      )
-    }
-    const outputScript = hex.decode(row.pkScript)
-    for (const outpoint of unrolled) {
-      const witness = await this.deps.onchain.findSpendWitness({
-        txid: outpoint.txid,
-        vout: outpoint.vout,
-        outputScript,
-      })
-      const revealed = witness?.find((item) => item.length === 32 && paymentHashFromPreimage(item) === row.paymentHash)
-      if (revealed) return revealed
-    }
-    return null
-  }
-
   /**
    * Wait for the claim to land, and — when covclaimd is configured — (re)ask
    * it to push one on every tick it hasn't.
@@ -782,7 +747,7 @@ export class OnchainReceiveSwapService {
     // the whole point: by the time covclaimd's claim is worth reading, the
     // output it spent is gone from any spendable-only view.
     const outpoints = await arkade.findLockupOutpoints(row.pkScript)
-    const preimage = await this.findPreimage(row, outpoints)
+    const preimage = await this.preimages.find(row, outpoints)
     if (preimage) {
       return store.transition(row.id, 'awaiting_claim', 'claimed', { preimage: hex.encode(preimage) })
     }
@@ -1100,9 +1065,30 @@ export class OnchainReceiveSwapService {
     // it, same reasoning send's whenRefundingOnchain documents for the
     // identical race on the other leg.
     const outpoints = await arkade.findLockupOutpoints(row.pkScript)
-    const preimage = await this.findPreimage(row, outpoints)
+    const preimage = await this.preimages.find(row, outpoints)
     if (preimage) {
       return store.transition(row.id, 'refunding_arkade', 'claimed', { preimage: hex.encode(preimage) })
+    }
+
+    // Ahead of `findLockups`, which reads an unrolled lockup as empty.
+    // The fund tx pays this script once; thrown, not parked, so the claim recheck above keeps running.
+    const matches = outpoints.filter((o) => o.unrolled && o.txid === row.arkadeFundTxid)
+    if (matches.length > 1) {
+      throw new Error(`swap ${row.id}: ${matches.length} unrolled outputs of fund tx ${row.arkadeFundTxid}`)
+    }
+    const [unrolled] = matches
+    if (unrolled && arkade.refundUnrolled) {
+      const covenantRow = receiveCovenantRowFor(row)
+      const save = (record: UnrolledSpendRecord) => store.patch(row.id, { unrolled_refund: JSON.stringify(record) })
+      const step = await arkade.refundUnrolled(covenantRow, unrolled, parseUnrolledSpend(row.unrolledRefund), save)
+      return applyUnrolledSpendStep(
+        store,
+        row,
+        { from: 'refunding_arkade', to: 'refunded' },
+        step,
+        this.now() < row.htlcLocktime,
+        () => unilateralExitRecourse(covenantRow, { solverPubkey: arkade.providerPubkey }),
+      )
     }
 
     const outputs = await arkade.findLockups(row.pkScript)
