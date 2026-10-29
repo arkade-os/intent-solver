@@ -1,6 +1,6 @@
 {
   "name": "@arkade-os/solver-rails-lnd",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Part of the Arkade intent-solver: rails-lnd primitives.",
   "license": "MIT",
   "repository": {
@@ -29,7 +29,7 @@
     "@arkade-os/solver-core": "workspace:*",
     "@arkade-os/solver-rails-esplora": "workspace:*",
     "@scure/base": "^2.0.0",
-    "@scure/btc-signer": "^2.0.1",
+    "@scure/btc-signer": "2.4.1",
     "lightning": "^12.2.3"
   }
 }

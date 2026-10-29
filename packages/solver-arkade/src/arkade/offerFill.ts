@@ -21,7 +21,7 @@
  * asset reads as funded — and lands with the asset corridors.
  */
 
-import type { Offer } from '@arkade-os/swap'
+import type { Offer } from '@arkade-os/swap/protocol'
 import type { OfferFillInput } from '@arkade-os/solver-core/core/assetOffer.js'
 
 /**

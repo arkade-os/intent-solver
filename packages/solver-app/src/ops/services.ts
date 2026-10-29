@@ -24,7 +24,7 @@ import { RebalanceService } from './rebalance.js'
 import { RebalanceStore } from './rebalanceStore.js'
 import { createArkadeRebalanceSource } from './rebalanceRoutes.js'
 import { createLndRebalanceBackend } from '@arkade-os/solver-rails-lnd/rebalance.js'
-import { arkadeFundingOwed } from './pool.js'
+import { arkadeFundableSats, arkadeFundingOwed } from './pool.js'
 import { RestEmulatorProvider } from '@arkade-os/sdk'
 import { hex } from '@scure/base'
 import { Address, OutScript } from '@scure/btc-signer'
@@ -82,10 +82,15 @@ import { AdminStore, type SwapApprovalRequest } from '../admin/db.js'
 import { createNotifier } from './notify.js'
 import { sinksFrom } from './notifySinks.js'
 import { btcSwapSize, createBalanceSampler, createSwapOutcomeReporter } from './businessEvents.js'
-import { createBalanceReportReader, formatBalanceReport } from './balanceReport.js'
+import {
+  createBalanceReportReader,
+  formatBalanceReport,
+  formatSourceRecovered,
+  UNREADABLE_RETRY_MS,
+} from './balanceReport.js'
 import { balanceCheckpointScope, checkpointNotices, type BalanceCheckpoint } from './balanceCheckpoints.js'
 import { createSwapSummaryReader } from './swapSummary.js'
-import { fundSources } from './fundSources.js'
+import { fundSources, type FundSource } from './fundSources.js'
 import { assetSource, describeAssetId } from '../admin/assets.js'
 import { approvalGateFor } from './approvals.js'
 import { formatSats, type CorridorStates, type TransitionHook } from '@arkade-os/solver-core/core/businessEvent.js'
@@ -665,11 +670,10 @@ export const createServices = async (
     ) {
       return undefined
     }
-    const balance = await arkade.wallet.getBalance()
     return {
       poolId: 'arkade',
       requiredSats: request.giveSats,
-      available: { sats: balance.available, ageMs: 0 },
+      available: { sats: await arkadeFundableSats(arkade), ageMs: 0 },
       owedSats: async () => (rebalancePolicy?.reserveSats ?? 0) + (await arkadeFundingOwed(services.readers)),
     }
   })
@@ -1602,12 +1606,38 @@ export const createServices = async (
     firstSince: nowSeconds() - (config.balanceReportIntervalMinutes ?? 0) * 60,
   })
   let balanceReportInFlight: Promise<void> | undefined
+  // Silent until a source answers, so a long outage costs one report line, not a message per retry.
+  let unreadableRetry: ReturnType<typeof setTimeout> | undefined
+  let unreadableFollow = 0
+  let balanceReportsClosed = false
+  const followUnreadable = (sources: FundSource[], follow = ++unreadableFollow): void => {
+    clearTimeout(unreadableRetry)
+    if (balanceReportsClosed || sources.length === 0) return
+    unreadableRetry = setTimeout(() => {
+      void readBalanceReport
+        .readSources(sources)
+        .then((reads) => {
+          if (follow !== unreadableFollow) return
+          reads.forEach(({ label, balance }) => {
+            if (balance.error === null) notifier.post(formatSourceRecovered(config.network, label, balance.value))
+          })
+          followUnreadable(
+            sources.filter((_, i) => reads[i]!.balance.error !== null),
+            follow,
+          )
+        })
+        .catch((error: unknown) => log('balance source retry failed:', messageOf(error)))
+    }, UNREADABLE_RETRY_MS)
+    unreadableRetry.unref()
+  }
   const postBalanceReport = (): Promise<void> => {
     if (balanceReportInFlight) return balanceReportInFlight
+    followUnreadable([])
     balanceReportInFlight = (async () => {
+      const sources = fundSources(services)
       const report = await readBalanceReport({
         network: config.network,
-        sources: fundSources(services),
+        sources,
         readAssets: async () => {
           const source = assetSource(arkade.wallet)
           const { assets } = await arkade.wallet.getBalance()
@@ -1630,6 +1660,7 @@ export const createServices = async (
         },
       })
       notifier.post(formatBalanceReport(report))
+      followUnreadable(sources.filter((_, i) => report.sources[i]!.balance.error !== null))
       const checkpoint = report.checkpoint?.value?.current
       if (checkpoint?.totalSats != null) await adminStore.markBalanceReportCheckpoint(checkpoint.id)
     })().finally(() => {
@@ -1696,7 +1727,14 @@ export const createServices = async (
       // sequential await chain with no isolation would skip both if
       // store.close() (first, and least likely to matter) threw first.
       const steps: Array<[string, () => Promise<void> | void]> = [
-        ['balanceReport', () => balanceReportInFlight],
+        [
+          'balanceReport',
+          () => {
+            balanceReportsClosed = true
+            followUnreadable([])
+            return balanceReportInFlight
+          },
+        ],
         // FIRST: `APPROVAL NEEDED` is the only signal a held swap gives, and every
         // step below tears down what delivering it needs. Bounded by the sinks'
         // own AbortSignal.timeout, so it cannot hang the shutdown it precedes.

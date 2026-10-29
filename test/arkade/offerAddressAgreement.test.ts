@@ -7,8 +7,8 @@
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { schnorr } from '@noble/curves/secp256k1.js'
-import { ArkAddress, CSVMultisigTapscript, asset } from '@arkade-os/sdk'
-import { createOffer, offerVtxoScript } from '@arkade-os/swap'
+import { ArkAddress, CSVMultisigTapscript, RestArkProvider, asset } from '@arkade-os/sdk'
+import { createOffer, offerVtxoScript } from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
 import {
   offerExitDelay,
@@ -57,6 +57,10 @@ const clientWallet = () => ({
   identity: { xOnlyPublicKey: async () => MAKER_KEY },
   getContractManager: async () =>
     new Proxy({}, { get: (_t, prop) => (prop === 'then' ? undefined : async () => undefined) }),
+  // `createOffer` now reads server info off the wallet rather than a raw
+  // `arkServerUrl`; routed through the real provider so the stubbed `/v1/info`
+  // still exercises the SDK's own parsing.
+  getArkadeInfo: async () => new RestArkProvider(ARKD_URL).getInfo(),
 })
 
 const clientOffer = async (unilateralExitDelay: number) => {
@@ -68,7 +72,7 @@ const clientOffer = async (unilateralExitDelay: number) => {
         })
       : new Response('{}', { status: 500 }),
   )
-  return createOffer(clientWallet() as never, ARKD_URL, {
+  return createOffer(clientWallet() as never, {
     wantAmount: terms.wantAmount,
     wantAsset: asset.AssetId.fromString(USDA),
     emulatorPubkey: '02' + hex.encode(EMULATOR),

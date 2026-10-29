@@ -1,6 +1,6 @@
 {
   "name": "@arkade-os/solver-rails-fake",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Part of the Arkade intent-solver: rails-fake primitives.",
   "license": "MIT",
   "repository": {
@@ -31,6 +31,6 @@
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.0.0",
     "@scure/base": "^2.0.0",
-    "@scure/btc-signer": "^2.0.1"
+    "@scure/btc-signer": "2.4.1"
   }
 }

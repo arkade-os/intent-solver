@@ -4,6 +4,7 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { ripemd160 } from '@noble/hashes/legacy.js'
 import { hex, base64 } from '@scure/base'
 import {
+  ArkAddress,
   MnemonicIdentity,
   Transaction,
   CSVMultisigTapscript,
@@ -13,6 +14,8 @@ import {
   ConditionWitness,
   Extension,
   PrevArkTxField,
+  ServerResponseMismatchError,
+  SingleKey,
 } from '@arkade-os/sdk'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import type { ArkadeContext, FundedOutput } from '@arkade-os/solver-arkade/arkade/wallet.js'
@@ -367,9 +370,13 @@ describe('a lockup sprayed with outputs anyone could have paid in', () => {
   ]
   const KEPT_TOTAL = 55_130n
 
+  const sprayServer = SingleKey.fromPrivateKey(new Uint8Array(32).fill(3))
+  const cosign = async (psbt: string) =>
+    base64.encode((await sprayServer.sign(Transaction.fromPSBT(base64.decode(psbt)))).toPSBT())
   const arkSubmitTx = vi.fn(async (arkTxB64: string, checkpointsB64: string[]) => ({
     arkTxid: Transaction.fromPSBT(base64.decode(arkTxB64)).id,
-    signedCheckpointTxs: checkpointsB64,
+    finalArkTx: await cosign(arkTxB64),
+    signedCheckpointTxs: await Promise.all(checkpointsB64.map(cosign)),
   }))
   const arkCtx = (): ArkadeContext =>
     ({
@@ -436,6 +443,61 @@ describe('a lockup sprayed with outputs anyone could have paid in', () => {
     expect(Transaction.fromPSBT(base64.decode(arkTxB64)).getOutput(0).amount).toBe(1_000n)
 
     await expect(claimSwapScript(arkCtx(), baseScript(), [expiring], PREIMAGE, CLAIM_DEST)).rejects.toThrow(/expir/)
+  })
+})
+
+describe('claimSwapScript', () => {
+  const PREIMAGE = new Uint8Array(32).fill(7)
+  const DESTINATION = new ArkAddress(SERVER, key(5), 'tark').encode()
+  const serverKey = SingleKey.fromPrivateKey(new Uint8Array(32).fill(3))
+  const cosign = async (psbt: string) =>
+    base64.encode((await serverKey.sign(Transaction.fromPSBT(base64.decode(psbt)))).toPSBT())
+  const honestServer = async (arkTxB64: string, checkpointsB64: string[]) => ({
+    arkTxid: Transaction.fromPSBT(base64.decode(arkTxB64)).id,
+    finalArkTx: await cosign(arkTxB64),
+    signedCheckpointTxs: await Promise.all(checkpointsB64.map(cosign)),
+  })
+  const finalizeTx = vi.fn(async (_arkTxid: string, _checkpointsB64: string[]) => undefined)
+  const claimCtx = (respond: typeof honestServer): ArkadeContext =>
+    ({
+      identity: receiverIdentity,
+      wallet: { serverUnrollScript, arkProvider: { submitTx: respond, finalizeTx } },
+    }) as unknown as ArkadeContext
+  const funded = [FUNDED[0]!, { ...FUNDED[0]!, vout: 1 }]
+
+  it('signs and reveals the preimage on every input, then finalizes the countersigned checkpoints', async () => {
+    finalizeTx.mockClear()
+    const serverSubmit = vi.fn(honestServer)
+    const txid = await claimSwapScript(claimCtx(serverSubmit), baseScript(), funded, PREIMAGE, DESTINATION)
+
+    const [arkTxB64] = serverSubmit.mock.calls[0]!
+    const [finalizedTxid, checkpointsB64] = finalizeTx.mock.calls[0]!
+    expect(txid).toBe(Transaction.fromPSBT(base64.decode(arkTxB64)).id)
+    expect(finalizedTxid).toBe(txid)
+    expect(checkpointsB64).toHaveLength(funded.length)
+    for (const tx of [arkTxB64, ...checkpointsB64].map((psbt) => Transaction.fromPSBT(base64.decode(psbt)))) {
+      for (let i = 0; i < tx.inputsLength; i++) {
+        expect(getArkPsbtFields(tx, i, ConditionWitness)).toEqual([[PREIMAGE]])
+        expect(tx.getInput(i).tapScriptSig?.map(([sig]) => hex.encode(sig.pubKey))).toContain(hex.encode(RECEIVER))
+      }
+    }
+  })
+
+  it.each<[string, typeof honestServer]>([
+    [
+      'an ark tx the server did not countersign',
+      async (arkTx, checkpoints) => ({ ...(await honestServer(arkTx, checkpoints)), finalArkTx: arkTx }),
+    ],
+    [
+      'another ark txid',
+      async (arkTx, checkpoints) => ({ ...(await honestServer(arkTx, checkpoints)), arkTxid: 'b'.repeat(64) }),
+    ],
+  ])('refuses %s and finalizes nothing', async (_, respond) => {
+    finalizeTx.mockClear()
+    await expect(
+      claimSwapScript(claimCtx(respond), baseScript(), funded, PREIMAGE, DESTINATION),
+    ).rejects.toBeInstanceOf(ServerResponseMismatchError)
+    expect(finalizeTx).not.toHaveBeenCalled()
   })
 })
 

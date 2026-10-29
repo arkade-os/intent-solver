@@ -1,6 +1,6 @@
 {
   "name": "@arkade-os/solver-rails-esplora",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Part of the Arkade intent-solver: rails-esplora primitives.",
   "license": "MIT",
   "repository": {
@@ -29,6 +29,6 @@
     "@arkade-os/solver-core": "workspace:*",
     "@noble/hashes": "^2.0.0",
     "@scure/base": "^2.0.0",
-    "@scure/btc-signer": "^2.0.1"
+    "@scure/btc-signer": "2.4.1"
   }
 }

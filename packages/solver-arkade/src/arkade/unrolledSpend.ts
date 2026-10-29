@@ -10,9 +10,15 @@
  * one co-signed CPFP child.
  */
 
-import { setArkPsbtField, Transaction, VtxoTaprootTree, type OnchainProvider, type TapLeafScript } from '@arkade-os/sdk'
+import {
+  claimWithPreimageIdentity,
+  setArkPsbtField,
+  Transaction,
+  VtxoTaprootTree,
+  type OnchainProvider,
+  type TapLeafScript,
+} from '@arkade-os/sdk'
 import { base64, hex } from '@scure/base'
-import { claimIdentity } from './claimIdentity.js'
 import { ONCHAIN_DUST_SATS } from '@arkade-os/solver-core/core/onchainReceive.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import type { CovenantSwapScript } from './covenant.js'
@@ -235,7 +241,7 @@ export class UnrolledSpender {
         if (fee > cap) throw new Error(`the client's anchor child outbids all ${cap} sats this spend can pay`)
       }
     }
-    const signer = preimage ? claimIdentity(this.deps.signer, preimage) : this.deps.signer
+    const signer = preimage ? claimWithPreimageIdentity(this.deps.signer, preimage) : this.deps.signer
     const signed = await signer.sign(build(Math.min(fee, cap)), [0])
     const record = { txid: signed.id, tx: null, feeRate, broadcastAt: this.deps.now(), cpfpTxid: null }
     await save(record)

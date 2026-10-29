@@ -61,8 +61,8 @@ vi.mock('@arkade-os/sdk', async (importOriginal) => {
 })
 
 const { ArkAddress, Extension, MultisigTapscript, Transaction, VtxoScript, asset } = await import('@arkade-os/sdk')
-const { offerVtxoScript } = await import('@arkade-os/swap')
-type Offer = import('@arkade-os/swap').Offer
+const { offerVtxoScript } = await import('@arkade-os/swap/protocol')
+type Offer = import('@arkade-os/swap/protocol').Offer
 
 const SERVER_KEY = hex.decode('4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa')
 const MAKER_KEY = '71102fc86b5c576c72f411e083cc03eb83d1b55065406ba2a483208dbb5074ab'

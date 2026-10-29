@@ -41,7 +41,7 @@ describe('swap summary', () => {
         record('done'),
         record('done'),
         record('failed', { failureReason: 'no route' }),
-        record('failed', { failureReason: 'no route' }),
+        record('failed', { failureReason: 'no route — {"paymentId":"p1"}' }),
         record('failed', { state: 'stuck', failureReason: null }),
         record('failed', { inbound: leg(null), failureReason: 'lockup timeout' }),
         record('open', { state: 'funded' }),
@@ -49,15 +49,15 @@ describe('swap summary', () => {
       reader('lightning:BTC->arkade:BTC', []),
     ])
     expect(formatSwapSummary(summary)).toEqual([
-      'Swaps 2025-10-14 06:00 to 12:00 UTC',
-      'arkade:BTC->lightning:BTC: 2 fulfilled · 3 failed · 1 never funded',
+      '*Swaps* 2025-10-14 06:00 to 12:00 UTC',
+      'arkade:BTC → lightning:BTC: 2 fulfilled · 3 failed · 1 never funded',
       '  failed: 2× no route · 1× stuck',
     ])
   })
 
   it('says so when nothing finished', async () => {
     expect(formatSwapSummary(await summarise([reader('a', [record('open')])]))).toEqual([
-      'Swaps 2025-10-14 06:00 to 12:00 UTC: none finished',
+      '*Swaps* 2025-10-14 06:00 to 12:00 UTC: none finished',
     ])
   })
 
@@ -68,7 +68,7 @@ describe('swap summary', () => {
       reader('c', [record('done')], true),
     ])
     expect(formatSwapSummary(summary)).toEqual([
-      'Swaps 2025-10-14 06:00 to 12:00 UTC',
+      '*Swaps* 2025-10-14 06:00 to 12:00 UTC',
       'c: 1 fulfilled (partial: row cap reached)',
       'a: unreadable (db locked), retried next report',
       'not counted (no ledger): b',
@@ -84,7 +84,7 @@ describe('swap summary', () => {
     const hung: SummaryReader = { descriptor: { pair: 'hung' }, economics: () => new Promise(() => {}) }
     const summary = await summarise([hung, reader('ok', [record('done')])], 10)
     expect(formatSwapSummary(summary)).toEqual([
-      'Swaps 2025-10-14 06:00 to 12:00 UTC',
+      '*Swaps* 2025-10-14 06:00 to 12:00 UTC',
       'ok: 1 fulfilled',
       'hung: unreadable (no answer within 10ms), retried next report',
     ])
@@ -112,7 +112,7 @@ describe('swap summary', () => {
     expect(windows.ok!.map((w) => w.since)).toEqual([SINCE, UNTIL])
     expect(windows.flaky!.map((w) => w.since)).toEqual([SINCE, SINCE])
     expect(formatSwapSummary(second)).toEqual([
-      'Swaps 2025-10-14 06:00 to 13:00 UTC',
+      '*Swaps* 2025-10-14 06:00 to 13:00 UTC',
       'ok: 1 fulfilled (since 2025-10-14 12:00)',
       'flaky: 1 fulfilled',
     ])

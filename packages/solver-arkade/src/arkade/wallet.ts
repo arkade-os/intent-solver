@@ -13,6 +13,7 @@ import {
   ArkAddress,
   assertSubmittedArkTxid,
   buildOffchainTx,
+  claimWithPreimageIdentity,
   ConditionWitness,
   createAssetPacket,
   EmulatorPacket,
@@ -23,8 +24,10 @@ import {
   matchServerCheckpoints,
   MnemonicIdentity,
   PrevArkTxField,
+  RestArkProvider,
   RestEmulatorProvider,
   setArkPsbtField,
+  signAndSubmitOffchainTx,
   Transaction,
   Wallet,
   type Recipient,
@@ -42,16 +45,16 @@ import {
 } from '@arkade-os/solver-core/core/timelocks.js'
 import { log, nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { ensureDatabaseDir } from '@arkade-os/solver-core/util/sqlite.js'
-import { claimIdentity } from './claimIdentity.js'
 import type { CovenantSwapScript } from './covenant.js'
 import { virtualTxPages, vtxoPages } from './indexerPaging.js'
 import { SharedSyncIndexerProvider, TimedArkProvider, TimedIndexerProvider } from './latencyProviders.js'
 import { createReservationLedger, type ReservationLedger } from './reservations.js'
 
-/** The two views any spend below needs; CovenantSwapScript satisfies it (as would any VtxoScript wrapper). */
+/** What {@link claimSwapScript} spends; CovenantSwapScript satisfies it. */
 export interface ClaimableScript {
   claim(): TapLeafScript
   encode(): Uint8Array
+  readonly vhtlcOptions: { readonly server: Uint8Array }
 }
 
 export const sqliteExecutor = (path: string): SQLExecutor & { close(): void } => {
@@ -263,8 +266,9 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
 
   const wallet = await Wallet.create({
     identity,
-    arkServerUrl: config.arkServerUrl,
-    arkProvider: latencyDiagnostics ? new TimedArkProvider(config.arkServerUrl) : undefined,
+    arkProvider: latencyDiagnostics
+      ? new TimedArkProvider(config.arkServerUrl)
+      : new RestArkProvider(config.arkServerUrl),
     // The SDK's own default is a plain `RestIndexerProvider` at this same URL.
     indexerProvider: latencyDiagnostics
       ? new TimedIndexerProvider(config.arkServerUrl)
@@ -274,15 +278,15 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
       contractRepository: new SQLiteContractRepository(executor),
     },
     // Passing undefined is safe and is NOT the same as passing a hole: the SDK
-    // folds this into its policy only when set (`!== void 0`, pinned SDK
-    // `dist/chunk-DVOQZAAX.js:12939`), so unset keeps the per-network floor.
+    // folds this into its policy only when set (`!== void 0` in the SDK's
+    // `Wallet.create`), so unset keeps the per-network floor.
     // Spreading it conditionally here would read as more careful and do the
     // same thing; the explicit undefined is what makes that checkable.
     minCheckpointExitDelaySeconds:
       config.minCheckpointExitDelaySeconds === undefined ? undefined : BigInt(config.minCheckpointExitDelaySeconds),
     // Safe for the same reason, by a different operator: the SDK takes
-    // `config.onchainProvider || new EsploraProvider(default)` (pinned SDK
-    // `dist/chunk-AEWJU6NZ.js:12457`), so an explicit undefined falls through
+    // `config.onchainProvider || new EsploraProvider(default)` (SDK
+    // `ReadonlyWallet.setupWalletConfig`), so an explicit undefined falls through
     // to the per-network default rather than blanking the provider.
     onchainProvider: config.esploraUrl === undefined ? undefined : new EsploraProvider(config.esploraUrl),
     // NOT a performance tweak, and UNSET IS NOT OFF. The SDK folds an absent
@@ -438,7 +442,7 @@ const hashMatches = (candidate: Uint8Array, paymentHashHex: string): boolean =>
 /**
  * Every candidate witness item a spend of ONE input might carry, in the order
  * worth trying: the Ark-specific condition field first (the mechanism this
- * repo's own `claimIdentity.ts` uses to attach a preimage — `setArkPsbtField(...,
+ * repo's claims use, via the SDK's `claimWithPreimageIdentity` — `setArkPsbtField(...,
  * ConditionWitness, [preimage])` — confirmed to survive a `toPSBT()`/`fromPSBT()`
  * round trip against the pinned SDK version), then whatever the input's own
  * finalized script witness holds, in case a caller only inspects the raw
@@ -583,28 +587,7 @@ export const lockupSpendEvidence = async (
   return seen ? 'spent' : 'unknown'
 }
 
-/**
- * Spend a swap script's claim leaf, revealing the preimage.
- *
- * The claim leaf is `preimage-condition + receiver + Arkade server`, so this needs
- * both our signature and the server's countersignature. `claimIdentity` carries
- * the rule that the preimage is attached after signing, on both the Arkade
- * transaction and every checkpoint the server hands back.
- *
- * The countersignature round-trip is the dangerous moment: the server answers
- * `submitTx` with checkpoint PSBTs it wants our signature on, and signing input 0
- * attaches the preimage. Nothing structural forces those PSBTs to be the
- * checkpoints we built — a forged one could spend the same lockup outpoint
- * through the same claim leaf to outputs of the server's choosing, and our blind
- * signature would complete the theft (we already paid the Lightning invoice, so
- * the lockup is our money at this point). Hence the rule: **sign nothing the
- * server returned until it is proven to be one of ours** — the response must
- * name the ark tx we submitted, and every returned checkpoint must txid-match a
- * locally built one (witnesses never change a txid, so the server's signature
- * cannot legitimately alter it). `assertSubmittedArkTxid` /
- * `matchServerCheckpoints` are the SDK's own guards for exactly this; a mismatch
- * throws and the swap routes to `stuck` for a human rather than signing.
- */
+/** Spend a swap script's claim leaf, revealing the preimage; throws on any server response the SDK cannot verify. */
 export const claimSwapScript = async (
   ctx: ArkadeContext,
   script: ClaimableScript,
@@ -614,41 +597,21 @@ export const claimSwapScript = async (
 ): Promise<string> => {
   if (funded.length === 0) throw new Error('nothing to claim: no funded outputs')
   const inputs = spendable(funded, 'claim')
-  const signer = claimIdentity(ctx.identity, preimage)
-
-  const { arkTx, checkpoints } = buildOffchainTx(
-    inputs.map((output) => ({
+  return signAndSubmitOffchainTx({
+    identity: claimWithPreimageIdentity(ctx.identity, preimage),
+    provider: ctx.wallet.arkProvider,
+    inputs: inputs.map((output) => ({
       txid: output.txid,
       vout: output.vout,
       value: output.value,
       tapLeafScript: script.claim(),
       tapTree: script.encode(),
     })),
-    [{ script: ArkAddress.decode(destination).pkScript, amount: BigInt(totalValue(inputs)) }],
-    ctx.wallet.serverUnrollScript,
-  )
-
-  // No index list: every input spends the same claim leaf, so all are signed.
-  const signedArkTx = await signer.sign(arkTx)
-  const submitted = await ctx.wallet.arkProvider.submitTx(
-    base64.encode(signedArkTx.toPSBT()),
-    checkpoints.map((c) => base64.encode(c.toPSBT())),
-  )
-
-  // Verify BEFORE signing anything the server sent — see the doc comment.
-  // `matched` keeps the server's order, which is what finalizeTx expects.
-  assertSubmittedArkTxid(submitted, signedArkTx, 'claimSwapScript')
-  const matched = matchServerCheckpoints(submitted.signedCheckpointTxs, checkpoints, 'claimSwapScript')
-
-  const finalCheckpoints = await Promise.all(
-    matched.map(async ({ server }) => {
-      const signed = await signer.sign(server, [0])
-      return base64.encode(signed.toPSBT())
-    }),
-  )
-
-  await ctx.wallet.arkProvider.finalizeTx(submitted.arkTxid, finalCheckpoints)
-  return submitted.arkTxid
+    outputs: [{ script: ArkAddress.decode(destination).pkScript, amount: BigInt(totalValue(inputs)) }],
+    serverUnrollScript: ctx.wallet.serverUnrollScript,
+    // The leaf's own key, not the wallet's live one: a lockup quoted before a signer rotation is co-signed under it.
+    verifyServerSignatures: { serverPubkey: script.vhtlcOptions.server },
+  })
 }
 
 /** Raw witness encoding of an empty stack: varint item count 0. */

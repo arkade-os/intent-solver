@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@arkade-os/sdk':
-        specifier: 0.4.77
-        version: 0.4.77
+        specifier: 0.5.0-rc.29
+        version: 0.5.0-rc.29
       '@arkade-os/solver-arkade':
         specifier: workspace:*
         version: link:packages/solver-arkade
@@ -60,8 +60,8 @@ importers:
         specifier: ^2.2.0
         version: 2.2.0
       '@scure/btc-signer':
-        specifier: ^2.0.1
-        version: 2.0.1
+        specifier: 2.4.1
+        version: 2.4.1
       better-sqlite3:
         specifier: ^12.11.1
         version: 12.11.1
@@ -75,12 +75,15 @@ importers:
         specifier: ^12.2.3
         version: 12.2.3
       nostr-tools:
-        specifier: ^2.24.1
+        specifier: 2.24.1
         version: 2.24.1(typescript@5.9.3)
     devDependencies:
+      '@arkade-os/solver-discovery':
+        specifier: 0.3.0
+        version: 0.3.0
       '@arkade-os/swap':
-        specifier: 0.0.23
-        version: 0.0.23(nostr-tools@2.24.1(typescript@5.9.3))
+        specifier: 0.1.0-rc.32
+        version: 0.1.0-rc.32(nostr-tools@2.24.1(typescript@5.9.3))
       '@foundry-rs/anvil':
         specifier: 1.7.1
         version: 1.7.1
@@ -112,8 +115,8 @@ importers:
   packages/solver-app:
     dependencies:
       '@arkade-os/sdk':
-        specifier: 0.4.77
-        version: 0.4.77
+        specifier: 0.5.0-rc.29
+        version: 0.5.0-rc.29
       '@arkade-os/solver-arkade':
         specifier: workspace:*
         version: link:../solver-arkade
@@ -145,8 +148,8 @@ importers:
         specifier: workspace:*
         version: link:../solver-transport
       '@arkade-os/swap':
-        specifier: 0.0.23
-        version: 0.0.23(nostr-tools@2.24.1(typescript@5.9.3))
+        specifier: 0.1.0-rc.32
+        version: 0.1.0-rc.32(nostr-tools@2.24.1(typescript@5.9.3))
       '@hono/node-server':
         specifier: ^2.1.0
         version: 2.1.0(hono@4.13.0)
@@ -163,8 +166,8 @@ importers:
         specifier: ^2.2.0
         version: 2.2.0
       '@scure/btc-signer':
-        specifier: ^2.0.1
-        version: 2.0.1
+        specifier: 2.4.1
+        version: 2.4.1
       hono:
         specifier: ^4.13.0
         version: 4.13.0
@@ -172,14 +175,14 @@ importers:
   packages/solver-arkade:
     dependencies:
       '@arkade-os/sdk':
-        specifier: 0.4.77
-        version: 0.4.77
+        specifier: 0.5.0-rc.29
+        version: 0.5.0-rc.29
       '@arkade-os/solver-core':
         specifier: workspace:*
         version: link:../solver-core
       '@arkade-os/swap':
-        specifier: 0.0.23
-        version: 0.0.23(nostr-tools@2.24.1(typescript@5.9.3))
+        specifier: 0.1.0-rc.32
+        version: 0.1.0-rc.32(nostr-tools@2.24.1(typescript@5.9.3))
       '@noble/hashes':
         specifier: ^2.0.0
         version: 2.2.0
@@ -187,8 +190,8 @@ importers:
         specifier: ^2.0.0
         version: 2.2.0
       '@scure/btc-signer':
-        specifier: ^2.0.1
-        version: 2.0.1
+        specifier: 2.4.1
+        version: 2.4.1
       better-sqlite3:
         specifier: ^12.11.1
         version: 12.11.1
@@ -218,8 +221,8 @@ importers:
   packages/solver-corridors:
     dependencies:
       '@arkade-os/sdk':
-        specifier: 0.4.77
-        version: 0.4.77
+        specifier: 0.5.0-rc.29
+        version: 0.5.0-rc.29
       '@arkade-os/solver-arkade':
         specifier: workspace:*
         version: link:../solver-arkade
@@ -233,8 +236,8 @@ importers:
         specifier: workspace:*
         version: link:../solver-rails
       '@arkade-os/swap':
-        specifier: 0.0.23
-        version: 0.0.23(nostr-tools@2.24.1(typescript@5.9.3))
+        specifier: 0.1.0-rc.32
+        version: 0.1.0-rc.32(nostr-tools@2.24.1(typescript@5.9.3))
       '@noble/hashes':
         specifier: ^2.0.0
         version: 2.2.0
@@ -248,8 +251,8 @@ importers:
   packages/solver-corridors-evm:
     dependencies:
       '@arkade-os/sdk':
-        specifier: 0.4.77
-        version: 0.4.77
+        specifier: 0.5.0-rc.29
+        version: 0.5.0-rc.29
       '@arkade-os/solver-arkade':
         specifier: workspace:*
         version: link:../solver-arkade
@@ -297,8 +300,8 @@ importers:
         specifier: ^2.0.0
         version: 2.2.0
       '@scure/btc-signer':
-        specifier: ^2.0.1
-        version: 2.0.1
+        specifier: 2.4.1
+        version: 2.4.1
 
   packages/solver-rails-esplora:
     dependencies:
@@ -312,8 +315,8 @@ importers:
         specifier: ^2.0.0
         version: 2.2.0
       '@scure/btc-signer':
-        specifier: ^2.0.1
-        version: 2.0.1
+        specifier: 2.4.1
+        version: 2.4.1
 
   packages/solver-rails-evm:
     dependencies:
@@ -345,8 +348,8 @@ importers:
         specifier: ^2.0.0
         version: 2.2.0
       '@scure/btc-signer':
-        specifier: ^2.0.1
-        version: 2.0.1
+        specifier: 2.4.1
+        version: 2.4.1
 
   packages/solver-rails-lnd:
     dependencies:
@@ -360,8 +363,8 @@ importers:
         specifier: ^2.0.0
         version: 2.2.0
       '@scure/btc-signer':
-        specifier: ^2.0.1
-        version: 2.0.1
+        specifier: 2.4.1
+        version: 2.4.1
       lightning:
         specifier: ^12.2.3
         version: 12.2.3
@@ -390,7 +393,7 @@ importers:
         specifier: ^4.13.0
         version: 4.13.0
       nostr-tools:
-        specifier: ^2.24.1
+        specifier: 2.24.1
         version: 2.24.1(typescript@5.9.3)
       zod:
         specifier: ^3.24.1
@@ -402,9 +405,9 @@ packages:
     resolution: {integrity: sha512-+90ob+ruUhb5RfdZhfryIb0H+G3BDtQ+IiQvNJwpwN/gMRcMm9jwJpUBAf5yqhPCWY8KsPNcKFzt5IzCmtqzxQ==}
     engines: {node: '>=20'}
 
-  '@arkade-os/sdk@0.4.77':
-    resolution: {integrity: sha512-1VlAW0+LoYfdcdPjx2JHm9KuEpWG7WYjfNnVKomSnVXB75/1kc7asBBCJ5mOz5B0BgwxWHTi6u/QDteKrLUQMQ==}
-    engines: {node: '>=22.12.0 <27'}
+  '@arkade-os/sdk@0.5.0-rc.29':
+    resolution: {integrity: sha512-Y9K1tM6DQOUXw4iB06V2LwDfEfWBnd2IGMnk0xD7SShZ9Bhr/+IQ5wXzLtdaQtDDl2O16G+4hFMd/9OdVrYycg==}
+    engines: {node: '>=22.13.0 <27'}
     peerDependencies:
       '@react-native-async-storage/async-storage': '>=1.0.0'
       expo: '>=54.0.0'
@@ -423,14 +426,15 @@ packages:
       expo-task-manager:
         optional: true
 
-  '@arkade-os/solver-discovery@0.2.7':
-    resolution: {integrity: sha512-T5dfiezUG5YKtzOmX1Z2E0LePF3bx6unsqq7UPgha0Zp9PQFcodYMYl6T1i0AbruaGup5XWq8Die5wusiA5qUA==}
-    engines: {node: '>=18'}
+  '@arkade-os/solver-discovery@0.3.0':
+    resolution: {integrity: sha512-FMAhWG3vZrKIlCP1U8E5iAgB6O1wc6O1CMk+HlQ4xUf066p/S8PuRgmHtkHcL1YrGsdWhKfP/SSFwgLIbGTQjg==}
+    engines: {node: '>=20.19'}
 
-  '@arkade-os/swap@0.0.23':
-    resolution: {integrity: sha512-r3wXWDPP/EhVi2YUia3mLR4HkT/3uLoJhiAVkYJ1OxnRilzvoO0quqSQ8d5QY7oJe5gAwqPZvb/8/C+smOqyHg==}
+  '@arkade-os/swap@0.1.0-rc.32':
+    resolution: {integrity: sha512-s3HjCndAt0lHzQV0gqMCaHcJMxhaH/l+IhiyhH/luIUNLiAnnJUvfId6aSbiPEDRYZJeEUbUpldzPEZ54nBpig==}
+    engines: {node: '>=22.13.0'}
     peerDependencies:
-      nostr-tools: ^2.12.0
+      nostr-tools: 2.24.1
     peerDependenciesMeta:
       nostr-tools:
         optional: true
@@ -719,6 +723,10 @@ packages:
     resolution: {integrity: sha512-T/BoHgFXirb0ENSPBquzX0rcjXeM6Lo892a2jlYJkqk83LqZx0l1Of7DzlKJ6jkpvMrkHSnAcgb5JegL8SeIkQ==}
     engines: {node: '>= 20.19.0'}
 
+  '@noble/curves@2.4.0':
+    resolution: {integrity: sha512-P4/62zrgfH33CneE3Dn4WhJVA22YUU0eR51wKIan4NVRvwsA0YnPTwWGpNbpuacSujmSFLvyzpyuR30+fbq2Ew==}
+    engines: {node: '>= 20.19.0'}
+
   '@noble/hashes@1.8.0':
     resolution: {integrity: sha512-jCs9ldd7NwzpgXDIf6P3+NrHh9/sD6CQdxHyjQI+h/6rDNo88ypBxxz45UDuZHz9r3tNz7N/VInSVoVdtXEI4A==}
     engines: {node: ^14.21.3 || >=16}
@@ -729,6 +737,10 @@ packages:
 
   '@noble/hashes@2.2.0':
     resolution: {integrity: sha512-IYqDGiTXab6FniAgnSdZwgWbomxpy9FtYvLKs7wCUs2a8RkITG+DFGO1DM9cr+E3/RgADRpFjrKVaJ1z6sjtEg==}
+    engines: {node: '>= 20.19.0'}
+
+  '@noble/hashes@2.4.0':
+    resolution: {integrity: sha512-X5XaVWZIBCT7HHZGm5I7ZQXDwLG+bGXuSrMQAW+7Zvl87h1kmc1ZB1VSRJcpUfoUrGQp4Fkoxm5kZ+Ms+aW+eA==}
     engines: {node: '>= 20.19.0'}
 
   '@noble/secp256k1@3.0.0':
@@ -895,6 +907,9 @@ packages:
   '@scure/base@2.2.0':
     resolution: {integrity: sha512-b8XEupJibegiXV+tDUseI8oLQc8ei3d/4Jkb2RpbHh3MfE054ov3uIz2dhFkB3FI8iwYkEh0gGCApkrYggkPNg==}
 
+  '@scure/base@2.4.0':
+    resolution: {integrity: sha512-thZ1TuJwFwBblOhgsjDKvvGirBxNp+wSvY/DR6tJBJOTDhdAAcHJ8Vbr2eFnqaxeca4+t0i9KBf+uHYGWwZORg==}
+
   '@scure/bip32@2.0.1':
     resolution: {integrity: sha512-4Md1NI5BzoVP+bhyJaY3K6yMesEFzNS1sE/cP+9nuvE7p/b0kx9XbpDHHFl8dHtufcbdHRUUQdRqLIPHN/s7yA==}
 
@@ -907,8 +922,11 @@ packages:
   '@scure/bip39@2.2.0':
     resolution: {integrity: sha512-T/Bj/YvYMNkIPq6EENO6/rcs2e7qTNuyoUXf0KBFDmp0ZDu0H2X4Lq6yC3i0c8PcWkov5EbW+yQZZbdMmk154A==}
 
-  '@scure/btc-signer@2.0.1':
-    resolution: {integrity: sha512-vk5a/16BbSFZkhh1JIJ0+4H9nceZVo5WzKvJGGWiPp3sQOExeW+L53z3dI6u0adTPoE8ZbL+XEb6hEGzVZSvvQ==}
+  '@scure/bip39@2.4.0':
+    resolution: {integrity: sha512-82dxFbZUYboyOf0AXiydsQrFQ5Q4h9mX+O2UkE91ROYmsc0BKMGZLwDmy96Jpa2+vrtoxomjUhy1RPIgH/r2nA==}
+
+  '@scure/btc-signer@2.4.1':
+    resolution: {integrity: sha512-ch6h66o9nPhEoe/KciMMUJeH2MBPB8UAJI1if35Fxl6885lKTsc9YoCRqTW0/RjI0Vv9GSg1tmKtHHODyAw81g==}
 
   '@types/better-sqlite3@7.6.13':
     resolution: {integrity: sha512-NMv9ASNARoKksWtsq/SHakpYAYnhBrQgGD8zkLYk/jaK8jUGn08CfEdTRgYhMypUQAfzSP8W6gNLe0q19/t4VA==}
@@ -1300,8 +1318,8 @@ packages:
     resolution: {integrity: sha512-S3UwM3yj5mtUSEfP41UZmt/0SCoVYUcU1rkXv+BQ5Ig8ndL4sPoJNBUJERafdPb5jjHJGuMgytgKvKIf58XNBw==}
     engines: {node: '>= 0.10.0'}
 
-  micro-packed@0.8.0:
-    resolution: {integrity: sha512-AKb8znIvg9sooythbXzyFeChEY0SkW0C6iXECpy/ls0e5BtwXO45J9wD9SLzBztnS4XmF/5kwZknsq+jyynd/A==}
+  micro-packed@0.11.1:
+    resolution: {integrity: sha512-agQGBnBCw8OoKQZMUxcaQPaOowdfxyEmBsq4CNAXAXCyB8KxlRG0lTl5GADJIsMEDaFb0trhXBHKYsjTWa5kuw==}
     engines: {node: '>= 20.19.0'}
 
   mime-db@1.52.0:
@@ -1672,16 +1690,17 @@ snapshots:
 
   '@alexbosworth/blockchain@3.2.0': {}
 
-  '@arkade-os/sdk@0.4.77':
+  '@arkade-os/sdk@0.5.0-rc.29':
     dependencies:
       '@bitcoinerlab/descriptors-scure': 3.1.7
       '@marcbachmann/cel-js': 8.0.0
-      '@noble/curves': 2.0.1
+      '@noble/curves': 2.4.0
       '@noble/secp256k1': 3.0.0
-      '@scure/base': 2.0.0
-      '@scure/bip39': 2.0.1
-      '@scure/btc-signer': 2.0.1
+      '@scure/base': 2.4.0
+      '@scure/bip39': 2.4.0
+      '@scure/btc-signer': 2.4.1
       bip68: 1.0.4
+      micro-packed: 0.11.1
       ws-electrumx-client: 1.0.5
     transitivePeerDependencies:
       - '@ledgerhq/ledger-bitcoin'
@@ -1691,17 +1710,21 @@ snapshots:
       - ecpair
       - utf-8-validate
 
-  '@arkade-os/solver-discovery@0.2.7': {}
-
-  '@arkade-os/swap@0.0.23(nostr-tools@2.24.1(typescript@5.9.3))':
+  '@arkade-os/solver-discovery@0.3.0':
     dependencies:
-      '@arkade-os/sdk': 0.4.77
-      '@arkade-os/solver-discovery': 0.2.7
+      '@noble/curves': 2.4.0
+      '@noble/hashes': 2.4.0
+
+  '@arkade-os/swap@0.1.0-rc.32(nostr-tools@2.24.1(typescript@5.9.3))':
+    dependencies:
+      '@arkade-os/sdk': 0.5.0-rc.29
+      '@arkade-os/solver-discovery': 0.3.0
       '@noble/ciphers': 2.1.1
-      '@noble/curves': 2.0.1
-      '@noble/hashes': 2.0.1
-      '@scure/base': 2.0.0
-      '@scure/btc-signer': 2.0.1
+      '@noble/curves': 2.4.0
+      '@noble/hashes': 2.4.0
+      '@scure/base': 2.4.0
+      '@scure/btc-signer': 2.4.1
+      light-bolt11-decoder: 3.2.0
     optionalDependencies:
       nostr-tools: 2.24.1(typescript@5.9.3)
     transitivePeerDependencies:
@@ -1717,27 +1740,27 @@ snapshots:
       - expo-task-manager
       - utf-8-validate
 
-  '@bitcoinerlab/descriptors-core@3.1.7(@noble/curves@2.2.0)(@noble/hashes@2.2.0)(@scure/base@2.2.0)(@scure/bip32@2.2.0)(@scure/btc-signer@2.0.1)':
+  '@bitcoinerlab/descriptors-core@3.1.7(@noble/curves@2.4.0)(@noble/hashes@2.4.0)(@scure/base@2.4.0)(@scure/bip32@2.2.0)(@scure/btc-signer@2.4.1)':
     dependencies:
       '@bitcoinerlab/miniscript': 2.0.0
       lodash.memoize: 4.1.2
       uint8array-tools: 0.0.9
       varuint-bitcoin: 2.0.0
     optionalDependencies:
-      '@noble/curves': 2.2.0
-      '@noble/hashes': 2.2.0
-      '@scure/base': 2.2.0
+      '@noble/curves': 2.4.0
+      '@noble/hashes': 2.4.0
+      '@scure/base': 2.4.0
       '@scure/bip32': 2.2.0
-      '@scure/btc-signer': 2.0.1
+      '@scure/btc-signer': 2.4.1
 
   '@bitcoinerlab/descriptors-scure@3.1.7':
     dependencies:
-      '@bitcoinerlab/descriptors-core': 3.1.7(@noble/curves@2.2.0)(@noble/hashes@2.2.0)(@scure/base@2.2.0)(@scure/bip32@2.2.0)(@scure/btc-signer@2.0.1)
-      '@noble/curves': 2.2.0
-      '@noble/hashes': 2.2.0
-      '@scure/base': 2.2.0
+      '@bitcoinerlab/descriptors-core': 3.1.7(@noble/curves@2.4.0)(@noble/hashes@2.4.0)(@scure/base@2.4.0)(@scure/bip32@2.2.0)(@scure/btc-signer@2.4.1)
+      '@noble/curves': 2.4.0
+      '@noble/hashes': 2.4.0
+      '@scure/base': 2.4.0
       '@scure/bip32': 2.2.0
-      '@scure/btc-signer': 2.0.1
+      '@scure/btc-signer': 2.4.1
     transitivePeerDependencies:
       - bip32
       - bitcoinjs-lib
@@ -1883,11 +1906,17 @@ snapshots:
     dependencies:
       '@noble/hashes': 2.2.0
 
+  '@noble/curves@2.4.0':
+    dependencies:
+      '@noble/hashes': 2.4.0
+
   '@noble/hashes@1.8.0': {}
 
   '@noble/hashes@2.0.1': {}
 
   '@noble/hashes@2.2.0': {}
+
+  '@noble/hashes@2.4.0': {}
 
   '@noble/secp256k1@3.0.0': {}
 
@@ -1992,6 +2021,8 @@ snapshots:
 
   '@scure/base@2.2.0': {}
 
+  '@scure/base@2.4.0': {}
+
   '@scure/bip32@2.0.1':
     dependencies:
       '@noble/curves': 2.0.1
@@ -2014,12 +2045,16 @@ snapshots:
       '@noble/hashes': 2.2.0
       '@scure/base': 2.2.0
 
-  '@scure/btc-signer@2.0.1':
+  '@scure/bip39@2.4.0':
     dependencies:
-      '@noble/curves': 2.0.1
-      '@noble/hashes': 2.0.1
-      '@scure/base': 2.0.0
-      micro-packed: 0.8.0
+      '@noble/hashes': 2.4.0
+
+  '@scure/btc-signer@2.4.1':
+    dependencies:
+      '@noble/curves': 2.4.0
+      '@noble/hashes': 2.4.0
+      '@scure/base': 2.4.0
+      micro-packed: 0.11.1
 
   '@types/better-sqlite3@7.6.13':
     dependencies:
@@ -2424,9 +2459,9 @@ snapshots:
 
   memorystream@0.3.1: {}
 
-  micro-packed@0.8.0:
+  micro-packed@0.11.1:
     dependencies:
-      '@scure/base': 2.0.0
+      '@scure/base': 2.4.0
 
   mime-db@1.52.0: {}
 

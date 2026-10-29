@@ -38,7 +38,11 @@
 # Declared before the first FROM so both stages can read it; ARGs above the
 # first FROM are global, and one declared inside a stage would not be visible
 # to the other stage's FROM.
-ARG NODE_VERSION=22
+#
+# Pinned to a patch release because a builder that caches `node:22-slim` keeps
+# building on it and never picks up a security release. 22.23.4 carries the
+# October 2026 fixes; bump it for each Node security release.
+ARG NODE_VERSION=22.23.4
 
 FROM node:${NODE_VERSION}-slim AS build
 RUN corepack enable
