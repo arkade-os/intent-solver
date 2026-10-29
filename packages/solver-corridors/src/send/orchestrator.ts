@@ -583,17 +583,26 @@ export class SendSwapService {
     // us to make, which is the number they think in — while everything from here
     // down deals in the lockup, because that is the amount that actually has to
     // arrive. With a zero fee the two are equal and this is a no-op.
+    // A rail's subsidy comes out of this corridor's bps cut and no further: the lockup covers its routing.
     const quoteFee =
       feeEstimate === null
         ? this.fee
-        : { bps: this.fee.bps, flatSats: feeEstimate.billableFeeSats ?? feeEstimate.feeSats }
+        : {
+            bps: this.fee.bps,
+            flatSats: Math.max(
+              feeEstimate.billableFeeSats ?? feeEstimate.feeSats,
+              feeEstimate.feeSats - Math.ceil((decoded.amountSats * this.fee.bps) / 10_000),
+            ),
+          }
     const lockupSats = giveSatsFor(decoded.amountSats, quoteFee)
     // RESERVED, not merely observed: the row below is what makes this swap
     // visible to `totalCommitted()`, and until it lands a concurrent quote
     // reads the same headroom and takes it too. Handed back in the
     // `finally`, by which point either the row counts instead or nothing
     // was committed at all.
-    const routingFeeSats = feeEstimate?.feeSats ?? maxRoutingFeeSats(decoded.amountSats)
+    // Unestimated, the quote charged only the configured fee: that is all routing may spend.
+    const routingFeeSats =
+      feeEstimate?.feeSats ?? Math.min(maxRoutingFeeSats(decoded.amountSats), lockupSats - decoded.amountSats)
     const refusal: { ceiling?: 'exposure' | 'float' } = {}
     const reservation = await this.admission.admit({
       pair: RFQ_PAIR_SEND,
@@ -672,7 +681,7 @@ export class SendSwapService {
           clientRefundPubkey: options.clientRefundPubkey,
           receiverPkScript: arkade.receiverPkScript,
           nonInteractiveParameters: true,
-          quotedRoutingFeeSats: feeEstimate?.feeSats,
+          quotedRoutingFeeSats: coupled ? undefined : routingFeeSats,
           rfqId: options.rfqId,
         })
         return { accepted: true, swap, lockupDeadline: acceptance.lockupDeadline }

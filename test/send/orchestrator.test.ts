@@ -292,7 +292,7 @@ describe('the solver spread', () => {
   const FEE = { bps: 100, flatSats: 50 }
   const EXPECTED_LOCKUP = 2172
 
-  const withFee = () =>
+  const withFee = (fee = FEE) =>
     new SendSwapService({
       store,
       ln,
@@ -303,7 +303,7 @@ describe('the solver spread', () => {
       totalCommitted: () => store.committedSats(),
       admission: new AdmissionControl(),
       now: () => clock,
-      fee: FEE,
+      fee,
     })
 
   it('quotes a lockup of the invoice PLUS the fee', async () => {
@@ -387,6 +387,37 @@ describe('the solver spread', () => {
     // actually measured even though the customer was billed only 128 of them.
     expect(ln.payCalls[0]?.maxFeeSats).toBe(278)
     expect(ln.payCalls[0]?.maxFeeSats).not.toBe(maxRoutingFeeSats(50_000))
+  })
+
+  it('floors a rail subsidy at the bps cut, so the lockup still covers the routing cost', async () => {
+    ln.feeEstimate = { feeSats: 75, billableFeeSats: 0 }
+
+    const outcome = await withFee().quote(INVOICE, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+    if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+
+    expect(outcome.swap.amountSats - AMOUNT).toBeGreaterThanOrEqual(75)
+  })
+
+  it('caps routing at what the quote charged when the backend gives no estimate', async () => {
+    const svc = withFee({ bps: 30, flatSats: 0 })
+    const outcome = await svc.quote(INVOICE, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+    if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+    arkade.lockups = [{ txid: 'e'.repeat(64), vout: 0, value: outcome.swap.amountSats }]
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
+
+    await svc.tick(outcome.swap.id)
+
+    expect(ln.payCalls[0]?.maxFeeSats).toBe(outcome.swap.amountSats - AMOUNT)
+  })
+
+  it('admits Lightning float against that capped budget, not the 0.5% fallback', async () => {
+    ln.balance = { availableSats: AMOUNT + 7, incomingSats: 0 }
+
+    const outcome = await withFee({ bps: 30, flatSats: 0 }).quote(INVOICE, REFUND_ADDRESS, {
+      clientRefundPubkey: CLIENT_REFUND_PUBKEY,
+    })
+
+    expect(outcome).toMatchObject({ accepted: true, swap: { amountSats: AMOUNT + 7 } })
   })
 
   it('rejects a billable estimate that exceeds the backend cost', async () => {
