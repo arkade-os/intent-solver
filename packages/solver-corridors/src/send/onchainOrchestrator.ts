@@ -945,7 +945,8 @@ export class OnchainSendSwapService {
     try {
       const shortfall = await this.lockupShortfall(row)
       if (shortfall) return this.refuseFunding(row, fresh, shortfall)
-      const feeRateSatPerVbyte = Math.max(await onchain.estimateFeeRate(), MIN_RELAY_FEE_RATE)
+      // Rounded: fundPsbt's fee_tokens_per_vbyte is an integer, and the contract should not rest on the estimator returning one.
+      const feeRateSatPerVbyte = Math.round(Math.max(await onchain.estimateFeeRate(), MIN_RELAY_FEE_RATE))
       signed = await onchain.signFunding({
         address: row.onchainAddress,
         amountSats: row.payoutSats,
@@ -1027,7 +1028,8 @@ export class OnchainSendSwapService {
             row.id,
             new Error(
               `funding ${row.fundingTxid} unconfirmed ${this.now() - row.fundStartedAt}s after broadcast — ` +
-                `bump or CPFP before htlc_locktime ${row.htlcLocktime} or the payout strands`,
+                `bump or CPFP before refund_locktime ${row.refundLocktime} (the client reclaims the Arkade lockup ` +
+                `after it, so a later confirm pays both sides); htlc_locktime ${row.htlcLocktime}`,
             ),
           )
         }
