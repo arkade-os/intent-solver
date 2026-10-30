@@ -9,7 +9,7 @@
 
 import { randomBytes } from 'node:crypto'
 import { hex } from '@scure/base'
-import { Address, Transaction } from '@scure/btc-signer'
+import { Address, OutScript, Transaction } from '@scure/btc-signer'
 import { ONCHAIN_NETWORKS, type OnchainNetworkProfile } from '@arkade-os/solver-rails/onchain/htlc.js'
 import type {
   FundedOnchainOutput,
@@ -17,6 +17,18 @@ import type {
   OnchainSendBackend,
   OnchainTxOutcome,
 } from '@arkade-os/solver-core/ports/onchain.js'
+
+/** Whichever network the address belongs to: one fake serves corridors configured for any of them. */
+const scriptOf = (address: string): Uint8Array => {
+  for (const network of Object.values(ONCHAIN_NETWORKS)) {
+    try {
+      return OutScript.encode(Address(network).decode(address))
+    } catch {
+      continue
+    }
+  }
+  throw new Error(`${address} decodes on no onchain network`)
+}
 
 /** A realistic-length fake txid — 32 bytes, like a real one, not `randomUUID`'s 16. */
 const fakeTxid = (): string => hex.encode(randomBytes(32))
@@ -48,11 +60,11 @@ export class FakeOnchainBackend implements OnchainSendBackend {
   constructor(
     private feeRateSatsPerVbyte = 5,
     private readonly fundingVout = 0,
-    network: OnchainNetworkProfile = ONCHAIN_NETWORKS.regtest,
+    private readonly network: OnchainNetworkProfile = ONCHAIN_NETWORKS.regtest,
   ) {
     // A fixed P2WPKH rather than a random one: deterministic, so a test can
     // assert the exact address a refund is expected to pay.
-    this.receiveAddress = Address(network).encode({ type: 'wpkh', hash: new Uint8Array(20).fill(0x11) })
+    this.receiveAddress = Address(this.network).encode({ type: 'wpkh', hash: new Uint8Array(20).fill(0x11) })
   }
 
   /** `idempotencyKey` is unused: nothing here can be paid twice, there being no chain. */
@@ -62,6 +74,23 @@ export class FakeOnchainBackend implements OnchainSendBackend {
     idempotencyKey: string
   }): Promise<{ txid: string; vout: number }> {
     return this.receiveExternal({ address: params.address, amountSats: params.amountSats, vout: this.fundingVout })
+  }
+
+  private readonly signedFundings = new Map<string, { address: string; amountSats: number; vout: number }>()
+
+  async signFunding(params: {
+    address: string
+    amountSats: number
+  }): Promise<{ txid: string; vout: number; tx: string }> {
+    const tx = new Transaction({ allowUnknownInputs: true, allowUnknownOutputs: true })
+    tx.addInput({ txid: randomBytes(32), index: 0 })
+    for (let i = 0; i < this.fundingVout; i++) tx.addOutput({ script: new Uint8Array([0x6a]), amount: 0n })
+    tx.addOutput({
+      script: scriptOf(params.address),
+      amount: BigInt(params.amountSats),
+    })
+    this.signedFundings.set(tx.id, { ...params, vout: this.fundingVout })
+    return { txid: tx.id, vout: this.fundingVout, tx: hex.encode(tx.toBytes(true, false)) }
   }
 
   /**
@@ -99,7 +128,9 @@ export class FakeOnchainBackend implements OnchainSendBackend {
       allowUnknownOutputs: true,
       allowLegacyWitnessUtxo: true,
     }).id
-    this.broadcasts.set(txid, null)
+    const signed = this.signedFundings.get(txid)
+    if (signed && !this.outputs.some((o) => o.txid === txid)) this.receiveExternal({ ...signed, txid })
+    if (!this.broadcasts.has(txid)) this.broadcasts.set(txid, null)
     return { txid }
   }
 

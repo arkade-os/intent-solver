@@ -196,20 +196,30 @@ export class UnrolledSpender {
       const ours = out.txid === undefined ? null : await this.adopt(out.txid)
       return ours ? this.track(lockup, ours, save) : { kind: 'spent' }
     }
+    const saved: { record?: UnrolledSpendRecord } = {}
+    const keep: SaveUnrolledSpend = async (record) => {
+      await save(record)
+      saved.record = record
+    }
     try {
-      return { kind: 'pending', record: await this.push(lockup, save) }
+      return { kind: 'pending', record: await this.push(lockup, keep) }
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error)
       if (error instanceof UnspendableLockup) return { kind: 'closed', reason }
-      const unroll = await chain.getTxStatus(lockup.txid).catch(() => null)
-      if (
-        unroll?.confirmed &&
-        this.deps.now() >= unroll.blockTime + lockup.exitDelaySeconds - COSIGN_EXIT_MARGIN_SECONDS
-      ) {
-        return { kind: 'closed', reason }
+      if (await this.cosignWindowClosed(lockup)) {
+        // arkd may have broadcast it before the reply was lost; `track` closes once no explorer shows it.
+        return saved.record ? { kind: 'pending', record: saved.record } : { kind: 'closed', reason }
       }
       throw error
     }
+  }
+
+  private async cosignWindowClosed(lockup: UnrolledSpend): Promise<boolean> {
+    const unroll = await this.deps.chain.getTxStatus(lockup.txid).catch(() => null)
+    return (
+      unroll?.confirmed === true &&
+      this.deps.now() >= unroll.blockTime + lockup.exitDelaySeconds - COSIGN_EXIT_MARGIN_SECONDS
+    )
   }
 
   private async push(lockup: UnrolledSpend, save: SaveUnrolledSpend): Promise<UnrolledSpendRecord> {
@@ -269,15 +279,18 @@ export class UnrolledSpender {
     }
     // Spent by this spend, or by a spender the explorer does not name: wait.
     if (out?.spent) return { kind: 'pending', record }
-    // Dropped: the same signed transaction is always safe to resend.
+    // Dropped: the same signed transaction is always safe to resend, with its child as one package.
     if (record.tx) {
-      await chain.broadcastTransaction(record.tx)
+      await chain.broadcastTransaction(...(record.cpfpTx ? [record.tx, record.cpfpTx] : [record.tx]))
       return { kind: 'pending', record }
     }
     // Never seen: arkd refused it, or it left before any explorer kept it. Ask again, once
     // a lagging explorer has had time to show it. In the second case arkd refuses every retry
     // ("inputs already signed") and the row escalates when the window closes, naming the solo leaf.
     if (this.deps.now() - record.broadcastAt < RETRY_AFTER_SECONDS) return { kind: 'pending', record }
+    if (await this.cosignWindowClosed(lockup)) {
+      return { kind: 'closed', reason: `no explorer shows ${record.txid}, and arkd no longer co-signs` }
+    }
     return this.start(lockup, save)
   }
 

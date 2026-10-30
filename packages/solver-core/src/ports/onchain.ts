@@ -197,4 +197,10 @@ export interface OnchainSendBackend extends OnchainBackend {
     txid: string
     vout: number
   }>
+
+  /**
+   * {@link fund}'s payment, signed with its inputs reserved but NOT broadcast: the caller records `tx`
+   * before `broadcastRaw`, so a re-drive can only resend that one transaction, never pay the HTLC again.
+   */
+  signFunding(params: { address: string; amountSats: number }): Promise<{ txid: string; vout: number; tx: string }>
 }

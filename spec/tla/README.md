@@ -38,7 +38,7 @@ loudly under `grep` rather than pointing somewhere plausible and wrong.
 | `SwapCore.tla` | Shared machinery: the CAS, the worker/crash model, the clock, the contested-outpoint chain. Header documents traps T1–T4. |
 | `LightningSend.tla` | quoted → funded → paying → paid → claiming |
 | `LightningReceive.tla` | quoted → armed → funded → claimed → settled |
-| `OnchainSend.tla` | The L1 HTLC leg and its mempool race. Timing invariants are conditional on the `(A2) Urgent` assumption — read that note before trusting any timing pass. The send-time `refunded` record is FIXED, so `OnchainSend_UnconfirmedRefund.cfg` mutates a guard the code really ships; `OnchainSend_MempoolRace.cfg` is kept as the residual RBF race, which the fix makes loud rather than silent. `OnchainSend_LeaseStrand.cfg` is red on the shipped code: a crash holding the fund lease strands the row (B10). |
+| `OnchainSend.tla` | The L1 HTLC leg and its mempool race. Timing invariants are conditional on the `(A2) Urgent` assumption — read that note before trusting any timing pass. The send-time `refunded` record is FIXED, so `OnchainSend_UnconfirmedRefund.cfg` mutates a guard the code really ships; `OnchainSend_MempoolRace.cfg` is kept as the residual RBF race, which the fix makes loud rather than silent. Funding pre-commits: the signed tx is recorded with a CAS before broadcast, so the shipped cfgs are green with `FundIsIdempotent = FALSE` and the fund lease has a TTL — `OnchainSend_LeaseStrand.cfg` is green. `_RecordNotCas` and `_RefuseRecorded` show the TTL is safe only while every write that can end `funding_onchain` also requires `funding_tx IS NULL`. |
 | `EvmSend.tla` | The planner/shell split and the height-vs-wall margin. F2, F3, F5 and F6 are FIXED, so `EvmSend_BlindScan`, `EvmSend_NoReceipt`, `EvmSend_LockStrand` and `EvmSend_LostRefund` all mutate guards the code really ships. F4, the late lock, is the one still open — `LockLandsPromptly` is an assumption, not a guard, so read the findings before trusting a pass. The shipped watch on a closed row makes a late lock an operator event rather than a silent one; it does not move `NoNetLoss`, and `EvmSend_LateLock.cfg` still fires it. |
 | `EvmReceive.tla` | The mirror corridor: the solver funds against a lock it does not control. The parked `refunding_arkade` with an unspent covenant (F4) is a double loss under a patient client. |
 
@@ -106,20 +106,21 @@ shipped — plus scenario and mutation cfgs:
 Every mutation cfg states its expected verdict in its header — normally an
 `EXPECTED RESULT` line, though `OnchainSend_RefundTiming.cfg` says `EXPECTED
 TO STAY GREEN` on its first line instead; the per-module green cfgs also say
-so in their first line. The full set is 64 cfgs — 17 green, 47 expected
+so in their first line. The full set is 66 cfgs — 18 green, 48 expected
 violations — and the green modules' checkpoint comments record the per-cfg
 results. That split is a count of the files as they stand, so re-count it from
 the headers rather than trusting this line after cfgs are added or removed.
 After touching a module or any of its cfgs, re-run the module's full set and
 confirm every result still matches its header.
 
-**A suffixed cfg is not automatically an expected violation.** Six carry
+**A suffixed cfg is not automatically an expected violation.** Seven carry
 neither the bare module name nor `Control` in the filename and are still
 documented GREEN — `OnchainSend_RefundTiming`, `OnchainSend_Liveness`,
+`OnchainSend_LeaseStrand`,
 `LightningReceive_Censored`, `LightningReceive_SettleNotIdempotent`,
 `EvmSend_LostPatch` and `EvmReceive_LostSpend`. The last two are controls in
 everything but the name. Sweeping the set on the rule "suffix ⇒ must violate"
-raises a false alarm on all six; read the header, not the filename.
+raises a false alarm on all seven; read the header, not the filename.
 
 ## Reading the results
 

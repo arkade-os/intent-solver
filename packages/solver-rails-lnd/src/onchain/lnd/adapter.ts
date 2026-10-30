@@ -14,12 +14,14 @@ import {
   authenticatedLndGrpc,
   broadcastChainTransaction,
   createChainAddress,
+  fundPsbt,
   getChainBalance as lndGetChainBalance,
   getChainFeeRate as lndGetChainFeeRate,
   getChainTransactions as lndGetChainTransactions,
   getPendingChainBalance as lndGetPendingChainBalance,
   getWalletInfo as lndGetWalletInfo,
   sendToChainAddress,
+  signPsbt,
   subscribeToChainSpend,
   type AuthenticatedLnd,
 } from 'lightning'
@@ -141,6 +143,25 @@ export class LndOnchainAdapter implements OnchainSendBackend {
     if (vout === -1) throw new Error(`funding tx ${result.id} does not pay ${params.address} — cannot locate its vout`)
     assertFundingVout(tx?.transaction, vout, params.amountSats, result.id)
     return { txid: result.id, vout }
+  }
+
+  async signFunding(params: {
+    address: string
+    amountSats: number
+  }): Promise<{ txid: string; vout: number; tx: string }> {
+    const funded = await fundPsbt({ lnd: this.lnd, outputs: [{ address: params.address, tokens: params.amountSats }] })
+    const { transaction } = await signPsbt({ lnd: this.lnd, psbt: funded.psbt })
+    const payment = funded.outputs.find((output) => !output.is_change)?.output_script
+    const tx = Transaction.fromRaw(hex.decode(transaction), { allowUnknownInputs: true, allowUnknownOutputs: true })
+    const vouts: number[] = []
+    for (let i = 0; i < tx.outputsLength; i++) {
+      const output = tx.getOutput(i)
+      if (output.script && hex.encode(output.script) === payment && output.amount === BigInt(params.amountSats)) {
+        vouts.push(i)
+      }
+    }
+    if (vouts.length !== 1) throw new Error(`signed funding ${tx.id} pays ${params.address} ${vouts.length} times`)
+    return { txid: tx.id, vout: vouts[0]!, tx: transaction }
   }
 
   private esploraFor(why: string): EsploraClient {

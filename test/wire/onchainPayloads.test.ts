@@ -51,6 +51,7 @@ const row: OnchainSendSwapRow = {
   failureReason: null,
   rfqId: null,
   fundStartedAt: null,
+  fundingTx: null,
   unrolledClaim: null,
   lockupOutpoints: null,
 }
@@ -131,6 +132,7 @@ describe('onchainRfqQuotePayload', () => {
         min_confirmations: row.minConfirmations,
         lockup_address: row.lockupAddress,
         htlc_address: row.onchainAddress,
+        refund_without_receiver_delay: row.refundWithoutReceiverDelay,
       },
     })
   })
