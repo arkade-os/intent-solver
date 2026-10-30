@@ -482,7 +482,7 @@ export const openReportReaders = async (
  */
 export const createServices = async (
   config: Config,
-  opts?: { allCorridors?: boolean; corridors?: readonly CorridorPlugin[] },
+  opts?: { allCorridors?: boolean; corridors?: readonly CorridorPlugin[]; rebalance?: 'active' },
 ): Promise<Services> => {
   setLatencyDiagnostics(config.latencyDiagnostics)
   const settingPath = (id: string): string => config.configPaths?.get(id) ?? id
@@ -1699,22 +1699,30 @@ export const createServices = async (
       storedPolicy === undefined ? disabledRebalancePolicy() : validateRebalancePolicy(JSON.parse(storedPolicy))
     const rebalanceStore = await RebalanceStore.open(swapFile)
     const source = await createArkadeRebalanceSource(services, swapFile, inventoryAdmission)
-    runtimeRebalance = await RebalanceService.create({
-      store: rebalanceStore,
-      backend: rail.rebalance,
-      source,
-      policy: rebalancePolicy,
-      savePolicy: async (next) => adminStore.setOverride('REBALANCE_POLICY', JSON.stringify(next)),
-    })
+    // Only the long-lived daemon drives rebalancing; a one-shot CLI shares this db but must not
+    // reserve coins or rewrite in-flight rows (both process-local) under the running daemon.
+    const active = opts?.rebalance === 'active'
+    runtimeRebalance = await RebalanceService.create(
+      {
+        store: rebalanceStore,
+        backend: rail.rebalance,
+        source,
+        policy: rebalancePolicy,
+        savePolicy: async (next) => adminStore.setOverride('REBALANCE_POLICY', JSON.stringify(next)),
+      },
+      { active },
+    )
     services.rebalance = runtimeRebalance
-    const tickRebalance = (): void => {
-      void runtimeRebalance
-        ?.tick()
-        .catch((error) => log('rebalance pass failed:', error instanceof Error ? error.message : String(error)))
+    if (active) {
+      const tickRebalance = (): void => {
+        void runtimeRebalance
+          ?.tick()
+          .catch((error) => log('rebalance pass failed:', error instanceof Error ? error.message : String(error)))
+      }
+      rebalanceTimer = setInterval(tickRebalance, 60_000)
+      rebalanceTimer.unref()
+      tickRebalance()
     }
-    rebalanceTimer = setInterval(tickRebalance, 60_000)
-    rebalanceTimer.unref()
-    tickRebalance()
   }
   return services
 }
