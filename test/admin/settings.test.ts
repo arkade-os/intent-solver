@@ -272,6 +272,7 @@ describe("a registered rail's own settings", () => {
     create: never,
     consoleSettings: (railConfig) => [
       { path: STORAGE, value: `.data/${railConfig.network}` },
+      { path: STORAGE, value: 'listed twice by the rail' },
       { path: 'SWAP_NETWORK', value: 'claimed by the rail' },
     ],
   })

@@ -441,7 +441,9 @@ export const describeSettings = (
   }
   const taken = new Set(knobs.map((knob) => knob.key))
   for (const { path: where, value } of railRows) {
-    if (!taken.has(where)) knobs.push({ key: where, value, source: 'config', editable: false })
+    if (taken.has(where)) continue
+    taken.add(where)
+    knobs.push({ key: where, value, source: 'config', editable: false })
   }
 
   return knobs.map((knob) => ({ ...knob, path: path(knob.key) }))
