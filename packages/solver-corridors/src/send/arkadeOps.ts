@@ -13,6 +13,7 @@ import { hex } from '@scure/base'
 import { ArkAddress } from '@arkade-os/sdk'
 import {
   claimSwapScript,
+  findClaimPreimage,
   findLockupOutpoints,
   findLockups,
   findSweptLockups,
@@ -91,6 +92,7 @@ export const arkadeOpsFromContext = async (ctx: ArkadeContext, emulator: Emulato
       return refundSwapScript(ctx, emulator.url, script, outputs, hex.decode(row.refundPkScript!))
     },
     findLockupOutpoints: (pkScriptHex) => findLockupOutpoints(ctx, pkScriptHex),
+    findClaimPreimage: (outpoints, paymentHashHex) => findClaimPreimage(ctx, outpoints, paymentHashHex),
     // Closed, not thrown: a held throw would keep the row claiming with nothing left to try.
     claimUnrolled: async (row, lockup, record, save, preimageHex) => {
       const reason = keyMismatch(row)
