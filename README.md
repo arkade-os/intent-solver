@@ -379,8 +379,9 @@ write it as a decimal string) is refused at startup, naming its path. So is any
 of the old environment variables left set beside it: a host half-migrated would
 otherwise run on settings it believes it changed. `HOST` and `PORT` alone are
 ignored rather than refused, because platforms set them. `cli config-from-env`
-prints the document for an environment written the old way; see
-`docs/runbook.md` § "Migrating from environment variables".
+prints the document for an environment written the old way, and a CLI started
+under one with no document logs it too, each credential named rather than shown;
+see `docs/runbook.md` § "Migrating from environment variables".
 
 Corridors are keyed by the pair they serve: the four BTC corridors by name, an
 ERC-20 or Arkade asset through its label in `assets` — `arkade:BTC->USDC@arbitrum`,

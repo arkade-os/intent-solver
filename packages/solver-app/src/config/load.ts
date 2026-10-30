@@ -33,12 +33,15 @@ const positionOf = (error: unknown, text: string): string => {
   return at === undefined ? '' : ` at position ${at}`
 }
 
+/** Neither source set: the CLI follows it with the document any old variables describe. */
+export class NoConfigDocument extends Error {}
+
 export const readDocument = (env: NodeJS.ProcessEnv): unknown => {
   const path = env.SOLVER_CONFIG?.trim()
   const inline = env.SOLVER_CONFIG_JSON?.trim()
   if (path && inline) throw new Error('set only one of SOLVER_CONFIG or SOLVER_CONFIG_JSON')
   if (!path && !inline) {
-    throw new Error(
+    throw new NoConfigDocument(
       'set SOLVER_CONFIG to a JSON file path, or SOLVER_CONFIG_JSON to the document ' +
         '(cli config-from-env prints one from the current environment)',
     )
@@ -72,24 +75,29 @@ const LEGACY_FAMILY = /^(LN_SEND|LN_RECEIVE|ONCHAIN_SEND|ONCHAIN_RECEIVE|EVM|ASS
 // What Kubernetes derives from any Service's name (`evm-rpc` → EVM_RPC_SERVICE_HOST); no setting ends this way.
 const SERVICE_LINK = /_(SERVICE_HOST|SERVICE_PORT(_\w+)?|PORT(_\d+_(TCP|UDP|SCTP)(_(PROTO|PORT|ADDR))?)?)$/
 
-/** Refused rather than ignored: a host half-migrated would otherwise run on settings it believes it changed. */
-export const assertNoLegacyEnv = (env: NodeJS.ProcessEnv): void => {
-  const isSet = (name: string): boolean => Boolean(env[name]?.trim())
+const isSet = (env: NodeJS.ProcessEnv, name: string): boolean => Boolean(env[name]?.trim())
+
+export const legacyEnvNames = (env: NodeJS.ProcessEnv): string[] => {
   const railLegacy = new Set(lightningRailNames().flatMap((rail) => lightningRailFor(rail)?.legacyEnv?.names ?? []))
-  const legacy = Object.keys(env)
+  return Object.keys(env)
     .filter(
       (name) =>
-        isSet(name) &&
+        isSet(env, name) &&
         (LEGACY.has(name) || railLegacy.has(name) || (LEGACY_FAMILY.test(name) && !SERVICE_LINK.test(name))),
     )
     .sort()
+}
+
+/** Refused rather than ignored: a host half-migrated would otherwise run on settings it believes it changed. */
+export const assertNoLegacyEnv = (env: NodeJS.ProcessEnv): void => {
+  const legacy = legacyEnvNames(env)
   if (legacy.length > 0) {
     throw new Error(
       `legacy environment variables are set and would be ignored: ${legacy.join(', ')}. ` +
         'Move them into the config document (cli config-from-env prints one).',
     )
   }
-  const ignored = LEGACY_IGNORED.filter(isSet)
+  const ignored = LEGACY_IGNORED.filter((name) => isSet(env, name))
   if (ignored.length > 0) log(`ignoring legacy ${ignored.join('/')}; set http.host/http.port in the config`)
 }
 
@@ -97,6 +105,8 @@ export const loadConfig = (opts: LoadOptions = {}): Config => {
   const env = opts.env ?? process.env
   const raw = readDocument(env)
   assertNoLegacyEnv(env)
+  const left = /"<([A-Za-z_][A-Za-z0-9_]*)>"/.exec(JSON.stringify(raw))?.[1]
+  if (left) throw new Error(`the config document still holds <${left}>: put the value of ${left} in its place`)
   const parsed = parseDocument(raw, lightningRailNames())
   const profile = opts.profile ?? registeredProfile
   const doc = profile ? parseDocument(profile(parsed), lightningRailNames()) : parsed

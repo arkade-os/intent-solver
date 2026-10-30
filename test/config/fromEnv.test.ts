@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { configFromKnobs, type Config } from '@arkade-os/solver-app/config.js'
 import { loadConfig } from '@arkade-os/solver-app/config/load.js'
-import { envToDocument, exportConfig, healthPathNote } from '@arkade-os/solver-app/config/fromEnv.js'
+import { envToDocument, exportConfig, healthPathNote, migrationHint } from '@arkade-os/solver-app/config/fromEnv.js'
+import { SECRET_KNOBS } from '@arkade-os/solver-app/config/knobs.js'
 import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
 import { resolveLimits } from '@arkade-os/solver-core/core/limits.js'
 import { DEFAULT_SERVING } from '@arkade-os/solver-core/core/assetMarketConfig.js'
@@ -244,6 +245,30 @@ describe('exportConfig', () => {
       throw new Error('this deployment serves no EVM receive')
     }
     await expect(exportConfig(MINIMAL_ENV, profile)).rejects.toThrow('this deployment serves no EVM receive')
+  })
+})
+
+describe('migrationHint', () => {
+  const absent = join(tmpdir(), 'solver-hint-absent')
+  const env: Record<string, string> = { ...FULL_ENV, DB_DIR: absent, SWAP_DB_PATH: join(absent, 'swaps.sqlite') }
+
+  it('is the export with each credential named by its variable, and only that', async () => {
+    const hint = (await migrationHint(env))!
+    for (const name of [...SECRET_KNOBS, 'EVM_USDC_PRICE_FEED']) expect(hint).not.toContain(env[name])
+    const restored = hint
+      .slice(hint.indexOf('{'))
+      .replace(/"<([A-Z][A-Z0-9_]*)>"/g, (_: string, name: string) => JSON.stringify(env[name]))
+    expect(JSON.parse(restored)).toEqual(JSON.parse(await exportConfig(env)))
+  })
+
+  it('says why the old variables do not convert', async () => {
+    expect(await migrationHint({ ...MINIMAL_ENV, LN_SEND_FEE_BPS: '10000' })).toContain(
+      'corridors["arkade:BTC->lightning:BTC"].feeBps must be an integer between 0 and 9999',
+    )
+  })
+
+  it('is nothing where no old variable is set', async () => {
+    expect(await migrationHint({ PORT: '3000', HOST: '0.0.0.0' })).toBeNull()
   })
 })
 

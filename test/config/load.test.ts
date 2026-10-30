@@ -3,7 +3,12 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { swapDbPath } from '@arkade-os/solver-app/config.js'
-import { loadConfig, loadKnobsForInspection, loadSentryOptions } from '@arkade-os/solver-app/config/load.js'
+import {
+  loadConfig,
+  loadKnobsForInspection,
+  loadSentryOptions,
+  NoConfigDocument,
+} from '@arkade-os/solver-app/config/load.js'
 import type { SolverDocument } from '@arkade-os/solver-app/config/document.js'
 
 const minimalDoc = {
@@ -53,6 +58,7 @@ describe('loadConfig — where the document comes from', () => {
 
   it('refuses neither source, and says how to get one', () => {
     expect(() => loadConfig({ env: {} })).toThrow(/set SOLVER_CONFIG .*config-from-env/)
+    expect(() => loadConfig({ env: {} })).toThrow(NoConfigDocument)
   })
 
   it('reports invalid JSON by position and never echoes content', () => {
@@ -115,6 +121,13 @@ describe('loadConfig — the old environment', () => {
     }
     expect(() => loadConfig({ env: inline(minimalDoc, links) })).not.toThrow()
     expect(() => loadConfig({ env: inline(minimalDoc, { LND_SOCKET: 'lnd:10009' }) })).toThrow(/LND_SOCKET/)
+  })
+
+  it('refuses a credential the boot printout named and nobody put back', () => {
+    const arkade = { ...minimalDoc.rails.arkade, mnemonic: '<ARK_MNEMONIC>' }
+    expect(() => loadConfig({ env: inline({ ...minimalDoc, rails: { ...minimalDoc.rails, arkade } }) })).toThrow(
+      'the config document still holds <ARK_MNEMONIC>: put the value of ARK_MNEMONIC in its place',
+    )
   })
 
   it('leaves the test harness and runtime variables alone', () => {

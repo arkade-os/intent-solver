@@ -50,8 +50,8 @@ import { schnorr } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
 import { Transaction, SigHash, p2tr } from '@scure/btc-signer'
 import { swapDbPath, type Config } from './config.js'
-import { loadConfig, loadKnobsForInspection, loadSentryOptions } from './config/load.js'
-import { exportConfig, healthPathNote } from './config/fromEnv.js'
+import { loadConfig, loadKnobsForInspection, loadSentryOptions, NoConfigDocument } from './config/load.js'
+import { exportConfig, healthPathNote, migrationHint } from './config/fromEnv.js'
 import { createErrorReporter, type ErrorReporter } from './ops/sentry.js'
 import { SwapStore, type SendSwapRow } from '@arkade-os/solver-corridors/db/swaps.js'
 import { type OnchainSendSwapRow } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
@@ -2099,6 +2099,8 @@ main()
   .then(() => process.exit(process.exitCode ?? 0))
   .catch(async (error) => {
     console.error('failed:', error instanceof Error ? error.message : String(error))
+    const hint = error instanceof NoConfigDocument ? await migrationHint(process.env) : null
+    if (hint) console.error(hint)
     // A GiveUp names a usage mistake or a disabled corridor — an ANSWER, not a
     // fault, and the rule `onRefusal` already follows.
     if (!(error instanceof GiveUp)) reporter?.report('cli', error)

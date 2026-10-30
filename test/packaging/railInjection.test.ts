@@ -21,7 +21,7 @@ import * as sdk from '@arkade-os/solver-app/index.js'
 import { lightningRailFor, lightningRailNames, registerLightningRail } from '@arkade-os/solver-app/ops/rails.js'
 import type { LightningRail, LightningRailModule } from '@arkade-os/solver-app/index.js'
 import { configFromKnobs } from '@arkade-os/solver-app/config.js'
-import { envToDocument } from '@arkade-os/solver-app/config/fromEnv.js'
+import { envToDocument, migrationHint } from '@arkade-os/solver-app/config/fromEnv.js'
 import { valueImports } from '../support/importScan.js'
 
 const servicesSource = readFileSync(
@@ -227,5 +227,11 @@ describe('a registered rail migrates its own variables', () => {
     expect(envToDocument({ ...BASE_ENV, LN_BACKEND: 'fake', INJECTED_API_KEY: 'k' }, []).rails?.lightning).toEqual({
       backend: 'fake',
     })
+  })
+
+  it('has a credential in its block named, not printed, when boot shows the migration', async () => {
+    const hint = await migrationHint({ ...BASE_ENV, INJECTED_API_KEY: 'rail-secret' })
+    expect(hint).toContain('"apiKey": "<INJECTED_API_KEY>"')
+    expect(hint).not.toContain('rail-secret')
   })
 })

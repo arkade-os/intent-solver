@@ -13,9 +13,10 @@ import { messageOf } from '@arkade-os/solver-core/util/poll.js'
 import { swapDbPath } from '../config.js'
 import { parseAssetRfqTokens } from '../ops/assetRfqMarkets.js'
 import { lightningRailFor } from '../ops/rails.js'
+import { SECRET_KEY } from '../ops/sentry.js'
 import { DECIMAL, documentSchema, type SolverDocument } from './document.js'
-import { BTC_FAMILY, CORRIDOR_FIELDS, corridorKnob, EVM_FIELDS, PATHS } from './knobs.js'
-import { loadConfig, type LoadOptions } from './load.js'
+import { BTC_FAMILY, CORRIDOR_FIELDS, corridorKnob, EVM_FIELDS, PATHS, SECRET_KNOBS } from './knobs.js'
+import { legacyEnvNames, loadConfig, type LoadOptions } from './load.js'
 
 /** The two legs of a stored market row; null is BTC. */
 export interface MarketPair {
@@ -180,11 +181,44 @@ const storedPairs = async (path: string): Promise<MarketPair[]> => {
 }
 
 /** The document for this environment, checked by the loader that will read it, with the deployment's profile. */
-export const exportConfig = async (env: NodeJS.ProcessEnv, profile?: LoadOptions['profile']): Promise<string> => {
+const exportDocument = async (env: NodeJS.ProcessEnv, profile?: LoadOptions['profile']): Promise<SolverDocument> => {
   const admin = resolveDbLayout(swapDbPath(env)).admin
   const doc = envToDocument(env, await storedPairs(admin), admin)
   loadConfig({ env: { SOLVER_CONFIG_JSON: JSON.stringify(doc) }, profile })
-  return JSON.stringify(doc, null, 2)
+  return doc
+}
+
+export const exportConfig = async (env: NodeJS.ProcessEnv, profile?: LoadOptions['profile']): Promise<string> =>
+  JSON.stringify(await exportDocument(env, profile), null, 2)
+
+// A rail's own credentials are known only by name; a price feed's URL can carry its API key.
+const CREDENTIAL_NAME = new RegExp(`${SECRET_KEY}|_PRICE_FEED$`, 'i')
+
+/** The export for a deployment started under the old variables, for its log: each credential as `<VARIABLE>`. */
+export const migrationHint = async (env: NodeJS.ProcessEnv): Promise<string | null> => {
+  if (legacyEnvNames(env).length === 0) return null
+  let doc: SolverDocument
+  try {
+    doc = await exportDocument(env)
+  } catch (error) {
+    return `The old environment variables are still set, but do not convert as they stand: ${messageOf(error)}`
+  }
+  const named = new Map<string, string>()
+  for (const [name, value] of Object.entries(env)) {
+    if (value?.trim() && (SECRET_KNOBS.has(name) || CREDENTIAL_NAME.test(name))) named.set(value.trim(), `<${name}>`)
+  }
+  const text = JSON.stringify(
+    doc,
+    (_key, value: unknown) => (typeof value === 'string' ? (named.get(value.trim()) ?? value) : value),
+    2,
+  )
+  return [
+    "The old environment variables are still set. The document they describe follows, each credential shown as <VARIABLE>: put that variable's value in its place, set the result as SOLVER_CONFIG_JSON (or a file named by SOLVER_CONFIG), then unset the old variables.",
+    text,
+    healthPathNote(env),
+  ]
+    .filter(Boolean)
+    .join('\n')
 }
 
 // Resolved from the image's working directory, where `.data` links onto the volume.

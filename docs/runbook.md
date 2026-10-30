@@ -103,6 +103,12 @@ the like) is left alone too.
    variables: the old image cannot read the document and the new one refuses
    the variables, so neither mix starts.
 
+**Upgraded without these steps?** The new image refuses to start for want of a
+document, then logs the one its old variables describe: step 1's export, with
+each credential written as the variable holding it (`"mnemonic": "<ARK_MNEMONIC>"`),
+because a log is no place for one. Put each value back and carry on from step 2.
+A placeholder left in is refused at startup, naming the variable.
+
 ## Shape 1 — single Node process
 
 ```
