@@ -2150,6 +2150,21 @@ describe('tick: failure and recovery', () => {
     expect(arkade.claimCalls).toHaveLength(0)
   })
 
+  it('parks a lockup that holds only a dust asset vtxo after the clean funding was swept', async () => {
+    // claimOutputs falls back to EVERY output when the asset-free ones fall short; if even
+    // all of them are below the amount, the clean funding went after we paid.
+    const row = await claiming()
+    arkade.lockups = [{ txid: 'f2', vout: 0, value: 330, assets: [{ assetId: 'ab'.repeat(34), amount: 1n }] }]
+    arkade.lockupsSpent = true
+    expect(clock).toBeLessThan(row.refundLocktime) // even BEFORE the deadline
+
+    const done = await service.tick(row.id)
+    expect(done.state).toBe('stuck')
+    expect(done.claimArkTxid).toBeNull()
+    expect(done.failureReason).toContain('no claim txid')
+    expect(arkade.claimCalls).toHaveLength(0)
+  })
+
   it('keeps an UNPROVEN empty script in claiming, and claims it when the lockup reappears', async () => {
     // The lagging view `pushRefund` already refuses to act on; `stuck` is terminal.
     const row = await claiming()

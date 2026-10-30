@@ -1389,6 +1389,25 @@ describe('OnchainSendSwapService', () => {
     expect(done.failureReason).toContain('no claim txid')
   })
 
+  it('parks a lockup that holds only a dust asset vtxo after the clean funding was swept', async () => {
+    const row = await claiming()
+    deps.outputs.set(row.pkScript, [
+      { txid: 'dust', vout: 0, value: 330, assets: [{ assetId: 'ab'.repeat(34), amount: 1n }] },
+    ])
+    deps.spent.add(row.pkScript)
+    const claimed: unknown[] = []
+    deps.arkade.claim = ((_r: unknown, o: unknown) => {
+      claimed.push(o)
+      return Promise.resolve('claim-ark-txid')
+    }) as typeof deps.arkade.claim
+
+    const done = await service.tick(row.id)
+    expect(done.state).toBe('stuck')
+    expect(done.claimArkTxid).toBeNull()
+    expect(done.failureReason).toContain('no claim txid')
+    expect(claimed).toHaveLength(0)
+  })
+
   it('parks an unproven empty lockup once the refund deadline has passed', async () => {
     const row = await claiming()
     deps.outputs.delete(row.pkScript)
