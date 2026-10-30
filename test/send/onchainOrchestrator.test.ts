@@ -181,6 +181,36 @@ describe('OnchainSendSwapService', () => {
     expect((await service.quote(request(6, 'other-client'))).accepted).toBe(true)
   })
 
+  it('refuses a refund address that commits to a different Arkade server', async () => {
+    // Only a refund to THIS server is recoverable; the Lightning leg refuses a foreign one at quote time.
+    const foreignServer = new CovenantSwapScript({
+      receiver: keyBytes(4),
+      server: keyBytes(99),
+      preimageHash: new Uint8Array(20).fill(9),
+      refundLocktime: 1_800_000_000,
+      claimDelay: 512,
+      client: keyBytes(11),
+      clientRefundDelay: 1024,
+      refundWithoutServerDelay: 2048,
+      nonInteractiveParameters: {
+        emulatorPubkey: keyBytes(6),
+        receiverPkScript: Uint8Array.from([0x51, 0x20, ...keyBytes(13)]),
+        senderPkScript: Uint8Array.from([0x51, 0x20, ...keyBytes(4)]),
+      },
+    })
+      .address('tark', keyBytes(99))
+      .encode()
+    expect(
+      await service.quote({
+        paymentHash,
+        amountSats: 50_000,
+        payoutPubkey,
+        refundAddress: foreignServer,
+        clientRefundPubkey,
+      }),
+    ).toEqual({ accepted: false, reason: 'invalid_refund_address' })
+  })
+
   const quoteSwap = async () => {
     const quoted = await service.quote({
       paymentHash: 'ab'.repeat(32),
