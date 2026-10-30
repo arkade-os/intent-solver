@@ -877,7 +877,7 @@ const offersView = () => {
   return h(
     'div',
     h('h2.sans', 'offer fills'),
-    d.serving ? null : h('p.notice', 'No offer market served: OFFER_MARKETS is unset.'),
+    d.serving ? null : h('p.notice', 'No offer market served: offers.markets is empty in the config.'),
     d.offers.length === 0
       ? h('p.muted', d.serving ? 'No offers yet.' : 'Nothing to show.')
       : h(
@@ -1487,11 +1487,11 @@ const settingsView = () => {
         s.knobs.map((knob) =>
           h(
             'tr',
-            h('td', knob.key),
+            h('td', { title: knob.key }, knob.path ?? knob.key),
             h('td', String(knob.value)),
             h(
               'td',
-              knob.source === 'override' ? h('span.muted', 'override') : h('span.faint', 'env'),
+              knob.source === 'override' ? h('span.muted', 'override') : h('span.faint', 'config'),
               knob.pending ? [' ', h('span.phase.phase-exposed', { title: s.restartNotice }, 'pending restart')] : null,
             ),
             h(
@@ -1579,7 +1579,7 @@ const carrierRfqPriced = () => state.data.markets?.carrier?.rfqPriced === true
 /** BESIDE the draft, never on it: `draftFrom` mirrors market COLUMNS, and a non-column there is one a PUT deletes. */
 let carrierDefaultDraft = false
 
-/** Sent only when the form moved it: an unchanged key stores an override row for a value the environment supplies. */
+/** Sent only when the form moved it: an unchanged key stores an override row for a value the config supplies. */
 const carrierDefaultOverride = () =>
   carrierDefaultDraft === carrierRfqPriced() ? {} : { ASSET_CARRIER_PRICING: String(carrierDefaultDraft) }
 
@@ -1779,7 +1779,7 @@ const CARRIER_MODES = ['inherit', 'off', 'priced']
 const carrierDefaultField = () =>
   h(
     'label.check.toolbar',
-    { title: 'ASSET_CARRIER_PRICING, deployment-wide — saved with this market, in one ordered save' },
+    { title: 'offers.carrierPricing, deployment-wide — saved with this market, in one ordered save' },
     h('input', {
       type: 'checkbox',
       ...(carrierDefaultDraft ? { checked: true } : {}),
@@ -1791,7 +1791,7 @@ const carrierDefaultField = () =>
 const carrierModeField = () =>
   h(
     'label.check.toolbar',
-    { title: 'Whether an RFQ quote prices the carrier in; inherit follows ASSET_CARRIER_PRICING.' },
+    { title: 'Whether an RFQ quote prices the carrier in; inherit follows offers.carrierPricing.' },
     'carrier mode ',
     h(
       'select',
@@ -2139,8 +2139,8 @@ const marketForm = (save = saveMarket, close = () => ((marketDraft = null), rend
       field(
         'symbol',
         'symbol',
-        'the env stem and the label — USDA',
-        'The short name this market trades under, and the stem its settings take in the environment. Required to serve RFQ; an offer-only market may leave it blank.',
+        'the label — USDA',
+        'The short name this market trades under, and its label under assets in the config. Required to serve RFQ; an offer-only market may leave it blank.',
       ),
       group('how it is priced'),
       field(
@@ -2241,7 +2241,7 @@ const marketForm = (save = saveMarket, close = () => ((marketDraft = null), rend
         'RFQ directions live',
         tip(
           'What the running process is open on right now. The boxes below set this, but a direction can also be ' +
-            'closed by ASSET_<SYM>_<DIR>_ENABLED in the environment without touching the market.',
+            'closed by the enabled flag of its corridor in the config without touching the market.',
         ),
       ),
       h('span.span2', h('span.muted', rfqDirectionLine())),
@@ -2495,8 +2495,8 @@ const paintPricingChanges = () => {
     })),
     ...Object.entries(pricingDraft.overrides).map(([key, value]) => ({
       key,
-      label: key,
-      value: value === null ? 'use environment value' : value,
+      label: pricingKnobs().find((knob) => knob.key === key)?.path ?? key,
+      value: value === null ? 'use config value' : value,
     })),
   ]
   // Nothing to apply, nothing to show: a permanent "0 pending" bar is one more thing to read past.
@@ -2577,11 +2577,11 @@ const pricingKnobField = (knob, label, explanation) => {
                 render()
               },
             },
-            'Use env',
+            'Use config',
           )
         : null,
     ),
-    h('span.hint', !knob.editable ? 'environment only' : knob.restartRequired ? 'after restart' : 'live after apply'),
+    h('span.hint', !knob.editable ? 'config file only' : knob.restartRequired ? 'after restart' : 'live after apply'),
   ]
 }
 
@@ -2591,7 +2591,7 @@ const corridorForm = () => {
     [
       'ENABLED',
       'enabled',
-      'Whether this direction accepts new swaps. A direction absent at boot must be enabled in the environment first.',
+      'Whether this direction accepts new swaps. A direction absent at boot must be enabled in the config first.',
     ],
     ['FEE_BPS', 'fee bps', 'The percentage fee taken from the customer payout. 50 bps is half of one percent.'],
     ['FEE_FLAT_SATS', 'flat fee sats', 'A fixed fee per swap, added to the percentage fee.'],
@@ -2748,6 +2748,16 @@ const pricingView = () => {
             `Remove ${saved.symbol || 'this market'}`,
           )
         : null,
+      h(
+        'span.revert',
+        revertButton({ scope: 'all' }, 'Revert to config file'),
+        saved
+          ? revertButton(
+              { scope: 'market', marketKey: saved.marketKey },
+              `Revert ${saved.symbol || 'this market'} to config`,
+            )
+          : null,
+      ),
     ),
     pricingSelection
       ? h(
@@ -2781,7 +2791,7 @@ const pricingView = () => {
     ),
     h(
       'details',
-      h('summary', 'environment & serving capabilities'),
+      h('summary', 'config & serving capabilities'),
       h('p.notice', markets.restartNotice),
       h(
         'table',
@@ -2789,7 +2799,7 @@ const pricingView = () => {
           'tbody',
           pricingKnobs()
             .filter((knob) => !knob.editable)
-            .map((knob) => h('tr', h('td', knob.key), h('td', String(knob.value)))),
+            .map((knob) => h('tr', h('td', { title: knob.key }, knob.path ?? knob.key), h('td', String(knob.value)))),
         ),
       ),
       h(
@@ -2927,7 +2937,7 @@ const discoveryView = () => {
           'Post now',
         ),
         publish.mode === 'off'
-          ? h('span.muted', ' NOSTR_AD_PUBLISH is off')
+          ? h('span.muted', ' relay.adPublish is off')
           : !publish.publisher
             ? h('span.muted', ' only the relay command publishes')
             : null,
@@ -3278,7 +3288,7 @@ const noteLinks = (corridor, detail) => {
  */
 const actButton = (spec, attrs, ...label) => {
   const busy = Boolean(state.running)
-  const mine = state.running?.name === attrs['data-action']
+  const mine = busy && state.running.name === attrs['data-action']
   return h(
     spec,
     {
@@ -3618,6 +3628,7 @@ const closeConfirm = () => {
 const confirmDialog = () => {
   const d = state.dialog
   if (!d) return null
+  if (d.kind === 'revert') return revertDialog(d)
   const needsReason = d.name === 'park-swap'
   return h(
     'div.scrim',
@@ -3673,8 +3684,142 @@ const confirmDialog = () => {
   )
 }
 
+/**
+ * Revert to config file: console state put back to what the config this solver booted with implies.
+ * The dialog is built from a dry run, and the apply carries that run's basis, so what the operator
+ * confirms is exactly what is written.
+ */
+const openRevert = async (scope) => {
+  try {
+    const plan = await api('/api/config/revert', { method: 'POST', body: JSON.stringify({ ...scope, dryRun: true }) })
+    if (plan.changes.length === 0) {
+      // Including a stale dialog whose review found nothing left: the reload makes the buttons say so.
+      state.dialog = null
+      await load(state.view)
+      return
+    }
+    state.dialog = {
+      kind: 'revert',
+      scope,
+      plan,
+      error: null,
+      stale: false,
+      armedAt: performance.now(),
+      opener: document.activeElement,
+    }
+    render()
+    document.querySelector('.dialog.confirm button.cancel')?.focus()
+  } catch (error) {
+    fail(error)
+  }
+}
+
+const applyRevert = async () => {
+  const d = state.dialog
+  if (!d || state.running) return
+  state.running = { name: 'config-revert', forSwap: null }
+  render()
+  try {
+    await api('/api/config/revert', {
+      method: 'POST',
+      body: JSON.stringify({ ...d.scope, dryRun: false, basis: d.plan.basis }),
+    })
+    state.dialog = null
+    await load(state.view)
+  } catch (error) {
+    // In the dialog, which the page banner sits behind. A stale preview is read again, never re-applied.
+    d.error = error instanceof Error ? error.message : String(error)
+    d.stale = error?.status === 409
+  } finally {
+    state.running = null
+    render()
+  }
+}
+
+const revertDialog = (d) => {
+  const group = (applies, title) => {
+    const rows = d.plan.changes.filter((change) => change.applies === applies)
+    if (rows.length === 0) return null
+    return h(
+      'section',
+      h('h3', title),
+      h(
+        'table.revert-changes',
+        h(
+          'tbody',
+          rows.map((change) =>
+            h(
+              'tr',
+              h('td', change.target),
+              h('td.faint', change.field),
+              h('td', `${change.current} → ${change.config}`),
+            ),
+          ),
+        ),
+      ),
+    )
+  }
+  return h(
+    'div.scrim',
+    { onclick: (e) => e.target.classList.contains('scrim') && !state.running && closeConfirm() },
+    h(
+      'div.dialog.confirm.revert',
+      { role: 'alertdialog', 'aria-modal': 'true', 'aria-labelledby': 'confirm-title' },
+      h('h2', { id: 'confirm-title' }, 'Revert to config file'),
+      h('p.faint', `Config as loaded at ${new Date(d.plan.loadedAt * 1000).toLocaleString()}`),
+      group('now', 'Applies now'),
+      group('restart', 'Applies after restart'),
+      h('div.dialog-error', d.error ? h('p.banner', d.error) : null),
+      h('p.fine', 'This replaces console changes. To undo, edit them again.'),
+      h(
+        'div.row.end',
+        actButton('button.act.cancel', { onclick: closeConfirm }, 'Cancel'),
+        d.stale
+          ? actButton(
+              'button.act',
+              { 'data-action': 'config-revert', onclick: () => openRevert(d.scope) },
+              'review again',
+            )
+          : actButton(
+              'button.act.armed',
+              {
+                'data-action': 'config-revert',
+                onclick: (e) => {
+                  // As for every armed action: the second click of the double-click that opened it does not count.
+                  if (e.detail > 1 || performance.now() - d.armedAt < 500) return
+                  applyRevert()
+                },
+              },
+              'revert',
+            ),
+      ),
+    ),
+  )
+}
+
+/** Disabled, and saying so, when the console already matches; absent when the preview could not be read. */
+const revertButton = (scope, label) => {
+  const preview = state.data.revert
+  if (!Array.isArray(preview?.changes)) return null
+  // Not this market's share of the whole preview: alone, it must keep clear of symbols other rows hold.
+  if (scope.scope === 'market' && !preview.revertibleAlone?.includes(scope.marketKey)) return null
+  const matches = scope.scope === 'all' && preview.changes.length === 0
+  return h(
+    'button.act',
+    {
+      disabled: matches,
+      title: 'Put console changes back to the config file this solver booted with.',
+      onclick: () => openRevert(scope),
+    },
+    matches ? 'matches config file' : label,
+  )
+}
+
 const editKnob = (knob) => {
-  const next = window.prompt(`${knob.key}\n\nCurrent: ${knob.value}\nTakes effect on restart.`, String(knob.value))
+  const next = window.prompt(
+    `${knob.path ?? knob.key}\n\nCurrent: ${knob.value}\nTakes effect on restart.`,
+    String(knob.value),
+  )
   if (next === null) return
   patchSetting(knob.key, next)
 }
@@ -4310,10 +4455,18 @@ const load = async (view) => {
       if (overviewGeneration !== overviewLoadGeneration) return
       state.data[view] = data
     } else if (view === 'pricing') {
-      const [markets, settings] = await Promise.all([api('/api/markets'), api('/api/settings')])
+      const [markets, settings, revert] = await Promise.all([
+        api('/api/markets'),
+        api('/api/settings'),
+        // A preview only, and optional: the revert buttons stay away rather than fail the page.
+        api('/api/config/revert', { method: 'POST', body: JSON.stringify({ scope: 'all', dryRun: true }) }).catch(
+          () => null,
+        ),
+      ])
       if (overviewGeneration !== overviewLoadGeneration) return
       state.data.markets = markets
       state.data.settings = settings
+      state.data.revert = revert
     } else if (view === 'health') {
       const [diagnostics, discovery] = await Promise.all(
         // Not `/api/backends` as well: it runs the same probes, and diagnostics already carries each target.
@@ -4372,7 +4525,8 @@ const inFlightLine = (o) =>
 // `KNOB 0 → 25` — whether the change is worth interrupting swaps for. `.muted`
 // not `.faint`: these are the banner's substance, and --text-faint reads 4.02:1
 // on --exposed-bg, under the AA floor. See contrast.test.ts.
-const pendingItem = (item) => h('span.mono', item.key, h('span.muted', ` ${item.loaded} → ${item.stored}`))
+const pendingItem = (item) =>
+  h('span.mono', { title: item.key }, item.path ?? item.key, h('span.muted', ` ${item.loaded} → ${item.stored}`))
 
 // On EVERY panel: an operator who changed a knob and moved on is by definition
 // not looking at Settings. Same reasoning as the status bar's stuck-row count.
@@ -4402,7 +4556,7 @@ const restartBanner = () => {
           'span.muted',
           {
             title:
-              'Set ADMIN_RESTART_ENABLED=true, and only where a supervisor restarts the process. ' +
+              'Set admin.restartEnabled to true in the config, and only where a supervisor restarts the process. ' +
               'Without one this stops the solver and nothing brings it back.',
           },
           'restart disabled',

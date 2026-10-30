@@ -15,7 +15,11 @@ const OTHER = 'bb'.repeat(34)
 const KEY = assetMarketKey(null, USDT)
 
 const btcUsdt = { base: null, quote: USDT }
-const token = (assetId: string) => ({ symbol: 'USDT', assetId, enabled: { sell_base: true, buy_base: true } })
+const token = (assetId: string) => ({
+  symbol: 'USDT',
+  assetId,
+  enabled: { clientGivesAsset: true, clientGetsAsset: true },
+})
 const serving = (over: Partial<ServingRuntime> = {}): ServingRuntime => ({
   assetOffers: null,
   liveOfferMarkets: [],
@@ -221,7 +225,7 @@ describe('the settings page shows what decides whether a market is filled', () =
     expect(knob({ offerMarkets: [{ a: null, b: USDT }] }, 'OFFER_MARKETS')).toMatchObject({
       value: KEY,
       editable: false,
-      source: 'env',
+      source: 'config',
     })
   })
 

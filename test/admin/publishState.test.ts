@@ -14,7 +14,7 @@
  * table. Folding it into either sibling suite would mean carrying the other
  * route's members in a double that never exercises them.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
@@ -62,6 +62,8 @@ const makeDeps = (over: { nostrAdPublish?: AdPublishMode; adPublisher?: AdPublis
         arkade: { arkServerUrl: 'http://ark' },
         emulatorUrl: 'http://emu',
         relayUrl: 'wss://relay.example',
+        solverName: 'test-solver',
+        cardRelays: [],
         network: 'mutinynet',
         limits: { minSats: 1_000, maxSats: 50_000 },
         corridorLimits: allCorridors({ minSats: 1_000, maxSats: 50_000 }),
@@ -120,18 +122,6 @@ const bothViews = async (deps: ReturnType<typeof makeDeps>) => {
   }
   return { card, diagnostics }
 }
-
-let savedName: string | undefined
-
-beforeEach(() => {
-  savedName = process.env.SOLVER_NAME
-  process.env.SOLVER_NAME = 'test-solver'
-})
-
-afterEach(() => {
-  if (savedName === undefined) delete process.env.SOLVER_NAME
-  else process.env.SOLVER_NAME = savedName
-})
 
 describe('publish state across /api/card and /api/diagnostics', () => {
   it('reports the same state on both routes, for every configured mode', async () => {

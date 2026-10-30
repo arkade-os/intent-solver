@@ -49,7 +49,11 @@ cleanup() {
 trap cleanup EXIT
 
 echo "── starting provider in OUTBOUND relay mode (no listening ports) ────"
-RELAY_URL="$RELAY_URL" $NODE --env-file="$ENV_FILE" packages/solver-app/dist/cli.js relay >"$LOGDIR/provider.log" 2>&1 &
+# The provider reads a config document, made here from the regtest env file. RELAY_PROTOCOL is exported
+# above for the client example and a caller may export RELAY_URL, so the provider starts without both:
+# either would be refused as a leftover.
+PROVIDER_CONFIG=$(RELAY_URL="$RELAY_URL" $NODE --env-file="$ENV_FILE" packages/solver-app/dist/cli.js config-from-env)
+env -u RELAY_PROTOCOL -u RELAY_URL SOLVER_CONFIG_JSON="$PROVIDER_CONFIG" $NODE packages/solver-app/dist/cli.js relay >"$LOGDIR/provider.log" 2>&1 &
 provider_pid=$!
 
 for _ in $(seq 1 40); do

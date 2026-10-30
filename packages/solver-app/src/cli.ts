@@ -49,7 +49,9 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
 import { Transaction, SigHash, p2tr } from '@scure/btc-signer'
-import { loadConfig, sentryOptionsFromEnv, swapDbPath, type Config } from './config.js'
+import { swapDbPath, type Config } from './config.js'
+import { loadConfig, loadKnobsForInspection, loadSentryOptions, NoConfigDocument } from './config/load.js'
+import { exportConfig, healthPathNote, migrationHint } from './config/fromEnv.js'
 import { createErrorReporter, type ErrorReporter } from './ops/sentry.js'
 import { SwapStore, type SendSwapRow } from '@arkade-os/solver-corridors/db/swaps.js'
 import { type OnchainSendSwapRow } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
@@ -277,8 +279,8 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
     log(
       `lightning receive will refuse EVERY quote: this server's ${services.arkade.unilateralDelays.unilateralRefundWithoutReceiverDelay}s ` +
         `solo recourse needs more final CLTV than a payer will route. Serve it by lowering the exit delay to ` +
-        `${cliff}s or less (ARK_UNILATERAL_EXIT_DELAY, if the server enforces less than it advertises), ` +
-        `or by accepting the gap where the trader's recourse opens first (LN_RECEIVE_ACCEPT_UNILATERAL_GAP=true)`,
+        `${cliff}s or less (rails.arkade.unilateralExitDelay, if the server enforces less than it advertises), ` +
+        `or by accepting the gap where the trader's recourse opens first (rails.lightning.receiveAcceptUnilateralGap: true)`,
     )
   }
   if (
@@ -287,7 +289,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
     !services.config.lnd?.esploraUrl
   ) {
     log(
-      'lightning receive has no LND_ESPLORA_URL to read Bitcoin with: a client that unrolls its lockup and claims ' +
+      'lightning receive has no rails.onchain.esploraUrl to read Bitcoin with: a client that unrolls its lockup and claims ' +
         'it on L1 reveals P only there, so that swap is reported and left for review instead of settled',
     )
   }
@@ -297,7 +299,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
   // Only when it is ON: a line printed either way is a line nobody reads.
   if (services.config.lnReceiveAcceptUnilateralGap && services.config.corridorEnabled['lightning:BTC->arkade:BTC']) {
     log(
-      `LN_RECEIVE_ACCEPT_UNILATERAL_GAP=true: funding lightning receive without a solo-recourse guarantee. ` +
+      `rails.lightning.receiveAcceptUnilateralGap is true: funding lightning receive without a solo-recourse guarantee. ` +
         `If the Arkade server censors past its exit delay a trader can take both sides, putting up to ` +
         `${services.policy.corridorLimits['lightning:BTC->arkade:BTC'].maxSats} sats at risk per swap`,
     )
@@ -331,7 +333,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
   const watcher = new LockupWatcher({
     contracts: contractEvents,
     onEvent: (event, scripts) => {
-      if (process.env.SOLVER_LATENCY_DIAGNOSTICS !== '1') return
+      if (!services.config.latencyDiagnostics) return
       for (const script of scripts) {
         const watched = swapByScript.get(script)
         if (!watched) continue
@@ -352,7 +354,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
         void watched
           .tick()
           .then(() => {
-            if (process.env.SOLVER_LATENCY_DIAGNOSTICS === '1') {
+            if (services.config.latencyDiagnostics) {
               log(
                 'lockup_event_timing',
                 json({ swapId: watched.id, tickMs: Math.round(performance.now() - started), outcome: 'ok' }),
@@ -360,7 +362,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
             }
           })
           .catch((error) => {
-            if (process.env.SOLVER_LATENCY_DIAGNOSTICS === '1') {
+            if (services.config.latencyDiagnostics) {
               log(
                 'lockup_event_timing',
                 json({ swapId: watched.id, tickMs: Math.round(performance.now() - started), outcome: 'failed' }),
@@ -872,7 +874,9 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     if (!invoice || !refundAddress) throw new GiveUp('usage: quote <bolt11> <refund-address>')
     await withServices({}, async (services) => {
       if (!services.service)
-        throw new GiveUp('the arkade:BTC->lightning:BTC corridor is disabled (LN_SEND_ENABLED=false)')
+        throw new GiveUp(
+          'the arkade:BTC->lightning:BTC corridor is disabled (corridors["arkade:BTC->lightning:BTC"].enabled: false)',
+        )
       const quoted = await quoteAsClient(services, invoice, refundAddress)
       if (!quoted) return
       log(json({ ...printable(quoted.swap), lockupDeadline: quoted.lockupDeadline }))
@@ -882,7 +886,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
 
   async status([id]) {
     if (!id) throw new GiveUp('usage: status <id>')
-    const store = await SwapStore.open(swapDbPath())
+    const store = await SwapStore.open(swapDbPath(loadKnobsForInspection()))
     try {
       log(json(printable(await store.get(id))))
       log('history:', json(await store.history(id)))
@@ -915,7 +919,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
    * when the solver first SAW the lockup, not when the client sent it.
    */
   async timeline([ref]) {
-    const store = await SwapStore.open(swapDbPath())
+    const store = await SwapStore.open(swapDbPath(loadKnobsForInspection()))
     try {
       const row = ref
         ? ((await store.findByLockupTxid(ref)) ??
@@ -992,7 +996,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
   },
 
   async list() {
-    const store = await SwapStore.open(swapDbPath())
+    const store = await SwapStore.open(swapDbPath(loadKnobsForInspection()))
     try {
       for (const row of await store.findRecoverable()) log(json(printable(row)))
       log('(non-terminal swaps only; use status <id> for any specific swap)')
@@ -1005,7 +1009,9 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     if (!id) throw new GiveUp('usage: drive <id>')
     await withServices({}, async (services) => {
       if (!services.service)
-        throw new GiveUp('the arkade:BTC->lightning:BTC corridor is disabled (LN_SEND_ENABLED=false)')
+        throw new GiveUp(
+          'the arkade:BTC->lightning:BTC corridor is disabled (corridors["arkade:BTC->lightning:BTC"].enabled: false)',
+        )
       const row = await driveToTerminal(services.service, id)
       log('terminal:', json(printable(row)))
       if (row.state !== 'claimed') process.exitCode = 2
@@ -1144,16 +1150,16 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
    * process OPENS, and the money-mover runs alongside. No listening port — the
    * end-state architecture, where the solver only subscribes outward.
    *
-   * Requires RELAY_URL. The relay's specific wire protocol is adapted at the
+   * Requires relay.url. The relay's specific wire protocol is adapted at the
    * frame codec in src/relay/connection.ts.
    */
   async relay() {
     const config = loadConfig()
-    if (!config.relayUrl) throw new GiveUp('RELAY_URL is not set')
+    if (!config.relayUrl) throw new GiveUp('relay.url is not set')
     const services = await createServices(config)
     const { webSocketRelayConnection, isRelayFault } = await import('@arkade-os/solver-transport/relay/connection.js')
     const { RelayIngress, OpenRfqBidder } = await import('@arkade-os/solver-transport/ingress/relay.js')
-    const latencyDiagnostics = process.env.SOLVER_LATENCY_DIAGNOSTICS === '1'
+    const latencyDiagnostics = config.latencyDiagnostics
     if (latencyDiagnostics && services.receiveService) {
       services.receiveService.onQuoteTiming = (sample) => log('receive_quote_timing', json(sample))
       services.receiveService.onStepTiming = (sample) => log('receive_step_timing', json(sample))
@@ -1270,13 +1276,13 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     // behaviour change and not this commit's job.
     // Created up front so every beat is a plain touch, and guarded because this
     // must never be what stops a solver from starting: the directory is the
-    // swap DB's by default but RELAY_HEALTH_PATH can point anywhere, and an
+    // swap DB's by default but relay.healthPath can point anywhere, and an
     // unwritable health file is a reporting problem, not a reason to refuse to
     // move money.
     let beating = true
     const giveUp = (error: unknown): void => {
       beating = false
-      onError(`relay heartbeat (${config.relayHealthPath}; set RELAY_HEALTH_PATH) — health reporting off`, error)
+      onError(`relay heartbeat (${config.relayHealthPath}; set relay.healthPath) — health reporting off`, error)
     }
     try {
       mkdirSync(dirname(config.relayHealthPath), { recursive: true })
@@ -1335,7 +1341,9 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     if (!invoice) throw new GiveUp('usage: send <bolt11>')
     await withServices({}, async (services) => {
       if (!services.service)
-        throw new GiveUp('the arkade:BTC->lightning:BTC corridor is disabled (LN_SEND_ENABLED=false)')
+        throw new GiveUp(
+          'the arkade:BTC->lightning:BTC corridor is disabled (corridors["arkade:BTC->lightning:BTC"].enabled: false)',
+        )
       // The self-test plays the client, so its refund destination is our own
       // wallet — exactly what a real client would pass as theirs.
       const refundAddress = await services.arkade.wallet.getAddress()
@@ -1429,7 +1437,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     await withServices({}, async (services, config) => {
       if (!services.onchainService) {
         throw new GiveUp(
-          'the arkade:BTC->onchain:BTC corridor is unavailable: disabled (ONCHAIN_SEND_ENABLED=false), or LND did not answer at boot',
+          'the arkade:BTC->onchain:BTC corridor is unavailable: disabled (corridors["arkade:BTC->onchain:BTC"].enabled: false), or LND did not answer at boot',
         )
       }
       const onchainService = services.onchainService
@@ -1924,8 +1932,8 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     const rail = config.lnBackend === null ? undefined : lightningRailFor(config.lnBackend)
     if (!rail?.mintPayeeInvoice) {
       throw new GiveUp(
-        `no registered rail can mint a payee invoice (LN_BACKEND=${config.lnBackend ?? 'unset'}). ` +
-          'LN_BACKEND=fake forges one locally instead.',
+        `no registered rail can mint a payee invoice (rails.lightning.backend: ${config.lnBackend ?? 'unset'}). ` +
+          'rails.lightning.backend "fake" forges one locally instead.',
       )
     }
     // Only the invoice on stdout, so it can be piped into `send`.
@@ -1938,11 +1946,13 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
    */
   async card(args) {
     const pointer = args.includes('--pointer')
-    const name = args.find((arg) => !arg.startsWith('--')) ?? process.env.SOLVER_NAME
-    if (!name) {
-      throw new GiveUp('usage: card [name] [--pointer]   (or set SOLVER_NAME; becomes solvers/<network>/<name>.json)')
-    }
     const config = loadConfig()
+    const name = args.find((arg) => !arg.startsWith('--')) ?? config.solverName
+    if (!name) {
+      throw new GiveUp(
+        'usage: card [name] [--pointer]   (or set name in the config; becomes solvers/<network>/<name>.json)',
+      )
+    }
     // This command does not build the service stack, but the card it writes
     // must state the terms the stack would actually enforce — so it resolves
     // the same effective policy `createServices` does, from the same store.
@@ -1989,6 +1999,13 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
 
   async 'balance-checkpoint'() {
     await withServices({}, async (services) => log(json(await recordBalanceCheckpoint(services))))
+  },
+
+  /** The config document for this environment, on stdout. It holds every secret the environment does. */
+  async 'config-from-env'() {
+    console.log(await exportConfig(process.env))
+    const note = healthPathNote(process.env)
+    if (note) console.error(note)
   },
 
   async balances() {
@@ -2079,9 +2096,8 @@ const panic = async (context: string, error: unknown): Promise<void> => {
 }
 
 const main = async (): Promise<void> => {
-  // Before the command resolves: a panic while reading the environment is one
-  // worth reporting, and `loadConfig` has not run yet.
-  reporter = createErrorReporter(sentryOptionsFromEnv())
+  // Before the command resolves: a panic while reading the config is one worth reporting.
+  reporter = createErrorReporter(loadSentryOptions())
   if (reporter) {
     process.on('uncaughtException', (error) => void panic('uncaught exception', error))
     process.on('unhandledRejection', (reason) => void panic('unhandled rejection', reason))
@@ -2100,6 +2116,8 @@ main()
   .then(() => process.exit(process.exitCode ?? 0))
   .catch(async (error) => {
     console.error('failed:', error instanceof Error ? error.message : String(error))
+    const hint = error instanceof NoConfigDocument ? await migrationHint(process.env).catch(() => null) : null
+    if (hint) console.error(hint)
     // A GiveUp names a usage mistake or a disabled corridor — an ANSWER, not a
     // fault, and the rule `onRefusal` already follows.
     if (!(error instanceof GiveUp)) reporter?.report('cli', error)

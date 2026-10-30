@@ -270,6 +270,13 @@ describe('evmMarkets', () => {
     expect(() => evmMarkets(tokens, env({ EVM_USDC_PRICE_FEED: FEED }))).toThrow(/EVM_USDC_PRICE_PATH is required/)
   })
 
+  it('never repeats the feed URL, which can carry an API key', () => {
+    const keyed = 'https://feed.example/btc?apikey=s3cret'
+    expect(() => evmMarkets(tokens, env({ EVM_USDC_PRICE_FEED: keyed }))).toThrow(
+      /^EVM_USDC_PRICE_PATH is required: no default is known for this feed$/,
+    )
+  })
+
   it('refuses a pointer that is not RFC 6901 shaped, naming the shape', () => {
     // Checked before derivability, so a missing leading slash is reported as
     // such rather than as an undecidable feed.

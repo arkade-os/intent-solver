@@ -564,7 +564,7 @@ export const ACTIONS: Record<string, ActionDefinition> = {
     expectedConfirm: () => 'RESTART',
     warning:
       'Stops this process so a supervisor starts a new one, which is how a stored override or market edit takes ' +
-      'effect. In-flight swaps are picked up again by recovery on boot. Requires ADMIN_RESTART_ENABLED=true AND a ' +
+      'effect. In-flight swaps are picked up again by recovery on boot. Requires admin.restartEnabled = true AND a ' +
       'supervisor that restarts the solver — without one this stops it and nothing brings it back.',
     // Before the shutdown is armed, so the audit row carries the real exposure.
     run: async (services) => {

@@ -20,7 +20,8 @@ import { fileURLToPath } from 'node:url'
 import * as sdk from '@arkade-os/solver-app/index.js'
 import { lightningRailFor, lightningRailNames, registerLightningRail } from '@arkade-os/solver-app/ops/rails.js'
 import type { LightningRail, LightningRailModule } from '@arkade-os/solver-app/index.js'
-import { loadConfig } from '@arkade-os/solver-app/config.js'
+import { configFromKnobs } from '@arkade-os/solver-app/config.js'
+import { envToDocument, migrationHint } from '@arkade-os/solver-app/config/fromEnv.js'
 import { valueImports } from '../support/importScan.js'
 
 const servicesSource = readFileSync(
@@ -48,6 +49,10 @@ const injected: LightningRailModule = {
     onchain: { name: 'onchain-leg' } as unknown as LightningRail['onchain'],
   }),
   mintPayeeInvoice: async () => 'lnbcrt1injected',
+  legacyEnv: {
+    names: ['INJECTED_API_KEY'],
+    toBlock: (env) => (env.INJECTED_API_KEY ? { apiKey: env.INJECTED_API_KEY } : undefined),
+  },
 }
 registerLightningRail(RAIL, injected)
 
@@ -90,7 +95,7 @@ describe('a consumer rail joins the shipped daemon', () => {
     // The whole seam in one assertion: the operator names the rail in the
     // environment, and `loadConfig` — which every command already calls —
     // accepts it because it asks the registry what exists.
-    expect(loadConfig().lnBackend).toBe(RAIL)
+    expect(configFromKnobs(process.env).lnBackend).toBe(RAIL)
     expect(lightningRailNames()).toContain(RAIL)
   })
 
@@ -136,7 +141,7 @@ describe('a consumer rail joins the shipped daemon', () => {
   it('costs `loadConfig` no runtime dependency, which is what lets config read it', () => {
     // `config.ts` value-imports the registry, and `db/driver.ts` statically
     // imports the `better-sqlite3` NATIVE binding. A value import added here
-    // would be one hop from being loaded by every caller of `loadConfig()` —
+    // would be one hop from being loaded by every caller of `configFromKnobs(process.env)` —
     // including tests that touch no database at all. The same property
     // `test/corridors/registry.test.ts` protects for the descriptor modules,
     // and the reason this module holds only `import type`.
@@ -146,7 +151,7 @@ describe('a consumer rail joins the shipped daemon', () => {
   it('can mint the payee invoice the `invoice` command asks for', async () => {
     // Optional on the port, because opening a second wallet from a second seed
     // is a vendor capability rather than something the CLI can synthesise.
-    expect(await lightningRailFor(RAIL)?.mintPayeeInvoice?.(loadConfig(), 1000)).toBe('lnbcrt1injected')
+    expect(await lightningRailFor(RAIL)?.mintPayeeInvoice?.(configFromKnobs(process.env), 1000)).toBe('lnbcrt1injected')
   })
 })
 
@@ -162,5 +167,65 @@ describe('the rail seam is reachable from the entrypoint', () => {
     // never sees — the failure this assertion exists to catch, since both look
     // identical from the caller's side.
     expect(sdk.lightningRailFor(RAIL)).toBe(injected)
+  })
+})
+
+describe('a registered rail reads its own block of the config document', () => {
+  const document = (lightning: Record<string, unknown>) => ({
+    network: 'regtest',
+    rails: {
+      arkade: {
+        mnemonic: 'test mnemonic, never a real one',
+        serverUrl: 'http://localhost:7070',
+        emulatorUrl: 'http://localhost:7073',
+      },
+      lightning,
+    },
+  })
+  const load = (doc: unknown, options: Omit<sdk.LoadOptions, 'env'> = {}) =>
+    sdk.loadConfig({ env: { SOLVER_CONFIG_JSON: JSON.stringify(doc) }, ...options })
+
+  it('hands the selected rail its block, whose shape is the rail’s own', () => {
+    expect(load(document({ backend: RAIL, [RAIL]: { apiKey: 'k' } })).lightningRailBlock).toEqual({ apiKey: 'k' })
+  })
+
+  it('accepts the block while another backend is selected, and hands it to nobody', () => {
+    expect(load(document({ backend: 'fake', [RAIL]: { apiKey: 'k' } })).lightningRailBlock).toBeNull()
+  })
+
+  it('lets a deployment profile default a corridor off before anything is validated', () => {
+    const profile = (doc: sdk.SolverDocument): sdk.SolverDocument => ({
+      ...doc,
+      corridors: { 'arkade:BTC->onchain:BTC': { enabled: false }, ...doc.corridors },
+    })
+    expect(load(document({ backend: 'fake' }), { profile }).corridorEnabled['arkade:BTC->onchain:BTC']).toBe(false)
+  })
+
+  it('surfaces a profile’s own refusal unchanged', () => {
+    const profile = (): sdk.SolverDocument => {
+      throw new Error('this deployment serves no EVM receive')
+    }
+    expect(() => load(document({ backend: 'fake' }), { profile })).toThrow(/^this deployment serves no EVM receive$/)
+  })
+})
+
+describe('a registered rail migrates its own variables', () => {
+  it('has a leftover one refused at boot, like the solver’s own', () => {
+    const env = { SOLVER_CONFIG_JSON: JSON.stringify({ network: 'regtest' }), INJECTED_API_KEY: 'k' }
+    expect(() => sdk.loadConfig({ env })).toThrow(/would be ignored: INJECTED_API_KEY/)
+  })
+
+  it('has its block written by config-from-env when it is the selected backend', () => {
+    const doc = envToDocument({ ...BASE_ENV, INJECTED_API_KEY: 'k' }, [])
+    expect(doc.rails?.lightning?.[RAIL]).toEqual({ apiKey: 'k' })
+    expect(envToDocument({ ...BASE_ENV, LN_BACKEND: 'fake', INJECTED_API_KEY: 'k' }, []).rails?.lightning).toEqual({
+      backend: 'fake',
+    })
+  })
+
+  it('has a credential in its block named, not printed, when boot shows the migration', async () => {
+    const hint = await migrationHint({ ...BASE_ENV, INJECTED_API_KEY: 'rail-secret' })
+    expect(hint).toContain('"apiKey": "<INJECTED_API_KEY>"')
+    expect(hint).not.toContain('rail-secret')
   })
 })

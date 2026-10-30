@@ -13,7 +13,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { servicesBodyOf } from '../support/createServicesBody.js'
-import { loadConfig } from '@arkade-os/solver-app/config.js'
+import { configFromKnobs } from '@arkade-os/solver-app/config.js'
 import { openReportReaders } from '@arkade-os/solver-app/ops/services.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
@@ -142,7 +142,7 @@ describe('openReportReaders — a live row on a market nothing serves', () => {
 
   it('reads the pair back, though no console row names it', async () => {
     await writeLiveRow()
-    const { readers, close } = await openReportReaders(loadConfig())
+    const { readers, close } = await openReportReaders(configFromKnobs(process.env))
     try {
       expect(readers.get(PAIR)).toBeDefined()
       expect(await readers.get(PAIR)!.statusFor(RFQ_ID)).not.toBeNull()
@@ -153,7 +153,7 @@ describe('openReportReaders — a live row on a market nothing serves', () => {
 
   it('reports its committed capital, which is the number `pnl` exists to print', async () => {
     await writeLiveRow()
-    const { readers, close } = await openReportReaders(loadConfig())
+    const { readers, close } = await openReportReaders(configFromKnobs(process.env))
     try {
       const ledger = await readers.get(PAIR)!.economics!({ since: 0, until: 10_000, limit: 10 })
       expect(ledger.records).toHaveLength(1)
@@ -163,7 +163,7 @@ describe('openReportReaders — a live row on a market nothing serves', () => {
   })
 
   it('creates no asset RFQ table on a deployment that never served one', async () => {
-    const { close } = await openReportReaders(loadConfig())
+    const { close } = await openReportReaders(configFromKnobs(process.env))
     await close()
     expect(await tables()).toContain('send_swap')
     expect(await tables()).not.toContain('asset_rfq_swap')

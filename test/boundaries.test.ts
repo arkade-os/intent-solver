@@ -39,6 +39,7 @@ const LAYER_OF: Record<string, Layer> = {
   http: 'transport',
   admin: 'admin',
   ops: 'node',
+  config: 'node',
 }
 
 /** Which layers each layer may import FROM. A layer may always import itself. */

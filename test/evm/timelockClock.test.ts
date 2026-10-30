@@ -59,7 +59,7 @@ describe('backend timelock clock', () => {
 
   it('refuses a distinct clock while the config says the two are one', async () => {
     const { rpc } = rpcWith(hexOf(ARBITRUM.height), () => word(ARBITRUM.clock))
-    await expect(backend(rpc).timelockClock()).rejects.toThrow(/EVM_TIMELOCK_FASTEST_SECONDS_PER_BLOCK/)
+    await expect(backend(rpc).timelockClock()).rejects.toThrow(/timelockFastestSecondsPerBlock/)
   })
 
   it('never falls back to the height when block.number cannot be read', async () => {

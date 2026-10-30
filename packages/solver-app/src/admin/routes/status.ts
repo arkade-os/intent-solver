@@ -143,18 +143,24 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
         services.bootPolicy,
         effective,
         pendingRestartKeys(services.bootOverrides, overrides),
-      ).filter((item) => !LIVE_KEYS.has(item.key)),
+      )
+        .filter((item) => !LIVE_KEYS.has(item.key))
+        .map((item) => ({ ...item, path: services.config.configPaths?.get(item.key) ?? item.key })),
       restartEnabled: services.config.adminRestartEnabled,
       providerPubkey: services.providerPubkey,
       markets: marketCards(storedMarkets, services),
       servingDivergence: [
         // The boot repairs first: a row this process REWROTE outranks a row it
-        // merely disagrees with the environment about.
+        // merely disagrees with the config about.
         ...services.adminStore.repairedServing,
-        ...marketServingDivergence(storedMarkets, {
-          offerMarkets: services.config.offerMarkets,
-          tokens: services.config.assetRfqTokens,
-        }),
+        ...marketServingDivergence(
+          storedMarkets,
+          {
+            offerMarkets: services.config.offerMarkets,
+            tokens: services.config.assetRfqTokens,
+          },
+          services.config.configPaths,
+        ),
       ],
       corridors: CORRIDORS.map((corridor) => ({
         corridor,

@@ -34,8 +34,11 @@ AMOUNT_SATS=${1:-50000}
 NODE="node --enable-source-maps --experimental-eventsource"
 LOGDIR=$(mktemp -d)
 
+# The CLI reads a config document, made here from the regtest env file.
+PROVIDER_CONFIG=$($NODE --env-file=.env.regtest.lnd packages/solver-app/dist/cli.js config-from-env)
+
 echo "── sanity-checking the LND connection ────────────────────────────────"
-if ! $NODE --env-file=.env.regtest.lnd packages/solver-app/dist/cli.js balances >"$LOGDIR/balances.log" 2>&1; then
+if ! SOLVER_CONFIG_JSON="$PROVIDER_CONFIG" $NODE packages/solver-app/dist/cli.js balances >"$LOGDIR/balances.log" 2>&1; then
   echo "── FAIL: could not reach boltz-lnd or the Arkade wallet ──────────────"
   cat "$LOGDIR/balances.log"
   exit 1
@@ -43,7 +46,7 @@ fi
 cat "$LOGDIR/balances.log"
 
 echo "── running the onchain-send self-test (${AMOUNT_SATS} sats) ──────────"
-if $NODE --env-file=.env.regtest.lnd packages/solver-app/dist/cli.js send-onchain "$AMOUNT_SATS" \
+if SOLVER_CONFIG_JSON="$PROVIDER_CONFIG" $NODE packages/solver-app/dist/cli.js send-onchain "$AMOUNT_SATS" \
      2>&1 | tee "$LOGDIR/send-onchain.log" | grep -q '"state":"claimed"'; then
   echo "── PASS: onchain send completed end to end ────────────────────────────"
   exit 0

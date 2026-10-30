@@ -40,8 +40,9 @@ registerLightningRail('my-rail', { create: async (config) => ({ ln, onchain }) }
 ```
 
 `packages/solver-app/src/ops/rails.ts:108`. `loadConfig` admits the name because
-it asks `lightningRailNames()` what exists, so `LN_BACKEND=my-rail` is the whole
-of the operator's side. `test/packaging/railInjection.test.ts` pins every leg of
+it asks `lightningRailNames()` what exists, so `rails.lightning.backend: "my-rail"`,
+with the rail's own settings under `rails.lightning["my-rail"]`, is the whole of
+the operator's side. `test/packaging/railInjection.test.ts` pins every leg of
 that, including the one that is easy to lose: `config.ts` must READ the registry
 or the seam exists and is unusable (`railInjection.test.ts:136-140`).
 
@@ -109,7 +110,7 @@ Every item below is stated in a docstring and enforced nowhere.
 | `liveLockups` present whenever the corridor HOLDS lockups                            | `corridor.ts:118-135`           | Renewal protection and the recovery path are lost for every one of them          |
 | `statusFor` answers `null` — never a refusal — for an id it does not hold            | `corridor.ts:100-103`           | Ends the fall-through and hides a live swap belonging to the NEXT corridor       |
 | `tickAll` honours the skip guard, the backoff and per-row isolation                  | `corridor.ts:172-186`           | A failing backend is hammered; one row's throw ends the sweep                    |
-| `registerLightningRail` runs before `loadConfig`                                     | `rails.ts:29-31`                | `LN_BACKEND` refuses a rail that is registered — the registry is read once       |
+| `registerLightningRail` runs before `loadConfig`                                     | `rails.ts:29-31`                | `rails.lightning.backend` refuses a rail registered later — the registry is read once |
 
 One of these is worse than unchecked. `building-a-corridor.md:129-130` tells an
 author to use the SHARED `AdmissionControl` "or your corridor is uncapped while
@@ -133,8 +134,8 @@ but `@arkade-os/solver-app/index.js` and no `process.env` at all; that file
 compiling is the claim, which is why removing one field fails the typecheck
 rather than a test.
 
-**`loadConfig` is an adapter, not the gate.** It reads `process.env` 44 times
-(`config.ts`, `loadConfig` at line 617) and returns exactly that interface. It is
+**`loadConfig` is an adapter, not the gate.** It reads one JSON document
+(`config/load.ts`) and returns exactly that interface. It is
 one way to produce a `Config`. Nothing downstream asks where the object came
 from.
 

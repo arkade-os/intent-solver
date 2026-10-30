@@ -21,6 +21,7 @@ import {
 import { CLAIM_PACKET_TYPE } from '@arkade-os/swap'
 import { MAX_REFUND_HORIZON } from '@arkade-os/solver-core/core/receive.js'
 import { json, log, nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { latencyDiagnosticsEnabled } from '@arkade-os/solver-core/util/diagnostics.js'
 
 export const LOCKUP_FUNDING_FILTER = { withRecoverable: false, genericallySpendableOnly: true } as const
 
@@ -121,7 +122,7 @@ export const fundLockup = async (
     // shrinks the spendable float with nothing left to free it. If the send
     // DID land, the coins are spent and the next read will not offer them.
     release()
-    if (process.env.SOLVER_LATENCY_DIAGNOSTICS === '1') {
+    if (latencyDiagnosticsEnabled()) {
       log(
         'wallet_send_phase_timing',
         json({

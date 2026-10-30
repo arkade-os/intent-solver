@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { schnorr } from '@noble/curves/secp256k1.js'
@@ -53,6 +53,8 @@ const makeDeps = (
     allDisabled?: boolean
     lnSendFlatSats?: number
     relayUrl?: string | null
+    solverName?: string | null
+    cardRelays?: string[]
     nostrAdPublish?: AdPublishMode
     adPublisher?: AdPublisher
     assetMarkets?: unknown[]
@@ -84,6 +86,8 @@ const makeDeps = (
     services: {
       config: {
         relayUrl: over.relayUrl === undefined ? 'wss://relay.example' : over.relayUrl,
+        solverName: over.solverName === undefined ? 'test-solver' : over.solverName,
+        cardRelays: over.cardRelays ?? [],
         lockupTimeoutSeconds: 600,
         limits: { minSats: 1_000, maxSats: 50_000 },
         network: 'mutinynet',
@@ -154,23 +158,6 @@ const postAd = async (deps: ReturnType<typeof makeDeps>) => {
   )
   return { status: response.status, body: (await response.json()) as Record<string, unknown> }
 }
-
-let savedName: string | undefined
-let savedRelays: string | undefined
-
-beforeEach(() => {
-  savedName = process.env.SOLVER_NAME
-  savedRelays = process.env.SOLVER_CARD_RELAYS
-  process.env.SOLVER_NAME = 'test-solver'
-  delete process.env.SOLVER_CARD_RELAYS
-})
-
-afterEach(() => {
-  if (savedName === undefined) delete process.env.SOLVER_NAME
-  else process.env.SOLVER_NAME = savedName
-  if (savedRelays === undefined) delete process.env.SOLVER_CARD_RELAYS
-  else process.env.SOLVER_CARD_RELAYS = savedRelays
-})
 
 describe('GET /api/card', () => {
   /**
@@ -335,8 +322,7 @@ describe('GET /api/card', () => {
   })
 
   it('adds SOLVER_CARD_RELAYS beyond RELAY_URL, exactly as `cli card` does', async () => {
-    process.env.SOLVER_CARD_RELAYS = 'wss://second.example, wss://third.example'
-    const { body } = await getCard(makeDeps())
+    const { body } = await getCard(makeDeps({ cardRelays: ['wss://second.example', 'wss://third.example'] }))
     expect(body.card?.transports.nostr.relays).toEqual([
       'wss://relay.example',
       'wss://second.example',
@@ -345,8 +331,7 @@ describe('GET /api/card', () => {
   })
 
   it('strips credentials from a relay URL before advertising it', async () => {
-    process.env.SOLVER_CARD_RELAYS = 'wss://user:pw@second.example/nostr?token=secret'
-    const { body } = await getCard(makeDeps())
+    const { body } = await getCard(makeDeps({ cardRelays: ['wss://user:pw@second.example/nostr?token=secret'] }))
     expect(body.card?.transports.nostr.relays).toEqual(['wss://relay.example', 'wss://second.example/nostr'])
   })
 
@@ -358,19 +343,17 @@ describe('GET /api/card', () => {
    * the failure the console exists to end.
    */
   it('reports why a card could not be built instead of failing the request', async () => {
-    delete process.env.SOLVER_NAME
-    const { status, body } = await getCard(makeDeps())
+    const { status, body } = await getCard(makeDeps({ solverName: null }))
     expect(status).toBe(200)
     expect(body.card).toBeNull()
-    expect(body.cardError).toContain('SOLVER_NAME')
+    expect(body.cardError).toContain('name is not set')
   })
 
   // An unset SOLVER_NAME reaches the card's own /^[a-z0-9-]+$/ rule as the
   // string "undefined", which matches — so without an explicit guard this
   // route would hand out a perfectly valid card named `undefined`.
   it('never files a card called `undefined`', async () => {
-    delete process.env.SOLVER_NAME
-    const { body } = await getCard(makeDeps())
+    const { body } = await getCard(makeDeps({ solverName: null }))
     expect(body.card?.name).not.toBe('undefined')
   })
 
@@ -478,18 +461,20 @@ describe('GET /api/card', () => {
   })
 
   it('refuses to publish without SOLVER_NAME, and says why in the publish state', async () => {
-    delete process.env.SOLVER_NAME
-    const deps = makeDeps({ nostrAdPublish: 'manual' }) as { services: CardSource; adPublisher?: AdPublisher }
+    const deps = makeDeps({ nostrAdPublish: 'manual', solverName: null }) as {
+      services: CardSource
+      adPublisher?: AdPublisher
+    }
     const publish = vi.fn(async () => {})
     deps.adPublisher = publisher('manual', publish, () => deploymentCard(deps.services))
 
     const posted = await postAd(deps as never)
     expect(posted.status).toBe(409)
-    expect(String(posted.body['detail'])).toContain('SOLVER_NAME')
+    expect(String(posted.body['detail'])).toContain('name is not set')
     expect(publish).not.toHaveBeenCalled()
     const { status, body } = await getCard(deps as never)
     expect(status).toBe(200)
-    expect(body.publish.lastError).toContain('SOLVER_NAME')
+    expect(body.publish.lastError).toContain('name is not set')
   })
 })
 

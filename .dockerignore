@@ -10,6 +10,8 @@
 **/dist
 .data
 .env
+solver.json
+solver.*.json
 *.log
 .git
 docs

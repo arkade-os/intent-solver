@@ -81,9 +81,10 @@ export interface LightningRailModule {
   /**
    * Open the wallet(s) and return both legs.
    *
-   * Handed the WHOLE config rather than a vendor-shaped slice: a rail this repo
-   * has never heard of reads its own environment variables, and a slice would
-   * mean `Config` growing a field per consumer.
+   * Handed the WHOLE config rather than a vendor-shaped slice. A rail this repo
+   * has never heard of reads its settings from `config.lightningRailBlock`, its
+   * own block of the document (`rails.lightning.<name>`), and validates it
+   * itself: its shape is the rail's business, not `Config`'s.
    *
    * Called at most once per process, from `createServices`. Two backend wallets
    * brought up concurrently tear each other down, which is why `createServices`
@@ -110,6 +111,11 @@ export interface LightningRailModule {
    *   piped into `send`.
    */
   mintPayeeInvoice?(config: Config, amountSats: number): Promise<string>
+  /**
+   * Optional: the variables this rail read before the config document. Boot refuses any left set;
+   * `cli config-from-env` writes `toBlock(env)` as the rail's block, omitted when it returns undefined.
+   */
+  legacyEnv?: { names: readonly string[]; toBlock(env: NodeJS.ProcessEnv): unknown }
 }
 
 /**
@@ -157,8 +163,8 @@ export const lightningRailFor = (name: string): LightningRailModule | undefined 
  * of reporting a zero balance, which is what a solver with no float looks like.
  */
 const NO_RAIL =
-  'this deployment has no BTC rail: LN_BACKEND is unset, which is permitted only while all four BTC ' +
-  'corridors are disabled. Set LN_BACKEND to serve them.'
+  'this deployment has no BTC rail: rails.lightning.backend is unset, which is permitted only while all four ' +
+  'BTC corridors are disabled. Set rails.lightning.backend to serve them.'
 
 export const requireLn = (ln: LightningBackend | null): LightningBackend => {
   // Truthiness rather than `=== null`, though the type says null: an absent

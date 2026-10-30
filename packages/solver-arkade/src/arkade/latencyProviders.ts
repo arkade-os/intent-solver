@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { RestArkProvider, RestIndexerProvider } from '@arkade-os/sdk'
 import { json, log } from '@arkade-os/solver-core/util/poll.js'
+import { latencyDiagnosticsEnabled } from '@arkade-os/solver-core/util/diagnostics.js'
 
 export interface ProviderTimingScope {
   fundRef: string
@@ -13,7 +14,7 @@ export interface ProviderTimingScope {
 const timingScope = new AsyncLocalStorage<ProviderTimingScope>()
 
 export const withProviderTimingScope = <T>(scope: ProviderTimingScope, operation: () => Promise<T>): Promise<T> =>
-  process.env.SOLVER_LATENCY_DIAGNOSTICS === '1' ? timingScope.run(scope, operation) : operation()
+  latencyDiagnosticsEnabled() ? timingScope.run(scope, operation) : operation()
 
 const span = (from: number | undefined, to: number | undefined): number | undefined =>
   from === undefined || to === undefined ? undefined : Math.round(to - from)

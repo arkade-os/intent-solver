@@ -23,7 +23,7 @@ import {
   type CarrierMode,
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
-import { samePair, type AssetRfqToken } from '../ops/assetRfqMarkets.js'
+import { servingFor, type AssetRfqToken, type ServingFields } from '../ops/assetRfqMarkets.js'
 import type { BalanceCheckpoint } from '../ops/balanceCheckpoints.js'
 
 const SCHEMA = `
@@ -338,30 +338,20 @@ export class AdminStore {
     const done = await this.driver.get('SELECT name FROM admin_migration WHERE name = ?', [MARKET_SERVING_SEED])
     if (done) return
     const rows = await this.listMarkets()
-    const byAsset = new Map(seed.tokens.map((token) => [token.assetId, token]))
-    const declaredForOffers = (row: AssetMarketRow): boolean => seed.offerMarkets.some((pair) => samePair(row, pair))
     const taken = new Set<string>()
     await this.driver.transaction(async () => {
       for (const row of rows) {
-        const assetId = row.base !== null && row.quote !== null ? null : (row.base ?? row.quote)
-        const token = assetId === null ? undefined : byAsset.get(assetId)
-        const derived = assetId === null ? null : (token?.symbol ?? rfqSymbolFor(assetId))
-        // Fail CLOSED on a symbol an earlier row took, the answer `repairServing` gives: a second
-        // row carrying it violates idx_admin_market_symbol, and that throw is a boot nothing repairs.
-        const symbol = derived === null || taken.has(derived) ? null : derived
-        if (symbol !== null) taken.add(symbol)
-        const sellBase = symbol !== null && (token?.enabled.sell_base ?? true)
-        const buyBase = symbol !== null && (token?.enabled.buy_base ?? true)
+        const serving = servingFor(row, seed, taken)
+        if (serving.symbol !== null) taken.add(serving.symbol)
         await this.driver.run(
           'UPDATE admin_market SET symbol = ?, serves_offer = ?, serves_rfq = ?, rfq_sell_base = ?, ' +
             'rfq_buy_base = ? WHERE market_key = ?',
           [
-            symbol,
-            declaredForOffers(row) ? 1 : 0,
-            // The DIRECTIONS, not the symbol: both closed is a row `checkServing` rejects.
-            sellBase || buyBase ? 1 : 0,
-            sellBase ? 1 : 0,
-            buyBase ? 1 : 0,
+            serving.symbol,
+            serving.servesOffer ? 1 : 0,
+            serving.servesRfq ? 1 : 0,
+            serving.rfqSellBase ? 1 : 0,
+            serving.rfqBuyBase ? 1 : 0,
             row.marketKey,
           ],
         )
@@ -404,7 +394,7 @@ export class AdminStore {
           taken.add(symbol)
           notes.push(
             `${row.marketKey}: no symbol stored; wrote symbol = ${symbol} to the row, the stem an older binary ` +
-              `served when ASSET_MARKETS named no token for the asset.`,
+              `served when the config named no asset for it.`,
           )
           await this.driver.run('UPDATE admin_market SET symbol = ? WHERE market_key = ?', [symbol, row.marketKey])
           continue
@@ -449,6 +439,37 @@ export class AdminStore {
   async setOverrideWithAudit(key: string, value: string | null, entry: AuditEntry): Promise<void> {
     await this.driver.transaction(async () => {
       await this.setOverride(key, value)
+      await this.recordAction(entry)
+    })
+  }
+
+  /** The console's own state put back to what the config implies, in one transaction with its audit row. */
+  async revertToConfig(
+    serving: readonly { marketKey: string; fields: ServingFields }[],
+    overrideKeys: readonly string[],
+    entry: AuditEntry,
+  ): Promise<void> {
+    await this.driver.transaction(async () => {
+      // Symbols first, all of them: a symbol moving between rows would otherwise meet itself in the unique index.
+      for (const { marketKey } of serving) {
+        await this.driver.run('UPDATE admin_market SET symbol = NULL WHERE market_key = ?', [marketKey])
+      }
+      for (const { marketKey, fields } of serving) {
+        await this.driver.run(
+          'UPDATE admin_market SET symbol = ?, serves_offer = ?, serves_rfq = ?, rfq_sell_base = ?, ' +
+            'rfq_buy_base = ?, updated_at = ? WHERE market_key = ?',
+          [
+            fields.symbol,
+            fields.servesOffer ? 1 : 0,
+            fields.servesRfq ? 1 : 0,
+            fields.rfqSellBase ? 1 : 0,
+            fields.rfqBuyBase ? 1 : 0,
+            this.now(),
+            marketKey,
+          ],
+        )
+      }
+      for (const key of overrideKeys) await this.setOverride(key, null)
       await this.recordAction(entry)
     })
   }

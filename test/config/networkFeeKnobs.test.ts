@@ -15,7 +15,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { loadConfig } from '@arkade-os/solver-app/config.js'
+import { configFromKnobs } from '@arkade-os/solver-app/config.js'
 
 const BASE_ENV: Record<string, string> = {
   SWAP_NETWORK: 'regtest',
@@ -63,7 +63,7 @@ afterEach(() => {
 
 describe('per-corridor network fee bounds', () => {
   it('leaves every corridor on fixed pricing when nothing is set', () => {
-    const { corridorNetworkFees } = loadConfig()
+    const { corridorNetworkFees } = configFromKnobs(process.env)
     for (const pair of Object.values(PAIR_OF)) {
       expect({ pair, bounds: corridorNetworkFees[pair] }).toEqual({ pair, bounds: null })
     }
@@ -71,7 +71,7 @@ describe('per-corridor network fee bounds', () => {
 
   it.each(ONCHAIN_STEMS)('reads %s_FEE_CAP_SATS onto that corridor alone', (stem) => {
     process.env[`${stem}_FEE_CAP_SATS`] = '400'
-    const { corridorNetworkFees } = loadConfig()
+    const { corridorNetworkFees } = configFromKnobs(process.env)
     expect(corridorNetworkFees[PAIR_OF[stem]]).toEqual({ capSats: 400, minSats: 0 })
     for (const other of STEMS) {
       if (other === stem) continue
@@ -82,7 +82,10 @@ describe('per-corridor network fee bounds', () => {
   it('takes a floor beside the cap', () => {
     process.env.ONCHAIN_SEND_FEE_CAP_SATS = '400'
     process.env.ONCHAIN_SEND_FEE_MIN_SATS = '150'
-    expect(loadConfig().corridorNetworkFees['arkade:BTC->onchain:BTC']).toEqual({ capSats: 400, minSats: 150 })
+    expect(configFromKnobs(process.env).corridorNetworkFees['arkade:BTC->onchain:BTC']).toEqual({
+      capSats: 400,
+      minSats: 150,
+    })
   })
 
   /**
@@ -94,52 +97,68 @@ describe('per-corridor network fee bounds', () => {
   it('does not read the configured flat as a floor', () => {
     process.env.ONCHAIN_SEND_FEE_FLAT_SATS = '300'
     process.env.ONCHAIN_SEND_FEE_CAP_SATS = '900'
-    expect(loadConfig().corridorNetworkFees['arkade:BTC->onchain:BTC']).toEqual({ capSats: 900, minSats: 0 })
+    expect(configFromKnobs(process.env).corridorNetworkFees['arkade:BTC->onchain:BTC']).toEqual({
+      capSats: 900,
+      minSats: 0,
+    })
   })
 
   it.each(LIGHTNING_STEMS)('refuses %s_FEE_CAP_SATS rather than parsing a knob it cannot honour', (stem) => {
     process.env[`${stem}_FEE_CAP_SATS`] = '400'
-    expect(() => loadConfig()).toThrow(/cannot price its execution cost live/)
+    expect(() => configFromKnobs(process.env)).toThrow(/cannot price its execution cost live/)
   })
 
   it('refuses a floor with no ceiling, which would price nothing', () => {
     process.env.ONCHAIN_SEND_FEE_MIN_SATS = '150'
-    expect(() => loadConfig()).toThrow(/ONCHAIN_SEND_FEE_MIN_SATS is set without ONCHAIN_SEND_FEE_CAP_SATS/)
+    expect(() => configFromKnobs(process.env)).toThrow(
+      /ONCHAIN_SEND_FEE_MIN_SATS is set without ONCHAIN_SEND_FEE_CAP_SATS/,
+    )
   })
 
   it('refuses a floor above the ceiling, which the cap could never hold', () => {
     process.env.ONCHAIN_SEND_FEE_CAP_SATS = '100'
     process.env.ONCHAIN_SEND_FEE_MIN_SATS = '101'
-    expect(() => loadConfig()).toThrow(/ONCHAIN_SEND_FEE_MIN_SATS 101 exceeds ONCHAIN_SEND_FEE_CAP_SATS 100/)
+    expect(() => configFromKnobs(process.env)).toThrow(
+      /ONCHAIN_SEND_FEE_MIN_SATS 101 exceeds ONCHAIN_SEND_FEE_CAP_SATS 100/,
+    )
   })
 
   /** Equal is legal: it is "charge exactly this", not a contradiction. */
   it('allows a floor equal to the ceiling', () => {
     process.env.ONCHAIN_SEND_FEE_CAP_SATS = '250'
     process.env.ONCHAIN_SEND_FEE_MIN_SATS = '250'
-    expect(loadConfig().corridorNetworkFees['arkade:BTC->onchain:BTC']).toEqual({ capSats: 250, minSats: 250 })
+    expect(configFromKnobs(process.env).corridorNetworkFees['arkade:BTC->onchain:BTC']).toEqual({
+      capSats: 250,
+      minSats: 250,
+    })
   })
 
   it('refuses a zero cap, which is fixed pricing spelled to look like something', () => {
     process.env.ONCHAIN_SEND_FEE_CAP_SATS = '0'
-    expect(() => loadConfig()).toThrow(/ONCHAIN_SEND_FEE_CAP_SATS must be an integer between 1 and 1000000/)
+    expect(() => configFromKnobs(process.env)).toThrow(
+      /ONCHAIN_SEND_FEE_CAP_SATS must be an integer between 1 and 1000000/,
+    )
   })
 
   it.each(['-1', '1000001', '12.5', 'lots'])('refuses %s as a cap', (raw) => {
     process.env.ONCHAIN_SEND_FEE_CAP_SATS = raw
-    expect(() => loadConfig()).toThrow(/ONCHAIN_SEND_FEE_CAP_SATS must be an integer between 1 and 1000000/)
+    expect(() => configFromKnobs(process.env)).toThrow(
+      /ONCHAIN_SEND_FEE_CAP_SATS must be an integer between 1 and 1000000/,
+    )
   })
 
   it('refuses a negative floor', () => {
     process.env.ONCHAIN_SEND_FEE_CAP_SATS = '400'
     process.env.ONCHAIN_SEND_FEE_MIN_SATS = '-1'
-    expect(() => loadConfig()).toThrow(/ONCHAIN_SEND_FEE_MIN_SATS must be an integer between 0 and 1000000/)
+    expect(() => configFromKnobs(process.env)).toThrow(
+      /ONCHAIN_SEND_FEE_MIN_SATS must be an integer between 0 and 1000000/,
+    )
   })
 })
 
 describe('the sampled fee rate cadence', () => {
   it('defaults to a minute of refresh and a quarter hour of trust', () => {
-    const config = loadConfig()
+    const config = configFromKnobs(process.env)
     expect(config.onchainFeeRateRefreshMs).toBe(60_000)
     expect(config.onchainFeeRateStaleMs).toBe(900_000)
   })
@@ -147,7 +166,7 @@ describe('the sampled fee rate cadence', () => {
   it('reads both', () => {
     process.env.ONCHAIN_FEE_RATE_REFRESH_MS = '5000'
     process.env.ONCHAIN_FEE_RATE_STALE_MS = '20000'
-    const config = loadConfig()
+    const config = configFromKnobs(process.env)
     expect([config.onchainFeeRateRefreshMs, config.onchainFeeRateStaleMs]).toEqual([5_000, 20_000])
   })
 
@@ -159,6 +178,8 @@ describe('the sampled fee rate cadence', () => {
    */
   it.each(['60000', '30000'])('refuses a staleness of %s that does not exceed the refresh age', (raw) => {
     process.env.ONCHAIN_FEE_RATE_STALE_MS = raw
-    expect(() => loadConfig()).toThrow(/ONCHAIN_FEE_RATE_STALE_MS .* must exceed ONCHAIN_FEE_RATE_REFRESH_MS 60000/)
+    expect(() => configFromKnobs(process.env)).toThrow(
+      /ONCHAIN_FEE_RATE_STALE_MS .* must exceed ONCHAIN_FEE_RATE_REFRESH_MS 60000/,
+    )
   })
 })

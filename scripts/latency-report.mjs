@@ -21,14 +21,15 @@
  * millisecond instrumentation earns its cost.
  *
  * Run:
- *   node --env-file=.env scripts/latency-report.mjs
- *   node --env-file=.env scripts/latency-report.mjs --since 2026-08-01 --corridor ln-ark
+ *   SOLVER_CONFIG=solver.json node scripts/latency-report.mjs
+ *   SOLVER_CONFIG=solver.json node scripts/latency-report.mjs --since 2026-08-01 --corridor ln-ark
  */
 
 import { existsSync } from 'node:fs'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { resolveDbLayout } from '@arkade-os/solver-corridors/db/layout.js'
 import { swapDbPath } from '../packages/solver-app/dist/config.js'
+import { loadKnobsForInspection } from '../packages/solver-app/dist/config/load.js'
 import { summariseLatency } from '../packages/solver-app/dist/ops/latency.js'
 
 const arg = (name, fallback = null) => {
@@ -57,7 +58,7 @@ if (wanted.length === 0) {
   process.exit(2)
 }
 
-const layout = resolveDbLayout(swapDbPath())
+const layout = resolveDbLayout(swapDbPath(loadKnobsForInspection()))
 
 const secs = (n) => (n >= 60 ? `${Math.floor(n / 60)}m${String(n % 60).padStart(2, '0')}s` : `${n}s`)
 

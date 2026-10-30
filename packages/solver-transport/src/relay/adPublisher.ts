@@ -68,7 +68,7 @@ export class AdPublisher {
   /** Publish regardless of change. Refused when `off`. */
   async publishNow(): Promise<void> {
     if (this.opts.mode === 'off') {
-      throw new Error('NOSTR_AD_PUBLISH is off: this solver is configured not to publish to Nostr')
+      throw new Error('relay.adPublish is off: this solver is configured not to publish to Nostr')
     }
     const card = await this.build()
     await this.send(card, hex.encode(cardDigest(card)))

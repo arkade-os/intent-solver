@@ -44,6 +44,7 @@ import {
   type UnilateralDelays,
 } from '@arkade-os/solver-core/core/timelocks.js'
 import { log, nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { latencyDiagnosticsEnabled } from '@arkade-os/solver-core/util/diagnostics.js'
 import { ensureDatabaseDir } from '@arkade-os/solver-core/util/sqlite.js'
 import type { CovenantSwapScript } from './covenant.js'
 import { virtualTxPages, vtxoPages } from './indexerPaging.js'
@@ -207,7 +208,7 @@ export const resolveTimelockUnit = (params: {
     // disagreeing sources was right.
     if (overrideUnit !== unit) {
       throw new Error(
-        `ARK_UNILATERAL_EXIT_DELAY=${unilateralExitDelayOverride} is ${overrideUnit}, but this server ` +
+        `rails.arkade.unilateralExitDelay ${unilateralExitDelayOverride} is ${overrideUnit}, but this server ` +
           `advertises ${advertisedExitDelay}, which is ${unit} — an override must be expressed in the ` +
           'same unit as the server it overrides',
       )
@@ -218,7 +219,7 @@ export const resolveTimelockUnit = (params: {
     // server claims to require — and to see BOTH numbers, since the whole reason
     // the override exists is that they disagree.
     notices.push(
-      `ARK_UNILATERAL_EXIT_DELAY=${unilateralExitDelayOverride} ${overrideUnit} overrides the ` +
+      `rails.arkade.unilateralExitDelay ${unilateralExitDelayOverride} ${overrideUnit} overrides the ` +
         `${advertisedExitDelay} ${unit} this server advertises; every covenant written from now uses the override`,
     )
   }
@@ -251,7 +252,7 @@ export const resolveTimelockUnit = (params: {
 export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<ArkadeContext> => {
   const identity = MnemonicIdentity.fromMnemonic(config.mnemonic, { isMainnet: config.isMainnet })
   const executor = sqliteExecutor(config.databasePath)
-  const latencyDiagnostics = process.env.SOLVER_LATENCY_DIAGNOSTICS === '1'
+  const latencyDiagnostics = latencyDiagnosticsEnabled()
 
   const wallet = await Wallet.create({
     identity,
@@ -310,7 +311,7 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
   if (info.network !== config.expectedArkdNetwork) {
     throw new Error(
       `Arkade server at ${config.arkServerUrl} reports network '${info.network}', ` +
-        `expected '${config.expectedArkdNetwork}' — check ARK_SERVER_URL / SWAP_NETWORK`,
+        `expected '${config.expectedArkdNetwork}' — check rails.arkade.serverUrl / network`,
     )
   }
 

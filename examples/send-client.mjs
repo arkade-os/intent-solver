@@ -25,7 +25,8 @@
 // Env: ARK_MNEMONIC, ARK_SERVER_URL, EMULATOR_URL (your own view of both
 // services — never taken from the provider), SWAP_NETWORK.
 
-import { createArkadeContext, loadConfig } from '../packages/solver-app/dist/index.js'
+import { createArkadeContext } from '../packages/solver-app/dist/index.js'
+import { configFromKnobs } from '../packages/solver-app/dist/config.js'
 import { httpTransport, pollStatus, sendToLightning } from './lib/swap-client.mjs'
 
 const [providerUrl, bolt11] = process.argv.slice(2)
@@ -34,7 +35,7 @@ if (!providerUrl || !bolt11) {
   process.exit(1)
 }
 
-const config = loadConfig()
+const config = configFromKnobs(process.env)
 const arkade = await createArkadeContext(config.arkade)
 const transport = httpTransport(providerUrl)
 

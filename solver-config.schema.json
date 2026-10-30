@@ -1,0 +1,449 @@
+{
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "network": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "rails": {
+      "type": "object",
+      "properties": {
+        "arkade": {
+          "type": "object",
+          "properties": {
+            "mnemonic": {
+              "type": "string"
+            },
+            "serverUrl": {
+              "type": "string"
+            },
+            "emulatorUrl": {
+              "type": "string"
+            },
+            "esploraUrl": {
+              "type": "string"
+            },
+            "unilateralExitDelay": {
+              "type": "number"
+            },
+            "covclaimdUrl": {
+              "type": "string"
+            },
+            "poolAutoMint": {
+              "type": "boolean"
+            },
+            "contractRetentionDays": {
+              "type": "number"
+            }
+          },
+          "additionalProperties": false
+        },
+        "lightning": {
+          "type": "object",
+          "properties": {
+            "backend": {
+              "type": "string"
+            },
+            "lnd": {
+              "type": "object",
+              "properties": {
+                "socket": {
+                  "type": "string"
+                },
+                "cert": {
+                  "type": "string"
+                },
+                "certPath": {
+                  "type": "string"
+                },
+                "macaroon": {
+                  "type": "string"
+                },
+                "macaroonPath": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "fake": {
+              "type": "object",
+              "properties": {
+                "statePath": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "lockupTimeoutSeconds": {
+              "type": "number"
+            },
+            "sweepConcurrency": {
+              "type": "number"
+            },
+            "sendHintScidDenylist": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "receiveAcceptUnilateralGap": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": {}
+        },
+        "onchain": {
+          "type": "object",
+          "properties": {
+            "esploraUrl": {
+              "type": "string"
+            },
+            "chainTipEsploraUrl": {
+              "type": "string"
+            },
+            "feeRateRefreshMs": {
+              "type": "number"
+            },
+            "feeRateStaleMs": {
+              "type": "number"
+            }
+          },
+          "additionalProperties": false
+        },
+        "evm": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "chainId": {
+                "type": "number"
+              },
+              "rpcUrl": {
+                "type": "string"
+              },
+              "htlcAddress": {
+                "type": "string"
+              },
+              "privateKey": {
+                "type": "string"
+              },
+              "minConfirmations": {
+                "type": "number"
+              },
+              "minAgeSeconds": {
+                "type": "number"
+              },
+              "fastestSecondsPerBlock": {
+                "type": "number"
+              },
+              "slowestSecondsPerBlock": {
+                "type": "number"
+              },
+              "timelockFastestSecondsPerBlock": {
+                "type": "number"
+              },
+              "timelockSlowestSecondsPerBlock": {
+                "type": "number"
+              },
+              "gasLimit": {
+                "description": "decimal string",
+                "type": "string",
+                "pattern": "^\\d+$"
+              },
+              "maxFeePerGasCeiling": {
+                "description": "decimal string",
+                "type": "string",
+                "pattern": "^\\d+$"
+              },
+              "feeHeadroomSeconds": {
+                "type": "number"
+              },
+              "orderMarginSeconds": {
+                "type": "number"
+              },
+              "quoteValiditySeconds": {
+                "type": "number"
+              },
+              "logScanRange": {
+                "type": "number"
+              },
+              "directClaimsOnly": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "assets": {
+      "type": "object",
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "const": "erc20"
+              },
+              "chain": {
+                "type": "string"
+              },
+              "address": {
+                "type": "string"
+              },
+              "decimals": {
+                "type": "number"
+              },
+              "priceFeed": {
+                "type": "string"
+              },
+              "pricePath": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "chain",
+              "address",
+              "decimals"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "const": "arkade"
+              },
+              "assetId": {
+                "type": "string"
+              },
+              "approvalThreshold": {
+                "description": "decimal string",
+                "type": "string",
+                "pattern": "^\\d+$"
+              }
+            },
+            "required": [
+              "kind",
+              "assetId"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "maxSwapSats": {
+          "type": "number"
+        },
+        "maxExposedSats": {
+          "type": "number"
+        },
+        "approvalThresholdSats": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": false
+    },
+    "corridors": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "minSats": {
+            "type": "number"
+          },
+          "maxSats": {
+            "type": "number"
+          },
+          "feeBps": {
+            "type": "number"
+          },
+          "feeFlatSats": {
+            "type": "number"
+          },
+          "feeCapSats": {
+            "type": "number"
+          },
+          "feeMinSats": {
+            "type": "number"
+          },
+          "minUnits": {
+            "description": "decimal string",
+            "type": "string",
+            "pattern": "^\\d+$"
+          },
+          "maxUnits": {
+            "description": "decimal string",
+            "type": "string",
+            "pattern": "^\\d+$"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "offers": {
+      "type": "object",
+      "properties": {
+        "markets": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "minFillAmount": {
+          "description": "decimal string",
+          "type": "string",
+          "pattern": "^\\d+$"
+        },
+        "maxFillAmount": {
+          "description": "decimal string",
+          "type": "string",
+          "pattern": "^\\d+$"
+        },
+        "chargeCarrier": {
+          "type": "boolean"
+        },
+        "carrierPricing": {
+          "type": "boolean"
+        },
+        "quoteValiditySeconds": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": false
+    },
+    "relay": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string"
+        },
+        "protocol": {
+          "type": "string"
+        },
+        "healthPath": {
+          "type": "string"
+        },
+        "openRfqMaxBidsPerMinute": {
+          "type": "number"
+        },
+        "adPublish": {
+          "type": "string"
+        },
+        "cardRelays": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "storage": {
+      "type": "object",
+      "properties": {
+        "dir": {
+          "type": "string"
+        },
+        "swapDb": {
+          "type": "string"
+        },
+        "arkDb": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "http": {
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": false
+    },
+    "admin": {
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "restartEnabled": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "sentry": {
+      "type": "object",
+      "properties": {
+        "dsn": {
+          "type": "string"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "release": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "notify": {
+      "type": "object",
+      "properties": {
+        "telegramBotToken": {
+          "type": "string"
+        },
+        "telegramChatId": {
+          "type": "string"
+        },
+        "slackWebhookUrl": {
+          "type": "string"
+        },
+        "balanceReportIntervalMinutes": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": false
+    },
+    "diagnostics": {
+      "type": "object",
+      "properties": {
+        "latency": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Arkade intent-solver config document"
+}

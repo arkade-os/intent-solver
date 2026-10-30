@@ -588,7 +588,7 @@ describe('markets no card can carry', () => {
     expect(publishable[0]!.quote).toBe(OTHER_ASSET)
     expect(omitted).toHaveLength(1)
     expect(omitted[0]).toContain(ASSET)
-    expect(omitted[0]).toContain('OFFER_MIN_FILL_AMOUNT')
+    expect(omitted[0]).toContain('offers.minFillAmount')
     const card = buildSolverCard(inputs({ assetMarkets: publishable }))
     expect(quoteIds(card)).toEqual([BOLT11_BTC, `arkade:mutinynet/asset:${OTHER_ASSET}`])
   })
@@ -658,7 +658,7 @@ describe('a bound with nothing to inherit', () => {
 
   it('names the amounts to set rather than a side the operator never closed', () => {
     const blank = assetCardMarkets([view()], { min: 0n, max: 0n })
-    expect(() => buildSolverCard(inputs({ assetMarkets: blank }))).toThrow(/OFFER_MIN_FILL_AMOUNT/)
+    expect(() => buildSolverCard(inputs({ assetMarkets: blank }))).toThrow(/offers\.minFillAmount/)
     expect(() => buildSolverCard(inputs({ assetMarkets: blank }))).toThrow(/min\/max amounts in the console/)
     expect(() => buildSolverCard(inputs({ assetMarkets: blank }))).not.toThrow(/enables neither side/)
   })
