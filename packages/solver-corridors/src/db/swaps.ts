@@ -82,6 +82,10 @@ const TRANSITION_COLUMNS = new Set([
   'lockup_value',
   'idempotency_key',
   'pay_attempted_at',
+  // Recorded atomically with funded -> paying so the identity cannot be lost in
+  // a window between the state change and a follow-up write. Also in PATCH.
+  'payment_backend',
+  'payment_wallet',
   'payment_id',
   'preimage',
   'claim_ark_txid',
