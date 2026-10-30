@@ -39,6 +39,8 @@ jobs:
   # may point somewhere `main`'s CI never saw.
   verify:
     uses: ./.github/workflows/ci.yml
+    # vendor-names reads FORBIDDEN_NAMES, and a called workflow sees no secret it is not handed.
+    secrets: inherit
 
   packages:
     needs: verify

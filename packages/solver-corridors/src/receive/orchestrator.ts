@@ -47,6 +47,7 @@ import { fixedFeePricing, type PricingStrategy } from '@arkade-os/solver-core/co
 import { RFQ_PAIR_RECEIVE } from '../wire/lightningReceivePayloads.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { satsOutputs } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
 import { covenantScriptFromRow } from '../send/arkadeOps.js'
 import type { CovenantScriptRow } from '../send/orchestrator.js'
@@ -740,7 +741,10 @@ export class ReceiveSwapService {
         await store.fail(row.id, 'quoted', 'refused to fund: coupled send refund timing is unsafe')
         return false
       }
-      const outputs = await arkade.findLockups(coupled.pkScript)
+      // Asset-free only: the coupled send refuses a lockup whose sats sit on an
+      // asset vtxo, so an asset-carrying output must not count toward the
+      // payout this receive leg is about to make.
+      const outputs = satsOutputs(await arkade.findLockups(coupled.pkScript))
       // Exact value, not a minimum, for the same reason the funding guard
       // below filters exactly: a lockup a sat short is not a smaller swap, it
       // is a swap whose collect leg would not cover this payout.

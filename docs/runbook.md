@@ -1433,20 +1433,11 @@ hard way. The numbers below are the smallest legal values, not arbitrary ones.
   (`packages/solver-core/src/core/timelocks.ts:63`) hard-rejects anything below
   `SEQUENCE_GRANULARITY_SECONDS` (512) as "a block count, not seconds", so the
   service dies at wallet construction — before any swap runs.
-- **`ARKD_CHECKPOINT_EXIT_DELAY=1536`, NOT 1200.** BIP68 encodes relative
-  timelocks in 512-second units, so 1200s is representable only as
-  `floor(1200/512) = 2` units = **1024s**, which is under the SDK's own regtest
-  floor (`REGTEST_MIN_CHECKPOINT_EXIT_DELAY_SECONDS = 1200`, SDK
-  `defaultCheckpointExitDelayPolicy`). 1536 = 3x512 is the smallest multiple of
-  the granularity that clears it.
-  **Off regtest that floor is per network: mutinynet 4096, signet 86016, mainnet
-  (and anything unrecognised) `DEFAULT_MIN_CHECKPOINT_EXIT_DELAY_SECONDS` = 86400
-  (24h)**, and `Wallet.create` throws outright below it — worth knowing before
-  this configuration is copied toward mainnet. 86400 is not a multiple of 512
-  either (168.75 units), so the smallest usable mainnet setting is
-  169x512 = **86528s**, not 86400. The SDK picks the floor by the
-  server's advertised `info.network`, so our network profiles pin it for every
-  non-regtest network (`packages/solver-core/src/core/networks.ts`).
+- **`ARKD_CHECKPOINT_EXIT_DELAY=1536`.** It must be seconds and a multiple of
+  512 (BIP68 counts seconds in 512-second units). The SDK's checkpoint floor is
+  512s on every network (`assertValidServerUnrollScript`, since
+  arkade-os/ts-sdk#1121), so this is no longer the bound it was. 1536 stays as
+  the stack's value.
 - **`ARKD_VTXO_TREE_EXPIRY=6144.`** There is a SECOND, independent floor —
   `REGTEST_MIN_BATCH_EXPIRY_SECONDS = 6000` (SDK `defaultBatchExpiryPolicy`) —
   and it is checked at **settle**, not at startup. A smaller value (1024, say)

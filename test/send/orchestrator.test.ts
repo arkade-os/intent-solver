@@ -292,7 +292,7 @@ describe('the solver spread', () => {
   const FEE = { bps: 100, flatSats: 50 }
   const EXPECTED_LOCKUP = 2172
 
-  const withFee = () =>
+  const withFee = (fee = FEE) =>
     new SendSwapService({
       store,
       ln,
@@ -303,7 +303,7 @@ describe('the solver spread', () => {
       totalCommitted: () => store.committedSats(),
       admission: new AdmissionControl(),
       now: () => clock,
-      fee: FEE,
+      fee,
     })
 
   it('quotes a lockup of the invoice PLUS the fee', async () => {
@@ -387,6 +387,37 @@ describe('the solver spread', () => {
     // actually measured even though the customer was billed only 128 of them.
     expect(ln.payCalls[0]?.maxFeeSats).toBe(278)
     expect(ln.payCalls[0]?.maxFeeSats).not.toBe(maxRoutingFeeSats(50_000))
+  })
+
+  it('floors a rail subsidy at the bps cut, so the lockup still covers the routing cost', async () => {
+    ln.feeEstimate = { feeSats: 75, billableFeeSats: 0 }
+
+    const outcome = await withFee().quote(INVOICE, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+    if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+
+    expect(outcome.swap.amountSats - AMOUNT).toBeGreaterThanOrEqual(75)
+  })
+
+  it('caps routing at what the quote charged when the backend gives no estimate', async () => {
+    const svc = withFee({ bps: 30, flatSats: 0 })
+    const outcome = await svc.quote(INVOICE, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+    if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+    arkade.lockups = [{ txid: 'e'.repeat(64), vout: 0, value: outcome.swap.amountSats }]
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
+
+    await svc.tick(outcome.swap.id)
+
+    expect(ln.payCalls[0]?.maxFeeSats).toBe(outcome.swap.amountSats - AMOUNT)
+  })
+
+  it('admits Lightning float against that capped budget, not the 0.5% fallback', async () => {
+    ln.balance = { availableSats: AMOUNT + 7, incomingSats: 0 }
+
+    const outcome = await withFee({ bps: 30, flatSats: 0 }).quote(INVOICE, REFUND_ADDRESS, {
+      clientRefundPubkey: CLIENT_REFUND_PUBKEY,
+    })
+
+    expect(outcome).toMatchObject({ accepted: true, swap: { amountSats: AMOUNT + 7 } })
   })
 
   it('rejects a billable estimate that exceeds the backend cost', async () => {
@@ -698,6 +729,45 @@ describe('tick: the full drive', () => {
     const row = await service.tick(swap.id)
     expect(row.state).not.toBe('quoted')
     expect(row.lockupValue).toBe(2_100)
+  })
+
+  it('refuses at once, and refunds, a lockup funded on an asset-carrying vtxo', async () => {
+    const { swap } = await quoted()
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT, assets: [{ assetId: 'ab'.repeat(34), amount: 1n }] }]
+    // One tick, no timeout wait: the value is here but unclaimable, so refuse now.
+    expect((await service.tick(swap.id)).state).toBe('refused')
+    expect(ln.payCalls).toHaveLength(0)
+    // The whole lockup, asset vtxo included, goes back through the cooperative refund.
+    expect(await service.refundSweep()).toEqual([swap.id])
+    expect(arkade.refundCalls.map((c) => c.outputs)).toEqual([arkade.lockups])
+  })
+
+  it('claims only the sats outputs when an asset vtxo lands on the paid lockup', async () => {
+    const outcome = await service.quote(FORGED.invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+    if (!outcome.accepted) throw new Error(`forged quote refused: ${outcome.reason}`)
+    const funding = { txid: 'f1', vout: 0, value: AMOUNT }
+    arkade.lockups = [funding]
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
+    expect((await service.tick(outcome.swap.id)).state).toBe('paid')
+
+    arkade.lockups = [funding, { txid: 'f2', vout: 0, value: 330, assets: [{ assetId: 'ab'.repeat(34), amount: 1n }] }]
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'succeeded', preimage: FORGED_PREIMAGE })
+    expect((await service.tick(outcome.swap.id)).state).toBe('claimed')
+    expect(arkade.claimCalls.map((c) => c.outputs)).toEqual([[funding]])
+  })
+
+  it('claims the asset vtxo too when the asset-free outputs cannot cover what was paid', async () => {
+    const outcome = await service.quote(FORGED.invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+    if (!outcome.accepted) throw new Error(`forged quote refused: ${outcome.reason}`)
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
+    expect((await service.tick(outcome.swap.id)).state).toBe('paid')
+
+    const carrying = { txid: 'f1', vout: 0, value: AMOUNT, assets: [{ assetId: 'ab'.repeat(34), amount: 1n }] }
+    arkade.lockups = [carrying]
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'succeeded', preimage: FORGED_PREIMAGE })
+    expect((await service.tick(outcome.swap.id)).state).toBe('claimed')
+    expect(arkade.claimCalls.map((c) => c.outputs)).toEqual([[carrying]])
   })
 
   it('refuses an overfunded lockup rather than claim the excess', async () => {

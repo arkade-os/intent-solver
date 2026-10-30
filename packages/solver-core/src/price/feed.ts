@@ -37,6 +37,9 @@ export interface PriceFeedDeps {
 
 const DEFAULT_TIMEOUT_MS = 10_000
 
+// CoinGecko answers 403 to a request without one, and `node:http` (the guarded fetch) sends none.
+const USER_AGENT = 'arkade-intent-solver (+https://github.com/arkade-os/intent-solver)'
+
 /** A price is a few hundred bytes; the largest feed response seen is kilobytes. */
 const MAX_BODY_BYTES = 1_048_576
 
@@ -92,7 +95,7 @@ export const createPriceFeed = (deps: PriceFeedDeps = {}): FetchPrice => {
 
     const response = await call(feedUrl, {
       method: 'GET',
-      headers: { accept: 'application/json' },
+      headers: { accept: 'application/json', 'user-agent': USER_AGENT },
       signal: AbortSignal.timeout(timeoutMs),
     })
 

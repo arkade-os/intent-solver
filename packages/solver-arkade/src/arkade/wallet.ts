@@ -83,17 +83,6 @@ export interface ArkadeWalletConfig {
   isMainnet: boolean
   arkadeHrp: string
   /**
-   * Lowers the SDK's minimum accepted checkpoint exit delay, in seconds.
-   *
-   * Unset leaves the SDK's own per-network floor — 86400 off regtest, 1200 on
-   * it — which is what a deployment should want: the floor bounds how long our
-   * server-independent recourse takes if the Arkade Service stops cooperating.
-   * It exists because a hosted test Service may advertise a far shorter delay
-   * for its own convenience (mutinynet advertises 4096), and `Wallet.create`
-   * refuses to build against it at all. Config decides when that is allowed.
-   */
-  minCheckpointExitDelaySeconds?: number
-  /**
    * Believe THIS unilateral exit delay instead of the one the server advertises
    * at `/v1/info`, in seconds. Unset means believe the server.
    *
@@ -278,14 +267,7 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
       walletRepository: new SQLiteWalletRepository(executor),
       contractRepository: new SQLiteContractRepository(executor),
     },
-    // Passing undefined is safe and is NOT the same as passing a hole: the SDK
-    // folds this into its policy only when set (`!== void 0` in the SDK's
-    // `Wallet.create`), so unset keeps the per-network floor.
-    // Spreading it conditionally here would read as more careful and do the
-    // same thing; the explicit undefined is what makes that checkable.
-    minCheckpointExitDelaySeconds:
-      config.minCheckpointExitDelaySeconds === undefined ? undefined : BigInt(config.minCheckpointExitDelaySeconds),
-    // Safe for the same reason, by a different operator: the SDK takes
+    // Passing undefined is safe and is NOT the same as passing a hole: the SDK takes
     // `config.onchainProvider || new EsploraProvider(default)` (SDK
     // `ReadonlyWallet.setupWalletConfig`), so an explicit undefined falls through
     // to the per-network default rather than blanking the provider.
@@ -501,6 +483,22 @@ export const totalValue = (outputs: readonly FundedOutput[]): number =>
   outputs.reduce((sum, output) => sum + output.value, 0)
 
 /**
+ * The outputs a BTC lockup is made of. Anyone can send an asset vtxo to the public lockup address,
+ * and sats riding on one are not what the quote asked for. Refunds still take every output.
+ */
+export const satsOutputs = <O extends { assets?: readonly unknown[] }>(outputs: readonly O[]): O[] =>
+  outputs.filter((o) => !o.assets?.length)
+
+/**
+ * What a claim spends: the asset-free outputs when they cover `amountSats`, else every output, so a
+ * lockup that was paid out against an asset vtxo is still collected (the claim declares its assets).
+ */
+export const claimOutputs = (outputs: readonly FundedOutput[], amountSats: number): FundedOutput[] => {
+  const clean = satsOutputs(outputs)
+  return totalValue(clean) >= amountSats ? clean : [...outputs]
+}
+
+/**
  * Every outpoint this script has ever held — SPENT ONES INCLUDED, unlike {@link findLockups},
  * so {@link findClaimPreimage} can still find the claimed outpoint. `value` lets the receive
  * leg tell its own funding from a dust payment to a public address. Paged like findLockups;
@@ -560,6 +558,8 @@ export const claimSwapScript = async (
   destination: string,
 ): Promise<string> => {
   if (funded.length === 0) throw new Error('nothing to claim: no funded outputs')
+  // Anyone can add an asset to a lockup; without its packet arkd refuses the claim, after we already paid.
+  const assetPacket = refundAssetPacket(funded, 'aggregate')
   return signAndSubmitOffchainTx({
     identity: claimWithPreimageIdentity(ctx.identity, preimage),
     provider: ctx.wallet.arkProvider,
@@ -571,7 +571,10 @@ export const claimSwapScript = async (
       tapLeafScript: script.claim(),
       tapTree: script.encode(),
     })),
-    outputs: [{ script: ArkAddress.decode(destination).pkScript, amount: BigInt(totalValue(funded)) }],
+    outputs: [
+      { script: ArkAddress.decode(destination).pkScript, amount: BigInt(totalValue(funded)) },
+      ...(assetPacket ? [Extension.create([assetPacket]).txOut()] : []),
+    ],
     serverUnrollScript: ctx.wallet.serverUnrollScript,
     // The leaf's own key, not the wallet's live one: a lockup quoted before a signer rotation is co-signed under it.
     verifyServerSignatures: { serverPubkey: script.vhtlcOptions.server },
@@ -602,7 +605,7 @@ export const attachEmulatorPackets = (tx: Transaction, packets: Parameters<typeo
 export type RefundOutputLayout = 'per-input' | 'aggregate'
 
 /**
- * The asset packet a refund of `funded` needs, or null when it carries none.
+ * The asset packet a refund or claim of `funded` needs, or null when it carries none.
  * EVERY asset on EVERY input must be declared, not just the denominating one:
  * omitting one is refused with ASSET_NOT_FOUND, omitting all with `no asset packet`.
  */

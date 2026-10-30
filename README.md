@@ -990,36 +990,15 @@ reading the pinned SDK bundle (`node_modules/@arkade-os/sdk/dist/`; grep for the
 constant names below), not from documentation. Full walkthrough: `docs/runbook.md` § "Why the stack
 needs those overrides".
 
-**The checkpoint exit delay floor is the one most likely to surprise a
-production deployment.** `Wallet.create` resolves a policy and throws
-`ServerResponseMismatchError` if the server's advertised checkpoint tapscript
-is below it:
-
-| Network                       | Floor               | Smallest usable delay | Constant                                      |
-| ----------------------------- | ------------------- | --------------------- | --------------------------------------------- |
-| regtest (`bech32 === 'bcrt'`) | **1200 s**          | 1536 s                | `REGTEST_MIN_CHECKPOINT_EXIT_DELAY_SECONDS`   |
-| mutinynet                     | **4096 s**          | 4096 s                | `MUTINYNET_MIN_CHECKPOINT_EXIT_DELAY_SECONDS` |
-| signet                        | **86,016 s**        | 86,016 s              | `SIGNET_MIN_CHECKPOINT_EXIT_DELAY_SECONDS`    |
-| every other network           | **86,400 s (24 h)** | 86,528 s              | `DEFAULT_MIN_CHECKPOINT_EXIT_DELAY_SECONDS`   |
-
-BIP68 counts seconds in 512 s units, so a server's delay is always a multiple
-of 512. Neither 1200 nor 86,400 is one, so the smallest usable delay is the
-next multiple up. Setting `ARKD_CHECKPOINT_EXIT_DELAY` to the floor itself does
-not work: 86,400 s is 168.75 units, and 168 units is 86,016 s.
-
-The comparison is a strict `<`, so a delay exactly at the floor passes. Off
-regtest the policy additionally sets `requireSeconds: true`, so a block-typed
-timelock is rejected before the floor is even reached. The SDK chooses the row
-from the network the **server advertises** (`info.network`), inside
-`Wallet.create` and before this service checks that name against its own
-profile. The network profiles in `packages/solver-core/src/core/networks.ts`
-therefore pin the floor for every non-regtest network, so the operator cannot
-select a relaxed row by advertising another name.
-
-On regtest that means **`ARKD_CHECKPOINT_EXIT_DELAY=1536`, not 1200**: BIP68
-encodes in 512s units, so 1200 is representable only as `floor(1200/512) = 2`
-units = 1024 s, which is under the floor. 1536 = 3 × 512 is the smallest
-multiple of the granularity that clears it.
+**The checkpoint exit delay floor is 512 s on every network.**
+`Wallet.create` decodes the server's advertised checkpoint tapscript and throws
+`ServerResponseMismatchError` below it (SDK `assertValidServerUnrollScript`).
+512 s is the smallest seconds-typed BIP68 timelock, so in practice the check
+rejects a block-typed timelock off regtest (`requireSeconds: true`) and a
+malformed or wrong-pubkey script, not a short delay. There is no per-network
+floor any more and nothing to pin: since `@arkade-os/sdk` 0.5.0-rc.31
+(arkade-os/ts-sdk#1121) arkd refuses any checkpoint script other than the one it
+serves, so the client takes the server's.
 
 **The batch-expiry floor is checked at settle, not at startup.**
 `Wallet.create` only _pins_ the policy; the assertion fires per round inside

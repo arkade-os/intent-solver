@@ -33,6 +33,7 @@ import { FREE, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { fixedFeePricing, type PricingStrategy } from '@arkade-os/solver-core/core/pricing.js'
 import { paymentHashFromPreimage, scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { claimOutputs, satsOutputs } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
 import { buildOnchainHtlc, ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import {
@@ -720,12 +721,26 @@ export class OnchainSendSwapService {
 
   private async whenQuoted(row: OnchainSendSwapRow): Promise<boolean> {
     const { store, arkade } = this.deps
-    const outputs = await arkade.findLockups(row.pkScript)
+    const all = await arkade.findLockups(row.pkScript)
+    const outputs = satsOutputs(all)
     const locked = outputs.reduce((sum, o) => sum + o.value, 0)
+    const held = all.reduce((sum, o) => sum + o.value, 0)
     const timedOut = this.now() >= row.createdAt + DEFAULT_ONCHAIN_LOCKUP_TIMEOUT
 
     if (locked > row.amountSats) {
       await store.fail(row.id, 'quoted', `overfunded lockup: ${locked} > ${row.amountSats} sats`)
+      return false
+    }
+    // Funded, but (some of) the value sits on an asset vtxo a claim can never
+    // spend. Refuse at once rather than wait out the timeout for the same end;
+    // the refund sweep returns the whole lockup through the cooperative leaf.
+    if (locked < row.amountSats && held >= row.amountSats) {
+      await store.patch(row.id, { onchain_lockup_value: held })
+      await store.fail(
+        row.id,
+        'quoted',
+        `lockup funded on an asset vtxo a claim cannot spend: ${held} held, ${locked} spendable`,
+      )
       return false
     }
     if (locked === row.amountSats && !timedOut) {
@@ -737,7 +752,8 @@ export class OnchainSendSwapService {
       })
     }
     if (timedOut) {
-      if (locked > 0) await store.patch(row.id, { onchain_lockup_value: locked })
+      // The full held value, asset vtxo included, so the refund sweep returns it.
+      if (held > 0) await store.patch(row.id, { onchain_lockup_value: held })
       await store.fail(row.id, 'quoted', locked > 0 ? `lockup timeout with partial ${locked} sats` : 'lockup timeout')
     }
     return false
@@ -919,7 +935,7 @@ export class OnchainSendSwapService {
       await store.fail(row.id, 'claiming', 'claiming state with no preimage')
       return false
     }
-    const outputs = await arkade.findLockups(row.pkScript)
+    const outputs = claimOutputs(await arkade.findLockups(row.pkScript), row.amountSats)
     if (outputs.length === 0) {
       // Proof of neither our claim nor the lockup's spend: `findLockups` is
       // spendableOnly. {@link pushRefund}'s refusal applies here too, and harder —
