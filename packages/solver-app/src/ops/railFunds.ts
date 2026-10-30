@@ -271,10 +271,12 @@ const railWithdraw = async (
   }
 
   const balance = await onchain.getBalance()
-  if (amountSats > balance.confirmedSats) {
+  // Admission reserves `owedPayoutSats` the same way; spending it robs a funded-but-unbroadcast send.
+  const owed = (await services.onchainStore?.owedPayoutSats()) ?? 0
+  if (amountSats > balance.confirmedSats - owed) {
     throw new Error(
-      `withdrawal of ${amountSats} sats exceeds the rail's confirmed onchain balance ` +
-        `[requested: ${amountSats}, confirmed: ${balance.confirmedSats}, unconfirmed: ${balance.unconfirmedSats} sats]`,
+      `withdrawal of ${amountSats} sats exceeds the rail's withdrawable onchain balance ` +
+        `[requested: ${amountSats}, confirmed: ${balance.confirmedSats}, owed: ${owed}, unconfirmed: ${balance.unconfirmedSats} sats]`,
     )
   }
 
