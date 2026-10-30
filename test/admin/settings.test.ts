@@ -263,13 +263,23 @@ describe('describeSettings', () => {
   })
 })
 
-describe('a registered rail’s own settings', () => {
+describe("a registered rail's own settings", () => {
   const STORAGE = 'rails.lightning["console-rail"].storageDir'
+  const never = async () => {
+    throw new Error('never built here')
+  }
   registerLightningRail('console-rail', {
-    create: async () => {
-      throw new Error('never built here')
+    create: never,
+    consoleSettings: (railConfig) => [
+      { path: STORAGE, value: `.data/${railConfig.network}` },
+      { path: 'SWAP_NETWORK', value: 'claimed by the rail' },
+    ],
+  })
+  registerLightningRail('throwing-rail', {
+    create: never,
+    consoleSettings: () => {
+      throw new Error('block unreadable')
     },
-    consoleSettings: (railConfig) => [{ path: STORAGE, value: `.data/${railConfig.network}` }],
   })
 
   it('are listed read-only, under the label the rail gives them, when that rail is selected', () => {
@@ -277,6 +287,21 @@ describe('a registered rail’s own settings', () => {
       (knob) => knob.key === STORAGE,
     )
     expect(rows).toEqual([{ key: STORAGE, path: STORAGE, value: '.data/regtest', source: 'config', editable: false }])
+  })
+
+  it('never displace a setting the list already holds', () => {
+    const network = describeSettings({ ...config, lnBackend: 'console-rail' } as Config, {}).filter(
+      (knob) => knob.key === 'SWAP_NETWORK',
+    )
+    expect(network).toEqual([expect.objectContaining({ value: 'regtest' })])
+  })
+
+  it('cost the list one row, not the page, when the rail throws', () => {
+    const knobs = describeSettings({ ...config, lnBackend: 'throwing-rail' } as Config, {})
+    expect(knobs.find((knob) => knob.key === 'SWAP_NETWORK')?.value).toBe('regtest')
+    expect(knobs.find((knob) => knob.key === 'rails.lightning["throwing-rail"]')?.value).toBe(
+      '(could not be listed: see the log)',
+    )
   })
 
   it('are absent while another backend is selected', () => {

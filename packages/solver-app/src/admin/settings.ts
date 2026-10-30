@@ -25,6 +25,7 @@ import { CORRIDORS, FREE, type Corridor, type Fee } from '@arkade-os/solver-core
 import { descriptorFor } from '@arkade-os/solver-corridors/corridors/index.js'
 import { MAX_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/send.js'
 import { assetMarketKey } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import { log, messageOf } from '@arkade-os/solver-core/util/poll.js'
 import { lightningRailFor } from '../ops/rails.js'
 
 export type KnobSource = 'config' | 'override'
@@ -430,8 +431,17 @@ export const describeSettings = (
     { key: 'OPEN_RFQ_MAX_BIDS_PER_MIN', value: config.openRfqMaxBidsPerMinute, source: 'config', editable: false },
   )
   const rail = config.lnBackend ? lightningRailFor(config.lnBackend) : undefined
-  for (const { path: where, value } of rail?.consoleSettings?.(config) ?? []) {
-    knobs.push({ key: where, value, source: 'config', editable: false })
+  let railRows: ReadonlyArray<{ path: string; value: string | number | boolean }> = []
+  try {
+    railRows = rail?.consoleSettings?.(config) ?? []
+  } catch (error) {
+    // Out-of-repo code: one row says it failed, rather than the page.
+    log(`console: rail ${config.lnBackend} could not list its settings: ${messageOf(error)}`)
+    railRows = [{ path: `rails.lightning["${config.lnBackend}"]`, value: '(could not be listed: see the log)' }]
+  }
+  const taken = new Set(knobs.map((knob) => knob.key))
+  for (const { path: where, value } of railRows) {
+    if (!taken.has(where)) knobs.push({ key: where, value, source: 'config', editable: false })
   }
 
   return knobs.map((knob) => ({ ...knob, path: path(knob.key) }))
