@@ -211,13 +211,15 @@ describe('LndOnchainAdapter.signFunding', () => {
       [script(3), 50_000],
     ])
     const adapter = await LndOnchainAdapter.create(config)
-    await expect(adapter.signFunding({ address: 'bcrt1qhtlc', amountSats: 50_000 })).resolves.toEqual({
+    await expect(
+      adapter.signFunding({ address: 'bcrt1qhtlc', amountSats: 50_000, feeRateSatPerVbyte: 12 }),
+    ).resolves.toEqual({
       txid: tx.id,
       vout: 1,
       tx: hex.encode(tx.toBytes(true, false)),
     })
     expect(fundPsbt).toHaveBeenCalledWith(
-      expect.objectContaining({ outputs: [{ address: 'bcrt1qhtlc', tokens: 50_000 }] }),
+      expect.objectContaining({ outputs: [{ address: 'bcrt1qhtlc', tokens: 50_000 }], fee_tokens_per_vbyte: 12 }),
     )
   })
 
@@ -227,7 +229,9 @@ describe('LndOnchainAdapter.signFunding', () => {
       [script(3), 49_999],
     ])
     const adapter = await LndOnchainAdapter.create(config)
-    await expect(adapter.signFunding({ address: 'bcrt1qhtlc', amountSats: 50_000 })).rejects.toThrow('0 times')
+    await expect(
+      adapter.signFunding({ address: 'bcrt1qhtlc', amountSats: 50_000, feeRateSatPerVbyte: 12 }),
+    ).rejects.toThrow('0 times')
   })
 })
 

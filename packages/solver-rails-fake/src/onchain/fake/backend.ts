@@ -78,10 +78,15 @@ export class FakeOnchainBackend implements OnchainSendBackend {
 
   private readonly signedFundings = new Map<string, { address: string; amountSats: number; vout: number }>()
 
+  /** The sat/vB the last {@link signFunding} was asked to pay, so a test can assert the corridor threads it. */
+  signFundingFeeRate: number | null = null
+
   async signFunding(params: {
     address: string
     amountSats: number
+    feeRateSatPerVbyte: number
   }): Promise<{ txid: string; vout: number; tx: string }> {
+    this.signFundingFeeRate = params.feeRateSatPerVbyte
     const tx = new Transaction({ allowUnknownInputs: true, allowUnknownOutputs: true })
     tx.addInput({ txid: randomBytes(32), index: 0 })
     for (let i = 0; i < this.fundingVout; i++) tx.addOutput({ script: new Uint8Array([0x6a]), amount: 0n })

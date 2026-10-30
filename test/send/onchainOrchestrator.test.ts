@@ -649,6 +649,58 @@ describe('OnchainSendSwapService', () => {
     expect(row.fundingTxid).toBeTruthy()
   })
 
+  it('funds the onchain HTLC at the corridor-sampled fee rate, not the wallet default', async () => {
+    const outcome = await service.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    deps.outputs.set(outcome.swap.pkScript, [{ txid: 'lockup-tx', vout: 0, value: 50_000 }])
+    const row = await service.tick(outcome.swap.id)
+    expect(row.state).toBe('awaiting_claim')
+    // Not the wallet's own default: the funding goes out at the rate the corridor sampled.
+    expect(deps.onchain.signFundingFeeRate).toBe(await deps.onchain.estimateFeeRate())
+  })
+
+  it('alerts the operator when the funding broadcast stays unconfirmed with no one able to claim', async () => {
+    const errors: { id: string; error: unknown }[] = []
+    const alerting = new OnchainSendSwapService({
+      store: deps.store,
+      onchain: deps.onchain,
+      arkade: deps.arkade,
+      limits: { minSats: 1_000, maxSats: 1_000_000 },
+      maxExposedSats: 1_000_000,
+      totalCommitted: () => deps.store.committedSats(),
+      admission: new AdmissionControl(),
+      network: 'regtest',
+      signer,
+      refundDestinationScript,
+      now: clock,
+    })
+    alerting.onTickError = (id, error) => errors.push({ id, error })
+    const outcome = await alerting.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    deps.outputs.set(outcome.swap.pkScript, [{ txid: 'lockup-tx', vout: 0, value: 50_000 }])
+    const funded = await alerting.tick(outcome.swap.id)
+    expect(funded.state).toBe('awaiting_claim')
+
+    // Funding stuck in the mempool, no claim, past the alert threshold but far from htlc_locktime.
+    now = funded.fundStartedAt! + 20 * 60 + 1
+    const row = await alerting.tick(outcome.swap.id)
+    expect(row.state).toBe('awaiting_claim')
+    expect(errors).toHaveLength(1)
+    expect(String((errors[0]?.error as Error).message)).toContain('unconfirmed')
+  })
+
   it('does not fund the onchain HTLC twice when the process dies between the broadcast and the persist', async () => {
     // The crash-safety hole this guards: the funding broadcast is a real,
     // irreversible transaction and THEN the process dies (or the store write
