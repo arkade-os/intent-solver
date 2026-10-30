@@ -68,7 +68,7 @@ describe('refundNow refuses a swap the solver may already have paid out', () => 
   for (const state of [...EXPOSED, 'claimed']) {
     it(`throws on a ${state} row and pushes no refund`, async () => {
       const { services, patch, transition } = servicesWith(state)
-      await expect(refundNow(services as never, 'swap-1')).rejects.toThrow(/paid|exposed|twice/i)
+      await expect(refundNow(services as never, 'swap-1')).rejects.toThrow(/in flight|twice/i)
       expect(refundSwapScript).not.toHaveBeenCalled()
       expect(refundSweptSwapScript).not.toHaveBeenCalled()
       expect(patch).not.toHaveBeenCalled()
