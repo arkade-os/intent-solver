@@ -54,6 +54,7 @@ import {
 } from '@arkade-os/solver-core/invoice/decode.js'
 import { preimageMatchesHash, scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { claimOutputs, satsOutputs } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
 import { advanceUnrolledClaims, awaitLeftover, lockupLeftover, settleUnrolledClaims } from '../unrolledSpendStep.js'
 import { boundedSpendInputs, MAX_LOCKUP_SPEND_INPUTS } from '@arkade-os/solver-arkade/arkade/wallet.js'
@@ -589,17 +590,26 @@ export class SendSwapService {
     // us to make, which is the number they think in — while everything from here
     // down deals in the lockup, because that is the amount that actually has to
     // arrive. With a zero fee the two are equal and this is a no-op.
+    // A rail's subsidy comes out of this corridor's bps cut and no further: the lockup covers its routing.
     const quoteFee =
       feeEstimate === null
         ? this.fee
-        : { bps: this.fee.bps, flatSats: feeEstimate.billableFeeSats ?? feeEstimate.feeSats }
+        : {
+            bps: this.fee.bps,
+            flatSats: Math.max(
+              feeEstimate.billableFeeSats ?? feeEstimate.feeSats,
+              feeEstimate.feeSats - Math.ceil((decoded.amountSats * this.fee.bps) / 10_000),
+            ),
+          }
     const lockupSats = giveSatsFor(decoded.amountSats, quoteFee)
     // RESERVED, not merely observed: the row below is what makes this swap
     // visible to `totalCommitted()`, and until it lands a concurrent quote
     // reads the same headroom and takes it too. Handed back in the
     // `finally`, by which point either the row counts instead or nothing
     // was committed at all.
-    const routingFeeSats = feeEstimate?.feeSats ?? maxRoutingFeeSats(decoded.amountSats)
+    // Unestimated, the quote charged only the configured fee: that is all routing may spend.
+    const routingFeeSats =
+      feeEstimate?.feeSats ?? Math.min(maxRoutingFeeSats(decoded.amountSats), lockupSats - decoded.amountSats)
     const refusal: { ceiling?: 'exposure' | 'float' } = {}
     const reservation = await this.admission.admit({
       pair: RFQ_PAIR_SEND,
@@ -678,7 +688,7 @@ export class SendSwapService {
           clientRefundPubkey: options.clientRefundPubkey,
           receiverPkScript: arkade.receiverPkScript,
           nonInteractiveParameters: true,
-          quotedRoutingFeeSats: feeEstimate?.feeSats,
+          quotedRoutingFeeSats: coupled ? undefined : routingFeeSats,
           rfqId: options.rfqId,
         })
         return { accepted: true, swap, lockupDeadline: acceptance.lockupDeadline }
@@ -946,8 +956,10 @@ export class SendSwapService {
 
   private async whenQuoted(row: SendSwapRow): Promise<boolean> {
     const { store, arkade } = this.deps
-    const outputs = await arkade.findLockups(row.pkScript)
+    const all = await arkade.findLockups(row.pkScript)
+    const outputs = satsOutputs(all)
     const locked = outputs.reduce((sum, o) => sum + o.value, 0)
+    const held = all.reduce((sum, o) => sum + o.value, 0)
 
     const timedOut = this.now() >= lockupDeadlineFor(row.createdAt, row.invoiceExpiresAt, this.lockupTimeout)
     const expired = this.now() >= row.invoiceExpiresAt
@@ -967,6 +979,21 @@ export class SendSwapService {
     if (locked === row.amountSats && outputs.length > MAX_LOCKUP_SPEND_INPUTS) {
       await store.patch(row.id, { lockup_value: locked })
       await store.fail(row.id, 'quoted', `lockup funded in ${outputs.length} outputs, over ${MAX_LOCKUP_SPEND_INPUTS}`)
+      return false
+    }
+
+    // Funded, but (some of) the value sits on an asset vtxo a claim can never
+    // spend — so we would never collect even after paying. Refuse at once rather
+    // than wait out the lockup timeout for the same end: the refund sweep then
+    // returns the WHOLE lockup, asset included, through the cooperative leaf.
+    // `held >= amountSats` is what separates this from a client still funding.
+    if (locked < row.amountSats && held >= row.amountSats) {
+      await store.patch(row.id, { lockup_value: held })
+      await store.fail(
+        row.id,
+        'quoted',
+        `lockup funded on an asset vtxo a claim cannot spend: ${held} held, ${locked} spendable`,
+      )
       return false
     }
 
@@ -996,8 +1023,10 @@ export class SendSwapService {
     // drive-later and crash-recovery paths cannot smuggle in a stale lockup that
     // an always-on watcher would have timed out.
     if (timedOut || expired) {
-      // Record whatever is there so the refund sweep can return it.
-      if (locked > 0) await store.patch(row.id, { lockup_value: locked })
+      // Record whatever is there so the refund sweep can return it — including
+      // an asset vtxo's value, which `satsOutputs` drops from `locked` but the
+      // refund still takes.
+      if (held > 0) await store.patch(row.id, { lockup_value: held })
       const reason = expired
         ? 'invoice expired before funding completed'
         : locked >= row.amountSats
@@ -1746,7 +1775,7 @@ export class SendSwapService {
       await store.fail(row.id, 'claiming', 'claiming state with no preimage')
       return false
     }
-    const outputs = await arkade.findLockups(row.pkScript)
+    const outputs = claimOutputs(await arkade.findLockups(row.pkScript), row.amountSats)
     // `findLockups` leaves out an output the client unrolled: arkd refuses it every offchain spend.
     const unrolled = await advanceUnrolledClaims(store, row, arkade, row, row.preimage)
     if (outputs.length === 0 && unrolled === null) {

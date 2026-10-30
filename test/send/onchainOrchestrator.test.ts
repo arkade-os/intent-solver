@@ -113,7 +113,10 @@ const buildDeps = async (fundingVout = 0) => {
   const driver = betterSqliteDriver(':memory:')
   const store = await OnchainSendSwapStore.open(driver, clock)
   const onchain = new FakeOnchainBackend(5, fundingVout)
-  const outputs = new Map<string, { txid: string; vout: number; value: number; expiresAt?: number }[]>()
+  const outputs = new Map<
+    string,
+    { txid: string; vout: number; value: number; expiresAt?: number; assets?: { assetId: string; amount: bigint }[] }[]
+  >()
   // Scripts whose outputs are PROVABLY spent. Deliberately separate from
   // `outputs` going empty: telling "the money was spent" apart from "the
   // spendable view has not caught up" is the whole point of the second read,
@@ -1216,6 +1219,86 @@ describe('OnchainSendSwapService', () => {
     row = await service.tick(outcome.swap.id)
     expect(row.state).toBe('claimed')
     expect(row.claimArkTxid).toBe('claim-ark-txid')
+  })
+
+  it('refuses at once a lockup whose sats arrive on an asset-carrying vtxo', async () => {
+    const outcome = await service.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    deps.outputs.set(outcome.swap.pkScript, [
+      { txid: 'lockup-tx', vout: 0, value: 50_000, assets: [{ assetId: 'ab'.repeat(34), amount: 1n }] },
+    ])
+    expect((await service.tick(outcome.swap.id)).state).toBe('refused')
+  })
+
+  it('claims only the sats outputs when an asset vtxo lands on the lockup before the claim', async () => {
+    const outcome = await service.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    const funding = { txid: 'lockup-tx', vout: 0, value: 50_000 }
+    deps.outputs.set(outcome.swap.pkScript, [funding])
+    let row = await service.tick(outcome.swap.id)
+    expect(row.state).toBe('awaiting_claim')
+
+    deps.outputs.set(outcome.swap.pkScript, [
+      funding,
+      { txid: 'dust-tx', vout: 0, value: 330, assets: [{ assetId: 'ab'.repeat(34), amount: 1n }] },
+    ])
+    const claimed: unknown[] = []
+    deps.arkade.claim = ((_row: unknown, outputs: unknown) => {
+      claimed.push(outputs)
+      return Promise.resolve('claim-ark-txid')
+    }) as typeof deps.arkade.claim
+    deps.onchain.spendClaim(row.fundingTxid!, 0, [
+      new Uint8Array([0xaa]),
+      P,
+      new Uint8Array([0xbb]),
+      new Uint8Array([0xcc]),
+    ])
+    row = await service.tick(outcome.swap.id)
+    expect(row.state).toBe('claimed')
+    expect(claimed).toEqual([[funding]])
+  })
+
+  it('claims the asset vtxo too when the asset-free outputs cannot cover what was paid', async () => {
+    const outcome = await service.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    deps.outputs.set(outcome.swap.pkScript, [{ txid: 'lockup-tx', vout: 0, value: 50_000 }])
+    let row = await service.tick(outcome.swap.id)
+    expect(row.state).toBe('awaiting_claim')
+
+    const carrying = { txid: 'lockup-tx', vout: 0, value: 50_000, assets: [{ assetId: 'ab'.repeat(34), amount: 1n }] }
+    deps.outputs.set(outcome.swap.pkScript, [carrying])
+    const claimed: unknown[] = []
+    deps.arkade.claim = ((_row: unknown, outputs: unknown) => {
+      claimed.push(outputs)
+      return Promise.resolve('claim-ark-txid')
+    }) as typeof deps.arkade.claim
+    deps.onchain.spendClaim(row.fundingTxid!, 0, [
+      new Uint8Array([0xaa]),
+      P,
+      new Uint8Array([0xbb]),
+      new Uint8Array([0xcc]),
+    ])
+    row = await service.tick(outcome.swap.id)
+    expect(row.state).toBe('claimed')
+    expect(claimed).toEqual([[carrying]])
   })
 
   it('names the server-independent recourse on a claim it parks past the refund deadline', async () => {

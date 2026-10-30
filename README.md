@@ -767,16 +767,16 @@ All **invariant**. The first five are shared by name _and_ value with
 `@arkade-os/swap`'s `onchainHtlc.ts`, because the client's own `assertFundable`
 guardrail is written in terms of exactly these constants.
 
-| Constant                                                            | Value                 | Notes                                                                                                                                                          |
-| ------------------------------------------------------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ONCHAIN_SECONDS_PER_BLOCK`                                         | 600                   | send leg                                                                                                                                                       |
-| `ONCHAIN_CLAIM_MARGIN_SECONDS`                                      | 90 min                | send leg                                                                                                                                                       |
-| `ONCHAIN_ORDER_MARGIN_SECONDS`                                      | 2 h                   | send leg                                                                                                                                                       |
-| `DEFAULT_MIN_CONFIRMATIONS`                                         | `1`                   | solver policy when a quote does not override it                                                                                                                |
-| `MAX_MIN_CONFIRMATIONS`                                             | `6`                   | a requested depth above this is clamped down, not refused                                                                                                      |
-| `ONCHAIN_DUST_SATS`                                                 | `330`                 | the **taproot** threshold, not P2PKH's 546 — the refund destination is taproot. Below it the spend refuses rather than broadcasting a non-standard transaction |
-| `DEFAULT_ONCHAIN_LOCKUP_TIMEOUT`                                    | 15 min                | send leg                                                                                                                                                       |
-| `MIN_ONCHAIN_FUND_WINDOW`                                           | 90 min                | re-checked immediately before funding the onchain HTLC                                                                                                         |
+| Constant                         | Value  | Notes                                                                                                                                                          |
+| -------------------------------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ONCHAIN_SECONDS_PER_BLOCK`      | 600    | send leg                                                                                                                                                       |
+| `ONCHAIN_CLAIM_MARGIN_SECONDS`   | 90 min | send leg                                                                                                                                                       |
+| `ONCHAIN_ORDER_MARGIN_SECONDS`   | 2 h    | send leg                                                                                                                                                       |
+| `DEFAULT_MIN_CONFIRMATIONS`      | `1`    | solver policy when a quote does not override it                                                                                                                |
+| `MAX_MIN_CONFIRMATIONS`          | `6`    | a requested depth above this is clamped down, not refused                                                                                                      |
+| `ONCHAIN_DUST_SATS`              | `330`  | the **taproot** threshold, not P2PKH's 546 — the refund destination is taproot. Below it the spend refuses rather than broadcasting a non-standard transaction |
+| `DEFAULT_ONCHAIN_LOCKUP_TIMEOUT` | 15 min | send leg                                                                                                                                                       |
+| `MIN_ONCHAIN_FUND_WINDOW`        | 90 min | re-checked immediately before funding the onchain HTLC                                                                                                         |
 
 ```
 send    htlcLocktime   = now + minConf × 600 + 2 × 90min
@@ -914,36 +914,15 @@ reading the pinned SDK bundle (`node_modules/@arkade-os/sdk/dist/`; grep for the
 constant names below), not from documentation. Full walkthrough: `docs/runbook.md` § "Why the stack
 needs those overrides".
 
-**The checkpoint exit delay floor is the one most likely to surprise a
-production deployment.** `Wallet.create` resolves a policy and throws
-`ServerResponseMismatchError` if the server's advertised checkpoint tapscript
-is below it:
-
-| Network                       | Floor               | Smallest usable delay | Constant                                      |
-| ----------------------------- | ------------------- | --------------------- | --------------------------------------------- |
-| regtest (`bech32 === 'bcrt'`) | **1200 s**          | 1536 s                | `REGTEST_MIN_CHECKPOINT_EXIT_DELAY_SECONDS`   |
-| mutinynet                     | **4096 s**          | 4096 s                | `MUTINYNET_MIN_CHECKPOINT_EXIT_DELAY_SECONDS` |
-| signet                        | **86,016 s**        | 86,016 s              | `SIGNET_MIN_CHECKPOINT_EXIT_DELAY_SECONDS`    |
-| every other network           | **86,400 s (24 h)** | 86,528 s              | `DEFAULT_MIN_CHECKPOINT_EXIT_DELAY_SECONDS`   |
-
-BIP68 counts seconds in 512 s units, so a server's delay is always a multiple
-of 512. Neither 1200 nor 86,400 is one, so the smallest usable delay is the
-next multiple up. Setting `ARKD_CHECKPOINT_EXIT_DELAY` to the floor itself does
-not work: 86,400 s is 168.75 units, and 168 units is 86,016 s.
-
-The comparison is a strict `<`, so a delay exactly at the floor passes. Off
-regtest the policy additionally sets `requireSeconds: true`, so a block-typed
-timelock is rejected before the floor is even reached. The SDK chooses the row
-from the network the **server advertises** (`info.network`), inside
-`Wallet.create` and before this service checks that name against its own
-profile. The network profiles in `packages/solver-core/src/core/networks.ts`
-therefore pin the floor for every non-regtest network, so the operator cannot
-select a relaxed row by advertising another name.
-
-On regtest that means **`ARKD_CHECKPOINT_EXIT_DELAY=1536`, not 1200**: BIP68
-encodes in 512s units, so 1200 is representable only as `floor(1200/512) = 2`
-units = 1024 s, which is under the floor. 1536 = 3 × 512 is the smallest
-multiple of the granularity that clears it.
+**The checkpoint exit delay floor is 512 s on every network.**
+`Wallet.create` decodes the server's advertised checkpoint tapscript and throws
+`ServerResponseMismatchError` below it (SDK `assertValidServerUnrollScript`).
+512 s is the smallest seconds-typed BIP68 timelock, so in practice the check
+rejects a block-typed timelock off regtest (`requireSeconds: true`) and a
+malformed or wrong-pubkey script, not a short delay. There is no per-network
+floor any more and nothing to pin: since `@arkade-os/sdk` 0.5.0-rc.31
+(arkade-os/ts-sdk#1121) arkd refuses any checkpoint script other than the one it
+serves, so the client takes the server's.
 
 **The batch-expiry floor is checked at settle, not at startup.**
 `Wallet.create` only _pins_ the policy; the assertion fires per round inside

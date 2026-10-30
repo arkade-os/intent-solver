@@ -446,6 +446,24 @@ describe('a lockup sprayed with outputs anyone could have paid in', () => {
   })
 })
 
+const ASSET_A = 'ab'.repeat(32) + '0100'
+const ASSET_B = 'cd'.repeat(32) + '0000'
+
+const packetOn = (arkTxB64: string) => {
+  const tx = Transaction.fromPSBT(base64.decode(arkTxB64))
+  return Extension.fromTx(tx).getPacketByType(asset.Packet.PACKET_TYPE)
+}
+
+/** Every group's `(assetId, output index, amount)`. */
+const allocations = (packet: ReturnType<typeof packetOn>) =>
+  (packet as unknown as { groups: AssetGroupView[] }).groups.flatMap((group) =>
+    group.outputs.map((entry) => ({
+      assetId: group.assetId.toString(),
+      vout: entry.vout,
+      amount: BigInt(entry.amount),
+    })),
+  )
+
 describe('claimSwapScript', () => {
   const PREIMAGE = new Uint8Array(32).fill(7)
   const DESTINATION = new ArkAddress(SERVER, key(5), 'tark').encode()
@@ -499,29 +517,34 @@ describe('claimSwapScript', () => {
     ).rejects.toBeInstanceOf(ServerResponseMismatchError)
     expect(finalizeTx).not.toHaveBeenCalled()
   })
+
+  it('moves every asset the lockup carries onto the claim output', async () => {
+    finalizeTx.mockClear()
+    const serverSubmit = vi.fn(honestServer)
+    const carrying: FundedOutput[] = [
+      {
+        ...funded[0]!,
+        assets: [
+          { assetId: ASSET_A, amount: 500n },
+          { assetId: ASSET_B, amount: 7n },
+        ],
+      },
+      { ...funded[1]!, assets: [{ assetId: ASSET_A, amount: 250n }] },
+    ]
+    await claimSwapScript(claimCtx(serverSubmit), baseScript(), carrying, PREIMAGE, DESTINATION)
+
+    const [arkTxB64] = serverSubmit.mock.calls[0]!
+    expect(allocations(packetOn(arkTxB64))).toEqual([
+      { assetId: ASSET_A, vout: 0, amount: 750n },
+      { assetId: ASSET_B, vout: 0, amount: 7n },
+    ])
+    expect(finalizeTx).toHaveBeenCalledOnce()
+  })
 })
 
 /** Refunding an ASSET-carrying lockup. `buildOffchainTx` outputs are sats alone,
  *  so nothing in a sats-only test notices a missing packet. */
 describe('refunding an asset-carrying lockup', () => {
-  const ASSET_A = 'ab'.repeat(32) + '0100'
-  const ASSET_B = 'cd'.repeat(32) + '0000'
-
-  const packetOn = (arkTxB64: string) => {
-    const tx = Transaction.fromPSBT(base64.decode(arkTxB64))
-    return Extension.fromTx(tx).getPacketByType(asset.Packet.PACKET_TYPE)
-  }
-
-  /** Every group's `(assetId, output index, amount)`. */
-  const allocations = (packet: ReturnType<typeof packetOn>) =>
-    (packet as unknown as { groups: AssetGroupView[] }).groups.flatMap((group) =>
-      group.outputs.map((entry) => ({
-        assetId: group.assetId.toString(),
-        vout: entry.vout,
-        amount: BigInt(entry.amount),
-      })),
-    )
-
   const receiveLegScript = () =>
     new CovenantSwapScript({
       receiver: key(2),

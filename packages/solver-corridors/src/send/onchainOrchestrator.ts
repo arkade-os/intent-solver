@@ -37,6 +37,7 @@ import { FREE, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { fixedFeePricing, type PricingStrategy } from '@arkade-os/solver-core/core/pricing.js'
 import { paymentHashFromPreimage, scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { claimOutputs, satsOutputs } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
 import { advanceUnrolledClaims, awaitLeftover, lockupLeftover, settleUnrolledClaims } from '../unrolledSpendStep.js'
 import { boundedSpendInputs, MAX_LOCKUP_SPEND_INPUTS } from '@arkade-os/solver-arkade/arkade/wallet.js'
@@ -785,8 +786,10 @@ export class OnchainSendSwapService {
 
   private async whenQuoted(row: OnchainSendSwapRow): Promise<boolean> {
     const { store, arkade, network } = this.deps
-    const outputs = await arkade.findLockups(row.pkScript)
+    const all = await arkade.findLockups(row.pkScript)
+    const outputs = satsOutputs(all)
     const locked = outputs.reduce((sum, o) => sum + o.value, 0)
+    const held = all.reduce((sum, o) => sum + o.value, 0)
     const timedOut = this.now() >= row.createdAt + DEFAULT_ONCHAIN_LOCKUP_TIMEOUT
 
     if (locked > row.amountSats) {
@@ -796,6 +799,18 @@ export class OnchainSendSwapService {
     // One claim spends at most this many; the rest would stay for the client to refund.
     if (locked === row.amountSats && outputs.length > MAX_LOCKUP_SPEND_INPUTS) {
       await store.fail(row.id, 'quoted', `lockup funded in ${outputs.length} outputs, over ${MAX_LOCKUP_SPEND_INPUTS}`)
+      return false
+    }
+    // Funded, but (some of) the value sits on an asset vtxo a claim can never
+    // spend. Refuse at once rather than wait out the timeout for the same end;
+    // the refund sweep returns the whole lockup through the cooperative leaf.
+    if (locked < row.amountSats && held >= row.amountSats) {
+      await store.patch(row.id, { onchain_lockup_value: held })
+      await store.fail(
+        row.id,
+        'quoted',
+        `lockup funded on an asset vtxo a claim cannot spend: ${held} held, ${locked} spendable`,
+      )
       return false
     }
     if (locked === row.amountSats && !timedOut) {
@@ -819,7 +834,8 @@ export class OnchainSendSwapService {
       })
     }
     if (timedOut) {
-      if (locked > 0) await store.patch(row.id, { onchain_lockup_value: locked })
+      // The full held value, asset vtxo included, so the refund sweep returns it.
+      if (held > 0) await store.patch(row.id, { onchain_lockup_value: held })
       await store.fail(row.id, 'quoted', locked > 0 ? `lockup timeout with partial ${locked} sats` : 'lockup timeout')
     }
     return false
@@ -1041,7 +1057,7 @@ export class OnchainSendSwapService {
       await store.fail(row.id, 'claiming', 'claiming state with no preimage')
       return false
     }
-    const outputs = await arkade.findLockups(row.pkScript)
+    const outputs = claimOutputs(await arkade.findLockups(row.pkScript), row.amountSats)
     const unrolled = await advanceUnrolledClaims(store, row, arkade, covenantRowFor(row), row.preimage)
     if (outputs.length === 0 && unrolled === null) {
       // Proof of neither our claim nor the lockup's spend: `findLockups` is

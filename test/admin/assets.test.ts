@@ -47,7 +47,7 @@ const balanceWith = (assets: { assetId: string; amount: bigint }[], available = 
   preconfirmed: 0,
   available: 250_000,
   gated: 0,
-  intentLocked: 0,
+  pendingSettlement: 0,
   recoverable: 0,
   pendingRecovery: 0,
   unrolled: 0,

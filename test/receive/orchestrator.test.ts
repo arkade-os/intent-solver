@@ -2233,6 +2233,16 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
     expect(arkade.state.fundCalls).toHaveLength(0)
   })
 
+  it('does not fund against a coupled send lockup whose sats sit on an asset vtxo', async () => {
+    const svc = coupledService()
+    const swap = await quotedCoupled(svc)
+    sendRow = coupledSendRow('funded')
+    sendLockups = [{ txid: 's1', vout: 0, value: SEND_AMOUNT, assets: [{ assetId: 'ab'.repeat(34), amount: 1n }] }]
+
+    expect((await svc.tick(swap.id)).state).toBe('quoted')
+    expect(arkade.state.fundCalls).toHaveLength(0)
+  })
+
   it('refuses a coupled payout when funding was provably never submitted', async () => {
     let fundFailed = false
     const svc = coupledService(async () => {

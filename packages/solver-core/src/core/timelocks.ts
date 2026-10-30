@@ -16,7 +16,7 @@
  *
  * WHY BLOCKS EXIST AT ALL. Not on mainnet: block-interval variance over the ~12 blocks
  * of a two-hour window is far too wide to hold an HTLC deadline against, and the SDK's
- * own default policies (`defaultBatchExpiryPolicy`, `defaultCheckpointExitDelayPolicy`)
+ * own timelock policies (`defaultBatchExpiryPolicy`, `assertValidServerUnrollScript`)
  * set `requireSeconds: true` on every network but regtest. Blocks
  * are a REGTEST capability, for two reasons. An arkd configured with block delays is
  * the only one that can also serve VHTLC chain swaps, which need a block-typed

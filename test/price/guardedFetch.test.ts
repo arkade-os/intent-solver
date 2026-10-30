@@ -18,10 +18,12 @@ const fetchGuarded = createGuardedFetch({ lookup, isPrivate: (address) => addres
 let server: Server
 let port = 0
 const hits: string[] = []
+let lastUserAgent: string | undefined
 
 beforeAll(async () => {
   server = createServer((request, response) => {
     hits.push(request.url ?? '')
+    lastUserAgent = request.headers['user-agent']
     const [path, target] = (request.url ?? '').split('?to=')
     if (path === '/redirect') return response.writeHead(302, { location: decodeURIComponent(target!) }).end()
     response.writeHead(200, { 'content-type': 'application/json' }).end('{"price":"63512.42"}')
@@ -37,6 +39,7 @@ describe('createGuardedFetch', () => {
   it('reads a feed whose host resolves publicly, through the real price reader', async () => {
     const price = await createPriceFeed({ fetch: fetchGuarded })(`http://public.test:${port}/price`, '/price')
     expect(price).toEqual({ mantissa: 6351242n, scale: 2 })
+    expect(lastUserAgent).toMatch(/^arkade-intent-solver/)
   })
 
   it('refuses a public-looking host that resolves to a private address, before connecting', async () => {
