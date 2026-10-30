@@ -1119,8 +1119,6 @@ export const loadConfig = (): Config => {
       databasePath: arkDbPath(),
       isMainnet: profile.isMainnet,
       arkadeHrp: profile.arkadeHrp,
-      // A network fact, deliberately not an env knob: see NetworkProfile.
-      minCheckpointExitDelaySeconds: profile.minCheckpointExitDelaySeconds,
       unilateralExitDelayOverride: unilateralExitDelayOverride(),
       // Separate from LND_ESPLORA_URL above on purpose. That one is the
       // Lightning side's explorer; this is the Arkade wallet's view of L1, and

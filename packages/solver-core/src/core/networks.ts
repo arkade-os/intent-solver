@@ -43,17 +43,6 @@ export interface NetworkProfile {
    */
   isMainnet: boolean
   /**
-   * Lowers the SDK's minimum accepted checkpoint exit delay, in seconds, or
-   * undefined to keep the SDK's own floor (86400 off regtest, 1200 on it).
-   *
-   * A network fact rather than an env knob: it relaxes a fund-safety bound — how
-   * long our recourse takes when the Arkade Service stops cooperating — so the one
-   * deployment that must never carry it is mainnet, and living here means a testnet
-   * env file copied toward mainnet has nothing to carry. `undefined` is spelled out
-   * per network so adding a network forces the decision rather than defaulting it.
-   */
-  minCheckpointExitDelaySeconds: number | undefined
-  /**
    * Where a human goes to look at what this service moved.
    *
    * TWO, because the corridors span two chains and neither explorer can show the
@@ -76,9 +65,6 @@ export const NETWORKS = {
     arkdNetwork: 'bitcoin',
     backendNetwork: 'MAINNET',
     isMainnet: true,
-    // The SDK's own mainnet floor, pinned so a server advertising another network
-    // cannot relax it. See mutinynet below.
-    minCheckpointExitDelaySeconds: 86400,
     explorers: { arkade: 'https://arkade.space', onchain: 'https://mempool.arkade.sh' },
   },
   // Mutinynet is a signet: the Lightning side cannot tell the two apart, so they
@@ -90,16 +76,6 @@ export const NETWORKS = {
     arkdNetwork: 'mutinynet',
     backendNetwork: 'SIGNET',
     isMainnet: false,
-    // The SDK picks this floor by the name the server advertises in `info.network`
-    // (`defaultCheckpointExitDelayPolicy`), and does so inside `Wallet.create`, before
-    // our own network check runs, so an unpinned floor is operator-selectable (the
-    // objection in arkade-os/ts-sdk#706). Hence every non-regtest profile pins it;
-    // on regtest the SDK floor is already the lowest, so a lie can only raise it.
-    //
-    // Exact, not lower: the SDK compares with a strict `<`, so 4096 accepts this
-    // Service and refuses one that later shortens its delay. arkade-os/wallet#891
-    // pins the identical constant.
-    minCheckpointExitDelaySeconds: 4096,
     explorers: { arkade: 'https://explorer.mutinynet.arkade.sh', onchain: 'https://mempool.mutinynet.arkade.sh' },
   },
   signet: {
@@ -109,9 +85,6 @@ export const NETWORKS = {
     arkdNetwork: 'signet',
     backendNetwork: 'SIGNET',
     isMainnet: false,
-    // The SDK's own signet floor, pinned so a server advertising `mutinynet` cannot
-    // relax it to 4096. See mutinynet above.
-    minCheckpointExitDelaySeconds: 86016,
     explorers: { arkade: 'https://explorer.signet.arkade.sh', onchain: 'https://mempool.signet.arkade.sh' },
   },
   regtest: {
@@ -121,9 +94,6 @@ export const NETWORKS = {
     arkdNetwork: 'regtest',
     backendNetwork: 'REGTEST',
     isMainnet: false,
-    // The SDK's regtest floor is already 1200, and the stack's own
-    // ARKD_CHECKPOINT_EXIT_DELAY=1536 clears it. Nothing to relax.
-    minCheckpointExitDelaySeconds: undefined,
     explorers: { arkade: 'http://localhost:7080', onchain: 'http://localhost:3000' },
   },
 } as const satisfies Record<string, NetworkProfile>
