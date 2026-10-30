@@ -28,7 +28,7 @@ const holding = (row: Record<string, unknown>) =>
   ({ findByRfqId: async (id: string) => (id === RFQ_ID ? row : null) }) as never
 
 /**
- * A reader set over the four built-in stores, every one a miss unless
+ * A reader set over the three built-in stores, every one a miss unless
  * overridden. Built through `readerSetFromDeps` — the same path both hosts
  * take — so these tests exercise the real adapters rather than a hand-rolled
  * stand-in that could drift from them.
@@ -38,7 +38,6 @@ const readers = (over: Record<string, unknown> = {}) =>
     store: miss,
     onchainStore: miss,
     receiveStore: miss,
-    onchainReceiveStore: miss,
     ...over,
   } as unknown as FlatCorridorDeps)
 
@@ -76,21 +75,7 @@ const receiveRow = {
   preimage: null,
 }
 
-const onchainReceiveRow = {
-  state: 'funding_arkade',
-  updatedAt: 1_800_000_003,
-  paymentHash: HEX32,
-  lockupAddress: 'tark1onchainreceive',
-  onchainAddress: 'bcrt1qreceive',
-  fundingTxid: null,
-  arkadeClaimTxid: null,
-  onchainClaimTxid: null,
-  arkadeRefundTxid: null,
-  failureReason: null,
-  preimage: null,
-}
-
-describe('rfq status dispatch — all four corridors', () => {
+describe('rfq status dispatch — all three corridors', () => {
   it('answers from the lightning send store', async () => {
     const outcome = await respondToRfqStatus(readers({ store: holding(sendRow) }), request())
     expect(outcome.kind).toBe('status')
@@ -109,12 +94,6 @@ describe('rfq status dispatch — all four corridors', () => {
     // `funded` on this leg is the solver's Arkade lockup being spent, which the
     // wire reports as filling — see lightningReceiveRfqStateFromRow.
     expect(outcome.payload).toMatchObject({ state: 'filling', profile: { lockup_address: 'tark1receive' } })
-  })
-
-  it('answers from the onchain receive store', async () => {
-    const outcome = await respondToRfqStatus(readers({ onchainReceiveStore: holding(onchainReceiveRow) }), request())
-    expect(outcome.kind).toBe('status')
-    expect(outcome.payload).toMatchObject({ state: 'filling', profile: { htlc_address: 'bcrt1qreceive' } })
   })
 
   it('falls through every corridor before answering unknown', async () => {
@@ -159,10 +138,11 @@ describe('rfq status dispatch — all four corridors', () => {
 
   it('rejects a malformed request before touching any corridor', async () => {
     const boom = { findByRfqId: async () => throwing() } as never
-    const outcome = await respondToRfqStatus(
-      readers({ store: boom, onchainStore: boom, receiveStore: boom, onchainReceiveStore: boom }),
-      { v: 1, type: 'rfq_status_request', rfq_id: 'not-hex' },
-    )
+    const outcome = await respondToRfqStatus(readers({ store: boom, onchainStore: boom, receiveStore: boom }), {
+      v: 1,
+      type: 'rfq_status_request',
+      rfq_id: 'not-hex',
+    })
     expect(outcome.kind).toBe('invalid')
     expect(outcome.payload).toMatchObject({ reason: 'unsupported_payload' })
   })

@@ -24,20 +24,17 @@ const config = {
     'arkade:BTC->lightning:BTC': { minSats: 1_000, maxSats: 100_000 },
     'lightning:BTC->arkade:BTC': { minSats: 1_000, maxSats: 100_000 },
     'arkade:BTC->onchain:BTC': { minSats: 1_000, maxSats: 100_000 },
-    'onchain:BTC->arkade:BTC': { minSats: 1_000, maxSats: 100_000 },
   },
   corridorFees: {
     'arkade:BTC->lightning:BTC': { bps: 0, flatSats: 0 },
     'lightning:BTC->arkade:BTC': { bps: 0, flatSats: 0 },
     'arkade:BTC->onchain:BTC': { bps: 0, flatSats: 0 },
-    'onchain:BTC->arkade:BTC': { bps: 0, flatSats: 0 },
   },
   corridorEnabled: {
     'arkade:BTC->lightning:BTC': true,
     'lightning:BTC->arkade:BTC': true,
     // Disabled in the environment on purpose: the console must not enable it.
     'arkade:BTC->onchain:BTC': false,
-    'onchain:BTC->arkade:BTC': true,
   },
   // Rendered in the read-only block, which iterates it — an absent set throws
   // rather than showing empty.
@@ -57,7 +54,7 @@ describe('the editable key set', () => {
     // every key in here, and the port has no authentication of its own, so
     // growing this surface should cost a deliberate edit here.
     //
-    expect(editableKeys()).toHaveLength(4 * 5 + 3)
+    expect(editableKeys()).toHaveLength(3 * 5 + 3)
   })
 
   it('admits the globals by name, so the count above cannot pass on the wrong set', () => {

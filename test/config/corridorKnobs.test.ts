@@ -27,12 +27,12 @@ const BASE_ENV: Record<string, string> = {
   ARK_SERVER_URL: 'http://localhost:7070',
   EMULATOR_URL: 'http://localhost:7073',
   // Required rather than defaulted: every BTC corridor takes both its legs from
-  // the rail, so `loadConfig` refuses an unset value while any of the four is
+  // the rail, so `loadConfig` refuses an unset value while any of the three is
   // enabled — and enabled is exactly what this file exercises.
   LN_BACKEND: 'fake',
 }
 
-const STEMS = ['LN_SEND', 'LN_RECEIVE', 'ONCHAIN_SEND', 'ONCHAIN_RECEIVE'] as const
+const STEMS = ['LN_SEND', 'LN_RECEIVE', 'ONCHAIN_SEND'] as const
 const SUFFIXES = ['MIN_SATS', 'MAX_SATS', 'FEE_BPS', 'FEE_FLAT_SATS', 'ENABLED'] as const
 
 const KNOB_KEYS = STEMS.flatMap((stem) => SUFFIXES.map((suffix) => `${stem}_${suffix}`))
@@ -43,7 +43,6 @@ const PAIR_OF = {
   LN_SEND: 'arkade:BTC->lightning:BTC',
   LN_RECEIVE: 'lightning:BTC->arkade:BTC',
   ONCHAIN_SEND: 'arkade:BTC->onchain:BTC',
-  ONCHAIN_RECEIVE: 'onchain:BTC->arkade:BTC',
 } as const
 
 let saved: Record<string, string | undefined>
@@ -129,7 +128,7 @@ describe('per-corridor amount bounds', () => {
   })
 
   it('refuses a zero bound, which would be a corridor nobody can use', () => {
-    process.env.ONCHAIN_RECEIVE_MIN_SATS = '0'
-    expect(() => configFromKnobs(process.env)).toThrow(/ONCHAIN_RECEIVE_MIN_SATS must be a positive integer/)
+    process.env.ONCHAIN_SEND_MIN_SATS = '0'
+    expect(() => configFromKnobs(process.env)).toThrow(/ONCHAIN_SEND_MIN_SATS must be a positive integer/)
   })
 })

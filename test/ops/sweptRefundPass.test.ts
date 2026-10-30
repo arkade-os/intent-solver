@@ -43,7 +43,6 @@ const stores = {
   store: { findRecoverable: async () => [] },
   onchainStore: { findRecoverable: async () => [] },
   receiveStore: { findRecoverable: async () => [] },
-  onchainReceiveStore: { findRecoverable: async () => [] },
 }
 
 const servicesWith = (options: {

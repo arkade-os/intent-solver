@@ -26,7 +26,6 @@ import {
 import type { SendSwapRow } from '@arkade-os/solver-corridors/db/swaps.js'
 import type { OnchainSendSwapRow } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
 import type { ReceiveSwapRow } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
-import type { OnchainReceiveSwapRow } from '@arkade-os/solver-corridors/db/onchainReceiveSwaps.js'
 
 const key = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
 const RECEIVER = key(1)
@@ -167,20 +166,19 @@ describe('liveLockupRows', () => {
    * The regression this guards. `registerLiveLockups` (`cli.ts`) used to build
    * its row set from only TWO of the four corridor stores — `store` and
    * `onchainStore`, the SEND corridors where the CLIENT locks up the funds
-   * (`src/core/send.ts`). The two RECEIVE corridors — `receiveStore` and
-   * `onchainReceiveStore`, where the SOLVER funds the lockup itself
-   * (`src/core/receive.ts`: "we fund the Arkade side") — were never read at
-   * all, so the solver's own escrow never got the `isGenericallySpendable:
+   * (`src/core/send.ts`). The RECEIVE corridor — `receiveStore`, where the
+   * SOLVER funds the lockup itself (`src/core/receive.ts`: "we fund the Arkade
+   * side") — was never read at all, so the solver's own escrow never got the `isGenericallySpendable:
    * false` renewal gate or a recovery path.
    *
    * Each fake store below counts its own calls, which is the whole reason
-   * this function takes stores rather than four pre-fetched arrays: a
+   * this function takes stores rather than three pre-fetched arrays: a
    * corridor silently dropped from the implementation shows up here as a
    * store that was never read, not merely as a row that happens to be
    * missing from the output.
    */
-  it('reads all four corridor stores and maps each one through its own mapper', async () => {
-    const calls = { store: 0, onchainStore: 0, receiveStore: 0, onchainReceiveStore: 0 }
+  it('reads all three corridor stores and maps each one through its own mapper', async () => {
+    const calls = { store: 0, onchainStore: 0, receiveStore: 0 }
 
     const deps = {
       store: {
@@ -252,54 +250,22 @@ describe('liveLockupRows', () => {
           ]
         },
       },
-      onchainReceiveStore: {
-        findRecoverable: async () => {
-          calls.onchainReceiveStore += 1
-          return [
-            {
-              id: 'onchain-receive-1',
-              clientPayoutPubkey: 'onchain-receive-payout',
-              serverPubkey: 'server',
-              paymentHash: 'd'.repeat(64),
-              refundLocktime: REFUND_LOCKTIME,
-              claimDelay: 512,
-              emulatorPubkey: 'emulator',
-              refundPkScript: 'refund-pkscript',
-              pkScript: 'onchain-receive-pkscript',
-              providerPubkey: 'onchain-receive-solver-refund',
-              refundWithoutReceiverDelay: 1024,
-              refundDelay: 2048,
-              clientPayoutPkScript: 'onchain-receive-receiver-pkscript',
-              nonInteractiveParameters: null,
-            } as unknown as OnchainReceiveSwapRow,
-          ]
-        },
-      },
     }
 
-    // The reader set built over the SAME four fake stores, so this still proves
+    // The reader set built over the SAME three fake stores, so this still proves
     // each row went through its own corridor's mapper — now supplied by the
     // corridor rather than reached for by `vtxoLifecycle`.
     const rows = await liveLockupRows(readerSetFromDeps(deps as unknown as FlatCorridorDeps))
 
-    expect(calls).toEqual({ store: 1, onchainStore: 1, receiveStore: 1, onchainReceiveStore: 1 })
-    expect(rows.map((row) => row.pkScript)).toEqual([
-      'send-pkscript',
-      'onchain-send-pkscript',
-      'receive-pkscript',
-      'onchain-receive-pkscript',
-    ])
-    // Both receive rows went through their own mapper rather than being
-    // dropped or mistakenly mapped through the SEND mapper: the receiver role
-    // on each is the CLIENT's payout key, not the solver's — the role
-    // inversion `receiveCovenantRowFor` documents on both receive legs.
+    expect(calls).toEqual({ store: 1, onchainStore: 1, receiveStore: 1 })
+    expect(rows.map((row) => row.pkScript)).toEqual(['send-pkscript', 'onchain-send-pkscript', 'receive-pkscript'])
+    // The receive row went through its own mapper rather than being dropped
+    // or mistakenly mapped through the SEND mapper: the receiver role is the
+    // CLIENT's payout key, not the solver's — the role inversion
+    // `receiveCovenantRowFor` documents.
     expect(rows.find((row) => row.pkScript === 'receive-pkscript')).toMatchObject({
       receiverPubkey: 'receive-payout',
       clientRefundPubkey: 'receive-solver-refund',
-    })
-    expect(rows.find((row) => row.pkScript === 'onchain-receive-pkscript')).toMatchObject({
-      receiverPubkey: 'onchain-receive-payout',
-      clientRefundPubkey: 'onchain-receive-solver-refund',
     })
   })
 
@@ -310,7 +276,6 @@ describe('liveLockupRows', () => {
         store: empty,
         onchainStore: empty,
         receiveStore: empty,
-        onchainReceiveStore: empty,
       } as unknown as FlatCorridorDeps),
     )
     expect(rows).toEqual([])

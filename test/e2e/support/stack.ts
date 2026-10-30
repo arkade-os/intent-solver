@@ -4,11 +4,11 @@
  *
  * This is deliberately the same construction `packages/solver-app/src/cli.ts`'s `createServices`
  * performs, minus the CLI: the same `createArkadeContext`, the same
- * `RestEmulatorProvider` key fetch, the same adapter classes. Two corridors
- * (`lightning:BTC->arkade:BTC` and `onchain:BTC->arkade:BTC`) have no CLI
- * command and no RFQ ingress yet, so for those there is nothing to shell out
- * to and the service object IS the thing under test; the send corridors are
- * built the same way here so all four read alike.
+ * `RestEmulatorProvider` key fetch, the same adapter classes. One corridor
+ * (`lightning:BTC->arkade:BTC`) has no CLI command and no RFQ ingress yet, so
+ * for it there is nothing to shell out to and the service object IS the thing
+ * under test; the send corridors are built the same way here so all three read
+ * alike.
  *
  * Two deliberate deviations from `createServices`, both about not damaging the
  * machine the tests run on:
@@ -33,7 +33,7 @@ import { createArkadeContext, type ArkadeContext } from '@arkade-os/solver-arkad
 import { arkDbPath } from '@arkade-os/solver-app/config.js'
 import { resolveLimits, type Limits } from '@arkade-os/solver-core/core/limits.js'
 import { NETWORKS, isSwapNetwork, type NetworkProfile, type SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
-import { ONCHAIN_SECONDS_PER_BLOCK } from '@arkade-os/solver-core/core/onchainReceive.js'
+import { ONCHAIN_SECONDS_PER_BLOCK } from '@arkade-os/solver-core/core/onchainSend.js'
 import { LndOnchainAdapter } from '@arkade-os/solver-rails-lnd/onchain/lnd/adapter.js'
 import type { OnchainSendBackend } from '@arkade-os/solver-core/ports/onchain.js'
 import { FakeLightningBackend } from '@arkade-os/solver-rails-fake/ln/fake/backend.js'
@@ -189,17 +189,13 @@ const BALANCE_SETTLE_INTERVAL_MS = 3000
  *
  * LND for the same reason `docs/runbook.md`'s onchain walkthrough uses it: it
  * is the only shipped rail with a real onchain wallet on arkade-regtest's own
- * local chain, rather than on a hosted one it cannot reach. `LndOnchainAdapter`
- * satisfies both `OnchainSendBackend` and `OnchainReceiveBackend`, so one
- * instance serves the send corridor's `fund()` and the receive corridor's
- * watching and claiming.
+ * local chain, rather than on a hosted one it cannot reach.
  *
- * `esploraUrl` is passed for the RECEIVE corridor's sake: `findOutputs` reads
- * address history from Esplora because LND's own chain view is wallet-scoped
- * and carries no per-output values (see that method in
- * `src/onchain/lnd/adapter.ts`). `createServices` gets it for free by handing
- * `config.lnd` over whole; this builds the config by hand, so it has to be
- * named here or the receive corridor throws on its first `findOutputs`. The
+ * `esploraUrl` is passed because `findOutputs` reads address history from
+ * Esplora: LND's own chain view is wallet-scoped and carries no per-output
+ * values (see that method in `src/onchain/lnd/adapter.ts`). `createServices`
+ * gets it for free by handing `config.lnd` over whole; this builds the config
+ * by hand, so it has to be named here or the first `findOutputs` throws. The
  * default matches {@link esploraUrl}, the same endpoint `requireStack` already
  * probes as the `esplora` dependency this corridor declares.
  */
@@ -257,7 +253,7 @@ export const holdSettleDeadline = async (paymentHash: string): Promise<number> =
   if (!held) throw new Error(`no accepted HTLC on the solver's hold invoice for ${paymentHash}`)
   const height = await nodeBlockHeight(solverContainer())
   // Blocks to seconds at the repo's own constant, the same conversion
-  // `htlcLocktimeFor` (src/core/onchainReceive.ts) makes for the sibling corridor.
+  // `htlcLocktimeFor` (src/core/onchainSend.ts) makes for the onchain corridor.
   return nowSeconds() + (held.expiry_height - height) * ONCHAIN_SECONDS_PER_BLOCK
 }
 

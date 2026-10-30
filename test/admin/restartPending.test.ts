@@ -27,19 +27,16 @@ const baseConfig = {
     'arkade:BTC->lightning:BTC': { minSats: 1_000, maxSats: 100_000 },
     'lightning:BTC->arkade:BTC': { minSats: 1_000, maxSats: 100_000 },
     'arkade:BTC->onchain:BTC': { minSats: 1_000, maxSats: 100_000 },
-    'onchain:BTC->arkade:BTC': { minSats: 1_000, maxSats: 100_000 },
   },
   corridorFees: {
     'arkade:BTC->lightning:BTC': { bps: 0, flatSats: 0 },
     'lightning:BTC->arkade:BTC': { bps: 0, flatSats: 0 },
     'arkade:BTC->onchain:BTC': { bps: 0, flatSats: 0 },
-    'onchain:BTC->arkade:BTC': { bps: 0, flatSats: 0 },
   },
   corridorEnabled: {
     'arkade:BTC->lightning:BTC': true,
     'lightning:BTC->arkade:BTC': true,
     'arkade:BTC->onchain:BTC': true,
-    'onchain:BTC->arkade:BTC': true,
   },
   adminRestartEnabled: true,
   assetCarrierPricing: false,
@@ -91,7 +88,6 @@ const services = (over: Record<string, unknown> = {}) =>
     store: store(),
     receiveStore: store(),
     onchainStore: store(),
-    onchainReceiveStore: store(),
     adminStore: {
       getOverrides: vi.fn().mockResolvedValue({}),
       listMarkets: vi.fn().mockResolvedValue([]),

@@ -71,7 +71,7 @@ const LEGACY = new Set(
   PATHS.map(([, knob]) => knob).filter((knob) => !(LEGACY_IGNORED as readonly string[]).includes(knob)),
 )
 // No LND_ family: its settings are all exact ids above, and Kubernetes derives LND_PORT & co from a service named lnd.
-const LEGACY_FAMILY = /^(LN_SEND|LN_RECEIVE|ONCHAIN_SEND|ONCHAIN_RECEIVE|EVM|ASSET|OFFER)_/
+const LEGACY_FAMILY = /^(LN_SEND|LN_RECEIVE|ONCHAIN_SEND|EVM|ASSET|OFFER)_/
 // What Kubernetes derives from any Service's name (`evm-rpc` → EVM_RPC_SERVICE_HOST); no setting ends this way.
 const SERVICE_LINK = /_(SERVICE_HOST|SERVICE_PORT(_\w+)?|PORT(_\d+_(TCP|UDP|SCTP)(_(PROTO|PORT|ADDR))?)?)$/
 

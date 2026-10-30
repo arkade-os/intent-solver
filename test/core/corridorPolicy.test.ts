@@ -14,14 +14,9 @@ const ONCHAIN: Fee = { bps: 25, flatSats: 500 }
 const LN: Fee = { bps: 10, flatSats: 0 }
 
 describe('corridors', () => {
-  it('covers exactly the four directional pairs the solver serves', () => {
+  it('covers exactly the three directional pairs the solver serves', () => {
     expect([...CORRIDORS].sort()).toEqual(
-      [
-        'arkade:BTC->lightning:BTC',
-        'arkade:BTC->onchain:BTC',
-        'lightning:BTC->arkade:BTC',
-        'onchain:BTC->arkade:BTC',
-      ].sort(),
+      ['arkade:BTC->lightning:BTC', 'arkade:BTC->onchain:BTC', 'lightning:BTC->arkade:BTC'].sort(),
     )
   })
 

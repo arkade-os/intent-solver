@@ -19,7 +19,6 @@ const allCorridors = <T>(value: T) => ({
   'arkade:BTC->lightning:BTC': value,
   'lightning:BTC->arkade:BTC': value,
   'arkade:BTC->onchain:BTC': value,
-  'onchain:BTC->arkade:BTC': value,
 })
 
 // The config names USDA and lets the client sell it for BTC but not buy it.

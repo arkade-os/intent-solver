@@ -22,9 +22,6 @@
  *   there is no refund it could push on a client's behalf — the client
  *   withdraws its own unfilled deposit whenever it likes. An operator button
  *   here would be one that cannot work.
- * - No `claimNow`. There is no claim: `fulfill` pays the client and takes the
- *   deposit in one transaction, so the only forced action worth having is
- *   `park`, which every corridor has.
  * - No `tickHot`. Latency here is dominated by waiting for a client deposit,
  *   which the ordinary sweep observes.
  * - No `liveLockups`/`lockupFor`. Those report ARKADE LOCKUPS OF OURS that the

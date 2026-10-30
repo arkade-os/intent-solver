@@ -49,10 +49,14 @@ import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { satsOutputs } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
+import { parseUnrolledSpend, type UnrolledSpendRecord } from '@arkade-os/solver-arkade/arkade/unrolledSpend.js'
 import { covenantScriptFromRow } from '../send/arkadeOps.js'
 import type { CovenantScriptRow } from '../send/orchestrator.js'
 import { claimPacketStamp } from './claimPacket.js'
 import type { ReceiveArkadeOps } from './arkadeOps.js'
+import { LockupPreimageReader } from './lockupPreimage.js'
+import { applyUnrolledSpendStep } from '../unrolledSpendStep.js'
+import type { OnchainBackend } from '@arkade-os/solver-core/ports/onchain.js'
 import { FundNotSubmittedError } from './fundLockup.js'
 import type { CovclaimdClient } from './covclaimd.js'
 import type { LightningBackend } from '@arkade-os/solver-core/ports/lightning.js'
@@ -62,6 +66,7 @@ import { GiveUp, json, log, messageOf, nowSeconds, poll } from '@arkade-os/solve
 import { sweep } from '@arkade-os/solver-core/util/sweep.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
+import { adoptFunding } from '../legs/arkadeLockup.js'
 
 const DEADLINE_SECONDS_PURPOSE = 'order the refund deadline against the HTLC'
 
@@ -179,6 +184,8 @@ export interface ReceiveServiceDeps {
     | 'getKnownInvoiceState'
   >
   arkade: ReceiveArkadeOps
+  /** Reads `P` off the L1 claim of a lockup the client unrolled. The rail's own wallet in production. */
+  onchain?: Pick<OnchainBackend, 'findSpendWitness'>
   /**
    * OPTIONAL. When set, the solver hands covclaimd the sealed packet so the
    * claim can be pushed with the client offline. When absent (or null), the
@@ -326,9 +333,11 @@ export class ReceiveSwapService {
   private readonly pricing: PricingStrategy
 
   private readonly admission: AdmissionStrategy
+  private readonly preimages: LockupPreimageReader
 
   constructor(private readonly deps: ReceiveServiceDeps) {
     this.admission = deps.admission
+    this.preimages = new LockupPreimageReader(deps.arkade, deps.onchain, (id, error) => this.onTickError?.(id, error))
     this.now = deps.now ?? nowSeconds
     this.quoteLimiter = deps.quoteLimiter ?? new RateLimiter(QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, this.now)
     this.fee = deps.fee ?? FREE
@@ -842,13 +851,8 @@ export class ReceiveSwapService {
     // existing exposure must be adopted regardless. Otherwise a row whose funding
     // crashed and whose invoice has since expired is failed at `armed` with capital
     // already moved and no outpoint for `whenRefunding` to act on.
-    const historical = await arkade.findLockupOutpoints(row.pkScript)
-    const ours = historical.filter((o) => o.value === row.payoutSats)
-    // Prefer an unspent one when both exist: that is the refundable outpoint,
-    // and it is the one `whenRefunding` must target. Either way `whenFunded`
-    // searches ALL historical outpoints for the preimage, so recording one
-    // does not lose the other.
-    const alreadyFunded = ours.find((o) => !o.spent) ?? ours[0]
+    // `whenFunded` searches ALL historical outpoints for the preimage, so recording one loses neither.
+    const alreadyFunded = adoptFunding(await arkade.findLockupOutpoints(row.pkScript), row.payoutSats)
     if (alreadyFunded) {
       // Transition rather than wait in `armed`: `funded` already owns the
       // "learn P, or recover/refund past the deadline" obligation, whereas
@@ -1083,7 +1087,7 @@ export class ReceiveSwapService {
     // empty, so indexer lag never narrows this to less than it was before.
     const historical = await arkade.findLockupOutpoints(row.pkScript)
     const searchable = historical.length > 0 ? historical : [{ txid: row.arkadeLockupTxid, vout: row.arkadeLockupVout }]
-    const preimage = await arkade.findClaimPreimage(searchable, row.paymentHash)
+    const preimage = await this.preimages.find(row, searchable)
     if (preimage) {
       const transitioned = await store.transition(row.id, 'funded', 'claimed', { preimage: hex.encode(preimage) })
       log(
@@ -1229,9 +1233,28 @@ export class ReceiveSwapService {
     // recheck exists to prevent.
     const historical = await arkade.findLockupOutpoints(row.pkScript)
     const searchable = historical.length > 0 ? historical : [{ txid: row.arkadeLockupTxid, vout: row.arkadeLockupVout }]
-    const late = await arkade.findClaimPreimage(searchable, row.paymentHash)
+    const late = await this.preimages.find(row, searchable)
     if (late) {
       return store.transition(row.id, 'refunding', 'claimed', { preimage: hex.encode(late) })
+    }
+
+    // Ahead of `findLockups`, which reads an unrolled lockup as empty, and of any
+    // offchain refund of a sibling output, which would record `refunded` over it.
+    const unrolled = historical.find(
+      (o) => o.unrolled && o.txid === row.arkadeLockupTxid && o.vout === row.arkadeLockupVout,
+    )
+    if (unrolled && arkade.refundUnrolled) {
+      const covenantRow = receiveCovenantRowFor(row)
+      const save = (record: UnrolledSpendRecord) => store.patch(row.id, { unrolled_refund: JSON.stringify(record) })
+      const step = await arkade.refundUnrolled(covenantRow, unrolled, parseUnrolledSpend(row.unrolledRefund), save)
+      return applyUnrolledSpendStep(
+        store,
+        row,
+        { from: 'refunding', to: 'refunded' },
+        step,
+        row.htlcExpiresAt !== null && this.now() < row.htlcExpiresAt,
+        () => unilateralExitRecourse(covenantRow, { solverPubkey: arkade.solverPubkey }),
+      )
     }
 
     const outputs = await arkade.findLockups(row.pkScript)

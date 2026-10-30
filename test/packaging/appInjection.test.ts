@@ -63,16 +63,12 @@ const solverConfig = (): Config => {
       'arkade:BTC->lightning:BTC': limits,
       'lightning:BTC->arkade:BTC': limits,
       'arkade:BTC->onchain:BTC': limits,
-      'onchain:BTC->arkade:BTC': limits,
     },
     corridorFees: {
       'arkade:BTC->lightning:BTC': free,
       'lightning:BTC->arkade:BTC': free,
       'arkade:BTC->onchain:BTC': free,
-      'onchain:BTC->arkade:BTC': free,
     },
-    onchainReceiveMaxBandSats: limits.maxSats - limits.minSats,
-    onchainReceiveBandBelowShare: 1,
     // Null on every corridor: no live chain-cost pricing, which is what an
     // unset `<STEM>_FEE_CAP_SATS` produces and the only shape this app —
     // which serves no built-in corridor — could want.
@@ -86,7 +82,6 @@ const solverConfig = (): Config => {
       'arkade:BTC->lightning:BTC': null,
       'lightning:BTC->arkade:BTC': null,
       'arkade:BTC->onchain:BTC': null,
-      'onchain:BTC->arkade:BTC': null,
     },
     onchainFeeRateRefreshMs: 60_000,
     onchainFeeRateStaleMs: 900_000,
@@ -96,7 +91,6 @@ const solverConfig = (): Config => {
       'arkade:BTC->lightning:BTC': false,
       'lightning:BTC->arkade:BTC': false,
       'arkade:BTC->onchain:BTC': false,
-      'onchain:BTC->arkade:BTC': false,
     },
     poolAutoMint: false,
     evmCorridors: [],

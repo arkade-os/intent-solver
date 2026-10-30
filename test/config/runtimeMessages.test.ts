@@ -16,7 +16,7 @@ const RENAMED_AT_LOAD = /^(OFFER_MARKETS entry|ASSET_MARKETS|SENTRY_DSN) /
 
 const ids = [...PATHS.map(([, id]) => id), ...Object.values(EVM_FIELDS), 'EVM_TOKENS', 'ASSET_MARKETS', 'OFFER_MARKETS']
 const ID = new RegExp(
-  `(?<![A-Za-z0-9_])(${ids.join('|')}|(LN_SEND|LN_RECEIVE|ONCHAIN_SEND|ONCHAIN_RECEIVE)_[A-Z_]+|[A-Z][A-Z_]*_<[A-Z]+>[A-Z_]*)(?![a-z0-9])`,
+  `(?<![A-Za-z0-9_])(${ids.join('|')}|(LN_SEND|LN_RECEIVE|ONCHAIN_SEND)_[A-Z_]+|[A-Z][A-Z_]*_<[A-Z]+>[A-Z_]*)(?![a-z0-9])`,
 )
 
 const sources = (dir: string): string[] =>

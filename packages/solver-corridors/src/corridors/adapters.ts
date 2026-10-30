@@ -1,5 +1,5 @@
 /**
- * The four built-in corridors, expressed as `Corridor` implementations.
+ * The three built-in corridors, expressed as `Corridor` implementations.
  *
  * Deliberately thin. Each one delegates to the orchestrator and store that
  * already exist — the money-path state machines are not touched here, only the
@@ -15,10 +15,9 @@
  * The optional capabilities are declared ONLY where the service really has one.
  * That omission is the contract, not an oversight: `Corridor` follows
  * `ln/port.ts`'s rule that an absent capability means a documented degradation,
- * so a corridor claiming a `claimNow` it cannot honour would be worse than one
- * that says nothing. Today only Lightning-send has `tickHot`, only
- * onchain-receive has `claimNow`, and Lightning-send is the one corridor with
- * no operator-forced refund at all.
+ * so a corridor claiming a `refundNow` it cannot honour would be worse than one
+ * that says nothing. Today only Lightning-send has `tickHot`, and it is the one
+ * corridor with no operator-forced refund at all.
  */
 import {
   parkVia,
@@ -28,36 +27,26 @@ import {
 } from '@arkade-os/solver-core/core/corridor.js'
 import { NON_TERMINAL as LN_SEND_LIVE } from '../db/swaps.js'
 import { NON_TERMINAL as LN_RECEIVE_LIVE } from '../db/receiveSwaps.js'
-import { NON_TERMINAL as ONCHAIN_SEND_LIVE } from '../db/onchainSwaps.js'
-import { NON_TERMINAL as ONCHAIN_RECEIVE_LIVE } from '../db/onchainReceiveSwaps.js'
+import { OnchainSendMachine } from '../machines/onchainSend.js'
 import type { CorridorDescriptor } from '@arkade-os/solver-core/core/corridorDescriptor.js'
 import type { CovenantScriptRow } from '@arkade-os/solver-arkade/arkade/covenantRow.js'
 import { covenantRowFor } from '../send/onchainOrchestrator.js'
 import { receiveCovenantRowFor } from '../receive/orchestrator.js'
-import { receiveCovenantRowFor as onchainReceiveCovenantRowFor } from '../receive/onchainOrchestrator.js'
 import type { PageOptions } from '@arkade-os/solver-core/core/page.js'
-import { LN_SEND, LN_RECEIVE, ONCHAIN_SEND, ONCHAIN_RECEIVE } from './index.js'
-import { projectSend, projectReceive, projectOnchainSend, projectOnchainReceive } from './projections.js'
-import { sendEconomics, receiveEconomics, onchainSendEconomics, onchainReceiveEconomics } from './economics.js'
+import { LN_SEND, LN_RECEIVE, ONCHAIN_SEND } from './index.js'
+import { projectSend, projectReceive, projectOnchainSend } from './projections.js'
+import { sendEconomics, receiveEconomics, onchainSendEconomics } from './economics.js'
 import type { LedgerWindow, SwapEconomics } from '@arkade-os/solver-core/analytics/economics.js'
-import {
-  respondToLightningRfqRequest,
-  respondToLightningReceiveRfqRequest,
-  respondToOnchainRfqRequest,
-  respondToOnchainReceiveRfqRequest,
-} from './rfq.js'
+import { respondToLightningRfqRequest, respondToLightningReceiveRfqRequest, respondToOnchainRfqRequest } from './rfq.js'
 import { rfqStatusPayload } from '../wire/payloads.js'
 import { lightningReceiveRfqStatusPayload } from '../wire/lightningReceivePayloads.js'
 import { onchainRfqStatusPayload } from '../wire/onchainPayloads.js'
-import { onchainReceiveRfqStatusPayload } from '../wire/onchainReceivePayloads.js'
 import type { SendSwapService } from '../send/orchestrator.js'
 import type { ReceiveSwapService } from '../receive/orchestrator.js'
 import type { OnchainSendSwapService } from '../send/onchainOrchestrator.js'
-import type { OnchainReceiveSwapService } from '../receive/onchainOrchestrator.js'
 import type { SwapStore } from '../db/swaps.js'
 import type { ReceiveSwapStore } from '../db/receiveSwaps.js'
 import type { OnchainSendSwapStore } from '../db/onchainSwaps.js'
-import type { OnchainReceiveSwapStore } from '../db/onchainReceiveSwaps.js'
 
 /** The store surface every reader needs, whichever corridor it belongs to. */
 interface ReadableStore<Row> {
@@ -162,21 +151,8 @@ export const onchainSendReader = (store: OnchainSendSwapStore): CorridorReader =
   outstandingArkadeSats: async () => 0,
 })
 
-export const onchainReceiveReader = (store: OnchainReceiveSwapStore): CorridorReader => ({
-  ...readerFor(
-    ONCHAIN_RECEIVE,
-    store,
-    projectOnchainReceive,
-    onchainReceiveRfqStatusPayload,
-    onchainReceiveCovenantRowFor,
-    onchainReceiveEconomics,
-  ),
-  outstandingArkadeSats: async () =>
-    (await store.findRecoverable()).filter((row) => !row.arkadeFundTxid).reduce((sum, row) => sum + row.payoutSats, 0),
-})
-
 /**
- * Where a parked row lands, for all four BTC corridors.
+ * Where a parked row lands, for all three BTC corridors.
  *
  * The two words `BaseSwapStore.fail()` routes to. A corridor that renamed
  * either would need its own list, which is why `parkVia` takes it.
@@ -215,22 +191,7 @@ export const onchainSendCorridor = (service: OnchainSendSwapService, store: Onch
     await service.tick(id)
   },
   tickAll: async () => (await service.tickAll()).length,
-  park: (id, reason) => parkVia(store, { live: ONCHAIN_SEND_LIVE, parked: BTC_PARKED }, id, reason),
+  park: (id, reason) => parkVia(store, { live: OnchainSendMachine.live, parked: BTC_PARKED }, id, reason),
   refundSweep: () => service.refundSweep(),
-  refundNow: (id) => service.refundNow(id),
-})
-
-export const onchainReceiveCorridor = (
-  service: OnchainReceiveSwapService,
-  store: OnchainReceiveSwapStore,
-): Corridor => ({
-  ...onchainReceiveReader(store),
-  quote: (payload, options) => respondToOnchainReceiveRfqRequest(service, payload, options),
-  tick: async (id) => {
-    await service.tick(id)
-  },
-  tickAll: async () => (await service.tickAll()).length,
-  park: (id, reason) => parkVia(store, { live: ONCHAIN_RECEIVE_LIVE, parked: BTC_PARKED }, id, reason),
-  claimNow: (id) => service.claimNow(id),
   refundNow: (id) => service.refundNow(id),
 })

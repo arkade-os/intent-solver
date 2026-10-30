@@ -16,6 +16,8 @@ const {
   sendToChainAddress,
   getChainTransactions,
   getWalletInfo,
+  fundPsbt,
+  signPsbt,
 } = vi.hoisted(() => ({
   subscribeToChainSpend: vi.fn(),
   createChainAddress: vi.fn(),
@@ -23,6 +25,8 @@ const {
   sendToChainAddress: vi.fn(),
   getChainTransactions: vi.fn(),
   getWalletInfo: vi.fn(async () => ({ current_block_height: 102 })),
+  fundPsbt: vi.fn(),
+  signPsbt: vi.fn(),
 }))
 vi.mock('lightning', async (importOriginal) => {
   const actual = await importOriginal<typeof import('lightning')>()
@@ -37,6 +41,8 @@ vi.mock('lightning', async (importOriginal) => {
     getChainFeeRate,
     sendToChainAddress,
     getChainTransactions,
+    fundPsbt,
+    signPsbt,
   }
 })
 
@@ -179,6 +185,49 @@ describe('LndOnchainAdapter.fund', () => {
       txid: 'fundtx',
       vout: 1,
     })
+  })
+})
+
+describe('LndOnchainAdapter.signFunding', () => {
+  const config = { socket: 's', cert: 'c', macaroon: 'm' }
+  const script = (fill: number) => p2wpkh(secp256k1.getPublicKey(new Uint8Array(32).fill(fill), true)).script
+
+  const signed = (outputs: [Uint8Array, number][]) => {
+    const tx = new Transaction({ allowUnknownOutputs: true, allowUnknownInputs: true })
+    tx.addInput({ txid: 'ff'.repeat(32), index: 0 })
+    for (const [s, amount] of outputs) tx.addOutput({ script: s, amount: BigInt(amount) })
+    fundPsbt.mockResolvedValue({
+      psbt: 'unsigned',
+      inputs: [],
+      outputs: outputs.map(([s, tokens], i) => ({ output_script: hex.encode(s), tokens, is_change: i === 0 })),
+    })
+    signPsbt.mockResolvedValue({ psbt: 'signed', transaction: hex.encode(tx.toBytes(true, false)) })
+    return tx
+  }
+
+  it('signs without broadcasting, and returns the vout of the payment rather than the change', async () => {
+    const tx = signed([
+      [script(2), 99_000],
+      [script(3), 50_000],
+    ])
+    const adapter = await LndOnchainAdapter.create(config)
+    await expect(adapter.signFunding({ address: 'bcrt1qhtlc', amountSats: 50_000 })).resolves.toEqual({
+      txid: tx.id,
+      vout: 1,
+      tx: hex.encode(tx.toBytes(true, false)),
+    })
+    expect(fundPsbt).toHaveBeenCalledWith(
+      expect.objectContaining({ outputs: [{ address: 'bcrt1qhtlc', tokens: 50_000 }] }),
+    )
+  })
+
+  it('refuses a signed transaction that does not pay the amount it was asked for', async () => {
+    signed([
+      [script(2), 99_000],
+      [script(3), 49_999],
+    ])
+    const adapter = await LndOnchainAdapter.create(config)
+    await expect(adapter.signFunding({ address: 'bcrt1qhtlc', amountSats: 50_000 })).rejects.toThrow('0 times')
   })
 })
 
@@ -468,7 +517,6 @@ describe('LndOnchainAdapter read deadlines', () => {
     'arkade:BTC->lightning:BTC': null,
     'lightning:BTC->arkade:BTC': null,
     'arkade:BTC->onchain:BTC': null,
-    'onchain:BTC->arkade:BTC': null,
   } as const
 
   beforeEach(() => {
@@ -507,7 +555,7 @@ describe('LndOnchainAdapter read deadlines', () => {
     const adapter = await LndOnchainAdapter.create(config)
     let clock = 0
     const sampler = onchainFeeRateSampler({
-      bounds: { ...NO_BOUNDS, 'onchain:BTC->arkade:BTC': { capSats: 1_000, minSats: 0 } },
+      bounds: { ...NO_BOUNDS, 'arkade:BTC->onchain:BTC': { capSats: 1_000, minSats: 0 } },
       estimateFeeRate: () => adapter.estimateFeeRate(),
       refreshAfterMs: 1_000,
       staleAfterMs: 10_000,

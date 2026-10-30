@@ -88,17 +88,6 @@
       "feeCapSats": 20000,
       "feeMinSats": 500
     },
-    "onchain:BTC->arkade:BTC": {
-      "enabled": true,
-      "minSats": 10000,
-      "maxSats": 50000,
-      "feeBps": 30,
-      "feeFlatSats": 1500,
-      "feeCapSats": 20000,
-      "feeMinSats": 500,
-      "maxBandSats": 5000,
-      "bandBelowShare": 1
-    },
     "arkade:BTC->USDC@arbitrum": {
       "enabled": true,
       "minSats": 10000,

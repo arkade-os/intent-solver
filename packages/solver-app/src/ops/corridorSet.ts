@@ -21,11 +21,9 @@ import {
   lightningSendCorridor,
   lightningReceiveCorridor,
   onchainSendCorridor,
-  onchainReceiveCorridor,
   lightningSendReader,
   lightningReceiveReader,
   onchainSendReader,
-  onchainReceiveReader,
 } from '@arkade-os/solver-corridors/corridors/adapters.js'
 import {
   evmReceiveCorridor,
@@ -38,11 +36,9 @@ import {
 import type { SendSwapService } from '@arkade-os/solver-corridors/send/orchestrator.js'
 import type { ReceiveSwapService } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import type { OnchainSendSwapService } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
-import type { OnchainReceiveSwapService } from '@arkade-os/solver-corridors/receive/onchainOrchestrator.js'
 import type { SwapStore } from '@arkade-os/solver-corridors/db/swaps.js'
 import type { ReceiveSwapStore } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
 import type { OnchainSendSwapStore } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
-import type { OnchainReceiveSwapStore } from '@arkade-os/solver-corridors/db/onchainReceiveSwaps.js'
 import type { EvmSendSwapStore } from '@arkade-os/solver-corridors-evm/db/evmSendSwaps.js'
 import type { EvmReceiveSwapStore } from '@arkade-os/solver-corridors-evm/db/evmReceiveSwaps.js'
 import type { EvmSendSwapService } from '@arkade-os/solver-corridors-evm/send/evmOrchestrator.js'
@@ -77,8 +73,6 @@ export interface FlatCorridorDeps {
   onchainStore: OnchainSendSwapStore
   receiveService?: ReceiveSwapService
   receiveStore?: ReceiveSwapStore
-  onchainReceiveService?: OnchainReceiveSwapService
-  onchainReceiveStore?: OnchainReceiveSwapStore
   /**
    * The EVM family: one store and one service per DIRECTION (both absent when
    * no chain is configured), and the per-token policies they serve. A corridor
@@ -98,7 +92,7 @@ export interface FlatCorridorDeps {
   assetRfqService?: AssetRfqSwapService | null
   assetRfqStore?: AssetRfqSwapStore | null
   assetRfqMarkets?: readonly AssetRfqMarket[]
-  /** Whether the four BTC corridors' LND answers. Unset means always. */
+  /** Whether the three BTC corridors' LND answers. Unset means always. */
   railUp?: () => boolean
 }
 
@@ -138,9 +132,8 @@ export interface FlatReaderDeps extends Omit<FlatCorridorDeps, 'assetRfqMarkets'
  *
  * Registration order is the fall-through order for `statusFor`: the two send
  * legs first (the busier profiles, and the order this had before the receive
- * legs existed), then Lightning-receive, then onchain-receive. `rfq_id`
- * identifies at most one negotiation, so the order is a latency choice rather
- * than a correctness one.
+ * legs existed), then Lightning-receive. `rfq_id` identifies at most one
+ * negotiation, so the order is a latency choice rather than a correctness one.
  */
 export const corridorSetFromDeps = (deps: FlatCorridorDeps, extra: readonly Corridor[] = []): CorridorSet => {
   const corridors: Corridor[] = []
@@ -152,10 +145,7 @@ export const corridorSetFromDeps = (deps: FlatCorridorDeps, extra: readonly Corr
   if (deps.receiveService && deps.receiveStore) {
     corridors.push(whileRailUp(lightningReceiveCorridor(deps.receiveService, deps.receiveStore), railUp))
   }
-  if (deps.onchainReceiveService && deps.onchainReceiveStore) {
-    corridors.push(whileRailUp(onchainReceiveCorridor(deps.onchainReceiveService, deps.onchainReceiveStore), railUp))
-  }
-  // EVM last, after the four built-ins: one corridor per ENABLED policy, and a
+  // EVM last, after the three built-ins: one corridor per ENABLED policy, and a
   // corridor registers only when its leg's service exists — absent means the
   // pair is refused by name as `unsupported_pair`, the same rule as above.
   for (const policy of deps.evmCorridors ?? []) {
@@ -189,7 +179,7 @@ export const corridorSetFromDeps = (deps: FlatCorridorDeps, extra: readonly Corr
  * Every corridor this deployment has a STORE for — wider than
  * {@link corridorSetFromDeps} by exactly the corridors an operator switched off.
  *
- * That width is the point. `createServices` opens all four stores regardless of
+ * That width is the point. `createServices` opens all three stores regardless of
  * `corridorEnabled`, and both the admin console and the status route depend on
  * it: a disabled corridor's in-flight swaps must stay listed and its
  * negotiations answerable, or an operator who turned a corridor off would watch
@@ -198,7 +188,6 @@ export const corridorSetFromDeps = (deps: FlatCorridorDeps, extra: readonly Corr
 export const readerSetFromDeps = (deps: FlatReaderDeps, extra: readonly CorridorReader[] = []): CorridorReaderSet => {
   const readers: CorridorReader[] = [lightningSendReader(deps.store), onchainSendReader(deps.onchainStore)]
   if (deps.receiveStore) readers.push(lightningReceiveReader(deps.receiveStore))
-  if (deps.onchainReceiveStore) readers.push(onchainReceiveReader(deps.onchainReceiveStore))
   // A READER for every EVM corridor with a store, enabled or not — the same
   // width argument as above: a token corridor switched off keeps its in-flight
   // swaps, and the console and the status route must keep answering for them.

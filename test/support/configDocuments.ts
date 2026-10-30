@@ -75,12 +75,7 @@ export const FULL_DOCUMENT = {
   limits: { maxSwapSats: 5000000, maxExposedSats: 15000000, approvalThresholdSats: 1000000 },
   corridors: {
     'arkade:BTC->lightning:BTC': { enabled: true, minSats: 1000, maxSats: 2000000, feeBps: 50, feeFlatSats: 0 },
-    'onchain:BTC->arkade:BTC': {
-      feeCapSats: 20000,
-      feeMinSats: 500,
-      maxBandSats: 10000,
-      bandBelowShare: 1,
-    },
+    'arkade:BTC->onchain:BTC': { feeCapSats: 20000, feeMinSats: 500 },
     'arkade:BTC->USDC@arbitrum': { feeBps: 40, minUnits: '1000000', maxUnits: '1000000000' },
     'USDA->arkade:BTC': { enabled: true },
   },

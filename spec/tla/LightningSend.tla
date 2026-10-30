@@ -15,6 +15,7 @@
 (*                           settleFromBackend, whenClaiming, tick(),      *)
 (*                           tickAll(), tickHot(), driveRows()             *)
 (*     send/arkadeOps.ts     claim() and assertScriptMatchesRow            *)
+(*     unrolledSpendStep.ts  advanceUnrolledClaims, settleUnrolledClaims   *)
 (*   packages/solver-core/src/                                             *)
 (*     core/send.ts          MIN_INVOICE_WINDOW, MIN_CLAIM_WINDOW,         *)
 (*                           DEFAULT_LOCKUP_TIMEOUT, evaluateSendPayment,  *)
@@ -159,7 +160,10 @@ CONSTANTS
     BreakClaimWindow,           \* MUTATION: drop the MIN_CLAIM_WINDOW conjunct
     BackendHonoursIdempotency,  \* MUTATION: the Lightning backend dedups by key
     AtomicAdmission,            \* MUTATION: quote() is one conditional INSERT
-    IndexerNeverLies            \* MUTATION: findLockups may report [] for a live lockup
+    IndexerNeverLies,           \* MUTATION: findLockups may report [] for a live lockup
+    ClientMayUnroll,            \* the client may land the lockup on Bitcoin
+    ExitDelay,                  \* the lockup's shortest CSV, counted from the unroll
+    ClaimsUnrolled              \* MUTATION: whenClaiming claims an unrolled lockup on L1
 
 (***************************************************************************)
 (* The constant ordering is the whole content of the timing guards.        *)
@@ -173,6 +177,8 @@ ASSUME RefundLocktime <= MaxClock
 \* is kept so the ordering above stays visible and checkable; raising it means
 \* raising MinClaimWindow with it.
 ASSUME HtlcMaxLifetime = 1
+\* P arrives before arkd's co-signing window on a lockup unrolled after PayGate can close.
+ASSUME HtlcMaxLifetime < ExitDelay
 
 VARIABLES
     lockup,     \* [Swaps -> BOOLEAN] the client's Arkade lockup exists at pk_script
@@ -182,11 +188,12 @@ VARIABLES
     payAged,    \* [Swaps -> BOOLEAN] a tick has passed since the payment went in
                 \* flight.  This is HtlcMaxLifetime = 1 tick; see (A1).
     payMoney,   \* [Swaps -> 0..2] payments the BACKEND actually created. >1 == double pay.
-    payIdRec    \* [Swaps -> BOOLEAN] payment_id is on the row (patch(), unguarded)
+    payIdRec,   \* [Swaps -> BOOLEAN] payment_id is on the row (patch(), unguarded)
+    unrolledAt  \* [Swaps -> 0..MaxClock+1] the +1-shifted confirm tick of an unroll; 0 = none
 
-LsVars == << lockup, pay, payAged, payMoney, payIdRec >>
+LsVars == << lockup, pay, payAged, payMoney, payIdRec, unrolledAt >>
 vars   == << clock, st, loc, conf, serverUp,
-             lockup, pay, payAged, payMoney, payIdRec >>
+             lockup, pay, payAged, payMoney, payIdRec, unrolledAt >>
 
 (***************************************************************************)
 (* SwapCore constants supplied by cfg definition override.                 *)
@@ -242,6 +249,11 @@ PaidOut(s)          == pay[s] = "succeeded"          \* the sats irreversibly le
 Collected(s)        == SpentBy(s, "solverClaim")     \* the lockup is ours
 ClientTookLockup(s) == SpentBy(s, "clientRefund")    \* the client pulled it back
 
+Unrolled(s) == unrolledAt[s] # 0
+
+\* arkd co-signs a spend of an unrolled lockup on L1 only, until its exit CSV is near.
+ArkdCosigns(s) == ~Unrolled(s) \/ clock < unrolledAt[s] + ExitDelay
+
 (***************************************************************************)
 (* THE PROOF THAT LICENSES paying/paid -> refused.                         *)
 (*                                                                         *)
@@ -290,7 +302,8 @@ ProofSatsNeverLeft(s) == pay[s] \in { "none", "failed" }
 
 \* evaluateSendPayment, in packages/solver-core/src/core/send.ts.
 \* Subtraction is written as addition throughout so Naturals never goes negative.
-PayGateOpen ==
+PayGateOpen(s) ==
+    /\ ~Unrolled(s)                                         \* payDeadline: gone from findLockups
     /\ clock < InvoiceExpiry                                \* invoice_expired
     /\ clock + MinInvoiceWindow <= InvoiceExpiry            \* invoice_expires_too_soon
     /\ ( BreakClaimWindow                                   \* <<< THE MUTATION
@@ -311,7 +324,7 @@ ClientFunds(s) ==
     /\ ~lockup[s]
     /\ lockup' = [lockup EXCEPT ![s] = TRUE]
     /\ UNCHANGED << clock, st, loc, conf, serverUp >>
-    /\ UNCHANGED << pay, payAged, payMoney, payIdRec >>
+    /\ UNCHANGED << pay, payAged, payMoney, payIdRec, unrolledAt >>
 
 \* The Lightning payment resolves.  THREE outcomes exist in the code, not two:
 \* "succeeded", "failed" (only on the adapter's terminal allowlist), and
@@ -325,7 +338,7 @@ ResolvePayment(s) ==
        \/ pay' = [pay EXCEPT ![s] = "failed"]
     /\ payAged' = [payAged EXCEPT ![s] = FALSE]
     /\ UNCHANGED << clock, st, loc, conf, serverUp >>
-    /\ UNCHANGED << lockup, payMoney, payIdRec >>
+    /\ UNCHANGED << lockup, payMoney, payIdRec, unrolledAt >>
 
 \* THE ADVERSARIAL SPEND.  The client's own refundWithoutReceiver leaf, open
 \* from refund_locktime and needing the Arkade server's co-signature.  This
@@ -345,9 +358,21 @@ ClientRefundLockup(s) ==
     /\ lockup[s]
     /\ serverUp
     /\ clock >= RefundLocktime
+    /\ ArkdCosigns(s)
     /\ SpendAccepted(s, "clientRefund")
     /\ UNCHANGED << clock, st, loc, serverUp >>
     /\ UNCHANGED LsVars
+
+\* The client, holding our HTLC as payee, lands the lockup on Bitcoin.  Unfair.
+ClientUnrolls(s) ==
+    /\ ClientMayUnroll
+    /\ serverUp
+    /\ lockup[s]
+    /\ ~Spent(s)
+    /\ ~Unrolled(s)
+    /\ unrolledAt' = [unrolledAt EXCEPT ![s] = clock + 1]
+    /\ UNCHANGED << clock, st, loc, conf, serverUp >>
+    /\ UNCHANGED << lockup, pay, payAged, payMoney, payIdRec >>
 
 (***************************************************************************)
 (* OPERATOR RECOVERY OUT OF `stuck`.                                       *)
@@ -429,7 +454,7 @@ Tick ==
     /\ ~PaymentOverdue
     /\ ~SolverBehind
     /\ payAged' = [s \in Swaps |-> pay[s] = "inflight"]
-    /\ UNCHANGED << lockup, pay, payMoney, payIdRec >>
+    /\ UNCHANGED << lockup, pay, payMoney, payIdRec, unrolledAt >>
 
 --------------------------------------------------------------------------
 (***************************************************************************)
@@ -518,7 +543,7 @@ RefuseQuoted(w, s) ==
 \* crash point 3 (nothing has moved, the row alone records the intent).
 PayGate(w, s) ==
     /\ Saw(w, s, "funded")
-    /\ PayGateOpen
+    /\ PayGateOpen(s)
     /\ \/ /\ CasWon(s, "funded", "paying")
           /\ Advance(w, "payCommitted", "none")
        \/ /\ CasLost(s, "funded")
@@ -532,7 +557,7 @@ PayGate(w, s) ==
 \* RefuseProvenSelfPayment below.
 RefusePay(w, s) ==
     /\ Saw(w, s, "funded")
-    /\ ~PayGateOpen
+    /\ ~PayGateOpen(s)
     /\ \/ CasWon(s, "funded", "refused")
        \/ CasLost(s, "funded")
     /\ Park(w)
@@ -610,7 +635,7 @@ SubmitPay(w, s) ==
           /\ Advance(w, "payCalled", "failed")
           /\ UNCHANGED << payAged, payMoney >>
     /\ UNCHANGED << clock, st, conf, serverUp >>
-    /\ UNCHANGED << lockup, payIdRec >>
+    /\ UNCHANGED << lockup, payIdRec, unrolledAt >>
 
 (***************************************************************************)
 (* PROOF (2) IS NOT MODELLED, AND THAT IS A DECISION, NOT AN OVERSIGHT.    *)
@@ -684,7 +709,7 @@ RecordPay(w, s) ==
               \/ CasLost(s, "paying")
     /\ Park(w)
     /\ UNCHANGED << clock, conf, serverUp >>
-    /\ UNCHANGED << lockup, pay, payAged, payMoney >>
+    /\ UNCHANGED << lockup, pay, payAged, payMoney, unrolledAt >>
 
 (***** settleFromBackend / whenPaid ****************************************)
 
@@ -756,7 +781,9 @@ LearnPreimage(w, s) ==
 \* strands a claimable swap in `stuck` — see the report.
 ClaimSeesEmpty(w, s) ==
     /\ Saw(w, s, "claiming")
-    /\ (Spent(s) \/ ~IndexerNeverLies)
+    /\ \/ Spent(s)
+       \/ ~IndexerNeverLies
+       \/ Unrolled(s) /\ ~(ClaimsUnrolled /\ ArkdCosigns(s))   \* settleUnrolledClaims' `closed`
     /\ \/ CasWon(s, "claiming", "stuck")
        \/ CasLost(s, "claiming")
     /\ Park(w)
@@ -770,6 +797,8 @@ ClaimSeesEmpty(w, s) ==
 ClaimAccepted(w, s) ==
     /\ Saw(w, s, "claiming")
     /\ serverUp
+    /\ Unrolled(s) => ClaimsUnrolled   \* on L1, through CosignOnchainTx: no timelock
+    /\ ArkdCosigns(s)
     /\ conf[s] = {}
     /\ conf' = [conf EXCEPT ![s] = { "solverClaim" }]
     /\ Advance(w, "claimSent", "none")
@@ -863,6 +892,7 @@ Next ==
           \/ GiveUp(w)
           \/ Crash(w)
     \/ \E s \in Swaps : ClientFunds(s) \/ ResolvePayment(s) \/ ClientRefundLockup(s)
+    \/ \E s \in Swaps : ClientUnrolls(s)
     \/ \E s \in Swaps : OperatorClaimStuck(s) \/ OperatorRefundStuck(s)
     \/ Censor
     \/ Tick
@@ -874,6 +904,7 @@ Init ==
     /\ payAged  = [s \in Swaps |-> FALSE]
     /\ payMoney = [s \in Swaps |-> 0]
     /\ payIdRec = [s \in Swaps |-> FALSE]
+    /\ unrolledAt = [s \in Swaps |-> 0]
 
 (***************************************************************************)
 (* FAIRNESS.  Strong fairness per (worker, swap, action): a worker that    *)
@@ -922,6 +953,7 @@ TypeOK ==
     /\ payAged  \in [Swaps -> BOOLEAN]
     /\ payMoney \in [Swaps -> 0..2]
     /\ payIdRec \in [Swaps -> BOOLEAN]
+    /\ unrolledAt \in [Swaps -> 0..MaxClock + 1]
 
 \* Every state change is an edge of LEGAL_EDGES.  An ACTION property.
 ForwardOnly == [][ ForwardOnlyStep(Edges) ]_vars
@@ -982,9 +1014,9 @@ NoNetLoss == \A s \in Swaps : ~(PaidOut(s) /\ ClientTookLockup(s))
 \*   ClientTookLockup, so `~PaidOut` has to come from NoNetLoss; with
 \*   NoNetLoss broken the operator edge walks a paid-out row into `refused`,
 \*   at depth 22 — in LightningSend_Broken and LightningSend_StaleIndexer
-\*   alike, neither of which mutates idempotency.
+\*   alike, neither of which mutates idempotency — and at 23 in _LateUnroll.
 \*
-\* So this invariant is FALSE in three of the four mutation cfgs.  Each still
+\* So this invariant is FALSE in four of the five mutation cfgs.  Each still
 \* reports the invariant its own header names, because that one violates
 \* shallower; verified stable over five runs each (TLC 2.19, -workers 16).
 \* On a violating cfg only the invariant NAME and the depth reproduce, never
@@ -1025,8 +1057,8 @@ Perms == Permutations(Swaps) \cup Permutations(Workers)
 (* MUTATION CHECKS — RESULTS                                               *)
 (*                                                                         *)
 (* A spec that passes because it is too weak to fail is worse than none.   *)
-(* Four guards were broken one at a time, each by a single constant, each  *)
-(* with its own .cfg.  All four produce a counterexample.                  *)
+(* Five guards were broken one at a time, each by a single constant, each  *)
+(* with its own .cfg.  All five produce a counterexample.                  *)
 (*                                                                         *)
 (* Every run here is TLC 2.19 (08 Aug 2024) on Temurin 25, -workers 16.    *)
 (* Record the version and the worker count with anything added here: TLC   *)
@@ -1044,7 +1076,8 @@ Perms == Permutations(Swaps) \cup Permutations(Workers)
 (* that moves.                                                             *)
 (*                                                                         *)
 (*   LightningSend.cfg               GREEN                                 *)
-(*                                   278,482 distinct, depth 42, 14m41s    *)
+(*                                   2,435,071 distinct, depth 44, 3h41m,  *)
+(*                                   Liveness included (-lncheck final)    *)
 (*   LightningSend_Broken.cfg        BreakClaimWindow=TRUE                 *)
 (*                                   -> NoNetLoss violated, ~1s            *)
 (*   LightningSend_DoublePay.cfg     BackendHonoursIdempotency=FALSE       *)
@@ -1053,8 +1086,10 @@ Perms == Permutations(Swaps) \cup Permutations(Workers)
 (*                                   -> ExposureBounded violated, <1s      *)
 (*   LightningSend_StaleIndexer.cfg  IndexerNeverLies=FALSE                *)
 (*                                   -> NoNetLoss violated, ~1s            *)
+(*   LightningSend_LateUnroll.cfg    ClaimsUnrolled=FALSE                  *)
+(*                                   -> NoNetLoss violated, ~5s            *)
 (*                                                                         *)
-(* Three of those four ALSO break RefusedNeverPaid, deeper, so TLC never   *)
+(* Four of those five ALSO break RefusedNeverPaid, deeper, so TLC never   *)
 (* reports it.  That is documented at the invariant, not here; the reason  *)
 (* it matters to a sweep is that the headers stay accurate only because    *)
 (* the named violation is the shallower one.                               *)

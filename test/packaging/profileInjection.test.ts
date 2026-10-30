@@ -4,12 +4,12 @@ import { join } from 'node:path'
 import * as sdk from '@arkade-os/solver-app/index.js'
 import { exportConfig } from '@arkade-os/solver-app/config/fromEnv.js'
 
-const REFUSAL = 'this deployment serves no onchain receive'
+const REFUSAL = 'this deployment serves no onchain send'
 
 // As a consumer running the shipped CLI does it: the CLI calls loadConfig itself, with no options.
 sdk.registerConfigProfile((doc) => {
-  if (doc.corridors?.['onchain:BTC->arkade:BTC']?.enabled === true) throw new Error(REFUSAL)
-  return { ...doc, corridors: { ...doc.corridors, 'onchain:BTC->arkade:BTC': { enabled: false } } }
+  if (doc.corridors?.['arkade:BTC->onchain:BTC']?.enabled === true) throw new Error(REFUSAL)
+  return { ...doc, corridors: { ...doc.corridors, 'arkade:BTC->onchain:BTC': { enabled: false } } }
 })
 
 const document = (corridors: Record<string, unknown> = {}) => ({
@@ -28,13 +28,13 @@ const load = (doc: unknown) => sdk.loadConfig({ env: { SOLVER_CONFIG_JSON: JSON.
 
 describe('a registered config profile', () => {
   it('reaches every loadConfig that passes none', () => {
-    expect(load(document()).corridorEnabled['onchain:BTC->arkade:BTC']).toBe(false)
-    expect(() => load(document({ 'onchain:BTC->arkade:BTC': { enabled: true } }))).toThrow(REFUSAL)
+    expect(load(document()).corridorEnabled['arkade:BTC->onchain:BTC']).toBe(false)
+    expect(() => load(document({ 'arkade:BTC->onchain:BTC': { enabled: true } }))).toThrow(REFUSAL)
   })
 
   it('gives way to one passed explicitly', () => {
     const config = sdk.loadConfig({ env: { SOLVER_CONFIG_JSON: JSON.stringify(document()) }, profile: (doc) => doc })
-    expect(config.corridorEnabled['onchain:BTC->arkade:BTC']).toBe(true)
+    expect(config.corridorEnabled['arkade:BTC->onchain:BTC']).toBe(true)
   })
 
   it('checks what config-from-env exports', async () => {
@@ -45,7 +45,7 @@ describe('a registered config profile', () => {
       EMULATOR_URL: 'http://localhost:7073',
       LN_BACKEND: 'fake',
       DB_DIR: join(tmpdir(), 'profile-injection-absent'),
-      ONCHAIN_RECEIVE_ENABLED: 'true',
+      ONCHAIN_SEND_ENABLED: 'true',
     }
     await expect(exportConfig(env)).rejects.toThrow(REFUSAL)
   })

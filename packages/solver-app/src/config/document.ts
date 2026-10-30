@@ -87,8 +87,6 @@ const corridorTerms = section({
   feeFlatSats: num,
   feeCapSats: num,
   feeMinSats: num,
-  maxBandSats: num,
-  bandBelowShare: num,
   minUnits: decimal,
   maxUnits: decimal,
 })

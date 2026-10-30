@@ -21,14 +21,7 @@
  */
 
 import type { Hono } from 'hono'
-import {
-  refundNow,
-  onchainRefundNow,
-  reclaimL1Htlc,
-  receiveRefundNow,
-  onchainReceiveRefundNow,
-  onchainReceiveClaimNow,
-} from '../../ops/refunds.js'
+import { refundNow, onchainRefundNow, reclaimL1Htlc, receiveRefundNow } from '../../ops/refunds.js'
 import { hex } from '@scure/base'
 import { claimNow } from '../../ops/claims.js'
 import { planExitForSwap } from '../../ops/unilateralExit.js'
@@ -493,37 +486,6 @@ export const ACTIONS: Record<string, ActionDefinition> = {
       'output out from under them and their held payment fails back to the payer, killing a live swap. Read the ' +
       'row first; on a `stuck` row this is the only way out.',
     run: (services, body) => receiveRefundNow(services, requireId(body)),
-  },
-
-  'onchain-receive-refund-now': {
-    tier: 'armed',
-    confirmKind: 'swap-id',
-    expectedConfirm: bodyId,
-    target: bodyId,
-    warning:
-      "RECOVERS THE SOLVER'S OWN Arkade lockup on the onchain:BTC->arkade:BTC leg. Same direction and same caveat " +
-      'as receive-refund-now: our money, but refunding under a client who can still claim kills a live swap.',
-    run: (services, body) => onchainReceiveRefundNow(services, requireId(body)),
-  },
-
-  /**
-   * The fee-dust retry, and the one operator action here that carries no
-   * judgement call at all: every attempt spends the SAME output, so a
-   * redundant broadcast is a double-spend the network rejects. Armed anyway,
-   * because it is a broadcast — but the warning says what it is rather than
-   * inventing a hazard.
-   */
-  'onchain-receive-claim-now': {
-    tier: 'armed',
-    confirmKind: 'swap-id',
-    expectedConfirm: bodyId,
-    target: bodyId,
-    warning:
-      "Retries the solver's own claim of the CLIENT's L1 HTLC at today's fee rate, for a row that parked in " +
-      '`stuck` because the fee once left less than dust. Safe to repeat — every attempt spends the same output, ' +
-      'so a redundant broadcast is a double-spend the network rejects, never a second payout. Refuses with both ' +
-      'numbers if the fee still eats the payout.',
-    run: (services, body) => onchainReceiveClaimNow(services, requireId(body)),
   },
 
   'reclaim-l1-htlc': {

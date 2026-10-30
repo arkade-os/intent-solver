@@ -55,6 +55,7 @@ import { exportConfig, healthPathNote, migrationHint } from './config/fromEnv.js
 import { createErrorReporter, type ErrorReporter } from './ops/sentry.js'
 import { SwapStore, type SendSwapRow } from '@arkade-os/solver-corridors/db/swaps.js'
 import { type OnchainSendSwapRow } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
+import { OnchainSendMachine } from '@arkade-os/solver-corridors/machines/onchainSend.js'
 import { findLockups, refundSwapScript } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { lazyContractSource } from '@arkade-os/solver-arkade/arkade/lazyContractSource.js'
 import { LockupWatcher } from '@arkade-os/solver-arkade/arkade/lockupWatcher.js'
@@ -97,6 +98,14 @@ import { withEvmSendSweep } from './ops/evmSendSweep.js'
 import { startCadence } from './ops/cadence.js'
 import { recordBalanceCheckpoint, withBalanceCheckpoints } from './ops/balanceCheckpoints.js'
 import { lightningRailFor, requireLn, requireOnchain } from './ops/rails.js'
+
+/** A base rung as the quote's ladder counts it: re-clocked to seconds when the quoted solo rung was. */
+const quotedRung =
+  (solo: number) =>
+  (base: number): number =>
+    relativeDelayFrom(solo).unit === 'seconds' && relativeDelayFrom(base).unit === 'blocks'
+      ? secondsForBlockRung(base)
+      : base
 
 /**
  * How often `relay` refreshes its liveness file. Six of these fit inside the
@@ -254,7 +263,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
   startEvmSendSweep()
   log(`recovered ${recovered} swap(s) across ${services.corridors.size} corridor(s); watching`)
   const served = CORRIDORS.filter((corridor) => services.config.corridorEnabled[corridor])
-  log(`serving ${served.length === CORRIDORS.length ? 'all four corridors' : served.join(', ')}`)
+  log(`serving ${served.length === CORRIDORS.length ? 'all three corridors' : served.join(', ')}`)
   // The corridor is configured to run but cannot quote, and the reason is a
   // deployment fact no request will ever change — so say it once at boot rather
   // than leaving an operator to infer it from a stream of refusals. Says which
@@ -274,6 +283,16 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
         `or by accepting the gap where the trader's recourse opens first (rails.lightning.receiveAcceptUnilateralGap: true)`,
     )
   }
+  if (
+    services.config.corridorEnabled['lightning:BTC->arkade:BTC'] &&
+    services.config.lnBackend === 'lnd' &&
+    !services.config.lnd?.esploraUrl
+  ) {
+    log(
+      'lightning receive has no rails.onchain.esploraUrl to read Bitcoin with: a client that unrolls its lockup and claims ' +
+        'it on L1 reveals P only there, so that swap is reported and left for review instead of settled',
+    )
+  }
   // Said out loud at every boot, not just recorded in the console. This is the
   // only setting here that accepts a LOSS, and an operator who inherits a
   // deployment should meet it in the log rather than by reading the unit file.
@@ -290,7 +309,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
   // the swap tables on every sweep, so it can never name a swap the sweep has
   // already retired.
   //
-  // A thunk rather than an id because the four corridors have four services:
+  // A thunk rather than an id because the three corridors have three services:
   // the script alone does not say which one owns it, and a map of id -> service
   // would be the same thing with a lookup in the way.
   let swapByScript = new Map<string, { id: string; tick: () => Promise<unknown> }>()
@@ -386,15 +405,15 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
 
   /**
    * Point the subscription at exactly the swaps still worth watching, across
-   * ALL FOUR corridors.
+   * ALL THREE corridors.
    *
    * It watched only the Lightning-send store for a while, which left the other
    * three on the sweep alone — most obviously onchain send, which has the
    * identical shape (a client funding a covenant lockup at a pkScript) and was
    * already being registered as a contract two functions down.
    *
-   * The two receive corridors are here on the same terms even though the event
-   * they care about is the opposite one: the solver funds the lockup itself and
+   * The receive corridor is here on the same terms even though the event
+   * it cares about is the opposite one: the solver funds the lockup itself and
    * then waits for the CLIENT to claim it, so the useful signal is a spend
    * rather than an arrival. Whether the indexer reports both is its business,
    * not ours — an event only ever causes a re-read, so a corridor whose event
@@ -452,7 +471,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
    * a foreign script that wants the same treatment, and adding it should be
    * adding a source rather than a second lifecycle. @see arkade/contractLifecycle.ts
    *
-   * Built once, outside the loop: `lockupSource` closes over the four stores
+   * Built once, outside the loop: `lockupSource` closes over the three stores
    * and reads them afresh on every pass, so there is nothing per-pass to rebuild.
    */
   const contractSources = [
@@ -612,7 +631,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
         //
         // WRAPPED, unlike the corridors above. This path is new and optional, and
         // an offer store that throws must not be able to end a watch loop those
-        // four corridors were already depending on. Per-fill failures are already
+        // three corridors were already depending on. Per-fill failures are already
         // recorded on their own rows by `tickAll`; this catches only what is left.
         try {
           const filled = (await services.assetOffers?.tickAll()) ?? 0
@@ -677,7 +696,7 @@ const driveToTerminal = async (service: SendSwapService, id: string, attempts = 
   )
 
 /** Onchain terminal states: nothing further will ever happen to these rows. */
-const ONCHAIN_TERMINAL = new Set(['claimed', 'refused', 'stuck'])
+const ONCHAIN_TERMINAL: ReadonlySet<string> = new Set(OnchainSendMachine.terminal)
 
 /** Tick one onchain swap until it reaches any state in `until` (terminal or an intermediate wait point). */
 const driveOnchainUntil = async (
@@ -1352,9 +1371,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       // converted with the service's exact rule or this derivation mixes units
       // and the addresses diverge. The unit rides on the quoted value, so a
       // seconds deployment needs no branch — its base is seconds already.
-      const soloUnit = relativeDelayFrom(swap.refundWithoutReceiverDelay).unit
-      const rung = (base: number): number =>
-        soloUnit === 'seconds' && relativeDelayFrom(base).unit === 'blocks' ? secondsForBlockRung(base) : base
+      const rung = quotedRung(swap.refundWithoutReceiverDelay)
       const local = new CovenantSwapScript({
         receiver: hex.decode(swap.receiverPubkey), // trusted from quote: provider key
         server: serverKey,
@@ -1456,15 +1473,16 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       // fund on any mismatch. The Arkade-side script is byte-identical to the
       // Lightning leg's; the onchain HTLC is new to this leg.
       const serverKey = services.arkade.wallet.arkServerPublicKey
+      const rung = quotedRung(swap.refundWithoutReceiverDelay)
       const localArkade = new CovenantSwapScript({
         receiver: hex.decode(swap.providerPubkey),
         server: serverKey,
         preimageHash: scriptHashFromPaymentHash(paymentHash),
         refundLocktime: swap.refundLocktime,
-        claimDelay: services.arkade.unilateralDelays.unilateralClaimDelay,
+        claimDelay: rung(services.arkade.unilateralDelays.unilateralClaimDelay),
         client: clientRefundPub,
-        clientRefundDelay: services.arkade.unilateralDelays.unilateralRefundWithoutReceiverDelay,
-        refundWithoutServerDelay: services.arkade.unilateralDelays.unilateralRefundDelay,
+        clientRefundDelay: swap.refundWithoutReceiverDelay,
+        refundWithoutServerDelay: rung(services.arkade.unilateralDelays.unilateralRefundDelay),
         nonInteractiveParameters: {
           emulatorPubkey: hex.decode(services.emulatorPubkey),
           receiverPkScript: hex.decode(swap.receiverPkScript),
@@ -1573,7 +1591,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
         log('onchain refunds NOT checked: LND did not answer at boot; run this again once it does')
       const evmPushed = (await services.evmSendService?.refundSweep()) ?? []
       if (pushed.length === 0 && onchainPushed.length === 0 && evmPushed.length === 0) {
-        log('nothing eligible: refunds need a failed swap past its deadline with funds at the script')
+        log('nothing eligible: no failed swap has funds at its lockup that its refund leaf can move yet')
         return
       }
       for (const id of pushed) log('refunded', id, json((await services.store.get(id)).refundArkTxid))
@@ -1654,8 +1672,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
    * WITHOUT the Arkade Service, by landing the VTXO on Bitcoin first.
    *
    * Reach for it when a row is parked with `claim failing past the refund
-   * deadline`, `refund failing past the refund deadline` or (onchain receive)
-   * `refund failing for …s` — the failure detail
+   * deadline` or `refund failing past the refund deadline` — the failure detail
    * on such a row already names which leaf this would spend. Both mean the
    * Service is censoring or gone, which is the only situation an exit is worth
    * its cost: it is slow (the leaf's CSV runs from when the lockup CONFIRMS

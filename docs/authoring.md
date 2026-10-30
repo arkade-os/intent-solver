@@ -48,14 +48,14 @@ or the seam exists and is unusable (`railInjection.test.ts:136-140`).
 
 Both seams are already as thin as a seam gets. Neither is where the cost is.
 
-### Adding a built-in corridor to THIS repo — **23 files**
+### Adding a built-in corridor to THIS repo — **30 files**
 
-`grep -rln 'ONCHAIN_RECEIVE|onchainReceive|OnchainReceive' packages/*/src`
-returns 23 files across six packages for `onchain:BTC->arkade:BTC`, the most
-recent member of the closed union. The heaviest concentrations are
-`ops/services.ts` (28 references), `admin/routes/status.ts` (9) and
-`ops/refunds.ts` (9). Joining the union in
-`solver-core/core/corridorPolicy.ts:12-17` is what pulls in the rest: the
+`grep -rlnE 'ONCHAIN_SEND|onchainSend|OnchainSend' packages/*/src`
+returns 30 files across seven packages for `arkade:BTC->onchain:BTC`, a
+member of the closed union. The heaviest concentrations are
+`ops/services.ts` (17 references), `ops/corridorSet.ts` (8) and
+`cli.ts` (8). Joining the union in
+`solver-core/core/corridorPolicy.ts:12-14` is what pulls in the rest: the
 `Record<Corridor, …>` tables in `config.ts`, the admin settings grid, the CLI's
 served-corridor list.
 
@@ -65,7 +65,7 @@ served-corridor list.
 through exactly four files: `cli.ts`, `config.ts`, `ops/corridorSet.ts`,
 `ops/services.ts`. It deliberately stayed OUT of the closed union — its pair
 carries a token address, so `EvmCorridor` is a template-literal type
-(`corridorPolicy.ts:52`) rather than a member — and out of `ALL_DESCRIPTORS`.
+(`corridorPolicy.ts:42`) rather than a member — and out of `ALL_DESCRIPTORS`.
 
 That is the shape the framework is actually optimised for, and the numbers say
 it works: a family of corridors for a chain this repo had never served cost four
@@ -75,14 +75,14 @@ edits at the composition root and nothing anywhere else.
 
 Not in registration. In the two things every corridor implements after it.
 
-**`tickAll`, six times.** `send/onchainOrchestrator.ts:378`,
-`receive/orchestrator.ts:537` and `receive/onchainOrchestrator.ts:412` are the
+**`tickAll`, five times.** `send/onchainOrchestrator.ts:378` and
+`receive/orchestrator.ts:537` are the
 same 27 lines including the same comment paragraph. `send/orchestrator.ts:579`
 diverged into a bounded-concurrent version (`driveRows`, line 605).
 `solver-corridors-evm/src/send/evmOrchestrator.ts:595` and
 `receive/evmOrchestrator.ts:477` are 14 lines that dropped the
 `shouldSkipTick`/`inFlight` guard and the `onTickSuccess` call entirely —
-`grep -c shouldSkipTick` is 0 in both EVM orchestrators and ≥2 in all four
+`grep -c shouldSkipTick` is 0 in both EVM orchestrators and ≥2 in all three
 built-ins. `core/corridor.ts:172-186` predicted this in as many words: "a naive
 loop here would quietly drop all four."
 
@@ -105,7 +105,7 @@ Every item below is stated in a docstring and enforced nowhere.
 
 | Obligation                                                                         | Where it is stated              | What silently happens                                                            |
 | ---------------------------------------------------------------------------------- | ------------------------------- | -------------------------------------------------------------------------------- |
-| `exposed` is a subset of `live`                                                     | `corridorDescriptor.ts:47`      | Checked at `registry.test.ts:103` — but only over the four built-in descriptors  |
+| `exposed` is a subset of `live`                                                     | `corridorDescriptor.ts:47`      | Checked at `registry.test.ts:103` — but only over the three built-in descriptors |
 | `payoutRail` names a rail that exists                                                | `corridorDescriptor.ts:19-29`   | Console reads UNKNOWN forever (`rail.ts:69`); no boot-time complaint             |
 | `liveLockups` present whenever the corridor HOLDS lockups                            | `corridor.ts:118-135`           | Renewal protection and the recovery path are lost for every one of them          |
 | `statusFor` answers `null` — never a refusal — for an id it does not hold            | `corridor.ts:100-103`           | Ends the fall-through and hides a live swap belonging to the NEXT corridor       |
@@ -147,7 +147,7 @@ ordering hazard — the contrast with the rail seam is sharp and deliberate, sin
 above the import.
 
 **A solver with its own corridors needs no rail at all.** `services.ts:328` is
-`config.lnBackend === null ? null : await createRail(config)`. With the four
+`config.lnBackend === null ? null : await createRail(config)`. With the three
 built-in corridors disabled, `lnBackend: null` is a supported deployment — so a
 consumer serving their own corridors never touches the rail registry, never meets
 its ordering hazard, and never needs a dynamic import to sequence one.
@@ -218,7 +218,7 @@ hand-built app has no console.
   is not exported at all. Two different types, one name.
   `Record<Corridor, number>` written against the exported one fails with
   `TS2344: Type 'Corridor' does not satisfy the constraint 'string | number |
-  symbol'`. Writing the four pair strings as literal keys works, which makes this
+  symbol'`. Writing the three pair strings as literal keys works, which makes this
   a discoverability trap rather than a wall.
 
 `ArkadeWalletConfig`, `Fee`, `LndConfig`, `EvmCorridorPolicy` and `EvmMarket` are

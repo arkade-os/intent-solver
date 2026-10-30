@@ -59,8 +59,6 @@ services:
   #       replicas: [{ url: s3://YOUR_BUCKET/swaps-onchain.sqlite }]
   #     - path: /data/swaps-receive.sqlite          # Lightning receive
   #       replicas: [{ url: s3://YOUR_BUCKET/swaps-receive.sqlite }]
-  #     - path: /data/swaps-onchain-receive.sqlite  # onchain receive
-  #       replicas: [{ url: s3://YOUR_BUCKET/swaps-onchain-receive.sqlite }]
   #     - path: /data/swaps-admin.sqlite            # overrides + audit log
   #       replicas: [{ url: s3://YOUR_BUCKET/swaps-admin.sqlite }]
   #

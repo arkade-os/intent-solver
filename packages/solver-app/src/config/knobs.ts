@@ -99,13 +99,12 @@ export const EVM_FIELDS: Readonly<Record<string, string>> = {
   directClaimsOnly: 'EVM_DIRECT_CLAIMS_ONLY',
 }
 
-export type Family = 'lightning' | 'onchain send' | 'onchain receive' | 'erc20' | 'Arkade asset'
+export type Family = 'lightning' | 'onchain send' | 'erc20' | 'Arkade asset'
 
 const COMMON = ['enabled', 'minSats', 'maxSats', 'feeBps', 'feeFlatSats']
 export const CORRIDOR_FIELDS: Readonly<Record<Family, readonly string[]>> = {
   lightning: COMMON,
   'onchain send': [...COMMON, 'feeCapSats', 'feeMinSats'],
-  'onchain receive': [...COMMON, 'feeCapSats', 'feeMinSats', 'maxBandSats', 'bandBelowShare'],
   erc20: [...COMMON, 'minUnits', 'maxUnits'],
   'Arkade asset': ['enabled'],
 }
@@ -122,21 +121,14 @@ const SUFFIX: Readonly<Record<string, string>> = {
   maxUnits: 'MAX_UNITS',
 }
 
-// Named outright rather than built from a stem: they predate the per-corridor naming.
-const ABSOLUTE: Readonly<Record<string, string>> = {
-  maxBandSats: 'ONCHAIN_RECEIVE_MAX_BAND_SATS',
-  bandBelowShare: 'ONCHAIN_RECEIVE_BAND_BELOW_SHARE',
-}
-
 export const BTC_FAMILY: Readonly<Record<string, Family>> = {
   'arkade:BTC->lightning:BTC': 'lightning',
   'lightning:BTC->arkade:BTC': 'lightning',
   'arkade:BTC->onchain:BTC': 'onchain send',
-  'onchain:BTC->arkade:BTC': 'onchain receive',
 }
 
 /** The setting id one corridor field is read from. */
-export const corridorKnob = (stem: string, field: string): string => ABSOLUTE[field] ?? `${stem}_${SUFFIX[field]}`
+export const corridorKnob = (stem: string, field: string): string => `${stem}_${SUFFIX[field]}`
 
 const BTC_SIDES = new Set(['arkade:BTC', 'lightning:BTC', 'onchain:BTC'])
 const LABEL = /^[A-Za-z0-9@._-]{1,32}$/

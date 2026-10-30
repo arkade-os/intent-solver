@@ -72,13 +72,7 @@ const BASE_ENV: Record<string, string> = {
  * deployment from needing a rail at all, which is precisely the property under
  * test.
  */
-const CLEARED = [
-  'LN_SEND_ENABLED',
-  'LN_RECEIVE_ENABLED',
-  'ONCHAIN_SEND_ENABLED',
-  'ONCHAIN_RECEIVE_ENABLED',
-  'EVM_TOKENS',
-]
+const CLEARED = ['LN_SEND_ENABLED', 'LN_RECEIVE_ENABLED', 'ONCHAIN_SEND_ENABLED', 'EVM_TOKENS']
 
 let saved: Record<string, string | undefined> = {}
 
@@ -202,9 +196,9 @@ describe('a registered rail reads its own block of the config document', () => {
   it('lets a deployment profile default a corridor off before anything is validated', () => {
     const profile = (doc: sdk.SolverDocument): sdk.SolverDocument => ({
       ...doc,
-      corridors: { 'onchain:BTC->arkade:BTC': { enabled: false }, ...doc.corridors },
+      corridors: { 'arkade:BTC->onchain:BTC': { enabled: false }, ...doc.corridors },
     })
-    expect(load(document({ backend: 'fake' }), { profile }).corridorEnabled['onchain:BTC->arkade:BTC']).toBe(false)
+    expect(load(document({ backend: 'fake' }), { profile }).corridorEnabled['arkade:BTC->onchain:BTC']).toBe(false)
   })
 
   it('surfaces a profile’s own refusal unchanged', () => {

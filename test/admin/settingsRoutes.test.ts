@@ -30,19 +30,16 @@ const baseConfig = {
     'arkade:BTC->lightning:BTC': { minSats: 1_000, maxSats: 100_000 },
     'lightning:BTC->arkade:BTC': { minSats: 1_000, maxSats: 100_000 },
     'arkade:BTC->onchain:BTC': { minSats: 1_000, maxSats: 100_000 },
-    'onchain:BTC->arkade:BTC': { minSats: 1_000, maxSats: 100_000 },
   },
   corridorFees: {
     'arkade:BTC->lightning:BTC': { bps: 0, flatSats: 0 },
     'lightning:BTC->arkade:BTC': { bps: 0, flatSats: 0 },
     'arkade:BTC->onchain:BTC': { bps: 0, flatSats: 0 },
-    'onchain:BTC->arkade:BTC': { bps: 0, flatSats: 0 },
   },
   corridorEnabled: {
     'arkade:BTC->lightning:BTC': true,
     'lightning:BTC->arkade:BTC': true,
     'arkade:BTC->onchain:BTC': false,
-    'onchain:BTC->arkade:BTC': true,
   },
   // Rendered in the read-only block, which iterates it.
   sendHintScidDenylist: new Set<string>(),

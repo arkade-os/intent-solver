@@ -202,12 +202,4 @@ describe('every send leg is HANDED a gate on the shipped daemon', () => {
   ])('%s is gated', (corridor) => {
     expect(servicesSource).toContain(`approvalGate: gateFor('${corridor}')`)
   })
-
-  it('keeps the derivation for the asset receive leg next to the factory', () => {
-    const approvalsSource = readFileSync(
-      fileURLToPath(new URL('../../packages/solver-app/src/ops/approvals.ts', import.meta.url)),
-      'utf8',
-    )
-    expect(approvalsSource).toContain('onchain:BTC->arkade:<asset>')
-  })
 })

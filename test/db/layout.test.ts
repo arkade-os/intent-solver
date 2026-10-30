@@ -20,18 +20,11 @@ describe('suffixed', () => {
   })
 
   // The runbook publishes these exact names as what an operator must back up.
-  it('produces the five names the runbook documents', () => {
-    expect([
-      BASE,
-      suffixed(BASE, 'onchain'),
-      suffixed(BASE, 'receive'),
-      suffixed(BASE, 'onchain-receive'),
-      suffixed(BASE, 'admin'),
-    ]).toEqual([
+  it('produces the four names the runbook documents', () => {
+    expect([BASE, suffixed(BASE, 'onchain'), suffixed(BASE, 'receive'), suffixed(BASE, 'admin')]).toEqual([
       '/data/swaps.sqlite',
       '/data/swaps-onchain.sqlite',
       '/data/swaps-receive.sqlite',
-      '/data/swaps-onchain-receive.sqlite',
       '/data/swaps-admin.sqlite',
     ])
   })
@@ -41,14 +34,12 @@ describe('resolveDbLayout', () => {
   it('consolidates a fresh install — nothing on disk at all', () => {
     const layout = resolveDbLayout(BASE, fs())
     expect(layout.consolidated).toBe(true)
-    expect([layout.send, layout.onchainSend, layout.receive, layout.onchainReceive, layout.admin]).toEqual(
-      Array(5).fill(BASE),
-    )
+    expect([layout.send, layout.onchainSend, layout.receive, layout.admin]).toEqual(Array(4).fill(BASE))
   })
 
   // The swap file alone is not evidence of the split layout: the consolidated
   // layout writes that same path. Reading it as "legacy" would strand a
-  // consolidated deployment's four other corridors in files nobody writes.
+  // consolidated deployment's three other stores in files nobody writes.
   it('still consolidates when only the swap file exists', () => {
     expect(resolveDbLayout(BASE, fs(BASE)).consolidated).toBe(true)
   })
@@ -58,22 +49,20 @@ describe('resolveDbLayout', () => {
     expect(layout.consolidated).toBe(false)
     expect(layout.onchainSend).toBe('/data/swaps-onchain.sqlite')
     expect(layout.receive).toBe('/data/swaps-receive.sqlite')
-    // Named even though absent — this deployment is legacy, so the corridor
+    // Named even though absent — this deployment is legacy, so the store
     // that has not run yet still belongs in its own file rather than being
     // quietly folded into the swap file beside rows written the other way.
-    expect(layout.onchainReceive).toBe('/data/swaps-onchain-receive.sqlite')
+    expect(layout.admin).toBe('/data/swaps-admin.sqlite')
   })
 
   // A deployment that only ever ran one non-Lightning corridor still has just
   // one suffixed file. Treating that as fresh would move its rows out of view.
-  it.each([
-    ['/data/swaps-onchain.sqlite'],
-    ['/data/swaps-receive.sqlite'],
-    ['/data/swaps-onchain-receive.sqlite'],
-    ['/data/swaps-admin.sqlite'],
-  ])('treats a single legacy file (%s) as the split layout', (legacyFile) => {
-    expect(resolveDbLayout(BASE, fs(BASE, legacyFile)).consolidated).toBe(false)
-  })
+  it.each([['/data/swaps-onchain.sqlite'], ['/data/swaps-receive.sqlite'], ['/data/swaps-admin.sqlite']])(
+    'treats a single legacy file (%s) as the split layout',
+    (legacyFile) => {
+      expect(resolveDbLayout(BASE, fs(BASE, legacyFile)).consolidated).toBe(false)
+    },
+  )
 
   // A corridor with no previous release has no file it "already has", so the
   // split layout has nothing to preserve for it. Naming a suffixed EVM file

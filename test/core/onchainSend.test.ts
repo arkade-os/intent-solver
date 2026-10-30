@@ -5,6 +5,8 @@ import {
   evaluateOnchainSendAcceptance,
   evaluateOnchainSendFunding,
   latestClaimArrival,
+  arkadeClaimDeadline,
+  expiryBeforeClaimDeadline,
   ARKADE_CLAIM_WINDOW_SECONDS,
   ONCHAIN_SECONDS_PER_BLOCK,
   ONCHAIN_CLAIM_MARGIN_SECONDS,
@@ -81,6 +83,28 @@ describe('onchainRefundLocktimeFor', () => {
     const claimAnswerBound = latestClaimArrival(htlcLocktime) + ARKADE_CLAIM_WINDOW_SECONDS
     expect(chainBound - claimAnswerBound).toBe(HOUR)
     expect(onchainRefundLocktimeFor(htlcLocktime, 512, now)).toBe(chainBound)
+  })
+})
+
+describe('expiryBeforeClaimDeadline', () => {
+  const htlcLocktime = 1_000_000
+  const deadline = arkadeClaimDeadline(htlcLocktime)
+
+  it('is the same bound onchainRefundLocktimeFor reserves for the claim answer', () => {
+    expect(deadline).toBe(latestClaimArrival(htlcLocktime) + ARKADE_CLAIM_WINDOW_SECONDS)
+  })
+
+  it('names the earliest expiry falling before the deadline, wherever in the list it sits', () => {
+    expect(expiryBeforeClaimDeadline([{ expiresAt: deadline - 1 }], htlcLocktime)).toBe(deadline - 1)
+    expect(
+      expiryBeforeClaimDeadline([{ expiresAt: deadline + 86_400 }, { expiresAt: deadline - 600 }], htlcLocktime),
+    ).toBe(deadline - 600)
+  })
+
+  it('passes a lockup that outlives the deadline, an empty one, and an expiry it was not told', () => {
+    expect(expiryBeforeClaimDeadline([{ expiresAt: deadline }], htlcLocktime)).toBeNull()
+    expect(expiryBeforeClaimDeadline([{}, { expiresAt: deadline + 1 }], htlcLocktime)).toBeNull()
+    expect(expiryBeforeClaimDeadline([], htlcLocktime)).toBeNull()
   })
 })
 

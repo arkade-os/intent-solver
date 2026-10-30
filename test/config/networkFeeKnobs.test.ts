@@ -25,8 +25,8 @@ const BASE_ENV: Record<string, string> = {
   LN_BACKEND: 'fake',
 }
 
-const STEMS = ['LN_SEND', 'LN_RECEIVE', 'ONCHAIN_SEND', 'ONCHAIN_RECEIVE'] as const
-const ONCHAIN_STEMS = ['ONCHAIN_SEND', 'ONCHAIN_RECEIVE'] as const
+const STEMS = ['LN_SEND', 'LN_RECEIVE', 'ONCHAIN_SEND'] as const
+const ONCHAIN_STEMS = ['ONCHAIN_SEND'] as const
 const LIGHTNING_STEMS = ['LN_SEND', 'LN_RECEIVE'] as const
 
 const KNOB_KEYS = STEMS.flatMap((stem) => [`${stem}_FEE_CAP_SATS`, `${stem}_FEE_MIN_SATS`, `${stem}_FEE_FLAT_SATS`])
@@ -44,7 +44,6 @@ const PAIR_OF = {
   LN_SEND: 'arkade:BTC->lightning:BTC',
   LN_RECEIVE: 'lightning:BTC->arkade:BTC',
   ONCHAIN_SEND: 'arkade:BTC->onchain:BTC',
-  ONCHAIN_RECEIVE: 'onchain:BTC->arkade:BTC',
 } as const
 
 let saved: Record<string, string | undefined>
@@ -81,9 +80,9 @@ describe('per-corridor network fee bounds', () => {
   })
 
   it('takes a floor beside the cap', () => {
-    process.env.ONCHAIN_RECEIVE_FEE_CAP_SATS = '400'
-    process.env.ONCHAIN_RECEIVE_FEE_MIN_SATS = '150'
-    expect(configFromKnobs(process.env).corridorNetworkFees['onchain:BTC->arkade:BTC']).toEqual({
+    process.env.ONCHAIN_SEND_FEE_CAP_SATS = '400'
+    process.env.ONCHAIN_SEND_FEE_MIN_SATS = '150'
+    expect(configFromKnobs(process.env).corridorNetworkFees['arkade:BTC->onchain:BTC']).toEqual({
       capSats: 400,
       minSats: 150,
     })
@@ -117,10 +116,10 @@ describe('per-corridor network fee bounds', () => {
   })
 
   it('refuses a floor above the ceiling, which the cap could never hold', () => {
-    process.env.ONCHAIN_RECEIVE_FEE_CAP_SATS = '100'
-    process.env.ONCHAIN_RECEIVE_FEE_MIN_SATS = '101'
+    process.env.ONCHAIN_SEND_FEE_CAP_SATS = '100'
+    process.env.ONCHAIN_SEND_FEE_MIN_SATS = '101'
     expect(() => configFromKnobs(process.env)).toThrow(
-      /ONCHAIN_RECEIVE_FEE_MIN_SATS 101 exceeds ONCHAIN_RECEIVE_FEE_CAP_SATS 100/,
+      /ONCHAIN_SEND_FEE_MIN_SATS 101 exceeds ONCHAIN_SEND_FEE_CAP_SATS 100/,
     )
   })
 
@@ -142,9 +141,9 @@ describe('per-corridor network fee bounds', () => {
   })
 
   it.each(['-1', '1000001', '12.5', 'lots'])('refuses %s as a cap', (raw) => {
-    process.env.ONCHAIN_RECEIVE_FEE_CAP_SATS = raw
+    process.env.ONCHAIN_SEND_FEE_CAP_SATS = raw
     expect(() => configFromKnobs(process.env)).toThrow(
-      /ONCHAIN_RECEIVE_FEE_CAP_SATS must be an integer between 1 and 1000000/,
+      /ONCHAIN_SEND_FEE_CAP_SATS must be an integer between 1 and 1000000/,
     )
   })
 

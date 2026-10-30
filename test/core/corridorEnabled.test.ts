@@ -64,12 +64,12 @@ describe('corridorEnabled', () => {
     for (const corridor of CORRIDORS) expect(config.corridorEnabled[corridor]).toBe(true)
   })
 
-  it('switches one corridor off without touching the other three', () => {
-    process.env.ONCHAIN_RECEIVE_ENABLED = 'false'
+  it('switches one corridor off without touching the other two', () => {
+    process.env.ONCHAIN_SEND_ENABLED = 'false'
     const config = configFromKnobs(process.env)
-    expect(config.corridorEnabled['onchain:BTC->arkade:BTC']).toBe(false)
+    expect(config.corridorEnabled['arkade:BTC->onchain:BTC']).toBe(false)
     for (const corridor of CORRIDORS) {
-      if (corridor === 'onchain:BTC->arkade:BTC') continue
+      if (corridor === 'arkade:BTC->onchain:BTC') continue
       expect(config.corridorEnabled[corridor]).toBe(true)
     }
   })
@@ -81,12 +81,10 @@ describe('corridorEnabled', () => {
 
   it('can leave a Lightning-only deployment', () => {
     process.env.ONCHAIN_SEND_ENABLED = 'false'
-    process.env.ONCHAIN_RECEIVE_ENABLED = 'false'
     const config = configFromKnobs(process.env)
     expect(config.corridorEnabled['arkade:BTC->lightning:BTC']).toBe(true)
     expect(config.corridorEnabled['lightning:BTC->arkade:BTC']).toBe(true)
     expect(config.corridorEnabled['arkade:BTC->onchain:BTC']).toBe(false)
-    expect(config.corridorEnabled['onchain:BTC->arkade:BTC']).toBe(false)
   })
 
   it('can switch every corridor off — a solver that quotes nothing is a legal state', () => {

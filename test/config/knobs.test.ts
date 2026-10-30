@@ -65,26 +65,15 @@ describe('documentToKnobs — corridors', () => {
     expect(knobs).toMatchObject({ LN_SEND_ENABLED: 'false', LN_SEND_FEE_BPS: '50' })
   })
 
-  it('maps the onchain receive band to its own knobs', () => {
-    const { knobs } = documentToKnobs({
-      corridors: { 'onchain:BTC->arkade:BTC': { maxBandSats: 100, bandBelowShare: 0.5, feeCapSats: 9 } },
-    })
-    expect(knobs).toMatchObject({
-      ONCHAIN_RECEIVE_MAX_BAND_SATS: '100',
-      ONCHAIN_RECEIVE_BAND_BELOW_SHARE: '0.5',
-      ONCHAIN_RECEIVE_FEE_CAP_SATS: '9',
-    })
-  })
-
   it('refuses feeCapSats on a lightning corridor', () => {
     expect(() => documentToKnobs({ corridors: { 'lightning:BTC->arkade:BTC': { feeCapSats: 1 } } })).toThrow(
       'corridors["lightning:BTC->arkade:BTC"].feeCapSats: not valid on a lightning corridor',
     )
   })
 
-  it('refuses the band on the onchain send corridor', () => {
-    expect(() => documentToKnobs({ corridors: { 'arkade:BTC->onchain:BTC': { maxBandSats: 1 } } })).toThrow(
-      'corridors["arkade:BTC->onchain:BTC"].maxBandSats: not valid on an onchain send corridor',
+  it('refuses units on the onchain send corridor', () => {
+    expect(() => documentToKnobs({ corridors: { 'arkade:BTC->onchain:BTC': { minUnits: '1' } } })).toThrow(
+      'corridors["arkade:BTC->onchain:BTC"].minUnits: not valid on an onchain send corridor',
     )
   })
 

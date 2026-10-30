@@ -283,12 +283,6 @@
           "feeMinSats": {
             "type": "number"
           },
-          "maxBandSats": {
-            "type": "number"
-          },
-          "bandBelowShare": {
-            "type": "number"
-          },
           "minUnits": {
             "description": "decimal string",
             "type": "string",
