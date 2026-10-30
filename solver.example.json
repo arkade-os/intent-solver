@@ -136,6 +136,7 @@
   },
   "admin": {
     "host": "127.0.0.1",
+    "allowedHosts": [],
     "port": 8788,
     "restartEnabled": false
   },

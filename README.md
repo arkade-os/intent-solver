@@ -229,6 +229,12 @@ engine-strict` returns `undefined`, and `.npmrc` does not set it), so an
   `[1, 65535]` and a bad value throws rather than reading as "off", so a typo
   cannot silently darken the console an operator believes is up.
 
+  `admin.allowedHosts` is the DNS-rebinding guard: a state-changing request
+  must carry a `Host` the console expects — the bound host and its loopback
+  aliases by default. A reverse proxy or a non-loopback bind presents its own
+  name, so list it here (comma-separated in `ADMIN_ALLOWED_HOSTS`), or those
+  requests answer `403 host_not_allowed`.
+
   `admin.restartEnabled` lets the console restart the solver, which is how a
   stored override takes effect. Market CRUD does not wait on it: add, edit or
   delete on the **markets** tab and the next RFQ uses the new list. Off unless

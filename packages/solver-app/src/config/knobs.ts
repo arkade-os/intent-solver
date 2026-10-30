@@ -67,6 +67,7 @@ export const PATHS: readonly Row[] = [
   ['http.host', 'HOST'],
   ['http.port', 'PORT'],
   ['admin.host', 'ADMIN_HOST'],
+  ['admin.allowedHosts', 'ADMIN_ALLOWED_HOSTS'],
   ['admin.port', 'ADMIN_PORT'],
   ['admin.restartEnabled', 'ADMIN_RESTART_ENABLED'],
   ['sentry.dsn', 'SENTRY_DSN'],

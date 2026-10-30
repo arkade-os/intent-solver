@@ -388,6 +388,12 @@
         "host": {
           "type": "string"
         },
+        "allowedHosts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "port": {
           "type": [
             "number",
