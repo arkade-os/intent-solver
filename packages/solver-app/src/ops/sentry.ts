@@ -144,7 +144,7 @@ const replaceSpans = (text: string, spans: Array<[number, number]>): string => {
  * NINE, in SQL DDL. The checksum only ever ADDS a span, so a truncated, mistyped
  * or transposed phrase — still brute-forceable — is redacted exactly as before.
  */
-const redactMnemonics = (text: string): string => {
+export const redactMnemonics = (text: string): string => {
   const words: Token[] = []
   for (let m = WORD.exec(text); m; m = WORD.exec(text)) {
     words.push({ word: m[0], start: m.index, end: m.index + m[0].length })

@@ -107,7 +107,9 @@ the like) is left alone too.
 document, then logs the one its old variables describe: step 1's export, with
 each credential written as the variable holding it (`"mnemonic": "<ARK_MNEMONIC>"`),
 because a log is no place for one. Put each value back and carry on from step 2.
-A placeholder left in is refused at startup, naming the variable.
+A placeholder left in is refused at startup, naming the variable. Where a
+credential reached the document in a form no variable holds, as a rail's own
+block can, nothing is logged but that fact: run step 1 instead.
 
 ## Shape 1 — single Node process
 

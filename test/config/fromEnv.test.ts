@@ -4,7 +4,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { configFromKnobs, type Config } from '@arkade-os/solver-app/config.js'
 import { loadConfig } from '@arkade-os/solver-app/config/load.js'
-import { envToDocument, exportConfig, healthPathNote, migrationHint } from '@arkade-os/solver-app/config/fromEnv.js'
+import {
+  documentForLog,
+  envToDocument,
+  exportConfig,
+  healthPathNote,
+  migrationHint,
+} from '@arkade-os/solver-app/config/fromEnv.js'
 import { SECRET_KNOBS } from '@arkade-os/solver-app/config/knobs.js'
 import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
 import { resolveLimits } from '@arkade-os/solver-core/core/limits.js'
@@ -269,6 +275,33 @@ describe('migrationHint', () => {
 
   it('is nothing where no old variable is set', async () => {
     expect(await migrationHint({ PORT: '3000', HOST: '0.0.0.0' })).toBeNull()
+  })
+})
+
+describe('documentForLog', () => {
+  const words = `${'abandon '.repeat(11)}about`
+  const rail = (block: Record<string, unknown>) => ({ rails: { lightning: { injected: block } } })
+
+  it('names a credential by its shape as well: URL userinfo or query, or a mnemonic', () => {
+    const env = {
+      RELAY_URL: 'wss://relay.example/?token=t0k',
+      ARK_ESPLORA_URL: 'https://u:p@esplora.example/api',
+      SOLVER_NAME: words,
+    }
+    const doc = { name: words, relay: { url: env.RELAY_URL }, rails: { arkade: { esploraUrl: env.ARK_ESPLORA_URL } } }
+    expect(JSON.parse(documentForLog(doc, env)!)).toEqual({
+      name: '<SOLVER_NAME>',
+      relay: { url: '<RELAY_URL>' },
+      rails: { arkade: { esploraUrl: '<ARK_ESPLORA_URL>' } },
+    })
+  })
+
+  it('prints nothing where a credential reached the document in a form no variable holds', () => {
+    expect(documentForLog(rail({ apiKey: 'derived' }), {})).toBeNull()
+    expect(documentForLog(rail({ mnemonic: words.split(' ') }), { LN_MNEMONIC: words })).toBeNull()
+    expect(documentForLog(rail({ words }), {})).toBeNull()
+    expect(documentForLog(rail({ endpoint: 'https://u:p@rail.example' }), {})).toBeNull()
+    expect(documentForLog(rail({ authEnabled: true, tokenDecimals: 8 }), {})).not.toBeNull()
   })
 })
 

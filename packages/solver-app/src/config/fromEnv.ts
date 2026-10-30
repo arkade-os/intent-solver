@@ -13,7 +13,7 @@ import { messageOf } from '@arkade-os/solver-core/util/poll.js'
 import { swapDbPath } from '../config.js'
 import { parseAssetRfqTokens } from '../ops/assetRfqMarkets.js'
 import { lightningRailFor } from '../ops/rails.js'
-import { SECRET_KEY } from '../ops/sentry.js'
+import { redactMnemonics, SECRET_KEY } from '../ops/sentry.js'
 import { DECIMAL, documentSchema, type SolverDocument } from './document.js'
 import { BTC_FAMILY, CORRIDOR_FIELDS, corridorKnob, EVM_FIELDS, PATHS, SECRET_KNOBS } from './knobs.js'
 import { legacyEnvNames, loadConfig, type LoadOptions } from './load.js'
@@ -193,8 +193,45 @@ export const exportConfig = async (env: NodeJS.ProcessEnv, profile?: LoadOptions
 
 // A rail's own credentials are known only by name; a price feed's URL can carry its API key.
 const CREDENTIAL_NAME = new RegExp(`${SECRET_KEY}|_PRICE_FEED$`, 'i')
+const SECRET_FIELD = new RegExp(SECRET_KEY, 'i')
+const URL_CREDENTIAL = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*@|[^#]*\?)/i
 
-/** The export for a deployment started under the old variables, for its log: each credential as `<VARIABLE>`. */
+const credentialShaped = (value: string): boolean => URL_CREDENTIAL.test(value) || redactMnemonics(value) !== value
+
+/**
+ * The document with each credential as `<VARIABLE>`, matched by value. Null where one arrived in a form no
+ * variable holds, which a rail's `toBlock` can produce: that one cannot be named, so nothing is printed.
+ */
+export const documentForLog = (doc: unknown, env: NodeJS.ProcessEnv): string | null => {
+  const named = new Map<string, string>()
+  for (const [name, raw] of Object.entries(env)) {
+    const value = raw?.trim()
+    if (value && (SECRET_KNOBS.has(name) || CREDENTIAL_NAME.test(name) || credentialShaped(value))) {
+      named.set(value, `<${name}>`)
+    }
+  }
+  let unnamed = false
+  const text = JSON.stringify(
+    doc,
+    (key, value: unknown) => {
+      const name = typeof value === 'string' ? named.get(value.trim()) : undefined
+      if (name) return name
+      const secret = SECRET_FIELD.test(key)
+      if (
+        typeof value === 'string'
+          ? secret || credentialShaped(value)
+          : secret && value !== null && typeof value === 'object'
+      ) {
+        unnamed = true
+      }
+      return value
+    },
+    2,
+  )
+  return unnamed ? null : text
+}
+
+/** The export for a deployment started under the old variables, for its log. */
 export const migrationHint = async (env: NodeJS.ProcessEnv): Promise<string | null> => {
   if (legacyEnvNames(env).length === 0) return null
   let doc: SolverDocument
@@ -203,15 +240,10 @@ export const migrationHint = async (env: NodeJS.ProcessEnv): Promise<string | nu
   } catch (error) {
     return `The old environment variables are still set, but do not convert as they stand: ${messageOf(error)}`
   }
-  const named = new Map<string, string>()
-  for (const [name, value] of Object.entries(env)) {
-    if (value?.trim() && (SECRET_KNOBS.has(name) || CREDENTIAL_NAME.test(name))) named.set(value.trim(), `<${name}>`)
+  const text = documentForLog(doc, env)
+  if (text === null) {
+    return 'The old environment variables are still set, and their document holds a credential no variable names, so it is not printed here.'
   }
-  const text = JSON.stringify(
-    doc,
-    (_key, value: unknown) => (typeof value === 'string' ? (named.get(value.trim()) ?? value) : value),
-    2,
-  )
   return [
     "The old environment variables are still set. The document they describe follows, each credential shown as <VARIABLE>: put that variable's value in its place, set the result as SOLVER_CONFIG_JSON (or a file named by SOLVER_CONFIG), then unset the old variables.",
     text,
