@@ -45,6 +45,7 @@ const chain = {
   status: new Map<string, Status>(),
   outspends: new Map<string, { spent: boolean; txid?: string }[]>(),
   broadcasts: [] as string[],
+  packages: [] as string[][],
   calls: 0,
 }
 
@@ -64,7 +65,7 @@ const fakeChain: UnrolledSpendDeps['chain'] = {
     return status
   },
   getTxOutspends: async (txid) => (chain.calls++, chain.outspends.get(txid) ?? []),
-  broadcastTransaction: async (...txs) => (chain.broadcasts.push(...txs), 'ok'),
+  broadcastTransaction: async (...txs) => (chain.broadcasts.push(...txs), chain.packages.push(txs), 'ok'),
 }
 
 /** arkd's checks on what it is asked to co-sign, then its signature and the broadcast. */
@@ -137,6 +138,7 @@ beforeEach(async () => {
   chain.status.clear()
   chain.outspends.clear()
   chain.broadcasts.length = 0
+  chain.packages.length = 0
   chain.calls = 0
 
   const solverKey = await solver.xOnlyPublicKey()
@@ -305,12 +307,26 @@ describe('UnrolledSpender', () => {
     expect(await refunder().advance(lockup, null, save)).toEqual({ kind: 'spent' })
   })
 
-  it('reports the window closed once the client CSV is near, and rethrows before that', async () => {
+  it('reports the window closed once the client CSV is near and no explorer showed the spend, rethrowing before', async () => {
     cosignFails = new Error('input 0 has an available exit closure')
-    chain.status.set(parent.id, { confirmed: true, blockTime: NOW - EXIT_DELAY + 300, blockHeight: 1 })
-    expect(await refunder().advance(lockup, null, save)).toEqual({ kind: 'closed', reason: cosignFails.message })
     chain.status.set(parent.id, { confirmed: true, blockTime: NOW - EXIT_DELAY + 301, blockHeight: 1 })
     await expect(refunder().advance(lockup, null, save)).rejects.toThrow('available exit closure')
+    chain.status.set(parent.id, { confirmed: true, blockTime: NOW - EXIT_DELAY + 300, blockHeight: 1 })
+    expect(await refunder().advance(lockup, null, save)).toEqual({ kind: 'pending', record: saved[1] })
+    now += 120
+    expect(await refunder().advance(lockup, saved[1]!, save)).toMatchObject({ kind: 'closed' })
+    expect(order.filter((step) => step === 'cosign')).toHaveLength(2)
+  })
+
+  it('keeps tracking a spend arkd broadcast for a reply lost once the client CSV is near', async () => {
+    chain.status.set(parent.id, { confirmed: true, blockTime: NOW - EXIT_DELAY + 300, blockHeight: 1 })
+    replyLost = true
+    expect(await refunder().advance(lockup, null, save)).toEqual({ kind: 'pending', record: saved[0] })
+    replyLost = false
+    now += 60
+
+    const step = await refunder().advance(lockup, saved[0]!, save)
+    expect(step).toEqual({ kind: 'pending', record: { ...saved[0], tx: hex.encode(cosigned[0]!.extract()) } })
   })
 
   it('asks the chain about a lockup at most once a minute', async () => {
@@ -457,6 +473,17 @@ describe('UnrolledSpender', () => {
       await refunder().advance(lockup, bumped, save)
       expect(chain.broadcasts).toEqual([bumped.cpfpTx])
       expect(cosigned).toHaveLength(2)
+    })
+
+    it('resends a dropped refund together with its child, as one package', async () => {
+      const step = await refunder().advance(lockup, await slowRefund(), save)
+      const bumped = (step as { record: UnrolledSpendRecord }).record
+      chain.status.delete(bumped.txid)
+      chain.status.delete(bumped.cpfpTxid!)
+      now += 60
+
+      expect(await refunder().advance(lockup, bumped, save)).toEqual({ kind: 'pending', record: bumped })
+      expect(chain.packages).toEqual([[bumped.tx, bumped.cpfpTx]])
     })
 
     it('keeps the child once an explorer serves it, so it can still be resent', async () => {
