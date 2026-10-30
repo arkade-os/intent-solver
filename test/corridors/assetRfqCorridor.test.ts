@@ -343,6 +343,14 @@ describe('the read half', () => {
     expect(detail?.swap).toMatchObject({ corridor: BUY.pair, state: 'quoted', phase: 'open' })
   })
 
+  it('ships a raw row the console can serialise — bigint amounts become strings, not a 500', async () => {
+    const { corridor } = await harness()
+    await corridor.quote(rfqRequest())
+    const detail = await corridor.detail('swap-1')
+    expect(() => JSON.stringify(detail?.raw)).not.toThrow()
+    expect(typeof (detail?.raw as { fromAmount: unknown }).fromAmount).toBe('string')
+  })
+
   /**
    * `payoutSats` is SATS by contract. On this direction the payout is an ASSET,
    * so a number there would be 10^18 units of a stablecoin labelled as sats.
