@@ -1059,15 +1059,26 @@ export class OnchainSendSwapService {
     }
     const outputs = claimOutputs(await arkade.findLockups(row.pkScript), row.amountSats)
     const unrolled = await advanceUnrolledClaims(store, row, arkade, covenantRowFor(row), row.preimage)
-    if (outputs.length === 0 && unrolled === null) {
-      // Proof of neither our claim nor the lockup's spend: `findLockups` is
-      // spendableOnly. {@link pushRefund}'s refusal applies here too, and harder —
-      // `stuck` has no `step` case, so parking ends collection after we paid out.
+    // claimOutputs falls back to EVERY output when the asset-free ones fall short, so a
+    // dust asset vtxo left after the clean funding was swept reads non-empty yet cannot
+    // cover the amount. Guard on value, not emptiness — held 0 is the empty case.
+    const held = outputs.reduce((sum, o) => sum + o.value, 0)
+    if (held < row.amountSats && unrolled === null) {
+      // Proof of neither our claim nor enough value to deliver: `findLockups` is
+      // spendableOnly, and claimOutputs may fall back to a dust asset vtxo that cannot
+      // cover the amount. {@link pushRefund}'s refusal applies — `stuck` has no `step`
+      // case, so parking ends collection after we paid out.
       const evidence = await arkade.lockupSpendEvidence(row.pkScript)
       if (evidence !== 'spent' && this.now() < row.refundLocktime) {
-        throw new Error(`swap ${row.id}: lockup reads empty while claiming but no spend is provable (${evidence})`)
+        throw new Error(
+          `swap ${row.id}: lockup holds ${held} < ${row.amountSats} while claiming but no spend is provable (${evidence})`,
+        )
       }
-      await store.fail(row.id, 'claiming', 'lockup empty while claiming with no claim txid recorded; needs review')
+      await store.fail(
+        row.id,
+        'claiming',
+        `lockup holds ${held} < amount ${row.amountSats} while claiming; no claim txid recorded; needs review`,
+      )
       return false
     }
     let txid: string | null = null

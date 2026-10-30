@@ -1778,24 +1778,31 @@ export class SendSwapService {
     const outputs = claimOutputs(await arkade.findLockups(row.pkScript), row.amountSats)
     // `findLockups` leaves out an output the client unrolled: arkd refuses it every offchain spend.
     const unrolled = await advanceUnrolledClaims(store, row, arkade, row, row.preimage)
-    if (outputs.length === 0 && unrolled === null) {
-      // The script is empty, but we hold no claim txid — so we have NO positive
-      // proof our claim landed. `findLockups` returns [] for a swept, renewed or
-      // lagging vtxo exactly as it does after our own spend (`spendableOnly`
-      // excludes a swept-but-unspent vtxo, and an empty indexer page maps to []),
-      // so "empty" is NOT "claimed". Recording success here would bury a
-      // full-amount loss — a swept lockup, or a client refund after we paid — as
-      // `claimed`. Route to `stuck` for a human: a false `stuck` (we really did
-      // claim and a crash ate the record) costs a glance; a false `claimed` costs
-      // the funds. The only paths that ever record `claimed` are below, each
-      // with our own claim txids in hand.
-      // Nor is it proof the lockup is GONE, and `stuck` is terminal — so parking
-      // on a lagging view ends collection of an invoice we already paid.
+    // claimOutputs falls back to EVERY output when the asset-free ones fall short, so a
+    // dust asset vtxo left after the clean funding was swept reads non-empty yet still
+    // cannot cover the amount. Guard on value, not emptiness — held 0 is the empty case.
+    const held = outputs.reduce((sum, o) => sum + o.value, 0)
+    if (held < row.amountSats && unrolled === null) {
+      // We hold no claim txid, so NO positive proof our claim landed, and not enough to
+      // deliver even if we swept what is here. `findLockups` returns [] for a swept,
+      // renewed or lagging vtxo exactly as after our own spend (`spendableOnly` excludes a
+      // swept-but-unspent vtxo, and an empty indexer page maps to []), so a short read is
+      // NOT "claimed". Recording success here — or claiming a leftover dust asset vtxo and
+      // recording it — buries a full-amount loss as `claimed`. Route to `stuck`: a false
+      // `stuck` costs a glance, a false `claimed` costs the funds. The only paths that
+      // record `claimed` are below, each with our own claim txids in hand — not a lagging
+      // view (`stuck` is terminal, so parking it ends collection we are owed).
       const evidence = await arkade.lockupSpendEvidence(row.pkScript)
       if (evidence !== 'spent' && !(await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip))) {
-        throw new Error(`swap ${row.id}: lockup reads empty while claiming but no spend is provable (${evidence})`)
+        throw new Error(
+          `swap ${row.id}: lockup holds ${held} < ${row.amountSats} while claiming but no spend is provable (${evidence})`,
+        )
       }
-      await store.fail(row.id, 'claiming', 'lockup empty while claiming with no claim txid recorded; needs review')
+      await store.fail(
+        row.id,
+        'claiming',
+        `lockup holds ${held} < amount ${row.amountSats} while claiming; no claim txid recorded; needs review`,
+      )
       return false
     }
 
