@@ -7,6 +7,7 @@ import {
   LIVE_KEYS,
 } from '@arkade-os/solver-app/admin/settings.js'
 import type { Config } from '@arkade-os/solver-app/config.js'
+import { registerLightningRail } from '@arkade-os/solver-app/ops/rails.js'
 
 const config = {
   network: 'regtest',
@@ -259,5 +260,26 @@ describe('describeSettings', () => {
     const knobs = describeSettings(config, {})
     expect(knobs.find((k) => k.key === 'SWAP_DB_PATH')?.value).toBe('.data/swaps.sqlite')
     expect(knobs.find((k) => k.key === 'ARK_DB_PATH')?.value).toBe('.data/ark.sqlite')
+  })
+})
+
+describe('a registered rail’s own settings', () => {
+  const STORAGE = 'rails.lightning["console-rail"].storageDir'
+  registerLightningRail('console-rail', {
+    create: async () => {
+      throw new Error('never built here')
+    },
+    consoleSettings: (railConfig) => [{ path: STORAGE, value: `.data/${railConfig.network}` }],
+  })
+
+  it('are listed read-only, under the label the rail gives them, when that rail is selected', () => {
+    const rows = describeSettings({ ...config, lnBackend: 'console-rail' } as Config, {}).filter(
+      (knob) => knob.key === STORAGE,
+    )
+    expect(rows).toEqual([{ key: STORAGE, path: STORAGE, value: '.data/regtest', source: 'config', editable: false }])
+  })
+
+  it('are absent while another backend is selected', () => {
+    expect(describeSettings(config, {}).some((knob) => knob.key === STORAGE)).toBe(false)
   })
 })

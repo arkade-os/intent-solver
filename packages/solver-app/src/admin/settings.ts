@@ -25,6 +25,7 @@ import { CORRIDORS, FREE, type Corridor, type Fee } from '@arkade-os/solver-core
 import { descriptorFor } from '@arkade-os/solver-corridors/corridors/index.js'
 import { MAX_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/send.js'
 import { assetMarketKey } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import { lightningRailFor } from '../ops/rails.js'
 
 export type KnobSource = 'config' | 'override'
 
@@ -428,6 +429,10 @@ export const describeSettings = (
     { key: 'RELAY_PROTOCOL', value: config.relayProtocol, source: 'config', editable: false },
     { key: 'OPEN_RFQ_MAX_BIDS_PER_MIN', value: config.openRfqMaxBidsPerMinute, source: 'config', editable: false },
   )
+  const rail = config.lnBackend ? lightningRailFor(config.lnBackend) : undefined
+  for (const { path: where, value } of rail?.consoleSettings?.(config) ?? []) {
+    knobs.push({ key: where, value, source: 'config', editable: false })
+  }
 
   return knobs.map((knob) => ({ ...knob, path: path(knob.key) }))
 }
