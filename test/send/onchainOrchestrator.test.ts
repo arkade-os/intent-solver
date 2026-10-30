@@ -1389,6 +1389,17 @@ describe('OnchainSendSwapService', () => {
     expect(done.failureReason).toContain('no claim txid')
   })
 
+  it('finishes instead of parking when the provable spend was OUR OWN claim', async () => {
+    const row = await claiming()
+    deps.outputs.delete(row.pkScript)
+    deps.spent.add(row.pkScript)
+    deps.arkade.findLockupOutpoints = async () => [{ txid: 'lockup-tx', vout: 0, spent: true, unrolled: false }]
+    deps.arkade.findClaimPreimage = async () => P
+
+    const done = await service.tick(row.id)
+    expect(done.state).toBe('claimed')
+  })
+
   it('parks a lockup that holds only a dust asset vtxo after the clean funding was swept', async () => {
     const row = await claiming()
     deps.outputs.set(row.pkScript, [
