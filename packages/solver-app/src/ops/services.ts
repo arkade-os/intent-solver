@@ -1710,7 +1710,7 @@ export const createServices = async (
         policy: rebalancePolicy,
         savePolicy: async (next) => adminStore.setOverride('REBALANCE_POLICY', JSON.stringify(next)),
       },
-      { active },
+      active ? 'active' : 'passive',
     )
     services.rebalance = runtimeRebalance
     if (active) {

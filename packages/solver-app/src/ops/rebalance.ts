@@ -61,11 +61,11 @@ export class RebalanceService {
     this.now = deps.now ?? (() => Math.floor(Date.now() / 1000))
   }
 
-  static async create(deps: RebalanceDeps, opts: { active?: boolean } = {}): Promise<RebalanceService> {
+  static async create(deps: RebalanceDeps, mode: 'active' | 'passive' = 'active'): Promise<RebalanceService> {
     const service = new RebalanceService(deps)
     // Reservations are process-local and the recovery rewrite mutates live rows, so only the one
     // daemon that drives rebalancing may run them; a one-shot CLI sharing the db builds passive.
-    if (opts.active === false) return service
+    if (mode === 'passive') return service
     deps.backend.protectDeposits?.(() => deps.store.active())
     for (const row of await deps.store.active()) {
       if (row.state === 'submitting') {

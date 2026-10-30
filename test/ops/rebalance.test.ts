@@ -302,7 +302,7 @@ describe('only the live daemon recovers rebalance state — a one-shot build is 
     try {
       await f.store.create(submittingRow())
       f.deps.source.reserve.mockClear()
-      await RebalanceService.create(f.deps, { active: false })
+      await RebalanceService.create(f.deps, 'passive')
       expect((await f.store.get('rb-1'))?.state).toBe('submitting')
       expect(f.deps.source.reserve).not.toHaveBeenCalled()
     } finally {
@@ -315,7 +315,7 @@ describe('only the live daemon recovers rebalance state — a one-shot build is 
     try {
       await f.store.create(submittingRow())
       f.deps.source.reserve.mockClear()
-      await RebalanceService.create(f.deps)
+      await RebalanceService.create(f.deps, 'active')
       expect((await f.store.get('rb-1'))?.state).toBe('needs_reconciliation')
       expect(f.deps.source.reserve).toHaveBeenCalledTimes(1)
     } finally {
