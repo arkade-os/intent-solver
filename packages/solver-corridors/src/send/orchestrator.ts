@@ -1163,9 +1163,17 @@ export class SendSwapService {
     // Commit intent before the irreversible call. The idempotency key is
     // derived from the payment hash, so even a retry from a different process
     // after a crash cannot pay the same invoice twice.
+    //
+    // Bind the attempt to its backend HERE, not with the id: a crash between this
+    // transition and `payInvoice` leaves payment_id null, so this is the only
+    // record `whenPaying` has that the attempt may have committed on the node it
+    // then recovers away from.
+    const payWallet = await this.deps.ln.walletFingerprint?.().catch(() => undefined)
     const won = await store.transition(row.id, 'funded', 'paying', {
       pay_attempted_at: this.now(),
       idempotency_key: `swap-${row.paymentHash}`,
+      ...(this.deps.backendName ? { payment_backend: this.deps.backendName } : {}),
+      ...(payWallet ? { payment_wallet: payWallet } : {}),
     })
     if (!won) return false
     // Nothing committed, by construction: this process won the transition a
@@ -1177,6 +1185,26 @@ export class SendSwapService {
   /** Recovery path: the process died (or the call threw) somewhere around payInvoice. */
   private async whenPaying(row: SendSwapRow): Promise<boolean> {
     if (row.paymentId) return this.settleFromBackend(row, 'paying')
+    // Bound to its backend at `funded -> paying`. If the live backend is a
+    // DIFFERENT node, a payment that committed on the original is invisible to
+    // the probe below, so re-submitting pays the same invoice twice. Park for a
+    // human — the same identity guard the coupled refund and `paymentVerdict`
+    // apply, here on a row that has no id yet. `stuck`, not `refused`: a payment
+    // may exist on the other node, so a refund is not safe.
+    const liveWallet = await this.deps.ln.walletFingerprint?.().catch(() => undefined)
+    const foreignBackend = Boolean(
+      row.paymentBackend && this.deps.backendName && row.paymentBackend !== this.deps.backendName,
+    )
+    const foreignWallet = Boolean(row.paymentWallet && liveWallet && row.paymentWallet !== liveWallet)
+    if (foreignBackend || foreignWallet) {
+      await this.deps.store.fail(
+        row.id,
+        'paying',
+        `refused to re-submit: payment attempted on ${row.paymentBackend ?? '?'}/${row.paymentWallet ?? '?'}, ` +
+          `now on ${this.deps.backendName ?? '?'}/${liveWallet ?? '?'}; a payment there is invisible here — reconcile before retry`,
+      )
+      return false
+    }
     // No payment id on disk: the payInvoice call may or may not have gone out.
     //
     // Re-submitting is NOT safe by construction, which is what this once
