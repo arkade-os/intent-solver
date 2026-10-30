@@ -103,9 +103,7 @@ export const adminHostAllowlist = (config?: {
 export const buildAdminApp = (deps: AdminDeps): Hono => {
   const app = new Hono()
   const now = deps.now ?? nowSeconds
-  const allowedHosts = adminHostAllowlist(
-    (deps.services as { config?: Parameters<typeof adminHostAllowlist>[0] })?.config,
-  )
+  const allowedHosts = adminHostAllowlist(deps.services.config)
 
   /**
    * Same-site JSON only, ahead of every route: Hono runs handlers in
