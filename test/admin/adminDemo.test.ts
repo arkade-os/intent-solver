@@ -56,7 +56,7 @@ describe('the demo console', () => {
     const { body } = await get('/api/swaps?limit=100')
     const rows = body.swaps as { id: string; corridor: string }[]
     const corridors = [...new Set(rows.map((row) => row.corridor))]
-    expect(corridors.length).toBeGreaterThanOrEqual(5)
+    expect(corridors.length).toBeGreaterThanOrEqual(4)
     for (const corridor of corridors) {
       const row = rows.find((candidate) => candidate.corridor === corridor)!
       const { status } = await get(`/api/swaps/${encodeURIComponent(corridor)}/${row.id}`)

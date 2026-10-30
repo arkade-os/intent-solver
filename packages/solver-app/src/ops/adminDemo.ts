@@ -15,7 +15,6 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { SwapStore } from '@arkade-os/solver-corridors/db/swaps.js'
 import { ReceiveSwapStore } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
 import { OnchainSendSwapStore } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
-import { OnchainReceiveSwapStore } from '@arkade-os/solver-corridors/db/onchainReceiveSwaps.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { assetRfqDescriptor } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
 import { forgeInvoice } from '@arkade-os/solver-rails-fake/ln/fake/bolt11.js'
@@ -109,7 +108,6 @@ export const buildDemoConsole = async (options: { live?: boolean } = {}): Promis
   const store = await SwapStore.open(':memory:', now)
   const receiveStore = await ReceiveSwapStore.open(':memory:', now)
   const onchainStore = await OnchainSendSwapStore.open(':memory:', now)
-  const onchainReceiveStore = await OnchainReceiveSwapStore.open(':memory:', now)
   const adminStore = await AdminStore.open(':memory:', now, { offerMarkets: [], tokens: [] })
   const assetRfqStore = await AssetRfqSwapStore.open(':memory:', now)
 
@@ -300,56 +298,12 @@ export const buildDemoConsole = async (options: { live?: boolean } = {}): Promis
     await onchainStore.transition(id, 'claiming', 'claimed', { claim_ark_txid: hexOf(32) })
   }
 
-  /** Onchain → Arkade. The client's L1 HTLC confirms, we fund the payout on Arkade, then claim the HTLC. */
-  const onchainReceive = async (ago: number, sats: number, end: 'settled' | 'awaiting_confirmations') => {
-    at(ago)
-    const id = uuid()
-    const { preimage, paymentHash } = secret()
-    const payout = sats - Math.max(600, Math.round(sats * 0.006))
-    await onchainReceiveStore.insertQuote({
-      id,
-      paymentHash,
-      amountSats: sats,
-      payoutSats: payout,
-      htlcLocktime: now() + 6 * HOUR,
-      refundLocktime: now() + 3 * HOUR,
-      minConfirmations: 1,
-      providerPubkey: hexOf(32),
-      clientPayoutPubkey: hexOf(32),
-      refundPkScript: '5120' + hexOf(32),
-      clientPayoutPkScript: '5120' + hexOf(32),
-      htlcPubkey: hexOf(32),
-      clientOnchainRefundPubkey: hexOf(32),
-      onchainAddress: btcAddress(),
-      onchainPkScript: '5120' + hexOf(32),
-      claimPacket: null,
-      ...covenant(),
-    })
-    at(ago - 120)
-    await onchainReceiveStore.transition(id, 'quoted', 'awaiting_confirmations', {
-      funding_txid: hexOf(32),
-      funding_vout: 0,
-      funded_value_sats: sats,
-      funded_payout_sats: payout,
-    })
-    if (end === 'awaiting_confirmations') return
-    at(ago - 720)
-    await onchainReceiveStore.transition(id, 'awaiting_confirmations', 'funding_arkade')
-    await onchainReceiveStore.transition(id, 'funding_arkade', 'awaiting_claim', { arkade_fund_txid: hexOf(32) })
-    at(ago - 800)
-    await onchainReceiveStore.transition(id, 'awaiting_claim', 'claimed', { preimage })
-    await onchainReceiveStore.patch(id, { onchain_claim_txid: hexOf(32) })
-    at(ago - 1_500)
-    await onchainReceiveStore.transition(id, 'claimed', 'settled')
-  }
-
   // A week of delivered swaps, oldest first, so the P&L chart has a shape.
   for (let ago = 7 * DAY; ago > 2 * HOUR; ago -= between(2 * HOUR, 9 * HOUR)) {
     const pick = rand()
     if (pick < 0.4) await send(ago, between(5_000, 250_000), 'claimed')
     else if (pick < 0.75) await receive(ago, between(10_000, 300_000), 'settled')
-    else if (pick < 0.9) await onchainSend(ago, between(50_000, 800_000), 'claimed')
-    else await onchainReceive(ago, between(50_000, 800_000), 'settled')
+    else await onchainSend(ago, between(50_000, 800_000), 'claimed')
   }
   // The rows an operator acts on: failures, money in flight, and fresh quotes.
   await send(3 * DAY, 120_000, 'refused')
@@ -360,7 +314,6 @@ export const buildDemoConsole = async (options: { live?: boolean } = {}): Promis
   const paid = await send(400, 61_500, 'paid')
   await receive(300, 210_000, 'funded')
   await onchainSend(1_200, 525_000, 'awaiting_claim')
-  await onchainReceive(900, 300_000, 'awaiting_confirmations')
   await receive(120, 25_000, 'armed')
   await send(45, 18_000, 'quoted')
   // Above APPROVAL_THRESHOLD_SATS, so it waits funded for an operator.
@@ -547,7 +500,6 @@ export const buildDemoConsole = async (options: { live?: boolean } = {}): Promis
     store,
     receiveStore,
     onchainStore,
-    onchainReceiveStore,
     evmSendStore: null,
     evmReceiveStore: null,
     evmSendService: null,
@@ -586,7 +538,6 @@ export const buildDemoConsole = async (options: { live?: boolean } = {}): Promis
       store,
       onchainStore,
       receiveStore,
-      onchainReceiveStore,
       assetRfqStore,
       assetRfqMarkets,
     }),
@@ -621,7 +572,7 @@ export const buildDemoConsole = async (options: { live?: boolean } = {}): Promis
     close: async () => {
       for (const timer of timers) clearInterval(timer)
       changes.stop()
-      for (const closable of [store, receiveStore, onchainStore, onchainReceiveStore, assetRfqStore, adminStore]) {
+      for (const closable of [store, receiveStore, onchainStore, assetRfqStore, adminStore]) {
         await closable.close()
       }
     },
