@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import {
   applyOverrides,
   validateOverride,
@@ -274,14 +274,17 @@ describe("a registered rail's own settings", () => {
       { path: STORAGE, value: `.data/${railConfig.network}` },
       { path: STORAGE, value: 'listed twice by the rail' },
       { path: 'SWAP_NETWORK', value: 'claimed by the rail' },
+      { path: 'network', value: 'claimed by the rail' },
     ],
   })
   registerLightningRail('throwing-rail', {
     create: never,
     consoleSettings: () => {
-      throw new Error('block unreadable')
+      throw new Error('block unreadable: mnemonic secret words')
     },
   })
+  const selected = (backend: string): Config =>
+    ({ ...config, lnBackend: backend, configPaths: new Map([['SWAP_NETWORK', 'network']]) }) as unknown as Config
 
   it('are listed read-only, under the label the rail gives them, when that rail is selected', () => {
     const rows = describeSettings({ ...config, lnBackend: 'console-rail' } as Config, {}).filter(
@@ -290,19 +293,25 @@ describe("a registered rail's own settings", () => {
     expect(rows).toEqual([{ key: STORAGE, path: STORAGE, value: '.data/regtest', source: 'config', editable: false }])
   })
 
-  it('never displace a setting the list already holds', () => {
-    const network = describeSettings({ ...config, lnBackend: 'console-rail' } as Config, {}).filter(
-      (knob) => knob.key === 'SWAP_NETWORK',
-    )
-    expect(network).toEqual([expect.objectContaining({ value: 'regtest' })])
+  it('never displace a setting the list already holds, by its key or by the label it is shown under', () => {
+    const network = describeSettings(selected('console-rail'), {}).filter((knob) => knob.path === 'network')
+    expect(network).toEqual([expect.objectContaining({ key: 'SWAP_NETWORK', value: 'regtest' })])
   })
 
-  it('cost the list one row, not the page, when the rail throws', () => {
-    const knobs = describeSettings({ ...config, lnBackend: 'throwing-rail' } as Config, {})
-    expect(knobs.find((knob) => knob.key === 'SWAP_NETWORK')?.value).toBe('regtest')
-    expect(knobs.find((knob) => knob.key === 'rails.lightning["throwing-rail"]')?.value).toBe(
-      '(could not be listed: see the log)',
-    )
+  it('cost the list one row, not the page, and the log no word of what the rail threw', () => {
+    const logged = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      const knobs = describeSettings(selected('throwing-rail'), {})
+      expect(knobs.find((knob) => knob.key === 'SWAP_NETWORK')?.value).toBe('regtest')
+      expect(knobs.find((knob) => knob.key === 'rails.lightning["throwing-rail"]')?.value).toBe(
+        '(could not be listed: see the log)',
+      )
+      const lines = logged.mock.calls.map((call) => call.join(' '))
+      expect(lines.some((line) => line.includes('throwing-rail could not list its settings (Error)'))).toBe(true)
+      expect(lines.join('\n')).not.toContain('secret words')
+    } finally {
+      logged.mockRestore()
+    }
   })
 
   it('are absent while another backend is selected', () => {
