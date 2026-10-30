@@ -2,7 +2,12 @@ import { describe, expect, it, vi } from 'vitest'
 import { RebalanceService, type RebalanceSource } from '../../packages/solver-app/src/ops/rebalance.js'
 import { RebalanceStore } from '../../packages/solver-app/src/ops/rebalanceStore.js'
 import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
-import type { RebalancePolicy, RebalancePool, RebalanceDeposit } from '@arkade-os/solver-core/ports/rebalance.js'
+import type {
+  RebalancePolicy,
+  RebalancePool,
+  RebalanceDeposit,
+  RebalanceTransfer,
+} from '@arkade-os/solver-core/ports/rebalance.js'
 
 const policy: RebalancePolicy = {
   enabled: true,
@@ -268,6 +273,51 @@ describe('backend rebalancing', () => {
       await expect(f.service.submit(q.id)).rejects.toThrow(/reserve/)
       expect((await f.store.get(q.id))?.state).toBe('quoted')
       expect(await f.store.rollingDebit(1000)).toBe(0)
+    } finally {
+      await f.driver.close()
+    }
+  })
+})
+
+describe('only the live daemon recovers rebalance state — a one-shot build is passive', () => {
+  const submittingRow = (): RebalanceTransfer => ({
+    id: 'rb-1',
+    requestKey: 'k1',
+    origin: 'automatic',
+    poolId: 'rail:onchain',
+    netSats: 5000,
+    debitSats: 5010,
+    feeSats: 10,
+    policyRevision: 'rev',
+    createdAt: 1000,
+    updatedAt: 1000,
+    expiresAt: 2000,
+    state: 'submitting',
+    deposit: { kind: 'onchain', destination: 'receive', amountSats: 5000, netSats: 5000, feeSats: 0 },
+    inputs: [],
+  })
+
+  it('a passive build neither reconciles a submitting row nor reserves its coins', async () => {
+    const f = await setup()
+    try {
+      await f.store.create(submittingRow())
+      f.deps.source.reserve.mockClear()
+      await RebalanceService.create(f.deps, { active: false })
+      expect((await f.store.get('rb-1'))?.state).toBe('submitting')
+      expect(f.deps.source.reserve).not.toHaveBeenCalled()
+    } finally {
+      await f.driver.close()
+    }
+  })
+
+  it('the active build reconciles the submitting row and re-reserves its coins', async () => {
+    const f = await setup()
+    try {
+      await f.store.create(submittingRow())
+      f.deps.source.reserve.mockClear()
+      await RebalanceService.create(f.deps)
+      expect((await f.store.get('rb-1'))?.state).toBe('needs_reconciliation')
+      expect(f.deps.source.reserve).toHaveBeenCalledTimes(1)
     } finally {
       await f.driver.close()
     }
