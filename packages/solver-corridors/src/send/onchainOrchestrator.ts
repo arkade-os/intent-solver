@@ -15,6 +15,7 @@
  */
 
 import { hex } from '@scure/base'
+import { Transaction } from '@arkade-os/sdk'
 import type { AdmissionStrategy, FloatRequirement } from '@arkade-os/solver-core/core/admissionStrategy.js'
 import { RFQ_PAIR_ONCHAIN_SEND } from '../wire/onchainPayloads.js'
 import { ArkAddress } from '@arkade-os/sdk'
@@ -162,6 +163,18 @@ export interface OnchainQuoteRequest {
 
 /** Extract the preimage from a claim witness: `[signature, preimage, claimScript, controlBlock]`. */
 const preimageFromClaimWitness = (witness: Uint8Array[]): Uint8Array | null => witness[1] ?? null
+
+/** The one output of a recorded funding that pays this swap's HTLC exactly. */
+const fundingOutputOf = (tx: string, row: OnchainSendSwapRow): { txid: string; vout: number } => {
+  const parsed = Transaction.fromRaw(hex.decode(tx), { allowUnknownInputs: true, allowUnknownOutputs: true })
+  const vouts: number[] = []
+  for (let i = 0; i < parsed.outputsLength; i++) {
+    const { script, amount } = parsed.getOutput(i)
+    if (script && hex.encode(script) === row.onchainPkScript && amount === BigInt(row.payoutSats)) vouts.push(i)
+  }
+  if (vouts.length !== 1) throw new Error(`recorded funding ${parsed.id} pays this HTLC ${vouts.length} times`)
+  return { txid: parsed.id, vout: vouts[0]! }
+}
 
 /** Every version of our refund that could still confirm, newest first: a replacement does not revoke what it replaced. */
 const trackedRefundTxids = (row: OnchainSendSwapRow): string[] =>
@@ -856,10 +869,10 @@ export class OnchainSendSwapService {
   }
 
   /**
-   * Recovery path: `funding_onchain` with no txid on disk means the process died around
-   * `onchain.fund`, which may or may not have gone out. On a backend that drops the
-   * per-swap idempotency key, a blind resubmit is a SECOND funding transaction paying
-   * the same HTLC out of the solver's own pocket, with no way to recover the first.
+   * Recovery path: `funding_onchain` with no txid on disk means the process died around the
+   * funding broadcast. A recorded `funding_tx` is resent and nothing is signed again. Without
+   * one — a row funded before that column, through `fund()` — a blind resubmit is a SECOND
+   * funding transaction paying the same HTLC out of the solver's own pocket.
    *
    * So ask the chain instead. `row.onchainAddress` is a per-swap P2TR derived from this
    * swap's payment hash, claim key and locktime, so an output there for exactly
@@ -872,12 +885,13 @@ export class OnchainSendSwapService {
    * `P` and lose the whole Arkade lockup for a few sats. Both backends pay exactly
    * `payoutSats`, so anything else falls through to a real fund.
    *
-   * RESIDUAL WINDOW: a crash after the backend commits to paying but before the payment
+   * RESIDUAL WINDOW, for such a row only: a crash after the backend commits to paying but before the payment
    * is visible to `findOutputs`. Small for LND; for a backend that accepts first and
    * broadcasts afterwards the idempotency key is what closes it, not this query.
    */
   private async recoverFunding(row: OnchainSendSwapRow): Promise<boolean> {
     const { store, onchain } = this.deps
+    if (row.fundingTx) return this.publishFunding(row, row.fundingTx, true)
     const outputs = await onchain.findOutputs({ address: row.onchainAddress })
     const already = outputs.find((output) => output.valueSats === row.payoutSats)
     if (!already) return this.submitFunding(row, false)
@@ -906,40 +920,45 @@ export class OnchainSendSwapService {
     // after `recoverFunding`'s read, both deliberately — a check before either
     // would let one worker park a row another is inside `fund()` on, or park a
     // funding that really went out, losing the outpoint `reclaimOnchainHtlc` needs.
-    const decision = this.fundingDecision(row)
-    const refusal = !providerKeyCurrent(row.providerPubkey, this.deps.arkade.providerPubkey)
-      ? KEY_ROTATED
-      : decision.fund
-        ? null
-        : decision.reason
+    const refusal = this.fundingRefusal(row)
     if (refusal) return this.refuseFunding(row, fresh, refusal)
 
-    let result
+    let signed
     try {
       const shortfall = await this.lockupShortfall(row)
       if (shortfall) return this.refuseFunding(row, fresh, shortfall)
-      result = await onchain.fund({
-        address: row.onchainAddress,
-        amountSats: row.payoutSats,
-        // The row id, which is stable across every re-drive of this swap and
-        // unique to it — so a backend that honours the key answers a repeat with
-        // the funding it already made rather than making another.
-        idempotencyKey: `onchain-swap-${row.id}`,
-      })
+      signed = await onchain.signFunding({ address: row.onchainAddress, amountSats: row.payoutSats })
     } catch (error) {
-      // Hand the lease back: a throw here moved no money that this service can
-      // see, and holding it would strand the row for every worker rather than
-      // just this one. The surrounding recovery already owns the ambiguity a
-      // throw leaves — it looks for an output at the address for exactly the
-      // right amount — and this must not take that away from it.
+      // Nothing is broadcast before the record below, so the next worker may sign afresh.
       await store.releaseFundLease(row.id)
       throw error
     }
-    await store.transition(row.id, 'funding_onchain', 'awaiting_claim', {
-      funding_txid: result.txid,
-      funding_vout: result.vout,
-    })
-    return true
+    if (!(await store.recordFundingTx(row.id, signed.tx))) return false
+    return this.publishFunding(row, signed.tx, false)
+  }
+
+  private fundingRefusal(row: OnchainSendSwapRow): string | null {
+    if (!providerKeyCurrent(row.providerPubkey, this.deps.arkade.providerPubkey)) return KEY_ROTATED
+    const decision = this.fundingDecision(row)
+    return decision.fund ? null : decision.reason
+  }
+
+  /**
+   * Only ever the recorded funding, so a resend cannot pay the HTLC twice. `recheck` on a re-drive, which may
+   * come any time later: a recorded funding no chain has seen is parked once the gates have closed.
+   */
+  private async publishFunding(row: OnchainSendSwapRow, tx: string, recheck: boolean): Promise<boolean> {
+    const { store, onchain } = this.deps
+    const { txid, vout } = fundingOutputOf(tx, row)
+    if ((await onchain.transactionOutcome(txid)) === 'unknown') {
+      const refusal = recheck ? (this.fundingRefusal(row) ?? (await this.lockupShortfall(row))) : null
+      if (refusal) {
+        await store.fail(row.id, 'funding_onchain', `${refusal}; recorded funding ${txid} was never seen on chain`)
+        return false
+      }
+      await onchain.broadcastRaw(tx)
+    }
+    return store.transition(row.id, 'funding_onchain', 'awaiting_claim', { funding_txid: txid, funding_vout: vout })
   }
 
   /**
@@ -952,8 +971,7 @@ export class OnchainSendSwapService {
       await store.fail(row.id, 'funding_onchain', reason)
       return false
     }
-    await store.transition(row.id, 'funding_onchain', 'refused', { failure_reason: reason })
-    await store.releaseFundLease(row.id)
+    if (await store.refuseUnrecorded(row.id, reason)) await store.releaseFundLease(row.id)
     return false
   }
 

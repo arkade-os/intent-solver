@@ -51,6 +51,7 @@ const row: OnchainSendSwapRow = {
   failureReason: null,
   rfqId: null,
   fundStartedAt: null,
+  fundingTx: null,
   unrolledClaim: null,
   lockupOutpoints: null,
 }
