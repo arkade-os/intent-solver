@@ -1193,8 +1193,11 @@ Arkade lockup.
   onchain refund key), `htlc_locktime` (the HTLC's CLTV deadline, absolute
   unix seconds — the solver's own refund path), `min_confirmations`,
   `lockup_address` and `htlc_address` (both compare-only, kept distinct),
-  `receiver_pk_script` (compare-only — the § 7.1.1.1 role it plays on the
-  covenant). Amounts: the client locks `from_amount`; the solver funds the
+  `refund_without_receiver_delay` (the covenant's solo refund delay, extended
+  where the base ladder is shorter so the solo refund cannot open before
+  `htlc_locktime` + 3 h, the solver's last Arkade claim; the client builds it
+  into its derivation), `receiver_pk_script` (compare-only —
+  the § 7.1.1.1 role it plays on the covenant). Amounts: the client locks `from_amount`; the solver funds the
   HTLC with `to_amount` — the amount minus this corridor's fee, fixed at
   quote time. A quote whose payout would be below the onchain dust floor is
   refused (`pricing_unavailable`), never funded.

@@ -103,6 +103,14 @@ import { startCadence } from './ops/cadence.js'
 import { recordBalanceCheckpoint, withBalanceCheckpoints } from './ops/balanceCheckpoints.js'
 import { lightningRailFor, requireLn, requireOnchain } from './ops/rails.js'
 
+/** A base rung as the quote's ladder counts it: re-clocked to seconds when the quoted solo rung was. */
+const quotedRung =
+  (solo: number) =>
+  (base: number): number =>
+    relativeDelayFrom(solo).unit === 'seconds' && relativeDelayFrom(base).unit === 'blocks'
+      ? secondsForBlockRung(base)
+      : base
+
 /**
  * How often `relay` refreshes its liveness file. Six of these fit inside the
  * 60s staleness bound in the Dockerfile's HEALTHCHECK — a Dockerfile cannot
@@ -1382,9 +1390,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       // converted with the service's exact rule or this derivation mixes units
       // and the addresses diverge. The unit rides on the quoted value, so a
       // seconds deployment needs no branch — its base is seconds already.
-      const soloUnit = relativeDelayFrom(swap.refundWithoutReceiverDelay).unit
-      const rung = (base: number): number =>
-        soloUnit === 'seconds' && relativeDelayFrom(base).unit === 'blocks' ? secondsForBlockRung(base) : base
+      const rung = quotedRung(swap.refundWithoutReceiverDelay)
       const local = new CovenantSwapScript({
         receiver: hex.decode(swap.receiverPubkey), // trusted from quote: provider key
         server: serverKey,
@@ -1486,15 +1492,16 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       // fund on any mismatch. The Arkade-side script is byte-identical to the
       // Lightning leg's; the onchain HTLC is new to this leg.
       const serverKey = services.arkade.wallet.arkServerPublicKey
+      const rung = quotedRung(swap.refundWithoutReceiverDelay)
       const localArkade = new CovenantSwapScript({
         receiver: hex.decode(swap.providerPubkey),
         server: serverKey,
         preimageHash: scriptHashFromPaymentHash(paymentHash),
         refundLocktime: swap.refundLocktime,
-        claimDelay: services.arkade.unilateralDelays.unilateralClaimDelay,
+        claimDelay: rung(services.arkade.unilateralDelays.unilateralClaimDelay),
         client: clientRefundPub,
-        clientRefundDelay: services.arkade.unilateralDelays.unilateralRefundWithoutReceiverDelay,
-        refundWithoutServerDelay: services.arkade.unilateralDelays.unilateralRefundDelay,
+        clientRefundDelay: swap.refundWithoutReceiverDelay,
+        refundWithoutServerDelay: rung(services.arkade.unilateralDelays.unilateralRefundDelay),
         nonInteractiveParameters: {
           emulatorPubkey: hex.decode(services.emulatorPubkey),
           receiverPkScript: hex.decode(swap.receiverPkScript),
