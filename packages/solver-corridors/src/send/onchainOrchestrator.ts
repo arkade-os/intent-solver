@@ -220,6 +220,8 @@ type OnchainHtlcRefundAttempt =
 
 const MIN_RELAY_FEE_RATE = 1
 const KEY_ROTATED = 'provider key rotated since quote; refusing to fund an unclaimable lockup'
+/** How long a funding broadcast may sit unconfirmed before the stuck-tx alert fires, re-raised every tick after. */
+const FUNDING_STUCK_ALERT_SECONDS = 20 * 60
 
 /**
  * Re-exported, not defined here: `core/onchainSend.ts` owns it now, because
@@ -943,7 +945,12 @@ export class OnchainSendSwapService {
     try {
       const shortfall = await this.lockupShortfall(row)
       if (shortfall) return this.refuseFunding(row, fresh, shortfall)
-      signed = await onchain.signFunding({ address: row.onchainAddress, amountSats: row.payoutSats })
+      const feeRateSatPerVbyte = Math.max(await onchain.estimateFeeRate(), MIN_RELAY_FEE_RATE)
+      signed = await onchain.signFunding({
+        address: row.onchainAddress,
+        amountSats: row.payoutSats,
+        feeRateSatPerVbyte,
+      })
     } catch (error) {
       // Nothing is broadcast before the record below, so the next worker may sign afresh.
       await store.releaseFundLease(row.id)
@@ -1011,6 +1018,19 @@ export class OnchainSendSwapService {
       // HTLC_REFUND_MTP_MARGIN's doc comment.
       if (this.now() >= row.htlcLocktime + HTLC_REFUND_MTP_MARGIN) {
         return store.transition(row.id, 'awaiting_claim', 'refunding_onchain', {})
+      }
+      if (row.fundStartedAt !== null && this.now() - row.fundStartedAt >= FUNDING_STUCK_ALERT_SECONDS) {
+        // Unconfirmed funding blocks every later spend, and a confirm past refund_locktime is a double loss;
+        // its fee is fixed at sign time, so only a human can bump/CPFP it — surface it.
+        if ((await onchain.transactionOutcome(row.fundingTxid)) !== 'confirmed') {
+          this.onTickError?.(
+            row.id,
+            new Error(
+              `funding ${row.fundingTxid} unconfirmed ${this.now() - row.fundStartedAt}s after broadcast — ` +
+                `bump or CPFP before htlc_locktime ${row.htlcLocktime} or the payout strands`,
+            ),
+          )
+        }
       }
       return false // client has not claimed yet, and the timeout hasn't matured — keep waiting
     }

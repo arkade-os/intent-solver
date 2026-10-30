@@ -148,8 +148,13 @@ export class LndOnchainAdapter implements OnchainSendBackend {
   async signFunding(params: {
     address: string
     amountSats: number
+    feeRateSatPerVbyte: number
   }): Promise<{ txid: string; vout: number; tx: string }> {
-    const funded = await fundPsbt({ lnd: this.lnd, outputs: [{ address: params.address, tokens: params.amountSats }] })
+    const funded = await fundPsbt({
+      lnd: this.lnd,
+      outputs: [{ address: params.address, tokens: params.amountSats }],
+      fee_tokens_per_vbyte: params.feeRateSatPerVbyte,
+    })
     const { transaction } = await signPsbt({ lnd: this.lnd, psbt: funded.psbt })
     const payment = funded.outputs.find((output) => !output.is_change)?.output_script
     const tx = Transaction.fromRaw(hex.decode(transaction), { allowUnknownInputs: true, allowUnknownOutputs: true })
