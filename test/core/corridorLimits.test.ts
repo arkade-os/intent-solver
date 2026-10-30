@@ -34,7 +34,7 @@ const BASE_ENV: Record<string, string> = {
   ARK_MNEMONIC: 'test mnemonic, never a real one',
   ARK_SERVER_URL: 'http://localhost:7070',
   EMULATOR_URL: 'http://localhost:7073',
-  // Required: the four corridors are enabled here, and each takes both its legs
+  // Required: the three corridors are enabled here, and each takes both its legs
   // from the rail, so `loadConfig` refuses an unset value.
   LN_BACKEND: 'fake',
 }
@@ -62,7 +62,7 @@ describe('corridorLimits', () => {
     }
   })
 
-  it('narrows one corridor without touching the other three', () => {
+  it('narrows one corridor without touching the other two', () => {
     process.env.ONCHAIN_SEND_MAX_SATS = '5000'
     const config = loadConfig()
     expect(config.corridorLimits['arkade:BTC->onchain:BTC'].maxSats).toBe(5000)
@@ -73,9 +73,9 @@ describe('corridorLimits', () => {
   })
 
   it('raises a corridor floor without raising the others', () => {
-    process.env.ONCHAIN_RECEIVE_MIN_SATS = '50000'
+    process.env.ONCHAIN_SEND_MIN_SATS = '50000'
     const config = loadConfig()
-    expect(config.corridorLimits['onchain:BTC->arkade:BTC'].minSats).toBe(50000)
+    expect(config.corridorLimits['arkade:BTC->onchain:BTC'].minSats).toBe(50000)
     expect(config.corridorLimits['lightning:BTC->arkade:BTC'].minSats).toBe(config.limits.minSats)
   })
 

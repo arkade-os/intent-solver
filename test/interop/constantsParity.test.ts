@@ -43,31 +43,9 @@ import * as swap from '@arkade-os/swap/protocol'
  * Import it again once arkade-os/ts-sdk#1095 lands.
  */
 const SWAP_MIN_CLAIM_WINDOW_SECONDS = 30 * 60
-// EVERY local copy, not one of each.
-//
-// `core/*.ts` modules are self-contained on purpose: a value that coincides
-// with another module's is redeclared under the same name rather than imported,
-// so a corridor can be read without chasing imports (docs/deadlines.md states
-// the convention). Three of these quantities therefore exist TWICE in `src/`.
-//
-// A parity test that pinned one copy would be worse than none: it would report
-// agreement with the SDK while the other copy — the one the send leg's
-// `htlcLocktimeFor` actually reads — drifted underneath it. So each declaration
-// is imported under its own name and checked separately, which also pins the
-// two local copies to each other by transitivity.
-import {
-  MAX_MIN_CONFIRMATIONS as RECEIVE_MAX_MIN_CONFIRMATIONS,
-  MIN_MIN_CONFIRMATIONS as RECEIVE_MIN_MIN_CONFIRMATIONS,
-  ONCHAIN_SECONDS_PER_BLOCK as RECEIVE_SECONDS_PER_BLOCK,
-  ONCHAIN_DUST_SATS as RECEIVE_DUST_SATS,
-  DEFAULT_MIN_CONFIRMATIONS,
-  MAX_REFUND_HORIZON as ONCHAIN_RECEIVE_HORIZON,
-  MIN_SETTLE_WINDOW as ONCHAIN_RECEIVE_MIN_SETTLE_WINDOW,
-  SETTLE_SAFETY_MARGIN as ONCHAIN_RECEIVE_SETTLE_SAFETY_MARGIN,
-  onchainReceiveClaimWindow,
-} from '@arkade-os/solver-core/core/onchainReceive.js'
-import { MAX_REFUND_HORIZON as LIGHTNING_RECEIVE_HORIZON } from '@arkade-os/solver-core/core/receive.js'
-import { HOUR } from '@arkade-os/solver-core/core/timelocks.js'
+// EVERY local copy, not one of each: `core/*.ts` modules redeclare a coinciding
+// value rather than import it (docs/deadlines.md states the convention), so a
+// second copy gets its own import and its own row here.
 import {
   MAX_MIN_CONFIRMATIONS as SEND_MAX_MIN_CONFIRMATIONS,
   MIN_MIN_CONFIRMATIONS as SEND_MIN_MIN_CONFIRMATIONS,
@@ -80,7 +58,6 @@ import { MIN_CLAIM_WINDOW } from '@arkade-os/solver-core/core/send.js'
 import { RFQ_PAIR_SEND } from '@arkade-os/solver-corridors/wire/payloads.js'
 import { RFQ_PAIR_RECEIVE } from '@arkade-os/solver-corridors/wire/lightningReceivePayloads.js'
 import { RFQ_PAIR_ONCHAIN_SEND } from '@arkade-os/solver-corridors/wire/onchainPayloads.js'
-import { RFQ_PAIR_ONCHAIN_RECEIVE } from '@arkade-os/solver-corridors/wire/onchainReceivePayloads.js'
 
 /**
  * Values that MUST match, because both sides compute against them and a
@@ -102,28 +79,10 @@ const MUST_MATCH: ReadonlyArray<{ what: string; ours: unknown; theirs: unknown; 
   { what: 'RFQ_PAIR_RECEIVE', ours: RFQ_PAIR_RECEIVE, theirs: swap.LIGHTNING_RECEIVE_PAIR, why: 'as above' },
   { what: 'RFQ_PAIR_ONCHAIN_SEND', ours: RFQ_PAIR_ONCHAIN_SEND, theirs: swap.ONCHAIN_SEND_PAIR, why: 'as above' },
   {
-    what: 'RFQ_PAIR_ONCHAIN_RECEIVE',
-    ours: RFQ_PAIR_ONCHAIN_RECEIVE,
-    theirs: swap.ONCHAIN_RECEIVE_PAIR,
-    why: 'as above',
-  },
-  {
-    what: 'ONCHAIN_SECONDS_PER_BLOCK (core/onchainReceive.ts)',
-    ours: RECEIVE_SECONDS_PER_BLOCK,
-    theirs: swap.ONCHAIN_SECONDS_PER_BLOCK,
-    why: 'both convert blocks to seconds when sizing the same deadline',
-  },
-  {
     what: 'ONCHAIN_SECONDS_PER_BLOCK (core/onchainSend.ts)',
     ours: SEND_SECONDS_PER_BLOCK,
     theirs: swap.ONCHAIN_SECONDS_PER_BLOCK,
     why: "the send leg's own copy — this is the one htlcLocktimeFor reads",
-  },
-  {
-    what: 'MAX_MIN_CONFIRMATIONS (core/onchainReceive.ts)',
-    ours: RECEIVE_MAX_MIN_CONFIRMATIONS,
-    theirs: swap.MAX_MIN_CONFIRMATIONS,
-    why: 'we cap what a client may request; a client that believes a higher cap asks for what we refuse',
   },
   {
     what: 'MAX_MIN_CONFIRMATIONS (core/onchainSend.ts)',
@@ -180,14 +139,14 @@ describe('quantities this service shares with @arkade-os/swap', () => {
    * and the type difference stays visible in the test rather than being
    * silently absorbed.
    */
-  it.each([
-    ['core/onchainReceive.ts', RECEIVE_DUST_SATS],
-    ['core/onchainSend.ts', SEND_DUST_SATS],
-  ])('agrees with the SDK on the dust value in %s, across a type boundary', (_where, ours) => {
-    expect(typeof ours).toBe('number')
-    expect(typeof swap.ONCHAIN_DUST_SATS).toBe('bigint')
-    expect(BigInt(ours)).toBe(swap.ONCHAIN_DUST_SATS)
-  })
+  it.each([['core/onchainSend.ts', SEND_DUST_SATS]])(
+    'agrees with the SDK on the dust value in %s, across a type boundary',
+    (_where, ours) => {
+      expect(typeof ours).toBe('number')
+      expect(typeof swap.ONCHAIN_DUST_SATS).toBe('bigint')
+      expect(BigInt(ours)).toBe(swap.ONCHAIN_DUST_SATS)
+    },
+  )
 })
 
 /**
@@ -225,73 +184,8 @@ describe('quantities that look shared and are not', () => {
   })
 })
 
-/**
- * Our OWN two copies, which is a different hazard from SDK parity.
- *
- * `core/onchainReceive.ts` redeclares the confirmation-depth constants rather
- * than importing them, deliberately and for the reason its header gives. That
- * makes drift between the two legs possible in a way the SDK comparison above
- * would never catch — both legs could agree with the SDK on the ceiling and
- * still disagree with each other on the floor.
- */
-describe('the two onchain legs agree with each other', () => {
-  it('shares one confirmation floor, so neither leg can be quoted at zero-conf alone', () => {
-    // The floor is TLA+ finding F2's fix. A leg that lost it would fund against
-    // a replaceable transaction while the other refused — and the refusal would
-    // look like the bug.
-    expect(RECEIVE_MIN_MIN_CONFIRMATIONS).toBe(SEND_MIN_MIN_CONFIRMATIONS)
-    expect(RECEIVE_MIN_MIN_CONFIRMATIONS).toBeGreaterThan(0)
-  })
-
-  it('shares one ceiling too, which the SDK checks separately but never against each other', () => {
-    expect(RECEIVE_MAX_MIN_CONFIRMATIONS).toBe(SEND_MAX_MIN_CONFIRMATIONS)
-  })
-})
-
-/**
- * `MAX_REFUND_HORIZON` is declared TWICE and independently: `core/receive.ts` supplies the payer's
- * window, `core/onchainReceive.ts` the solver's L1 claim window. Tripwire, not ruling — #160, #161.
- */
-describe('the two receive legs agree about the refund horizon', () => {
-  it('holds one value across both declarations, so neither leg can move alone in silence', () => {
-    expect(ONCHAIN_RECEIVE_HORIZON).toBe(LIGHTNING_RECEIVE_HORIZON)
-  })
-
-  const claimWindowAtHorizon = (horizon: number, minConfirmations: number): number =>
-    Math.max(
-      ONCHAIN_RECEIVE_SETTLE_SAFETY_MARGIN,
-      minConfirmations * RECEIVE_SECONDS_PER_BLOCK + 2 * ONCHAIN_RECEIVE_MIN_SETTLE_WINDOW - horizon,
-    )
-
-  it.each([
-    ['the default depth', DEFAULT_MIN_CONFIRMATIONS],
-    ['the maximum depth', RECEIVE_MAX_MIN_CONFIRMATIONS],
-  ])('models %s exactly as the shipped function computes it', (_what, depth) => {
-    expect(claimWindowAtHorizon(ONCHAIN_RECEIVE_HORIZON, depth)).toBe(onchainReceiveClaimWindow(depth, 1_800_000_000))
-  })
-
-  it.each([
-    ['2 h, today: the L1 claim window is 70 min at the default depth and 120 at the maximum', 2 * HOUR, 70, 120],
-    ['3 h: 15 min at the default depth — the SETTLE_SAFETY_MARGIN floor — and 60 at the maximum', 3 * HOUR, 15, 60],
-    ['4 h: 15 min at every depth, so the cap has stopped supplying anything', 4 * HOUR, 15, 15],
-  ])('%s', (_label, horizon, atDefault, atMax) => {
-    expect(claimWindowAtHorizon(horizon, DEFAULT_MIN_CONFIRMATIONS)).toBe(atDefault * 60)
-    expect(claimWindowAtHorizon(horizon, RECEIVE_MAX_MIN_CONFIRMATIONS)).toBe(atMax * 60)
-  })
-
-  it('sits on the 2 h row today, so the table above reads as current and not as history', () => {
-    expect(ONCHAIN_RECEIVE_HORIZON).toBe(2 * HOUR)
-  })
-
-  it('puts the default depth on the floor from 2 h 55 m onward, which is short of 3 h', () => {
-    const floorsAt =
-      DEFAULT_MIN_CONFIRMATIONS * RECEIVE_SECONDS_PER_BLOCK +
-      2 * ONCHAIN_RECEIVE_MIN_SETTLE_WINDOW -
-      ONCHAIN_RECEIVE_SETTLE_SAFETY_MARGIN
-    expect(floorsAt).toBe(175 * 60)
-    expect(claimWindowAtHorizon(floorsAt, DEFAULT_MIN_CONFIRMATIONS)).toBe(ONCHAIN_RECEIVE_SETTLE_SAFETY_MARGIN)
-    expect(claimWindowAtHorizon(floorsAt - 60, DEFAULT_MIN_CONFIRMATIONS)).toBeGreaterThan(
-      ONCHAIN_RECEIVE_SETTLE_SAFETY_MARGIN,
-    )
+describe('the onchain send leg', () => {
+  it('keeps a confirmation floor, so it cannot be quoted at zero-conf', () => {
+    expect(SEND_MIN_MIN_CONFIRMATIONS).toBeGreaterThan(0)
   })
 })

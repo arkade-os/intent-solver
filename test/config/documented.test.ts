@@ -45,7 +45,7 @@ const sourceFiles = (dir: string): string[] =>
  *  - built from a corridor stem — `<STEM>_<SUFFIX>`, expanded below
  *  - `fileOrInline` pairs, which read `NAME` and `NAME_PATH`
  */
-const CORRIDOR_STEMS = ['LN_SEND', 'LN_RECEIVE', 'ONCHAIN_SEND', 'ONCHAIN_RECEIVE']
+const CORRIDOR_STEMS = ['LN_SEND', 'LN_RECEIVE', 'ONCHAIN_SEND']
 
 const envNamesInSource = (): Set<string> => {
   const names = new Set<string>()
@@ -69,7 +69,7 @@ const envNamesInSource = (): Set<string> => {
 }
 
 /**
- * What the README documents, with `<CORRIDOR>_X` expanded to the four concrete
+ * What the README documents, with `<CORRIDOR>_X` expanded to the three concrete
  * names — the README documents the family as a pattern on purpose, and that is
  * a real answer to "is this written down", not a gap.
  */

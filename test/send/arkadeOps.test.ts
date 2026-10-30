@@ -4,7 +4,9 @@ import { schnorr } from '@noble/curves/secp256k1.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { ripemd160 } from '@noble/hashes/legacy.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
-import { covenantScriptFromRow } from '@arkade-os/solver-corridors/send/arkadeOps.js'
+import { SingleKey } from '@arkade-os/sdk'
+import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { arkadeOpsFromContext, covenantScriptFromRow } from '@arkade-os/solver-corridors/send/arkadeOps.js'
 import type { CovenantScriptRow } from '@arkade-os/solver-corridors/send/orchestrator.js'
 
 const key = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
@@ -110,5 +112,29 @@ describe('covenantScriptFromRow — the timelocked non-interactive refund leaf',
     const withFlag = new CovenantSwapScript(scriptParams(true))
     const withoutFlag = new CovenantSwapScript(scriptParams(false))
     expect(hex.encode(withFlag.pkScript)).not.toBe(hex.encode(withoutFlag.pkScript))
+  })
+})
+
+describe('arkadeOpsFromContext — the L1 claim of an unrolled output', () => {
+  it('closes it at once when the live key is not the one the swap was quoted under', async () => {
+    const script = new CovenantSwapScript(scriptParams(true))
+    const ctx = {
+      identity: SingleKey.fromPrivateKey(new Uint8Array(32).fill(21)),
+      unilateralDelays: {
+        unilateralClaimDelay: CLAIM_DELAY,
+        unilateralRefundDelay: REFUND_WITHOUT_SERVER_DELAY,
+        unilateralRefundWithoutReceiverDelay: CLIENT_REFUND_DELAY,
+      },
+      hrp: 'tark',
+      wallet: { arkServerPublicKey: SERVER, getAddress: async () => script.address('tark', SERVER).encode() },
+    } as unknown as ArkadeContext
+    const ops = await arkadeOpsFromContext(ctx, { url: 'http://emulator.test', pubkey: hex.encode(EMULATOR) })
+
+    const lockup = { txid: 'aa'.repeat(32), vout: 0 }
+    const step = await ops.claimUnrolled!(rowFundedAgainst(script, true), lockup, null, async () => {}, '07'.repeat(32))
+    expect(step).toEqual({
+      kind: 'closed',
+      reason: 'swap test-swap was quoted under a different provider key; the live key cannot claim it',
+    })
   })
 })

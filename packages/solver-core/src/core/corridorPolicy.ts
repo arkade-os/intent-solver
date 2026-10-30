@@ -3,18 +3,13 @@
  *
  * Separate from `limits.ts` because that module owns one question — how wide a
  * blast radius a single swap may have — and answers it the same way for every
- * corridor. This one owns the questions where the four corridors genuinely
+ * corridor. This one owns the questions where the corridors genuinely
  * differ: an onchain leg pays for a transaction whatever the swap is worth, and
  * a Lightning leg does not, so a single spread cannot price both correctly.
  */
 
-/** The four directional pairs this solver serves. */
-export const CORRIDORS = [
-  'arkade:BTC->lightning:BTC',
-  'lightning:BTC->arkade:BTC',
-  'arkade:BTC->onchain:BTC',
-  'onchain:BTC->arkade:BTC',
-] as const
+/** The three directional pairs this solver serves. */
+export const CORRIDORS = ['arkade:BTC->lightning:BTC', 'lightning:BTC->arkade:BTC', 'arkade:BTC->onchain:BTC'] as const
 
 export type Corridor = (typeof CORRIDORS)[number]
 

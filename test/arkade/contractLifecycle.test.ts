@@ -122,14 +122,13 @@ const stores = (over: Record<string, unknown> = {}) => ({
   store: { findRecoverable: async () => [] },
   onchainStore: { findRecoverable: async () => [] },
   receiveStore: { findRecoverable: async () => [] },
-  onchainReceiveStore: { findRecoverable: async () => [] },
   ...over,
 })
 
 describe('lockupSource', () => {
   // Guards the exact regression `liveLockupRows` was written for: a source that
   // reads only the SEND stores looks identical in every other test.
-  it('reads all four corridor stores', async () => {
+  it('reads all three corridor stores', async () => {
     const calls: string[] = []
     const spy = (name: string) => ({
       findRecoverable: async () => {
@@ -142,13 +141,12 @@ describe('lockupSource', () => {
         store: spy('store'),
         onchainStore: spy('onchainStore'),
         receiveStore: spy('receiveStore'),
-        onchainReceiveStore: spy('onchainReceiveStore'),
       } as unknown as FlatCorridorDeps),
       'ark',
       new Uint8Array(32),
     )
     await source.live()
-    expect(calls.sort()).toEqual(['onchainReceiveStore', 'onchainStore', 'receiveStore', 'store'])
+    expect(calls.sort()).toEqual(['onchainStore', 'receiveStore', 'store'])
   })
 
   it('is empty when no corridor holds a lockup', async () => {

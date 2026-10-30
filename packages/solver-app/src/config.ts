@@ -10,7 +10,6 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { base64 } from '@scure/base'
 import { narrow, resolveLimits, type Limits } from '@arkade-os/solver-core/core/limits.js'
-import { defaultMaxBandWidthSats, DEFAULT_BAND_BELOW_SHARE } from '@arkade-os/solver-core/core/onchainReceive.js'
 import { DEFAULT_LOCKUP_TIMEOUT, MAX_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/send.js'
 import { MAX_BIP68_BLOCKS, MAX_BIP68_SECONDS, relativeDelayFrom } from '@arkade-os/solver-core/core/timelocks.js'
 import { corridorEnabledFrom } from '@arkade-os/solver-core/core/corridorEnabled.js'
@@ -101,8 +100,8 @@ export interface LndConfig {
   /** Base64-serialized macaroon. */
   macaroon: string
   /**
-   * Esplora base URL, for the ONCHAIN RECEIVE corridor only. LND's own chain
-   * view is wallet-scoped and carries no per-output values, so it cannot see a
+   * Esplora base URL, for the ONCHAIN RECEIVE corridor and the Lightning receive leg's L1 claim read.
+   * LND's own chain view is wallet-scoped and carries no per-output values, so it cannot see a
    * client's funding transaction — see `onchain/lnd/adapter.ts`'s `findOutputs`.
    * Optional: unset is fine for a send-only deployment, and the receive path
    * fails loudly rather than under-reporting.
@@ -147,15 +146,6 @@ export interface Config {
    */
   corridorFees: Record<Corridor, Fee>
   /**
-   * How far a funded `onchain:BTC->arkade:BTC` amount may sit from its quote,
-   * from `ONCHAIN_RECEIVE_MAX_BAND_SATS`. Separate from `corridorLimits` on
-   * purpose: how far an amount may DRIFT is a different risk from how large it
-   * may be, and an operator may want the first tight and the second wide.
-   */
-  onchainReceiveMaxBandSats: number
-  /** From `ONCHAIN_RECEIVE_BAND_BELOW_SHARE`. Only reachable when `ONCHAIN_RECEIVE_MAX_BAND_SATS` binds. */
-  onchainReceiveBandBelowShare: number
-  /**
    * The bounds a corridor prices its own EXECUTION COST inside, or null to keep
    * charging {@link Config.corridorFees}' flat and nothing else.
    *
@@ -180,7 +170,7 @@ export interface Config {
   onchainFeeRateRefreshMs: number
   onchainFeeRateStaleMs: number
   /**
-   * Which corridors this deployment quotes. All four by default.
+   * Which corridors this deployment quotes. All three by default.
    *
    * A disabled corridor is never constructed in `createServices`, so its pair
    * is refused as unsupported at the ingress by name — the answer a solver
@@ -308,11 +298,6 @@ export interface Config {
    * mainnet-gated on an explicit cap, and shown in the console. The window it waives is
    * still not one this corridor can be served without on mainnet; that is the trade,
    * stated as a trade.
-   *
-   * Lightning leg only. `onchain:BTC->arkade:BTC` carries the same gate and is
-   * deliberately NOT covered: there `E` is the client's own onchain locktime with no
-   * routing ceiling above it, so a long delay makes that corridor expensive rather
-   * than impossible.
    */
   lnReceiveAcceptUnilateralGap: boolean
   /** Cap on the summed amount across all concurrently-exposed swaps. */
@@ -396,7 +381,7 @@ export interface Config {
    * at compile time in a repo whose whole point is that someone else can add
    * one.
    *
-   * NULL exactly when no BTC corridor is enabled. All four take both their legs
+   * NULL exactly when no BTC corridor is enabled. All three take both their legs
    * from this one value, so a deployment serving only EVM or asset flow has
    * nothing to name — and demanding a Lightning node from it would be demanding
    * infrastructure for corridors it does not run. Any other combination is
@@ -562,10 +547,10 @@ const BUILT_IN_LN_BACKENDS = ['lnd', 'fake'] as const
 /**
  * Which BTC rail to talk to, or null on a deployment that needs none.
  *
- * REQUIRED whenever any BTC corridor is enabled, which is the default — all four
+ * REQUIRED whenever any BTC corridor is enabled, which is the default — all three
  * take their Lightning and their onchain leg from this one value, so `servesBtc`
  * is the whole exemption: a solver serving only EVM or asset flow states that by
- * disabling the four, and is not then asked for a Lightning node it has no use
+ * disabling the three, and is not then asked for a Lightning node it has no use
  * for. There is deliberately no default rail. One would mean a deployment that
  * forgot the variable silently coming up on whichever vendor this file happened
  * to name, holding the operator's money.
@@ -586,7 +571,7 @@ const lnBackendFromEnv = (servesBtc: boolean): string | null => {
     if (!servesBtc) return null
     throw new Error(
       `LN_BACKEND must be set to one of ${accepted.join(', ')}: every BTC corridor takes both its legs from ` +
-        `it. Only a deployment with all four disabled (<STEM>_ENABLED=false) may leave it unset.`,
+        `it. Only a deployment with all three disabled (<STEM>_ENABLED=false) may leave it unset.`,
     )
   }
   const match = accepted.find((backend) => backend === raw)
@@ -597,7 +582,7 @@ const lnBackendFromEnv = (servesBtc: boolean): string | null => {
 }
 
 /**
- * A per-corridor amount range for each of the four corridors.
+ * A per-corridor amount range for each of the three corridors.
  *
  * Layered rather than independent: each corridor narrows the range `limits`
  * already produced, so a corridor knob can only ever reduce what
@@ -622,33 +607,6 @@ const corridorLimitsFromEnv = (base: Limits): Record<Corridor, Limits> => {
     return [pair, narrow(base, { minSats: bound('MIN_SATS'), maxSats: bound('MAX_SATS') }, stem)] as const
   })
   return Object.fromEntries(entries) as Record<Corridor, Limits>
-}
-
-/** Defaults to all of it below the quote, the side that cannot cost the operator. A policy default, not a correctness property. */
-const onchainReceiveBandBelowShareFromEnv = (): number => {
-  const raw = process.env.ONCHAIN_RECEIVE_BAND_BELOW_SHARE?.trim()
-  if (!raw) return DEFAULT_BAND_BELOW_SHARE
-  const value = Number(raw)
-  if (!Number.isFinite(value) || value < 0 || value > 1) {
-    throw new Error(
-      `ONCHAIN_RECEIVE_BAND_BELOW_SHARE must be a number between 0 and 1, got ${process.env.ONCHAIN_RECEIVE_BAND_BELOW_SHARE}`,
-    )
-  }
-  return value
-}
-
-/** Absent, the whole range that corridor already serves. Same one-way rule as every amount knob here: it may only reduce. */
-const onchainReceiveMaxBandSatsFromEnv = (onchainReceiveLimits: Limits): number => {
-  const fallback = defaultMaxBandWidthSats(onchainReceiveLimits)
-  const raw = process.env.ONCHAIN_RECEIVE_MAX_BAND_SATS?.trim()
-  if (!raw) return fallback
-  const value = Number(raw)
-  if (!Number.isInteger(value) || value < 0) {
-    throw new Error(
-      `ONCHAIN_RECEIVE_MAX_BAND_SATS must be a non-negative integer, got ${process.env.ONCHAIN_RECEIVE_MAX_BAND_SATS}`,
-    )
-  }
-  return Math.min(fallback, value)
 }
 
 /**
@@ -677,7 +635,7 @@ const corridorFeesFromEnv = (): Record<Corridor, Fee> => {
 /**
  * The corridors that can answer "what will executing this swap cost me".
  *
- * The two onchain legs can: a chain cost is `vsize x sats/vbyte`, both halves of
+ * The onchain send leg can: a chain cost is `vsize x sats/vbyte`, both halves of
  * which the solver knows before it quotes. The Lightning legs cannot yet — the
  * backend port has no "what would routing this cost" call, so a solver only
  * learns a routing fee by being refused for budgeting too little, which is
@@ -689,7 +647,7 @@ const corridorFeesFromEnv = (): Record<Corridor, Fee> => {
  * quote is how an operator comes to believe they are pricing dynamically while
  * still charging a flat they guessed at boot.
  */
-const NETWORK_FEE_CAPABLE: readonly Corridor[] = ['arkade:BTC->onchain:BTC', 'onchain:BTC->arkade:BTC']
+const NETWORK_FEE_CAPABLE: readonly Corridor[] = ['arkade:BTC->onchain:BTC']
 
 /**
  * What each corridor may charge for EXECUTION, from `<STEM>_FEE_CAP_SATS` and
@@ -919,7 +877,7 @@ export const loadConfig = (): Config => {
   const profile = NETWORKS[raw]
 
   // Read BEFORE the rail, because it decides whether a rail is required at all.
-  // Every one of the four takes both its legs from `LN_BACKEND`, so "does this
+  // Every one of the three takes both its legs from `LN_BACKEND`, so "does this
   // deployment need a Lightning node" is exactly "does it serve any of them".
   const corridorEnabled = corridorEnabledFromEnv()
   const lnBackend = lnBackendFromEnv(Object.values(corridorEnabled).some(Boolean))
@@ -1008,8 +966,6 @@ export const loadConfig = (): Config => {
     limits,
     corridorLimits,
     corridorFees: corridorFeesFromEnv(),
-    onchainReceiveMaxBandSats: onchainReceiveMaxBandSatsFromEnv(corridorLimits['onchain:BTC->arkade:BTC']),
-    onchainReceiveBandBelowShare: onchainReceiveBandBelowShareFromEnv(),
     corridorNetworkFees: corridorNetworkFeesFromEnv(),
     onchainFeeRateRefreshMs,
     onchainFeeRateStaleMs,

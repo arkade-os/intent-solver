@@ -1,5 +1,5 @@
 /**
- * In-memory `OnchainSendBackend`/`OnchainReceiveBackend` for regtest
+ * In-memory `OnchainSendBackend` for regtest
  * orchestrator-level tests — no real chain interaction, mirrors the role
  * `src/ln/fake/backend.ts` plays for Lightning. Real end-to-end proof of the
  * onchain HTLC script + broadcast + confirmation watching uses the LND
@@ -9,15 +9,26 @@
 
 import { randomBytes } from 'node:crypto'
 import { hex } from '@scure/base'
-import { Address, Transaction } from '@scure/btc-signer'
+import { Address, OutScript, Transaction } from '@scure/btc-signer'
 import { ONCHAIN_NETWORKS, type OnchainNetworkProfile } from '@arkade-os/solver-rails/onchain/htlc.js'
 import type {
   FundedOnchainOutput,
   OnchainBalance,
-  OnchainReceiveBackend,
   OnchainSendBackend,
   OnchainTxOutcome,
 } from '@arkade-os/solver-core/ports/onchain.js'
+
+/** Whichever network the address belongs to: one fake serves corridors configured for any of them. */
+const scriptOf = (address: string): Uint8Array => {
+  for (const network of Object.values(ONCHAIN_NETWORKS)) {
+    try {
+      return OutScript.encode(Address(network).decode(address))
+    } catch {
+      continue
+    }
+  }
+  throw new Error(`${address} decodes on no onchain network`)
+}
 
 /** A realistic-length fake txid — 32 bytes, like a real one, not `randomUUID`'s 16. */
 const fakeTxid = (): string => hex.encode(randomBytes(32))
@@ -31,7 +42,7 @@ interface Output {
   spentByWitness: Uint8Array[] | null
 }
 
-export class FakeOnchainBackend implements OnchainSendBackend, OnchainReceiveBackend {
+export class FakeOnchainBackend implements OnchainSendBackend {
   private readonly outputs: Output[] = []
   private readonly broadcasts = new Map<string, number | null>()
   private currentBlock = 0
@@ -47,13 +58,13 @@ export class FakeOnchainBackend implements OnchainSendBackend, OnchainReceiveBac
   // the CLI decodes that address against the CONFIGURED network, and a
   // regtest address handed to a mainnet deployment would throw at startup.
   constructor(
-    private readonly feeRateSatsPerVbyte = 5,
+    private feeRateSatsPerVbyte = 5,
     private readonly fundingVout = 0,
-    network: OnchainNetworkProfile = ONCHAIN_NETWORKS.regtest,
+    private readonly network: OnchainNetworkProfile = ONCHAIN_NETWORKS.regtest,
   ) {
     // A fixed P2WPKH rather than a random one: deterministic, so a test can
     // assert the exact address a refund is expected to pay.
-    this.receiveAddress = Address(network).encode({ type: 'wpkh', hash: new Uint8Array(20).fill(0x11) })
+    this.receiveAddress = Address(this.network).encode({ type: 'wpkh', hash: new Uint8Array(20).fill(0x11) })
   }
 
   /** `idempotencyKey` is unused: nothing here can be paid twice, there being no chain. */
@@ -63,6 +74,23 @@ export class FakeOnchainBackend implements OnchainSendBackend, OnchainReceiveBac
     idempotencyKey: string
   }): Promise<{ txid: string; vout: number }> {
     return this.receiveExternal({ address: params.address, amountSats: params.amountSats, vout: this.fundingVout })
+  }
+
+  private readonly signedFundings = new Map<string, { address: string; amountSats: number; vout: number }>()
+
+  async signFunding(params: {
+    address: string
+    amountSats: number
+  }): Promise<{ txid: string; vout: number; tx: string }> {
+    const tx = new Transaction({ allowUnknownInputs: true, allowUnknownOutputs: true })
+    tx.addInput({ txid: randomBytes(32), index: 0 })
+    for (let i = 0; i < this.fundingVout; i++) tx.addOutput({ script: new Uint8Array([0x6a]), amount: 0n })
+    tx.addOutput({
+      script: scriptOf(params.address),
+      amount: BigInt(params.amountSats),
+    })
+    this.signedFundings.set(tx.id, { ...params, vout: this.fundingVout })
+    return { txid: tx.id, vout: this.fundingVout, tx: hex.encode(tx.toBytes(true, false)) }
   }
 
   /**
@@ -100,7 +128,9 @@ export class FakeOnchainBackend implements OnchainSendBackend, OnchainReceiveBac
       allowUnknownOutputs: true,
       allowLegacyWitnessUtxo: true,
     }).id
-    this.broadcasts.set(txid, null)
+    const signed = this.signedFundings.get(txid)
+    if (signed && !this.outputs.some((o) => o.txid === txid)) this.receiveExternal({ ...signed, txid })
+    if (!this.broadcasts.has(txid)) this.broadcasts.set(txid, null)
     return { txid }
   }
 
@@ -138,7 +168,7 @@ export class FakeOnchainBackend implements OnchainSendBackend, OnchainReceiveBac
     return this.receiveAddress
   }
 
-  // -- test control surface, not part of OnchainSendBackend/OnchainReceiveBackend --
+  // -- test control surface, not part of OnchainSendBackend --
 
   /**
    * Simulate a THIRD PARTY (the client, on the receive leg) paying `address`
@@ -147,9 +177,14 @@ export class FakeOnchainBackend implements OnchainSendBackend, OnchainReceiveBac
    * client funds their own onchain HTLC directly, outside this service), so
    * receive-side tests need a way to seed that deposit without going through
    * a send-only method.
+   * `txid` is for the deposit whose outpoint is not this backend's to choose:
+   * an unrolled Arkade vtxo arrives on L1 at the one it already had.
    */
-  receiveExternal(params: { address: string; amountSats: number; vout?: number }): { txid: string; vout: number } {
-    const txid = fakeTxid()
+  receiveExternal(params: { address: string; amountSats: number; vout?: number; txid?: string }): {
+    txid: string
+    vout: number
+  } {
+    const txid = params.txid ?? fakeTxid()
     const vout = params.vout ?? 0
     this.outputs.push({
       txid,
@@ -160,6 +195,11 @@ export class FakeOnchainBackend implements OnchainSendBackend, OnchainReceiveBac
       spentByWitness: null,
     })
     return { txid, vout }
+  }
+
+  /** Move the mempool under a swap already in flight — what a fee spike looks like from here. */
+  setFeeRate(satsPerVbyte: number): void {
+    this.feeRateSatsPerVbyte = satsPerVbyte
   }
 
   /** Advance the fake chain tip so previously-funded outputs gain confirmations. */
@@ -178,6 +218,13 @@ export class FakeOnchainBackend implements OnchainSendBackend, OnchainReceiveBac
 
   dropFromMempool(txid: string): void {
     if (!this.broadcasts.delete(txid)) throw new Error(`no broadcast ${txid} to drop`)
+  }
+
+  /** The client RBF-bumped its own funding: this output's transaction was replaced and it is gone. */
+  dropOutput(txid: string, vout: number): void {
+    const at = this.outputs.findIndex((o) => o.txid === txid && o.vout === vout)
+    if (at === -1) throw new Error(`no such output ${txid}:${vout}`)
+    this.outputs.splice(at, 1)
   }
 
   /** Record a claim/refund spend of `(txid, vout)`, with the given witness stack. */

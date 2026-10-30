@@ -29,7 +29,6 @@ const servicesWith = (send: ReturnType<typeof store>) =>
     store: send,
     receiveStore: store(),
     onchainStore: store(),
-    onchainReceiveStore: store(),
   }) as unknown as Services
 
 describe('the change feed', () => {

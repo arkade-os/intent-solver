@@ -20,7 +20,6 @@ const allCorridors = <T>(value: T) => ({
   'arkade:BTC->lightning:BTC': value,
   'lightning:BTC->arkade:BTC': value,
   'arkade:BTC->onchain:BTC': value,
-  'onchain:BTC->arkade:BTC': value,
 })
 
 const STUB_CARD = {
@@ -254,10 +253,10 @@ describe('GET /api/card', () => {
   })
 
   /**
-   * The mutinynet report: four corridors served, one asset market saved with
+   * The mutinynet report: every BTC corridor served, one asset market saved with
    * every bound blank, and no OFFER_MARKETS — so the card used to die whole.
    */
-  it('publishes the four BTC corridors without advertising an unserved saved asset market', async () => {
+  it('publishes the three BTC corridors without advertising an unserved saved asset market', async () => {
     const { status, body } = await getCard(
       makeDeps({
         offerFill: { min: 0n, max: 0n },
@@ -280,9 +279,11 @@ describe('GET /api/card', () => {
     expect(body.card).not.toBeNull()
     expect(body.card!.markets.map(quoteId)).toEqual([BOLT11_BTC, ONCHAIN_BTC])
     for (const market of body.card!.markets) {
-      expect([market.min_base_amount, market.max_base_amount]).toEqual(['1000', '50000'])
       expect([market.min_quote_amount, market.max_quote_amount]).toEqual(['1000', '50000'])
     }
+    const [lightning, onchain] = body.card!.markets
+    expect([lightning!.min_base_amount, lightning!.max_base_amount]).toEqual(['1000', '50000'])
+    expect([onchain!.min_base_amount, onchain!.max_base_amount]).toEqual(['0', '0'])
     expect(verifyCardSig(body.card!)).toBe(true)
     expect(body.cardOmitted).toEqual([])
     expect(JSON.stringify(body.card)).not.toContain(GUCCI)
@@ -312,8 +313,10 @@ describe('GET /api/card', () => {
     )
     expect(body.cardError).toBeNull()
     for (const market of body.card!.markets) {
-      expect([market.min_base_amount, market.max_base_amount]).toEqual(['1000', '50000'])
+      expect([market.min_quote_amount, market.max_quote_amount]).toEqual(['1000', '50000'])
     }
+    const lightning = body.card!.markets.find((m) => quoteId(m) === BOLT11_BTC)!
+    expect([lightning.min_base_amount, lightning.max_base_amount]).toEqual(['1000', '50000'])
   })
 
   it('advertises no corridor a pending toggle would have switched on', async () => {

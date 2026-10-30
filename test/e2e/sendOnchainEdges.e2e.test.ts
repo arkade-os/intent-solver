@@ -191,7 +191,7 @@ describe('e2e arkade:BTC->onchain:BTC (send) — refusals, wrong preimages and t
       const outcome = await (await serviceWith(() => quoteAt)).quote(request)
       if (!outcome.accepted) throw new Error(`solver refused the quote: ${outcome.reason}`)
       const swap = outcome.swap
-      // Backdating is what makes the refund below pushable at all.
+      // Not what makes the refund below pushable — nonInteractiveRefund has no timelock.
       expect(swap.refundLocktime).toBeLessThan(nowSeconds())
 
       const overfunded = AMOUNT_SATS + 1000
@@ -314,10 +314,9 @@ describe('e2e arkade:BTC->onchain:BTC (send) — refusals, wrong preimages and t
       expect(refunded.state).toBe('refunded')
       expect(refunded.onchainRefundTxid).toBe(broadcast.onchainRefundTxid)
 
-      // The client's Arkade lockup is untouched by any of that and is theirs to
-      // recover. `refundNow` is the operator override for exactly this — a
-      // terminal row the automatic sweep will not revisit — and it is what
-      // returns the sats this test locked up.
+      // The client's Arkade lockup is untouched by any of that. `refundSweep`
+      // releases it CLIENT_LOCKUP_RELEASE_DELAY_SECONDS after the refund above;
+      // `refundNow` is the override that does not wait, and is what runs here.
       const returned = await poll(() => present.refundNow(swap.id), {
         attempts: 12,
         intervalMs: 15_000,

@@ -26,17 +26,12 @@ import { requireLn, requireOnchain } from '../../ops/rails.js'
 import { attempt } from '../../ops/attempt.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import type { AdminSwap } from '@arkade-os/solver-core/core/swapView.js'
-import {
-  projectSend,
-  projectReceive,
-  projectOnchainSend,
-  projectOnchainReceive,
-} from '@arkade-os/solver-corridors/corridors/projections.js'
+import { projectSend, projectReceive, projectOnchainSend } from '@arkade-os/solver-corridors/corridors/projections.js'
 import { liveSwaps } from '../projection.js'
 import type { AdminDeps } from '../server.js'
 
 /**
- * Every swap parked in `stuck`, across all four corridors.
+ * Every swap parked in `stuck`, across all three corridors.
  *
  * A separate read from {@link liveSwaps} because `stuck` is TERMINAL: it is
  * excluded from `findRecoverable`, from every sweep, and from `findRefundable`
@@ -90,23 +85,16 @@ const stuckSwaps = async (deps: AdminDeps): Promise<{ rows: AdminSwap[]; total: 
   // the ones an operator is most likely to be looking for — below a cap that
   // fills with the oldest.
   const page = { limit: STUCK_PER_CORRIDOR, newestFirst: true } as const
-  const [send, receive, onchainSend, onchainReceive, ...counts] = await Promise.all([
+  const [send, receive, onchainSend, ...counts] = await Promise.all([
     services.store.findByStates(['stuck'], page),
     services.receiveStore.findByStates(['stuck'], page),
     services.onchainStore.findByStates(['stuck'], page),
-    services.onchainReceiveStore.findByStates(['stuck'], page),
     services.store.countByStates(['stuck']),
     services.receiveStore.countByStates(['stuck']),
     services.onchainStore.countByStates(['stuck']),
-    services.onchainReceiveStore.countByStates(['stuck']),
   ])
   return {
-    rows: [
-      ...send.map(projectSend),
-      ...receive.map(projectReceive),
-      ...onchainSend.map(projectOnchainSend),
-      ...onchainReceive.map(projectOnchainReceive),
-    ],
+    rows: [...send.map(projectSend), ...receive.map(projectReceive), ...onchainSend.map(projectOnchainSend)],
     total: counts.reduce((sum, n) => sum + n, 0),
   }
 }
@@ -137,7 +125,6 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
       services.store.committedSats(),
       services.receiveStore.committedSats(),
       services.onchainStore.committedSats(),
-      services.onchainReceiveStore.committedSats(),
     ])
     const committedSats = committed.reduce((sum, value) => sum + value, 0)
 
