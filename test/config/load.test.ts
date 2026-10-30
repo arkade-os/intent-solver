@@ -123,10 +123,13 @@ describe('loadConfig — the old environment', () => {
     expect(() => loadConfig({ env: inline(minimalDoc, { LND_SOCKET: 'lnd:10009' }) })).toThrow(/LND_SOCKET/)
   })
 
-  it('refuses a credential the boot printout named and nobody put back', () => {
+  it('refuses, all at once, every credential the boot printout named and nobody put back', () => {
     const arkade = { ...minimalDoc.rails.arkade, mnemonic: '<ARK_MNEMONIC>' }
-    expect(() => loadConfig({ env: inline({ ...minimalDoc, rails: { ...minimalDoc.rails, arkade } }) })).toThrow(
-      'the config document still holds <ARK_MNEMONIC>: put the value of ARK_MNEMONIC in its place',
+    const notify = { telegramBotToken: '<TELEGRAM_BOT_TOKEN>', slackWebhookUrl: '<ARK_MNEMONIC>' }
+    expect(() =>
+      loadConfig({ env: inline({ ...minimalDoc, rails: { ...minimalDoc.rails, arkade }, notify }) }),
+    ).toThrow(
+      "the config document still holds <ARK_MNEMONIC>, <TELEGRAM_BOT_TOKEN>: put each variable's value in its place",
     )
   })
 

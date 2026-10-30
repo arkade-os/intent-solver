@@ -2099,7 +2099,7 @@ main()
   .then(() => process.exit(process.exitCode ?? 0))
   .catch(async (error) => {
     console.error('failed:', error instanceof Error ? error.message : String(error))
-    const hint = error instanceof NoConfigDocument ? await migrationHint(process.env) : null
+    const hint = error instanceof NoConfigDocument ? await migrationHint(process.env).catch(() => null) : null
     if (hint) console.error(hint)
     // A GiveUp names a usage mistake or a disabled corridor — an ANSWER, not a
     // fault, and the rule `onRefusal` already follows.

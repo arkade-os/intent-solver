@@ -105,8 +105,10 @@ export const loadConfig = (opts: LoadOptions = {}): Config => {
   const env = opts.env ?? process.env
   const raw = readDocument(env)
   assertNoLegacyEnv(env)
-  const left = /"<([A-Za-z_][A-Za-z0-9_]*)>"/.exec(JSON.stringify(raw))?.[1]
-  if (left) throw new Error(`the config document still holds <${left}>: put the value of ${left} in its place`)
+  const left = new Set([...JSON.stringify(raw).matchAll(/"(<[A-Za-z_][A-Za-z0-9_]*>)"/g)].map(([, held]) => held))
+  if (left.size > 0) {
+    throw new Error(`the config document still holds ${[...left].join(', ')}: put each variable's value in its place`)
+  }
   const parsed = parseDocument(raw, lightningRailNames())
   const profile = opts.profile ?? registeredProfile
   const doc = profile ? parseDocument(profile(parsed), lightningRailNames()) : parsed
