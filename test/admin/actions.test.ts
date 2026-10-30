@@ -176,6 +176,38 @@ describe('auditing', () => {
     const call = services.adminStore.recordAction.mock.calls[0]![0] as { params: string }
     expect(call.params).not.toContain('confirm')
   })
+
+  // The money-mover already ran; a 500 here reads as "it failed" and invites a
+  // retry — which, for fund-withdraw, is a second irreversible payment.
+  const brokenAudit = () => ({
+    recordAction: vi.fn().mockRejectedValue(new Error('database is locked')),
+    listActions: vi.fn().mockResolvedValue([]),
+    getOverrides: vi.fn().mockResolvedValue({}),
+  })
+
+  it('still reports success when the action ran but writing the audit row failed', async () => {
+    const tick = vi.fn().mockResolvedValue(undefined)
+    const services = fakeServices({
+      adminStore: brokenAudit(),
+      arkade: { wallet: {} },
+      store: { get: vi.fn(), patch: vi.fn() },
+      corridors: oneCorridor('arkade:BTC->lightning:BTC', tick, { id: 'swap-1', state: 'claimed' }),
+    })
+    const response = await post('tick', { id: 'swap-1', corridor: 'arkade:BTC->lightning:BTC' }, services)
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ ok: true })
+    expect(tick).toHaveBeenCalledTimes(1)
+  })
+
+  it('still fails loudly when the action failed, even if recording the failure also throws', async () => {
+    const services = fakeServices({
+      adminStore: brokenAudit(),
+      corridors: oneCorridor('arkade:BTC->lightning:BTC', vi.fn().mockRejectedValue(new Error('indexer unreachable'))),
+    })
+    const response = await post('tick', { id: 'swap-1', corridor: 'arkade:BTC->lightning:BTC' }, services)
+    expect(response.status).toBe(500)
+    expect(await response.json()).toMatchObject({ ok: false, message: 'indexer unreachable' })
+  })
 })
 
 describe('GET /api/audit', () => {
