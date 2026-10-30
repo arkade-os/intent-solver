@@ -969,8 +969,8 @@ construction GIVEN THE SAME PARAMETERS — same class, so there is no
 independent-reimplementation drift to worry about for how a leaf is built,
 only for which leaves are included (below). Roles below are named for THIS
 corridor: the solver is the VHTLC `receiver` (it claims with `P`), the client
-is the `sender` (it is refunded if the swap fails). The receive corridors
-(§ 7.1.2, § 7.1.4) carry the same leaves with the roles inverted — the client
+is the `sender` (it is refunded if the swap fails). The receive corridor
+(§ 7.1.2) carries the same leaves with the roles inverted — the client
 is `receiver` there, the solver `sender` — so "who refunds whom" flips with
 them; see `packages/solver-arkade/src/arkade/covenant.ts`'s role-inversion note.
 
@@ -1202,31 +1202,10 @@ Arkade lockup.
   quote time. A quote whose payout would be below the onchain dust floor is
   refused (`pricing_unavailable`), never funded.
 
-#### 7.1.4 `onchain:BTC->arkade:BTC` — implemented today
+#### 7.1.4 `onchain:BTC->arkade:BTC` — not served
 
-The mirror: the client funds the onchain HTLC (holding its refund role) and
-receives Arkade (`packages/solver-corridors/src/receive/onchainOrchestrator.ts`,
-`packages/solver-corridors/src/wire/onchainReceivePayloads.ts`). The solver watches for the client's
-funding output, waits `min_confirmations`, funds the Arkade lockup pinned to
-the client's payout script, and claims the onchain HTLC once `P` is public.
-
-- **request.profile**: `payment_hash` (`H`, client-chosen), `claim_packet`
-  (as § 7.1.2, and optional for the same reason), `refund_pubkey` (the client's x-only key — the onchain HTLC's
-  refund role), `payout_address` and `payout_pubkey` (the client's Arkade
-  destination and covenant `receiver` key — the same two the Lightning
-  receive profile asks for, because both receive corridors carry the same
-  Arkade covenant).
-- **quote.profile**: `payment_hash` (echo), `claim_pubkey` (the solver's
-  onchain claim key), `htlc_locktime` (the CLIENT's onchain refund deadline
-  here — role-reversed from § 7.1.3), `min_confirmations`, `lockup_address`
-  and `htlc_address` (both compare-only), and `solver_refund_pk_script` — the
-  § 7.1.2 field, for the same reason: it is the one covenant parameter nothing
-  else on the wire determines, and a client reconstructing the full tree cannot
-  check `lockup_address` without it. The top-level `refund_locktime` is
-  the SOLVER's own Arkade refund deadline on this leg. Amounts mirror §
-  7.1.2: the client funds `from_amount` on-chain; the solver funds the
-  lockup with `to_amount`, the amount minus this corridor's fee, subject to
-  the same dust-floor refusal.
+Not served by this solver. Non-interactive boarding is the intended
+replacement for moving onchain BTC into Arkade.
 
 **Normative timelock-ordering invariant** for every client-funded HTLC-class
 profile:
@@ -1243,15 +1222,11 @@ solver is exposed between paying the cross side and claiming the client's
 lockup, and the client's escape hatch must not open while the solver's
 outbound commitment can still be live. For solver-funded contracts the
 mirror applies (§ 9: the solver's refund opens before the cross-side
-deadline `E`, minus a settle margin). On `onchain:BTC->arkade:BTC` that
-ordering is the derivation rather than a check on it — `E` IS
-`arkadeRefundLocktimeFor(...) + MIN_SETTLE_WINDOW`, both in
-`packages/solver-core/src/core/onchainReceive.ts`, so the gap cannot be
-narrowed by moving some other constant.
+deadline `E`, minus a settle margin).
 
 #### 7.1.5 `arkade:BTC<->ethereum:<asset>` — forward spec
 
-Same flow shape as 7.1.1–7.1.4: hash-locked contract on each side, the client
+Same flow shape as 7.1.1–7.1.3: hash-locked contract on each side, the client
 derives locally, funding is acceptance, the preimage settles both.
 
 **Contract.** Boltz `ERC20Swap` (`BoltzExchange/boltz-core`). Chosen because it
@@ -1330,7 +1305,7 @@ quote without it is one no client can settle.
 
 `ethereum:<asset>->arkade:BTC` — **the solver funds the Arkade covenant**, so
 the client must hand over the keys that pin the payout to it, exactly as
-§ 7.1.2 and § 7.1.4 do:
+§ 7.1.2 does:
 
 - **request.profile**: `payment_hash`, `evm_amount` (atomic units of the token
   the client locks — the amount lives in the profile rather than the
@@ -1338,7 +1313,7 @@ the client must hand over the keys that pin the payout to it, exactly as
   `evm_refund_address` (where the client's own EVM refund goes), and the
   Arkade-side claim keys **`payout_address`** (the client's Arkade
   destination) and **`payout_pubkey`** (the covenant's `receiver` signing key
-  — the same pair the other two receive profiles ask for, because all three
+  — the same pair the Lightning receive profile asks for, because both
   carry the same covenant). The token is named by the `pair`, so it is not
   repeated in the profile. There is deliberately **no `claim_packet`**: this
   profile does not offer the covclaimd non-interactive path § 7.1.2 describes,
@@ -1355,8 +1330,8 @@ the client must hand over the keys that pin the payout to it, exactly as
   only to 2^53−1, which at 18 decimals is 0.009 tokens, rounded inside
   `JSON.parse` before any validator could see it. `evm_amount` carries it as a
   decimal string instead (§ 2.1). This is the one place an EVM profile is
-  narrower than its § 7.1.2 / § 7.1.4 siblings, which accept **either**
-  `amount_side` and always carry `amount`: on those corridors both legs are
+  narrower than its § 7.1.2 sibling, which accepts **either**
+  `amount_side` and always carries `amount`: on that corridor both legs are
   sats, so exact-out is a subtraction, while here it would mean inverting a
   fetched, rounded, directional rate.
 - **status.profile** (both directions): `payment_hash`, the EVM lock's
@@ -1422,8 +1397,7 @@ implementer needs from this section:
   (an `evm_timeout_block` already inside the margin is not narrowed, it is refused).
   The solver funds the Arkade lockup second, after the same depth-and-age wait.
 
-Note the asymmetry against § 7.1.4, where the solver dictates the client's
-onchain refund deadline in the quote. Here the deadline governs the client's own
+Here the deadline governs the client's own
 refund, on a chain whose cadence the client is the party funding against, so the
 client declares it and the solver only holds the power to refuse — which is all
 the ordering invariant needs, since the solver picks `refund_locktime` freely
@@ -1700,19 +1674,18 @@ its own state machine (its own table, its own names); the mappers live in
 | `refunded` | `refused` + refund outcome recorded                 | the refund is an outcome fact on the terminal row, not a state                                                                                |
 | `stuck`    | `stuck`                                             |                                                                                                                                               |
 
-The other three corridors (`packages/solver-corridors/src/db/receiveSwaps.ts`, `packages/solver-corridors/src/db/onchainSwaps.ts`,
-`packages/solver-corridors/src/db/onchainReceiveSwaps.ts`):
+The other two corridors (`packages/solver-corridors/src/db/receiveSwaps.ts`, `packages/solver-corridors/src/db/onchainSwaps.ts`):
 
-| RFQ state             | Lightning receive                                 | onchain send                           | onchain receive                      |
-| --------------------- | ------------------------------------------------- | -------------------------------------- | ------------------------------------ |
-| `quoted`              | `quoted`                                          | `quoted`                               | `quoted`                             |
-| `funded`              | `armed` (client's HTLC held)                      | `funded` (client's lockup seen)        | `awaiting_confirmations`             |
-| `filling`             | `funded` (solver's lockup broadcast), `refunding` | `funding_onchain`, `refunding_onchain` | `funding_arkade`, `refunding_arkade` |
-| `filled`              | `claimed`                                         | `awaiting_claim`, `claiming`           | `awaiting_claim`, `claimed`          |
-| `settled`             | `settled`                                         | `claimed`                              | `settled`                            |
-| `refunded`            | `refunded`                                        | `refunded`                             | `refunded`                           |
-| `refused` / `expired` | `refused` (reason-refined)                        | `refused` (reason-refined)             | `refused` (reason-refined)           |
-| `stuck`               | `stuck`                                           | `stuck`                                | `stuck`                              |
+| RFQ state             | Lightning receive                                 | onchain send                           |
+| --------------------- | ------------------------------------------------- | -------------------------------------- |
+| `quoted`              | `quoted`                                          | `quoted`                               |
+| `funded`              | `armed` (client's HTLC held)                      | `funded` (client's lockup seen)        |
+| `filling`             | `funded` (solver's lockup broadcast), `refunding` | `funding_onchain`, `refunding_onchain` |
+| `filled`              | `claimed`                                         | `awaiting_claim`, `claiming`           |
+| `settled`             | `settled`                                         | `claimed`                              |
+| `refunded`            | `refunded`                                        | `refunded`                             |
+| `refused` / `expired` | `refused` (reason-refined)                        | `refused` (reason-refined)             |
+| `stuck`               | `stuck`                                           | `stuck`                                |
 
 The atomic class over RFQ (`packages/solver-corridors/src/db/assetRfqSwaps.ts`):
 
@@ -1749,8 +1722,7 @@ implementation and MUST hold in any implementation):
 
 These are **invariants, not tunables**. A deployment that could switch them
 off could lose money, so there is no switch (`packages/solver-core/src/core/send.ts`,
-`packages/solver-core/src/core/receive.ts`, `packages/solver-core/src/core/onchainSend.ts`,
-`packages/solver-core/src/core/onchainReceive.ts`). Every gate is **re-evaluated at action time** —
+`packages/solver-core/src/core/receive.ts`, `packages/solver-core/src/core/onchainSend.ts`). Every gate is **re-evaluated at action time** —
 immediately before the irreversible step it guards; quoting, funding and
 filling are separated by network waits, and a check that passed at quote time
 can be false by the time money moves. A quote-time pre-check is permitted and
@@ -1772,31 +1744,21 @@ the invoice) and both refused ordinary payee invoices.
 | ------------------------------ | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `MIN_CLAIM_WINDOW`             | 90 min                    | never fill within 90 min of the client's refund path opening. 90 because the refund CLTV matures against **median-time-past** (BIP-113), which lags wall clock by ~1 h on mainnet — a wall-clock margin smaller than the MTP lag is no margin at all. The same figure is the client-side funding gate ("headroom ≥ 90 min") |
 | `MIN_INVOICE_WINDOW`           | 2 min                     | never pay a BOLT11 that could lapse mid-attempt                                                                                                                                                                                                                                                                             |
-| `MIN_SETTLE_WINDOW`            | 90 min                    | receive direction: never fund unless ≥ 90 min remain before `E`. On `onchain:BTC->arkade:BTC` it additionally **defines** that gap — `E` is derived as `refund_locktime + MIN_SETTLE_WINDOW`, so the solver's L1 claim window is 90 min at every confirmation depth                                                        |
-| `SETTLE_SAFETY_MARGIN`         | 15 min                    | receive direction: the funder's refund opens at least this long before `E`, so funds are recoverable while settlement is still possible. A floor, not a target — the onchain receive leg leaves `MIN_SETTLE_WINDOW` there                                                                                                  |
-| `MAX_REFUND_HORIZON`           | 2 h                       | `lightning:BTC->arkade:BTC` only: cap on how long one swap may park solver capital (`refund_locktime ≤ now + 2 h`). The onchain receive leg derives `refund_locktime` from its client funding budget instead and carries no cap                                                                                            |
-| `SLOW_BLOCK_ALLOWANCE`         | 30 min                    | `onchain:BTC->arkade:BTC`: room for one long block inside the client's funding budget, `15 min + 2 · min_confirmations · 600 s + 30 min`                                                                                                                                                                                     |
+| `MIN_SETTLE_WINDOW`            | 90 min                    | receive direction: never fund unless ≥ 90 min remain before `E`.                                                        |
+| `SETTLE_SAFETY_MARGIN`         | 15 min                    | receive direction: the funder's refund opens at least this long before `E`, so funds are recoverable while settlement is still possible                                                                                                  |
+| `MAX_REFUND_HORIZON`           | 2 h                       | `lightning:BTC->arkade:BTC` only: cap on how long one swap may park solver capital (`refund_locktime ≤ now + 2 h`)                                                                                            |
 | `REFUND_SAFETY_MARGIN`         | 2 h                       | send direction: margin on top of the worst-case cross-side HTLC lifetime before the client's refund opens                                                                                                                                                                                                                   |
 | route CLTV budget              | 432 blocks @ 10 min/block | conservative over-estimate of route-added CLTV when deriving `refund_locktime` from an invoice's final CLTV delta                                                                                                                                                                                                           |
 | `ONCHAIN_CLAIM_MARGIN_SECONDS` | 90 min                    | onchain send: the client's claim-window floor, doubled into `htlcLocktimeFor` so the client's own `claim_window_too_short` guardrail passes with margin                                                                                                                                                                     |
-| `ONCHAIN_ORDER_MARGIN_SECONDS` | 2 h                       | `arkade:BTC->onchain:BTC`: the timelock-ordering margin — the client's Arkade refund opens at least this long after the onchain HTLC's deadline. The receive direction orders the same two deadlines the other way round and uses `MIN_SETTLE_WINDOW` for the gap                                                          |
+| `ONCHAIN_ORDER_MARGIN_SECONDS` | 2 h                       | `arkade:BTC->onchain:BTC`: the timelock-ordering margin — the client's Arkade refund opens at least this long after the onchain HTLC's deadline                                                          |
 | `MAX_MIN_CONFIRMATIONS`        | 6                         | cap on the `min_confirmations` a quote may carry                                                                                                                                                                                                                                                                            |
-| `ONCHAIN_DUST_SATS`            | 330                       | onchain corridors: a payout below the taproot dust floor is unquotable (`pricing_unavailable`) and a claim/refund spend that would leave a sub-dust output is refused rather than broadcast; the send corridor additionally reserves the refund spend's own fee at quote time                                               |
+| `ONCHAIN_DUST_SATS`            | 330                       | onchain send: a payout below the taproot dust floor is unquotable (`pricing_unavailable`) and a claim/refund spend that would leave a sub-dust output is refused rather than broadcast; it additionally reserves the refund spend's own fee at quote time                                               |
 
 Additionally:
 
 - `refund_locktime` for a client-funded Lightning send is
   `max(now + (final_cltv + 432) · 600 + 2 h, now + unilateral_claim_delay + 2 h)`
   — the second bound covers the solver's server-independent recourse window.
-- `refund_locktime` and `htlc_locktime` for a solver-funded
-  `onchain:BTC->arkade:BTC` are both derived from the client's funding budget
-  `B = 15 min + 2 · min_confirmations · 600 s + 30 min`:
-  `refund_locktime = now + B + 90 min` and `htlc_locktime = refund_locktime +
-  MIN_SETTLE_WINDOW`. Since the solver stops funding its Arkade side 90 min
-  before `refund_locktime`, `B` is exactly how long the client has to broadcast
-  **and** confirm — twice the expected confirmation time plus a slow block,
-  because inter-block intervals are exponential. The cost is capital parked
-  longer and a later client refund on a failed swap; see `docs/deadlines.md`.
 - **Exposure cap.** The solver bounds the sum of amounts across all
   non-terminal swaps and refuses new quotes above it with reason
   `exposure_cap`. This is the only invariant with **no action-time

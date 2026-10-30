@@ -200,14 +200,14 @@ describe('buildSolverCard', () => {
       inputs({
         corridors: {
           'arkade:BTC->lightning:BTC': { limits: { minSats: 1000, maxSats: 50_000 }, fee: FREE },
-          'onchain:BTC->arkade:BTC': { limits: { minSats: 5000, maxSats: 60_000 }, fee: FREE },
+          'arkade:BTC->onchain:BTC': { limits: { minSats: 5000, maxSats: 60_000 }, fee: FREE },
         },
       }),
     )
     expect(quoteIds(card)).toEqual([BOLT11_BTC, ONCHAIN_BTC])
-    // The onchain market is served one way only, so its quote side is disabled
+    // The onchain market is served one way only, so its base side is disabled
     // rather than the market being dropped.
-    expect(card.markets[1]).toMatchObject({ min_base_amount: '5000', min_quote_amount: '0', max_quote_amount: '0' })
+    expect(card.markets[1]).toMatchObject({ min_quote_amount: '5000', min_base_amount: '0', max_base_amount: '0' })
   })
 
   it('gives each market its OWN fees, not another corridor`s', () => {
@@ -347,7 +347,7 @@ const market = (over: Partial<AssetCardMarket> = {}): AssetCardMarket => ({
 })
 
 describe('asset markets on the card', () => {
-  it('names a market the four-corridor record cannot hold', () => {
+  it('names a market the three-corridor record cannot hold', () => {
     // The bug: served, not expressible in the corridor record, so unadvertised.
     const card = buildSolverCard(inputs({ assetMarkets: [market()] }))
     expect(card.markets).toHaveLength(2)

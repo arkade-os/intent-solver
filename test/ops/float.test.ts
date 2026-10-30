@@ -138,7 +138,6 @@ const floatStores = {
   store: { findRecoverable: async () => [] },
   onchainStore: { findRecoverable: async () => [] },
   receiveStore: { findRecoverable: async () => [] },
-  onchainReceiveStore: { findRecoverable: async () => [] },
 }
 
 /** A real address, because a renewal decodes it to price its own output. */
@@ -273,7 +272,6 @@ describe('lockupDeadlinesOf', () => {
         store: { findRecoverable: async () => rows },
         onchainStore: { findRecoverable: async () => [] },
         receiveStore: { findRecoverable: async () => [] },
-        onchainReceiveStore: { findRecoverable: async () => [] },
       } as unknown as FlatCorridorDeps),
     } as unknown as Services)
 

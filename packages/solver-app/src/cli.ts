@@ -71,14 +71,8 @@ import {
   maxServableExitDelay,
   minFinalCltvBlocksFor,
 } from '@arkade-os/solver-core/core/receive.js'
-import {
-  arkadeRefundLocktimeFor,
-  DEFAULT_MIN_CONFIRMATIONS,
-  evaluateOnchainReceiveFunding,
-  htlcLocktimeFor,
-} from '@arkade-os/solver-core/core/onchainReceive.js'
 import { MIN_CLAIM_WINDOW } from '@arkade-os/solver-core/core/send.js'
-import { rawDelaySeconds, relativeDelayFrom, secondsForBlockRung } from '@arkade-os/solver-core/core/timelocks.js'
+import { relativeDelayFrom, secondsForBlockRung } from '@arkade-os/solver-core/core/timelocks.js'
 import { decodeInvoice } from '@arkade-os/solver-core/invoice/decode.js'
 import { FakeLightningBackend } from '@arkade-os/solver-rails-fake/ln/fake/backend.js'
 import { buildOnchainHtlc, ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
@@ -267,7 +261,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
   startEvmSendSweep()
   log(`recovered ${recovered} swap(s) across ${services.corridors.size} corridor(s); watching`)
   const served = CORRIDORS.filter((corridor) => services.config.corridorEnabled[corridor])
-  log(`serving ${served.length === CORRIDORS.length ? 'all four corridors' : served.join(', ')}`)
+  log(`serving ${served.length === CORRIDORS.length ? 'all three corridors' : served.join(', ')}`)
   // The corridor is configured to run but cannot quote, and the reason is a
   // deployment fact no request will ever change — so say it once at boot rather
   // than leaving an operator to infer it from a stream of refusals. Says which
@@ -286,27 +280,6 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
         `${cliff}s or less (ARK_UNILATERAL_EXIT_DELAY, if the server enforces less than it advertises), ` +
         `or by accepting the gap where the trader's recourse opens first (LN_RECEIVE_ACCEPT_UNILATERAL_GAP=true)`,
     )
-  }
-  // The other receive leg's version of the same deployment fact, asked of the
-  // gate itself at the depth every quote defaults to.
-  if (services.config.corridorEnabled['onchain:BTC->arkade:BTC']) {
-    const at = nowSeconds()
-    const htlcLocktime = htlcLocktimeFor(DEFAULT_MIN_CONFIRMATIONS, at)
-    const soloRecourse = rawDelaySeconds(services.arkade.unilateralDelays.unilateralRefundWithoutReceiverDelay)
-    const servable = evaluateOnchainReceiveFunding({
-      arkadeRefundLocktime: arkadeRefundLocktimeFor(DEFAULT_MIN_CONFIRMATIONS, at),
-      htlcLocktime,
-      unilateralRefundWithoutReceiverDelay: services.arkade.unilateralDelays.unilateralRefundWithoutReceiverDelay,
-      now: at,
-    })
-    if (!servable.fund) {
-      log(
-        `onchain receive will refuse EVERY quote: this server's ${soloRecourse}s solo recourse opens after the ` +
-          `${htlcLocktime - at}s onchain htlc this leg quotes at ${DEFAULT_MIN_CONFIRMATIONS} confirmation(s). ` +
-          `Serve it by lowering the exit delay (ARK_UNILATERAL_EXIT_DELAY, if the server enforces less than it ` +
-          `advertises). Quotes are refused rather than funded: funding would strand the client's L1 HTLC`,
-      )
-    }
   }
   if (
     services.config.corridorEnabled['lightning:BTC->arkade:BTC'] &&
@@ -334,7 +307,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
   // the swap tables on every sweep, so it can never name a swap the sweep has
   // already retired.
   //
-  // A thunk rather than an id because the four corridors have four services:
+  // A thunk rather than an id because the three corridors have three services:
   // the script alone does not say which one owns it, and a map of id -> service
   // would be the same thing with a lookup in the way.
   let swapByScript = new Map<string, { id: string; tick: () => Promise<unknown> }>()
@@ -430,15 +403,15 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
 
   /**
    * Point the subscription at exactly the swaps still worth watching, across
-   * ALL FOUR corridors.
+   * ALL THREE corridors.
    *
    * It watched only the Lightning-send store for a while, which left the other
    * three on the sweep alone — most obviously onchain send, which has the
    * identical shape (a client funding a covenant lockup at a pkScript) and was
    * already being registered as a contract two functions down.
    *
-   * The two receive corridors are here on the same terms even though the event
-   * they care about is the opposite one: the solver funds the lockup itself and
+   * The receive corridor is here on the same terms even though the event
+   * it cares about is the opposite one: the solver funds the lockup itself and
    * then waits for the CLIENT to claim it, so the useful signal is a spend
    * rather than an arrival. Whether the indexer reports both is its business,
    * not ours — an event only ever causes a re-read, so a corridor whose event
@@ -496,7 +469,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
    * a foreign script that wants the same treatment, and adding it should be
    * adding a source rather than a second lifecycle. @see arkade/contractLifecycle.ts
    *
-   * Built once, outside the loop: `lockupSource` closes over the four stores
+   * Built once, outside the loop: `lockupSource` closes over the three stores
    * and reads them afresh on every pass, so there is nothing per-pass to rebuild.
    */
   const contractSources = [
@@ -656,7 +629,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
         //
         // WRAPPED, unlike the corridors above. This path is new and optional, and
         // an offer store that throws must not be able to end a watch loop those
-        // four corridors were already depending on. Per-fill failures are already
+        // three corridors were already depending on. Per-fill failures are already
         // recorded on their own rows by `tickAll`; this catches only what is left.
         try {
           const filled = (await services.assetOffers?.tickAll()) ?? 0
@@ -1691,8 +1664,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
    * WITHOUT the Arkade Service, by landing the VTXO on Bitcoin first.
    *
    * Reach for it when a row is parked with `claim failing past the refund
-   * deadline`, `refund failing past the refund deadline` or (onchain receive)
-   * `refund failing for …s` — the failure detail
+   * deadline` or `refund failing past the refund deadline` — the failure detail
    * on such a row already names which leaf this would spend. Both mean the
    * Service is censoring or gone, which is the only situation an exit is worth
    * its cost: it is slow (the leaf's CSV runs from when the lockup CONFIRMS

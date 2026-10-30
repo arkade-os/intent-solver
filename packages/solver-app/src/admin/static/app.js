@@ -247,7 +247,6 @@ const corridorLabel = (corridor) =>
     'arkade:BTC->lightning:BTC': 'ark→ln',
     'lightning:BTC->arkade:BTC': 'ln→ark',
     'arkade:BTC->onchain:BTC': 'ark→L1',
-    'onchain:BTC->arkade:BTC': 'L1→ark',
   })[corridor] ?? corridor
 
 /** Ended with nothing out — no delivery, but no harm — so the `failed` chip drops its colour. */
@@ -728,12 +727,9 @@ const swapsView = () => {
           },
         },
         h('option', { value: '', selected: state.filters.corridor === '' }, 'all corridors'),
-        ...[
-          'arkade:BTC->lightning:BTC',
-          'lightning:BTC->arkade:BTC',
-          'arkade:BTC->onchain:BTC',
-          'onchain:BTC->arkade:BTC',
-        ].map((c) => h('option', { value: c, selected: state.filters.corridor === c }, corridorLabel(c))),
+        ...['arkade:BTC->lightning:BTC', 'lightning:BTC->arkade:BTC', 'arkade:BTC->onchain:BTC'].map((c) =>
+          h('option', { value: c, selected: state.filters.corridor === c }, corridorLabel(c)),
+        ),
       ),
       h('input.search', {
         type: 'search',
@@ -2364,7 +2360,6 @@ const BTC_CORRIDORS = [
   { key: 'arkade:BTC->lightning:BTC', stem: 'LN_SEND', label: 'Arkade → Lightning' },
   { key: 'lightning:BTC->arkade:BTC', stem: 'LN_RECEIVE', label: 'Lightning → Arkade' },
   { key: 'arkade:BTC->onchain:BTC', stem: 'ONCHAIN_SEND', label: 'Arkade → onchain' },
-  { key: 'onchain:BTC->arkade:BTC', stem: 'ONCHAIN_RECEIVE', label: 'Onchain → Arkade' },
 ]
 
 const pricingKnobs = () => state.data.settings?.knobs ?? []
@@ -3111,14 +3106,14 @@ const explorerLink = (raw, field, chain, label) => {
  * Listed per step rather than per corridor: `explorerLink` yields nothing for a
  * field the row does not carry, so a step may name every corridor's spelling of
  * the same event and each row renders only its own. That is what keeps this
- * table one thing to maintain instead of four.
+ * table one thing to maintain instead of three.
  *
  * The spellings differ more than they look. `arkade:BTC->lightning:BTC` records
  * its lockup as `lockupTxid`; `lightning:BTC->arkade:BTC` records the very same
  * fact as `arkadeLockupTxid`. This table was written against the first and not
  * revisited, so the receive corridor rendered `armed -> funded` with no link
  * while the txid sat in the row — reported from mainnet on swap 28043f5d.
- * `test/admin/timelineLinks.test.ts` now reads the field names out of the four
+ * `test/admin/timelineLinks.test.ts` now reads the field names out of the three
  * row types and fails when one of them is unlinked.
  *
  * Chain matters as much as presence. An L1 txid on the Arkade explorer answers
@@ -3140,18 +3135,12 @@ const STEP_LINKS = {
     ['arkadeLockupTxid', 'arkade', 'lockup tx'],
     ['onchainLockupTxid', 'onchain', 'L1 lockup tx'],
     ['fundingTxid', 'onchain', 'L1 funding tx'],
-    ['arkadeFundTxid', 'arkade', 'arkade fund tx'],
   ],
-  claimed: [
-    ['claimArkTxid', 'arkade', 'claim tx'],
-    ['arkadeClaimTxid', 'arkade', 'arkade claim tx'],
-    ['onchainClaimTxid', 'onchain', 'L1 claim tx'],
-  ],
+  claimed: [['claimArkTxid', 'arkade', 'claim tx']],
   // The unwind, which had no entry at all — so the one transaction an operator
   // most needs to confirm after a refund was the one they could not open.
   refunded: [
     ['refundArkTxid', 'arkade', 'refund tx'],
-    ['arkadeRefundTxid', 'arkade', 'arkade refund tx'],
     ['onchainRefundTxid', 'onchain', 'L1 refund tx'],
   ],
 }

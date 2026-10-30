@@ -517,7 +517,6 @@ describe('LndOnchainAdapter read deadlines', () => {
     'arkade:BTC->lightning:BTC': null,
     'lightning:BTC->arkade:BTC': null,
     'arkade:BTC->onchain:BTC': null,
-    'onchain:BTC->arkade:BTC': null,
   } as const
 
   beforeEach(() => {
@@ -556,7 +555,7 @@ describe('LndOnchainAdapter read deadlines', () => {
     const adapter = await LndOnchainAdapter.create(config)
     let clock = 0
     const sampler = onchainFeeRateSampler({
-      bounds: { ...NO_BOUNDS, 'onchain:BTC->arkade:BTC': { capSats: 1_000, minSats: 0 } },
+      bounds: { ...NO_BOUNDS, 'arkade:BTC->onchain:BTC': { capSats: 1_000, minSats: 0 } },
       estimateFeeRate: () => adapter.estimateFeeRate(),
       refreshAfterMs: 1_000,
       staleAfterMs: 10_000,

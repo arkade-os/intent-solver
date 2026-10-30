@@ -67,7 +67,7 @@ const unbuildableRail: LightningRailModule = {
 }
 registerLightningRail(TEST_RAIL, unbuildableRail)
 
-/** The four `<STEM>_ENABLED` knobs, which together decide whether a rail is required. */
+/** The three `<STEM>_ENABLED` knobs, which together decide whether a rail is required. */
 const CORRIDOR_ENABLED_KEYS = CORRIDORS.map((corridor) => `${descriptorFor(corridor).envStem}_ENABLED`)
 
 /**
@@ -107,10 +107,6 @@ const CONFIG_KEYS = [
   'FAKE_LN_STATE_PATH',
   'POOL_AUTO_MINT',
   'CONTRACT_RETENTION_DAYS',
-  // Listed for the same reason the rest are: a leaked bad value makes every
-  // later `loadConfig()` in the file throw.
-  'ONCHAIN_RECEIVE_MAX_BAND_SATS',
-  'ONCHAIN_RECEIVE_BAND_BELOW_SHARE',
   'LN_SEND_HINT_SCID_DENYLIST',
   // Listed for the same reason `EVM_TOKENS` is: a leaked `OFFER_MARKETS` would
   // give every later test in the run an offer path it never asked for, and one
@@ -131,7 +127,7 @@ const CONFIG_KEYS = [
 /**
  * The minimum that gets `loadConfig` to the end.
  *
- * `LN_BACKEND` is in here now, and has to be: the four BTC corridors default to
+ * `LN_BACKEND` is in here now, and has to be: the three BTC corridors default to
  * enabled and every one of them needs a rail, so an unset value is a startup
  * error rather than a default. It is the registered TEST RAIL rather than `lnd`
  * (which would demand a socket, a cert and a macaroon) or `fake` (which
@@ -294,7 +290,7 @@ describe('loadConfig — a registered rail', () => {
 /**
  * `LN_BACKEND` is REQUIRED, and the one exemption.
  *
- * All four BTC corridors take BOTH their legs from the rail — the onchain pair
+ * All three BTC corridors take BOTH their legs from the rail — the onchain leg
  * as much as the Lightning pair, since one wallet answers both ports — so the
  * exemption is not "the Lightning corridors are off", it is "no BTC corridor is
  * served at all". A deployment quoting only EVM or asset flow is the case that
@@ -491,7 +487,7 @@ describe('loadConfig — DB_DIR', () => {
     expect(config.swapDbPath).toBe(join('/data', 'swaps.sqlite'))
     expect(config.arkade.databasePath).toBe(join('/data', 'ark.sqlite'))
     expect(config.fakeLnStatePath).toBe(join('/data', 'fake-ln.json'))
-    // The four siblings are suffixed off the swap path rather than named, so
+    // The three siblings are suffixed off the swap path rather than named, so
     // moving the directory has to carry them along. adminDbPath is the one that
     // is exported; the corridor stores use the identical rule in packages/solver-app/src/cli.ts.
     expect(adminDbPath(config.swapDbPath)).toBe(join('/data', 'swaps-admin.sqlite'))
@@ -626,52 +622,6 @@ describe('CONTRACT_RETENTION_DAYS', () => {
     // ever ruled out, this test is where that decision gets recorded.
     process.env.CONTRACT_RETENTION_DAYS = '0.5'
     expect(loadConfig().contractRetentionMs).toBe(0.5 * 86_400_000)
-  })
-})
-
-describe('ONCHAIN_RECEIVE_BAND_BELOW_SHARE', () => {
-  it('defaults to the whole retained width below the quote', () => {
-    expect(loadConfig().onchainReceiveBandBelowShare).toBe(1)
-  })
-
-  it.each(['0', '0.5', '1'])('accepts %s', (raw) => {
-    process.env.ONCHAIN_RECEIVE_BAND_BELOW_SHARE = raw
-    expect(loadConfig().onchainReceiveBandBelowShare).toBe(Number(raw))
-  })
-
-  it.each(['-0.1', '1.1', 'abc', 'Infinity'])('rejects %s rather than clamping silently', (raw) => {
-    process.env.ONCHAIN_RECEIVE_BAND_BELOW_SHARE = raw
-    expect(() => loadConfig()).toThrow(/ONCHAIN_RECEIVE_BAND_BELOW_SHARE must be a number between 0 and 1/)
-  })
-})
-
-describe('ONCHAIN_RECEIVE_MAX_BAND_SATS', () => {
-  it('defaults to the range that corridor already serves, so nothing new is offered or withheld', () => {
-    const config = loadConfig()
-    const limits = config.corridorLimits['onchain:BTC->arkade:BTC']
-    expect(config.onchainReceiveMaxBandSats).toBe(limits.maxSats - limits.minSats)
-  })
-
-  it('narrows how far a funded amount may drift from its quote', () => {
-    process.env.ONCHAIN_RECEIVE_MAX_BAND_SATS = '5000'
-    expect(loadConfig().onchainReceiveMaxBandSats).toBe(5_000)
-  })
-
-  it('accepts zero, which is exactly the strict equality shipped today', () => {
-    process.env.ONCHAIN_RECEIVE_MAX_BAND_SATS = '0'
-    expect(loadConfig().onchainReceiveMaxBandSats).toBe(0)
-  })
-
-  it('may only ever narrow, never widen past the corridor range', () => {
-    process.env.ONCHAIN_RECEIVE_MAX_BAND_SATS = '999999999999'
-    const config = loadConfig()
-    const limits = config.corridorLimits['onchain:BTC->arkade:BTC']
-    expect(config.onchainReceiveMaxBandSats).toBe(limits.maxSats - limits.minSats)
-  })
-
-  it.each(['-1', 'abc', '1.5', 'Infinity'])('rejects %s', (raw) => {
-    process.env.ONCHAIN_RECEIVE_MAX_BAND_SATS = raw
-    expect(() => loadConfig()).toThrow(/ONCHAIN_RECEIVE_MAX_BAND_SATS must be a non-negative integer/)
   })
 })
 

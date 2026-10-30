@@ -139,7 +139,6 @@ describe('each corridor searches columns it actually has', () => {
     'packages/solver-corridors/src/db/swaps.ts': 'SEND_SEARCH_COLUMNS',
     'packages/solver-corridors/src/db/receiveSwaps.ts': 'RECEIVE_SEARCH_COLUMNS',
     'packages/solver-corridors/src/db/onchainSwaps.ts': 'ONCHAIN_SEND_SEARCH_COLUMNS',
-    'packages/solver-corridors/src/db/onchainReceiveSwaps.ts': 'ONCHAIN_RECEIVE_SEARCH_COLUMNS',
   } as const
 
   /**

@@ -15,7 +15,6 @@ export interface DbLayout {
   readonly send: string
   readonly onchainSend: string
   readonly receive: string
-  readonly onchainReceive: string
   readonly admin: string
   /**
    * The EVM corridor's tables — ALWAYS `swapDbPath`, in both layouts.
@@ -47,7 +46,7 @@ export const suffixed = (swapDbPath: string, suffix: string): string =>
  * one. The rule is deliberately conservative: ANY legacy file present means
  * legacy, even if the others are missing. A half-populated directory is a
  * deployment whose corridors were enabled at different times, not a fresh
- * install, and reading four of its files while writing the fifth somewhere new
+ * install, and reading three of its files while writing the fourth somewhere new
  * would lose rows silently.
  */
 export const resolveDbLayout = (swapDbPath: string, exists: (path: string) => boolean = existsSync): DbLayout => {
@@ -55,13 +54,12 @@ export const resolveDbLayout = (swapDbPath: string, exists: (path: string) => bo
     send: swapDbPath,
     onchainSend: suffixed(swapDbPath, 'onchain'),
     receive: suffixed(swapDbPath, 'receive'),
-    onchainReceive: suffixed(swapDbPath, 'onchain-receive'),
     admin: suffixed(swapDbPath, 'admin'),
   }
   // `send` is deliberately NOT part of this test: it is the consolidated file
   // too, so its presence says nothing about which layout wrote it. Only a
   // SUFFIXED file is evidence of the split layout.
-  const split = [legacy.onchainSend, legacy.receive, legacy.onchainReceive, legacy.admin].some(exists)
+  const split = [legacy.onchainSend, legacy.receive, legacy.admin].some(exists)
   // These are outside `legacy` deliberately: they are the same path in both
   // branches, so a suffixed file is never named and never looked for for any of
   // them. See {@link DbLayout.evmSend}.
@@ -72,7 +70,6 @@ export const resolveDbLayout = (swapDbPath: string, exists: (path: string) => bo
     send: swapDbPath,
     onchainSend: swapDbPath,
     receive: swapDbPath,
-    onchainReceive: swapDbPath,
     admin: swapDbPath,
     ...noLegacyFile,
   }

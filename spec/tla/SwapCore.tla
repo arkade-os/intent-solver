@@ -15,7 +15,6 @@
 (*     db/swaps.ts                the send row, its SHAPE and migrations   *)
 (*     db/receiveSwaps.ts         ditto, receive                           *)
 (*     db/onchainSwaps.ts         ditto, onchain send                      *)
-(*     db/onchainReceiveSwaps.ts  ditto, onchain receive                   *)
 (*     db/driver.ts               the SqlDriver seam (WAL, synchronous)    *)
 (*     send/orchestrator.ts       tick() / tickAll() / driveRows()         *)
 (*   packages/solver-app/src/                                              *)

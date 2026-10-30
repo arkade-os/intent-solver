@@ -154,9 +154,9 @@ const MARKETS = [
   {
     quoteNamespace: CHAIN_NAMESPACE.onchain,
     quoteFrom: 'arkade:BTC->onchain:BTC',
-    baseFrom: 'onchain:BTC->arkade:BTC',
+    baseFrom: null,
   },
-] as const satisfies readonly { quoteNamespace: ChainNamespace; quoteFrom: Corridor; baseFrom: Corridor }[]
+] as const satisfies readonly { quoteNamespace: ChainNamespace; quoteFrom: Corridor; baseFrom: Corridor | null }[]
 
 const cardAsset = (leg: string | null, decimals: number, network: SwapNetwork): Record<string, unknown> => {
   if (!Number.isInteger(decimals) || decimals < 0 || decimals > MAX_DECIMALS) {
@@ -441,7 +441,7 @@ export const buildSolverCard = (inputs: SolverCardInputs): SolverCard => {
   }
   const assetMarkets = assetMarketEntries(inputs.assetMarkets ?? [], inputs.network)
   const markets = MARKETS.flatMap((market) => {
-    const base = inputs.corridors[market.baseFrom]
+    const base = market.baseFrom === null ? undefined : inputs.corridors[market.baseFrom]
     const quote = inputs.corridors[market.quoteFrom]
     if (!base && !quote) return []
     // A market's fee is the HIGHER of its two directions, because one card entry

@@ -1,7 +1,7 @@
 // A corridor, whole, in plain code: the `Corridor` interface with nothing else
 // in the way.
 //
-// The four built-in corridors are the same interface, but each carries a real
+// The three built-in corridors are the same interface, but each carries a real
 // state machine, a SQLite store and a settlement layer, so the shape is hard to
 // see through them. This one settles NOTHING — it issues a paper voucher and
 // calls it delivered — precisely so every line is about the interface rather
@@ -317,7 +317,7 @@ export const voucherCorridor = (options = {}) => {
 
     // ---- Optional capabilities. Absence IS the contract, not an oversight. ---
     //
-    // `liveLockups`, `tickHot`, `refundSweep`, `refundNow` and `claimNow` are
+    // `liveLockups`, `tickHot`, `refundSweep` and `refundNow` are
     // all absent because a voucher has no lockup, no hot state, and nothing to
     // refund. A corridor claiming a capability it cannot honour is worse than
     // one that says nothing.
