@@ -1696,3 +1696,31 @@ describe('refundSweptLockup on the EVM send corridor', () => {
     expect(await service.refundSweptLockup('5120' + '99'.repeat(32))).toBeNull()
   })
 })
+
+describe('the stuck-lock alert in locking_evm', () => {
+  // `isLocked` is false throughout `build`, so the lock stays absent once locking_evm.
+  it('alerts once the lock has been absent past the threshold', async () => {
+    let clock = NOW
+    const onTickError = vi.fn()
+    const { service } = await build({ now: () => clock, onTickError })
+    await service.tick('swap-1')
+    expect(onTickError).not.toHaveBeenCalled()
+
+    clock = NOW + 20 * 60 + 1
+    await service.tick('swap-1')
+    expect(onTickError).toHaveBeenCalledWith(
+      'swap-1',
+      expect.objectContaining({ message: expect.stringMatching(/lock absent/) }),
+    )
+  })
+
+  it('stays silent while the lock is only briefly absent', async () => {
+    let clock = NOW
+    const onTickError = vi.fn()
+    const { service } = await build({ now: () => clock, onTickError })
+    await service.tick('swap-1')
+    clock = NOW + 60
+    await service.tick('swap-1')
+    expect(onTickError).not.toHaveBeenCalled()
+  })
+})
