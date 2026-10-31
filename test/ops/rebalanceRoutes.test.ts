@@ -442,6 +442,21 @@ describe('Arkade rebalance source routes', () => {
     expect(mocks.restoreIds).toEqual([['rfq-1']])
   })
 
+  it('leaves a funded record to the daemon when built passive', async () => {
+    const receiving = lightningDeposit()
+    mockRequest(receiving)
+    const row = rowFrom(await source.quote(receiving, policy), receiving)
+    const release = await source.reserve(row, policy)
+    expect(await source.submit(row)).toBe(txid)
+    release()
+    await source.close?.()
+    mocks.restoreIds.length = 0
+    vi.mocked(services.arkade.wallet.getContractManager).mockClear()
+    source = await createArkadeRebalanceSource(services, driver, admission, 'passive')
+    expect(mocks.restoreIds).toEqual([])
+    expect(services.arkade.wallet.getContractManager).not.toHaveBeenCalled()
+  })
+
   it('restores a funded record stored under the pre-0.1.0 field names', async () => {
     const receiving = lightningDeposit()
     mockRequest(receiving)

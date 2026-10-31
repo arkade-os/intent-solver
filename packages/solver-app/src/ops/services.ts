@@ -1701,10 +1701,15 @@ export const createServices = async (
     const rebalancePolicy =
       storedPolicy === undefined ? disabledRebalancePolicy() : validateRebalancePolicy(JSON.parse(storedPolicy))
     const rebalanceStore = await RebalanceStore.open(swapFile)
-    const source = await createArkadeRebalanceSource(services, swapFile, inventoryAdmission)
     // Only the long-lived daemon drives rebalancing; a one-shot CLI shares this db but must not
     // reserve coins or rewrite in-flight rows (both process-local) under the running daemon.
     const active = opts?.rebalance === 'active'
+    const source = await createArkadeRebalanceSource(
+      services,
+      swapFile,
+      inventoryAdmission,
+      active ? 'active' : 'passive',
+    )
     runtimeRebalance = await RebalanceService.create(
       {
         store: rebalanceStore,
