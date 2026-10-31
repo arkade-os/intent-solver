@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { hex } from '@scure/base'
 import { NON_TERMINAL, SwapStore, type QuoteRecord } from '@arkade-os/solver-corridors/db/swaps.js'
-import { claimNow } from '@arkade-os/solver-app/ops/claims.js'
+import { OnchainSendSwapStore } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
+import { claimNow, onchainClaimNow } from '@arkade-os/solver-app/ops/claims.js'
 import { parkVia } from '@arkade-os/solver-core/core/corridor.js'
 import type { SendHtlcState } from '@arkade-os/solver-core/ports/lightning.js'
 
@@ -170,5 +171,79 @@ describe('Corridor.park, over the Lightning-send store', () => {
     // never moved money, so it needs no operator afterwards.
     expect(outcome).toEqual({ state: 'refused' })
     expect((await store.get('swap-1')).state).toBe('refused')
+  })
+})
+
+const onchainQuote = () => ({
+  id: 'swap-1',
+  paymentHash: PAYMENT_HASH,
+  amountSats: 50_000,
+  payoutSats: 49_500,
+  refundLocktime: 1_007_200,
+  providerPubkey: 'bb'.repeat(32),
+  serverPubkey: 'cc'.repeat(32),
+  claimDelay: 512,
+  refundDelay: 1024,
+  refundWithoutReceiverDelay: 1536,
+  pkScript: 'dd'.repeat(34),
+  lockupAddress: 'tark1example',
+  refundPkScript: 'ee'.repeat(34),
+  emulatorPubkey: 'ff'.repeat(33),
+  clientRefundPubkey: '44'.repeat(32),
+  receiverPkScript: '55'.repeat(34),
+  payoutPubkey: '11'.repeat(32),
+  htlcPubkey: '22'.repeat(32),
+  htlcLocktime: 1_005_400,
+  minConfirmations: 1,
+  onchainAddress: 'bcrt1pexample',
+  onchainPkScript: '33'.repeat(34),
+  nonInteractiveParameters: true,
+})
+
+describe('onchainClaimNow', () => {
+  let onchain: OnchainSendSwapStore
+
+  // Walk to `claiming` so the preimage lands on the row the one way the store allows,
+  // then fail it: the shape a transient Arkade claim error after refund_locktime leaves.
+  const stuckWithPreimage = async (preimage = PREIMAGE) => {
+    await onchain.insertQuote(onchainQuote())
+    await onchain.transition('swap-1', 'quoted', 'funded', {})
+    await onchain.transition('swap-1', 'funded', 'funding_onchain', {})
+    await onchain.transition('swap-1', 'funding_onchain', 'awaiting_claim', {})
+    await onchain.transition('swap-1', 'awaiting_claim', 'claiming', { preimage })
+    await onchain.fail('swap-1', 'claiming', 'arkade claim threw past the refund deadline')
+    expect((await onchain.get('swap-1')).state).toBe('stuck')
+  }
+
+  const services = () => ({ onchainStore: onchain }) as never
+
+  beforeEach(async () => {
+    onchain = await OnchainSendSwapStore.open(':memory:', () => 1_000_000)
+  })
+  afterEach(async () => onchain.close())
+
+  it('puts a stuck row with a proven preimage back on the claim path', async () => {
+    await stuckWithPreimage()
+    expect(await onchainClaimNow(services(), 'swap-1')).toEqual({ state: 'claiming' })
+    expect((await onchain.get('swap-1')).state).toBe('claiming')
+  })
+
+  it('refuses a row that is not stuck', async () => {
+    await onchain.insertQuote(onchainQuote())
+    await expect(onchainClaimNow(services(), 'swap-1')).rejects.toThrow(/not stuck/)
+  })
+
+  it('refuses a stuck row with no preimage — nothing proves the client revealed P', async () => {
+    await onchain.insertQuote(onchainQuote())
+    await onchain.transition('swap-1', 'quoted', 'funded', {})
+    await onchain.transition('swap-1', 'funded', 'funding_onchain', {})
+    await onchain.fail('swap-1', 'funding_onchain', 'funding stuck')
+    expect((await onchain.get('swap-1')).state).toBe('stuck')
+    await expect(onchainClaimNow(services(), 'swap-1')).rejects.toThrow(/no preimage/)
+  })
+
+  it('refuses a preimage that does not hash to the payment hash', async () => {
+    await stuckWithPreimage('cd'.repeat(32))
+    await expect(onchainClaimNow(services(), 'swap-1')).rejects.toThrow(/does not hash/)
   })
 })
