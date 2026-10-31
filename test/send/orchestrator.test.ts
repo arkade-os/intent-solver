@@ -1890,6 +1890,41 @@ describe('tick: failure and recovery', () => {
     expect(ln.payCalls[0]?.idempotencyKey).toBe(`swap-${PAYMENT_HASH}`)
   })
 
+  it('refuses to re-submit a mid-payment row recovered on a different Lightning backend', async () => {
+    // The pure double-pay the CLTV gate cannot catch: a backend that WOULD pay
+    // the same invoice, on a different node whose probe naturally knows nothing
+    // of the hash. Bound to node-a at `funded -> paying`, recovery on node-b
+    // parks instead of paying twice.
+    const svc = new SendSwapService({
+      store,
+      ln,
+      arkade,
+      backendName: 'node-b',
+      limits: { minSats: 500, maxSats: 10_000 },
+      invoicePrefix: 'bc',
+      maxExposedSats: 5_000,
+      totalCommitted: () => store.committedSats(),
+      admission: new AdmissionControl(),
+      now: () => clock,
+    })
+    const outcome = await svc.quote(INVOICE, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+    if (!outcome.accepted) throw new Error(`quote refused: ${outcome.reason}`)
+    const swap = outcome.swap
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
+    await store.transition(swap.id, 'quoted', 'funded', { lockup_value: AMOUNT })
+    await store.transition(swap.id, 'funded', 'paying', {
+      pay_attempted_at: clock - NO_RECORD_GRACE_SECONDS,
+      idempotency_key: `swap-${swap.paymentHash}`,
+      payment_backend: 'node-a',
+    })
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
+
+    const row = await svc.tick(swap.id)
+    expect(row.state).toBe('stuck')
+    expect(ln.payCalls).toHaveLength(0)
+    expect(row.failureReason).toContain('reconcile before retry')
+  })
+
   it('does not re-submit a recovered row until its last submission is old enough to be absent', async () => {
     const { swap } = await quoted()
     arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
