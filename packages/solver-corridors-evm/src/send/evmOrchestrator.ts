@@ -66,6 +66,9 @@ import {
   type EvmPayoutFundingMode,
 } from './evmPayoutFunding.js'
 
+/** How long a lock may be absent in `locking_evm` before the stuck alert fires, re-raised every tick after. */
+const LOCK_ABSENT_ALERT_SECONDS = 20 * 60
+
 /** Signs and broadcasts one call, resolving to its transaction hash. */
 export type EvmBroadcaster = (call: EvmCall) => Promise<string>
 
@@ -415,6 +418,23 @@ export class EvmSendSwapService {
       action = planEvmSend(row, seen)
     }
     const { store } = this.deps
+    // Direct funding has no reconcile path, so an absent lock waits silently to
+    // the timeout — and a dropped lock's nonce gap stalls this key until restart.
+    if (
+      this.deps.payoutFunding === undefined &&
+      row.state === 'locking_evm' &&
+      action.do === 'wait' &&
+      !seen.evmLockPresent &&
+      this.now() - row.updatedAt >= LOCK_ABSENT_ALERT_SECONDS
+    ) {
+      const txid = row.evmLockTxid ?? 'never recorded'
+      this.deps.onTickError?.(
+        row.id,
+        new Error(
+          `evm lock absent since the broadcast (${txid}); later refunds and claims may stall behind a nonce gap`,
+        ),
+      )
+    }
     // A provider/receiver recovery is not an HTLC refund against a nonexistent lock.
     if (this.deps.payoutFunding !== undefined && action.do === 'refund_evm' && !seen.evmLockPresent) {
       let recoveryError: unknown
