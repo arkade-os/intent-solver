@@ -157,6 +157,12 @@ describe('onchainRfqStateFromRow', () => {
     expect(onchainRfqStateFromRow({ ...row, state: 'stuck' })).toBe('stuck')
     expect(onchainRfqStateFromRow({ ...row, state: 'refused' })).toBe('refused')
   })
+
+  it('reports a refunded stuck row as refunded, like the Lightning leg', () => {
+    // `stuck` is an operator word; once the client's lockup went back, the client's
+    // own status is `refunded`. The LN mapper already answers this way.
+    expect(onchainRfqStateFromRow({ ...row, state: 'stuck', refundOutcome: 'pushed' })).toBe('refunded')
+  })
 })
 
 describe('onchainRfqStatusPayload', () => {
