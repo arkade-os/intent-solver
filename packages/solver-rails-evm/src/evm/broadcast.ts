@@ -19,6 +19,7 @@ import { bytesToHex } from '@noble/hashes/utils.js'
 import { createNonceSource, type NonceReader, type NonceSource } from './nonce.js'
 import { priceTransaction, blocksBefore } from './fees.js'
 import { addressFromPrivateKey, signTransaction, type Eip1559Fields } from './transaction.js'
+import { JsonRpcError } from './rpc.js'
 import type { EvmCall } from './backend.js'
 
 export interface EvmBroadcastDeps {
@@ -89,13 +90,31 @@ export const createEvmBroadcaster = (deps: EvmBroadcastDeps) => {
       throw error
     }
 
-    const hash = await deps.rpc('eth_sendRawTransaction', [raw])
+    let hash: unknown
+    try {
+      hash = await deps.rpc('eth_sendRawTransaction', [raw])
+    } catch (error) {
+      // Default keeps it burnt; freed only when the node proves the slot is empty.
+      if (nodeRejectedWithFreeNonce(error)) deps.nonces.release(from, nonce)
+      throw error
+    }
     if (typeof hash !== 'string') {
       throw new Error('eth_sendRawTransaction: expected a hash, got ' + JSON.stringify(hash))
     }
     return hash
   }
 }
+
+// Occupied: a tx holds the nonce, so releasing would replace it — on a claim, the claim.
+const NONCE_OCCUPIED =
+  /replacement transaction underpriced|already known|known transaction|nonce too low|already imported/i
+const CLEANLY_REJECTED =
+  /\bunderpriced|insufficient funds|intrinsic gas too low|less than block base fee|fee cap|exceeds block gas limit|gas limit reached|invalid sender/i
+
+const nodeRejectedWithFreeNonce = (error: unknown): boolean =>
+  error instanceof JsonRpcError &&
+  !NONCE_OCCUPIED.test(String(error.rpcMessage)) &&
+  CLEANLY_REJECTED.test(String(error.rpcMessage))
 
 /** A nonce source bound to one JSON-RPC endpoint, shared per solver key. */
 export const nonceSourceFor = (rpc: (method: string, params: readonly unknown[]) => Promise<unknown>): NonceSource => {

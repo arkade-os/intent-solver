@@ -19,12 +19,7 @@
 /** Matches {@link import('./backend.js').JsonRpc}, restated so this module imports nothing. */
 export type JsonRpc = (method: string, params: readonly unknown[]) => Promise<unknown>
 
-/**
- * A JSON-RPC error RESPONSE: the node received the request and refused it. Set
- * apart from a transport or HTTP failure, where delivery is unknown, because a
- * caller that broadcast a transaction needs that line to decide whether it can
- * have reached the mempool. @see evm/broadcast.ts
- */
+/** A node refusal (request processed, tx not accepted), apart from a transport failure where delivery is unknown. @see evm/broadcast.ts */
 export class JsonRpcError extends Error {
   constructor(
     method: string,

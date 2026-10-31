@@ -65,10 +65,7 @@ describe('createEvmBroadcaster', () => {
   })
 
   it('gives the nonce back when the NODE rejects the send, so no gap strands later txs', async () => {
-    // A JSON-RPC rejection (fee below base, an underfunded key) means the node
-    // refused the tx and it never entered a pool. Unlike the transport error
-    // above, holding the nonce here strands every later tx behind a permanent
-    // gap until restart — the stall this release exists to prevent.
+    // A JSON-RPC rejection never entered a pool, unlike the transport error above.
     const nonces = createNonceSource(async () => 7n)
     const release = vi.spyOn(nonces, 'release')
     const rpc = vi.fn(async (method: string) => {
@@ -84,9 +81,7 @@ describe('createEvmBroadcaster', () => {
   })
 
   it('KEEPS the nonce burnt when the node says the slot is already taken', async () => {
-    // 'replacement transaction underpriced' is a node rejection too, but it means
-    // a DIFFERENT tx already sits at this nonce. Releasing would make the next tx
-    // replace it — on a claim, the claim.
+    // A node rejection too, but a tx already sits at the nonce — releasing replaces it.
     const nonces = createNonceSource(async () => 7n)
     const release = vi.spyOn(nonces, 'release')
     const rpc = vi.fn(async (method: string) => {
