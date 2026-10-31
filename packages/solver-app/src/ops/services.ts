@@ -479,6 +479,9 @@ export const openReportReaders = async (
  * sweep, same ingress, same status route. They are not subject to
  * `corridorEnabled`, which is keyed by the closed union of built-in pairs — a
  * consumer passes the corridors it wants served.
+ *
+ * `opts.rebalance: 'active'` makes this process the one that drives wallet rebalancing; omitted, it only
+ * reads that state. The daemon commands pass it, and so must an embedding host that wants rebalancing.
  */
 export const createServices = async (
   config: Config,

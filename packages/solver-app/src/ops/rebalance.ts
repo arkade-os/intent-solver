@@ -63,10 +63,11 @@ export class RebalanceService {
 
   static async create(deps: RebalanceDeps, mode: 'active' | 'passive' = 'active'): Promise<RebalanceService> {
     const service = new RebalanceService(deps)
+    // Read-only, so every process registers it: a one-shot's own deposit claims must still honour the live rows.
+    deps.backend.protectDeposits?.(() => deps.store.active())
     // Reservations are process-local and the recovery rewrite mutates live rows, so only the one
     // daemon that drives rebalancing may run them; a one-shot CLI sharing the db builds passive.
     if (mode === 'passive') return service
-    deps.backend.protectDeposits?.(() => deps.store.active())
     for (const row of await deps.store.active()) {
       if (row.state === 'submitting') {
         row.state = 'needs_reconciliation'

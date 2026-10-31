@@ -297,14 +297,16 @@ describe('only the live daemon recovers rebalance state — a one-shot build is 
     inputs: [],
   })
 
-  it('a passive build neither reconciles a submitting row nor reserves its coins', async () => {
+  it('a passive build neither reconciles a submitting row nor reserves its coins, but still protects deposits', async () => {
     const f = await setup()
     try {
       await f.store.create(submittingRow())
       f.deps.source.reserve.mockClear()
-      await RebalanceService.create(f.deps, 'passive')
+      const protectDeposits = vi.fn()
+      await RebalanceService.create({ ...f.deps, backend: { ...f.deps.backend, protectDeposits } }, 'passive')
       expect((await f.store.get('rb-1'))?.state).toBe('submitting')
       expect(f.deps.source.reserve).not.toHaveBeenCalled()
+      expect(protectDeposits).toHaveBeenCalledOnce()
     } finally {
       await f.driver.close()
     }
