@@ -23,7 +23,7 @@
 import type { Hono } from 'hono'
 import { refundNow, onchainRefundNow, reclaimL1Htlc, receiveRefundNow } from '../../ops/refunds.js'
 import { hex } from '@scure/base'
-import { claimNow } from '../../ops/claims.js'
+import { claimNow, onchainClaimNow } from '../../ops/claims.js'
 import { planExitForSwap } from '../../ops/unilateralExit.js'
 import { requireLn } from '../../ops/rails.js'
 import { capabilityRefusal, fundSources, requireFundSource, summarise } from '../../ops/fundSources.js'
@@ -463,6 +463,18 @@ export const ACTIONS: Record<string, ActionDefinition> = {
       'in others — the solver may already have paid out on the onchain leg. Read the row and the onchain HTLC first. ' +
       'This does not touch the solver’s own L1 HTLC; that is reclaim-l1-htlc.',
     run: (services, body) => onchainRefundNow(services, requireId(body)),
+  },
+
+  'onchain-claim-now': {
+    tier: 'armed',
+    confirmKind: 'swap-id',
+    expectedConfirm: bodyId,
+    target: bodyId,
+    warning:
+      'For a `stuck` arkade:BTC->onchain:BTC row the solver ALREADY PAID the client on L1 and still holds the ' +
+      'preimage. Returns the row to claiming so the sweep claims the Arkade lockup the solver is owed. The opposite ' +
+      'of onchain-refund-now, which on such a row is the DOUBLE-PAYOUT. Refuses a row carrying no preimage.',
+    run: (services, body) => onchainClaimNow(services, requireId(body)),
   },
 
   /**
