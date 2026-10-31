@@ -34,7 +34,7 @@ import { requestRestart } from '../../ops/restart.js'
 import type { Services } from '../../ops/services.js'
 import type { AdminDeps } from '../server.js'
 import { clampLimit } from '@arkade-os/solver-core/core/page.js'
-import { messageOf } from '@arkade-os/solver-core/util/poll.js'
+import { log, messageOf } from '@arkade-os/solver-core/util/poll.js'
 import { CORRIDORS, isCorridor, type Corridor } from '@arkade-os/solver-core/core/corridorPolicy.js'
 
 export type ActionTier = 'safe' | 'armed'
@@ -773,28 +773,27 @@ export const registerActionRoutes = (app: Hono, deps: AdminDeps): void => {
     // secret, but recording the ceremony alongside the action is noise.
     const params = JSON.stringify({ ...body, confirm: undefined })
 
+    // Best-effort: the action may have moved money, so a failed audit write must not
+    // decide the HTTP result — a 500 reads as failure and invites a retry (a second pay).
+    const record = async (outcome: 'ok' | 'error', detail: string): Promise<void> => {
+      try {
+        await deps.services.adminStore.recordAction({ action: name, target, params, outcome, detail })
+      } catch (error) {
+        log(`admin action ${name}: audit record failed`, messageOf(error))
+      }
+    }
+
+    let result: unknown
     try {
-      const result = await definition.run(deps.services, body)
-      await deps.services.adminStore.recordAction({
-        action: name,
-        target,
-        params,
-        outcome: 'ok',
-        detail: JSON.stringify(result).slice(0, 500),
-      })
-      return c.json({ ok: true, result })
+      result = await definition.run(deps.services, body)
     } catch (error) {
-      await deps.services.adminStore.recordAction({
-        action: name,
-        target,
-        params,
-        outcome: 'error',
-        detail: messageOf(error),
-      })
+      await record('error', messageOf(error))
       // 500 with a readable body rather than a thrown fault: the operator needs
       // the reason, and the action WAS attempted, unlike a confirm failure.
       return c.json({ ok: false, error: 'action_failed', message: messageOf(error) }, 500)
     }
+    await record('ok', JSON.stringify(result).slice(0, 500))
+    return c.json({ ok: true, result })
   })
 
   app.get('/api/audit', async (c) => {
