@@ -134,7 +134,7 @@ const buildSchema = (railNames: readonly string[]) =>
     }),
     storage: section({ dir: str, swapDb: str, arkDb: str }),
     http: section({ host: str, port: num }),
-    admin: section({ host: str, port: num.nullable(), restartEnabled: bool }),
+    admin: section({ host: str, allowedHosts: strings, port: num.nullable(), restartEnabled: bool }),
     sentry: section({ dsn: str, environment: str, release: str }),
     notify: section({
       telegramBotToken: str,

@@ -425,6 +425,8 @@ export interface Config {
    * anything that can reach this port can move money.
    */
   adminHost: string
+  /** Extra `Host` values a state-changing request may carry; see `adminHostAllowlist` in admin/server.ts. */
+  adminAllowedHosts: readonly string[]
   /** Off unless set: a supervisor is what restarts, so without one this only stops. */
   adminRestartEnabled: boolean
   /** Outbound relay URL for `relay` mode; null when not configured. */
@@ -1028,6 +1030,10 @@ export const configFromKnobs = (env: Knobs): Config => {
     // A bad value still throws through intFromEnv rather than reading as "off".
     adminPort: env.ADMIN_PORT?.trim() ? intFromEnv(env, 'ADMIN_PORT', 8788, 1, 65535) : null,
     adminHost: env.ADMIN_HOST?.trim() || '127.0.0.1',
+    adminAllowedHosts: (env.ADMIN_ALLOWED_HOSTS ?? '')
+      .split(',')
+      .map((host) => host.trim().toLowerCase())
+      .filter(Boolean),
     adminRestartEnabled: env.ADMIN_RESTART_ENABLED?.trim() === 'true',
     /** Outbound relay URL for the `relay` command; unset = relay mode unavailable. */
     relayUrl: env.RELAY_URL?.trim() || null,
