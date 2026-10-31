@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
-import { createJsonRpc } from '@arkade-os/solver-rails-evm/evm/rpc.js'
+import { createJsonRpc, JsonRpcError } from '@arkade-os/solver-rails-evm/evm/rpc.js'
 
 const respond = (body: unknown, init: { status?: number; statusText?: string; text?: string } = {}) =>
   vi.fn().mockResolvedValue({
@@ -68,6 +68,13 @@ describe('refusals', () => {
     const fetch = respond({ error: { code: -32000, message: 'header not found' } })
     await expect(createJsonRpc({ url: 'http://node', fetch })('eth_call', [])).rejects.toThrow(
       /-32000.*header not found/,
+    )
+  })
+
+  it('throws a JsonRpcError, so a caller can tell a node refusal from a transport failure', async () => {
+    const fetch = respond({ error: { code: -32000, message: 'transaction underpriced' } })
+    await expect(createJsonRpc({ url: 'http://node', fetch })('eth_sendRawTransaction', [])).rejects.toBeInstanceOf(
+      JsonRpcError,
     )
   })
 

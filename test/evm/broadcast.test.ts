@@ -8,6 +8,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { createEvmBroadcaster, nonceSourceFor } from '@arkade-os/solver-rails-evm/evm/broadcast.js'
 import { createNonceSource } from '@arkade-os/solver-rails-evm/evm/nonce.js'
+import { JsonRpcError } from '@arkade-os/solver-rails-evm/evm/rpc.js'
 
 const KEY = Uint8Array.from(Buffer.from('11'.repeat(32), 'hex'))
 const CALL = { to: Uint8Array.from(Buffer.from('22'.repeat(20), 'hex')), data: Uint8Array.from([1, 2, 3, 4]) }
@@ -60,6 +61,43 @@ describe('createEvmBroadcaster', () => {
     })
     const broadcast = createEvmBroadcaster(deps({ nonces, rpc: rpc as never }))
     await expect(broadcast(CALL)).rejects.toThrow(/socket hang up/)
+    expect(release).not.toHaveBeenCalled()
+  })
+
+  it('gives the nonce back when the NODE rejects the send, so no gap strands later txs', async () => {
+    // A JSON-RPC rejection (fee below base, an underfunded key) means the node
+    // refused the tx and it never entered a pool. Unlike the transport error
+    // above, holding the nonce here strands every later tx behind a permanent
+    // gap until restart — the stall this release exists to prevent.
+    const nonces = createNonceSource(async () => 7n)
+    const release = vi.spyOn(nonces, 'release')
+    const rpc = vi.fn(async (method: string) => {
+      if (method === 'eth_sendRawTransaction')
+        throw new JsonRpcError('eth_sendRawTransaction', -32000, 'transaction underpriced')
+      if (method === 'eth_getBlockByNumber') return { baseFeePerGas: '0x3b9aca00' }
+      if (method === 'eth_maxPriorityFeePerGas') return '0x5f5e100'
+      throw new Error('unexpected rpc ' + method)
+    })
+    const broadcast = createEvmBroadcaster(deps({ nonces, rpc: rpc as never }))
+    await expect(broadcast(CALL)).rejects.toThrow(/underpriced/)
+    expect(release).toHaveBeenCalledWith(expect.anything(), 7n)
+  })
+
+  it('KEEPS the nonce burnt when the node says the slot is already taken', async () => {
+    // 'replacement transaction underpriced' is a node rejection too, but it means
+    // a DIFFERENT tx already sits at this nonce. Releasing would make the next tx
+    // replace it — on a claim, the claim.
+    const nonces = createNonceSource(async () => 7n)
+    const release = vi.spyOn(nonces, 'release')
+    const rpc = vi.fn(async (method: string) => {
+      if (method === 'eth_sendRawTransaction')
+        throw new JsonRpcError('eth_sendRawTransaction', -32000, 'replacement transaction underpriced')
+      if (method === 'eth_getBlockByNumber') return { baseFeePerGas: '0x3b9aca00' }
+      if (method === 'eth_maxPriorityFeePerGas') return '0x5f5e100'
+      throw new Error('unexpected rpc ' + method)
+    })
+    const broadcast = createEvmBroadcaster(deps({ nonces, rpc: rpc as never }))
+    await expect(broadcast(CALL)).rejects.toThrow(/replacement/)
     expect(release).not.toHaveBeenCalled()
   })
 

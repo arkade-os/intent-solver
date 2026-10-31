@@ -19,6 +19,23 @@
 /** Matches {@link import('./backend.js').JsonRpc}, restated so this module imports nothing. */
 export type JsonRpc = (method: string, params: readonly unknown[]) => Promise<unknown>
 
+/**
+ * A JSON-RPC error RESPONSE: the node received the request and refused it. Set
+ * apart from a transport or HTTP failure, where delivery is unknown, because a
+ * caller that broadcast a transaction needs that line to decide whether it can
+ * have reached the mempool. @see evm/broadcast.ts
+ */
+export class JsonRpcError extends Error {
+  constructor(
+    method: string,
+    readonly code: unknown,
+    readonly rpcMessage: unknown,
+  ) {
+    super(`${method}: JSON-RPC error ${String(code)} ${String(rpcMessage)}`)
+    this.name = 'JsonRpcError'
+  }
+}
+
 export interface JsonRpcDeps {
   url: string
   /**
@@ -75,7 +92,7 @@ export const createJsonRpc = (deps: JsonRpcDeps): JsonRpc => {
     const { result, error } = body as { result?: unknown; error?: unknown }
     if (error !== undefined && error !== null) {
       const { code, message } = error as { code?: unknown; message?: unknown }
-      throw new Error(`${method}: JSON-RPC error ${String(code)} ${String(message)}`)
+      throw new JsonRpcError(method, code, message)
     }
     // `result` may legitimately be null (`eth_getBlockByNumber` on an unknown
     // block) so its ABSENCE is what is refused, not its emptiness. A response
