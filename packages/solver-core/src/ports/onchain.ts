@@ -201,6 +201,13 @@ export interface OnchainSendBackend extends OnchainBackend {
   /**
    * {@link fund}'s payment, signed with its inputs reserved but NOT broadcast: the caller records `tx`
    * before `broadcastRaw`, so a re-drive can only resend that one transaction, never pay the HTLC again.
+   *
+   * `feeRateSatPerVbyte` (sat/vB) is required, not optional: the wallet's own default conf target is
+   * invisible here, and a funding confirming past `htlc_locktime` can be reclaimed by the client.
    */
-  signFunding(params: { address: string; amountSats: number }): Promise<{ txid: string; vout: number; tx: string }>
+  signFunding(params: {
+    address: string
+    amountSats: number
+    feeRateSatPerVbyte: number
+  }): Promise<{ txid: string; vout: number; tx: string }>
 }
