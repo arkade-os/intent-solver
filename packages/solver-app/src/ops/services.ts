@@ -479,10 +479,13 @@ export const openReportReaders = async (
  * sweep, same ingress, same status route. They are not subject to
  * `corridorEnabled`, which is keyed by the closed union of built-in pairs — a
  * consumer passes the corridors it wants served.
+ *
+ * `opts.rebalance: 'active'` makes this process the one that drives wallet rebalancing; omitted, it only
+ * reads that state. The daemon commands pass it, and so must an embedding host that wants rebalancing.
  */
 export const createServices = async (
   config: Config,
-  opts?: { allCorridors?: boolean; corridors?: readonly CorridorPlugin[] },
+  opts?: { allCorridors?: boolean; corridors?: readonly CorridorPlugin[]; rebalance?: 'active' },
 ): Promise<Services> => {
   setLatencyDiagnostics(config.latencyDiagnostics)
   const settingPath = (id: string): string => config.configPaths?.get(id) ?? id
@@ -1698,23 +1701,36 @@ export const createServices = async (
     const rebalancePolicy =
       storedPolicy === undefined ? disabledRebalancePolicy() : validateRebalancePolicy(JSON.parse(storedPolicy))
     const rebalanceStore = await RebalanceStore.open(swapFile)
-    const source = await createArkadeRebalanceSource(services, swapFile, inventoryAdmission)
-    runtimeRebalance = await RebalanceService.create({
-      store: rebalanceStore,
-      backend: rail.rebalance,
-      source,
-      policy: rebalancePolicy,
-      savePolicy: async (next) => adminStore.setOverride('REBALANCE_POLICY', JSON.stringify(next)),
-    })
+    // Only the long-lived daemon drives rebalancing; a one-shot CLI shares this db but must not
+    // reserve coins or rewrite in-flight rows (both process-local) under the running daemon.
+    const active = opts?.rebalance === 'active'
+    const source = await createArkadeRebalanceSource(
+      services,
+      swapFile,
+      inventoryAdmission,
+      active ? 'active' : 'passive',
+    )
+    runtimeRebalance = await RebalanceService.create(
+      {
+        store: rebalanceStore,
+        backend: rail.rebalance,
+        source,
+        policy: rebalancePolicy,
+        savePolicy: async (next) => adminStore.setOverride('REBALANCE_POLICY', JSON.stringify(next)),
+      },
+      active ? 'active' : 'passive',
+    )
     services.rebalance = runtimeRebalance
-    const tickRebalance = (): void => {
-      void runtimeRebalance
-        ?.tick()
-        .catch((error) => log('rebalance pass failed:', error instanceof Error ? error.message : String(error)))
+    if (active) {
+      const tickRebalance = (): void => {
+        void runtimeRebalance
+          ?.tick()
+          .catch((error) => log('rebalance pass failed:', error instanceof Error ? error.message : String(error)))
+      }
+      rebalanceTimer = setInterval(tickRebalance, 60_000)
+      rebalanceTimer.unref()
+      tickRebalance()
     }
-    rebalanceTimer = setInterval(tickRebalance, 60_000)
-    rebalanceTimer.unref()
-    tickRebalance()
   }
   return services
 }
