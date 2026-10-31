@@ -20,7 +20,8 @@ export const OnchainSendMachine = defineMachine({
   claimed: { live: false, exposed: false, to: [] },
   refunded: { live: false, exposed: false, to: [] },
   refused: { live: false, exposed: false, to: [] },
-  stuck: { live: false, exposed: false, outgoing: true, to: [] },
+  // Operator recovery only (onchainClaimNow): a stuck-mid-claim row still holds the preimage. Forward-only.
+  stuck: { live: false, exposed: false, outgoing: true, to: ['claiming'] },
 })
 
 export type OnchainSendSwapState = StateOf<typeof OnchainSendMachine>
