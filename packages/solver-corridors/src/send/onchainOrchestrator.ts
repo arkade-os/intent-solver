@@ -305,6 +305,10 @@ export class OnchainSendSwapService {
       if (!request.refundAddress.toLowerCase().startsWith(`${arkade.hrp}1`)) {
         return { accepted: false, reason: 'invalid_refund_address' }
       }
+      // Only a refund to THIS server is recoverable without another deployment's cooperation.
+      if (hex.encode(address.serverPubKey) !== arkade.serverPubkey) {
+        return { accepted: false, reason: 'invalid_refund_address' }
+      }
     } catch {
       return { accepted: false, reason: 'invalid_refund_address' }
     }
