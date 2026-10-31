@@ -99,7 +99,8 @@ registerLightningRail('my-rail', { create: async (config) => ({ ln, onchain }) }
 `rails.lightning.backend: "my-rail"` then selects it, because `loadConfig` asks the
 registry what exists (`packages/solver-app/src/ops/rails.ts`). The rail's own
 settings go under `rails.lightning["my-rail"]` and reach it as
-`config.lightningRailBlock`, for the rail to check itself. A rail that read environment
+`config.lightningRailBlock`, for the rail to check itself; `consoleSettings(config)` lists what the
+console shows of them, read-only, a credential left out rather than redacted. A rail that read environment
 variables before the document names them in `legacyEnv`: boot refuses any left set, and
 `cli config-from-env` writes `legacyEnv.toBlock(env)` as its block. A rail is a PAIR — one wallet
 answering both the Lightning and the onchain port — so a vendor with no onchain

@@ -116,6 +116,12 @@ export interface LightningRailModule {
    * `cli config-from-env` writes `toBlock(env)` as the rail's block, omitted when it returns undefined.
    */
   legacyEnv?: { names: readonly string[]; toBlock(env: NodeJS.ProcessEnv): unknown }
+  /**
+   * Optional: this rail's own settings and facts for the console's read-only list, each labelled
+   * where an operator finds it. Anything listed is readable by whatever reaches the admin port,
+   * which has no authentication: leave a credential out rather than redact it.
+   */
+  consoleSettings?(config: Config): ReadonlyArray<{ path: string; value: string | number | boolean }>
 }
 
 /**

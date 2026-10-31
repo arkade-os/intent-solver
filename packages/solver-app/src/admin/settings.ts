@@ -25,6 +25,8 @@ import { CORRIDORS, FREE, type Corridor, type Fee } from '@arkade-os/solver-core
 import { descriptorFor } from '@arkade-os/solver-corridors/corridors/index.js'
 import { MAX_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/send.js'
 import { assetMarketKey } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import { log } from '@arkade-os/solver-core/util/poll.js'
+import { lightningRailFor } from '../ops/rails.js'
 
 export type KnobSource = 'config' | 'override'
 
@@ -428,6 +430,23 @@ export const describeSettings = (
     { key: 'RELAY_PROTOCOL', value: config.relayProtocol, source: 'config', editable: false },
     { key: 'OPEN_RFQ_MAX_BIDS_PER_MIN', value: config.openRfqMaxBidsPerMinute, source: 'config', editable: false },
   )
+  const rail = config.lnBackend ? lightningRailFor(config.lnBackend) : undefined
+  let railRows: ReadonlyArray<{ path: string; value: string | number | boolean }> = []
+  try {
+    railRows = rail?.consoleSettings?.(config) ?? []
+  } catch (error) {
+    // Out-of-repo code handed the whole config: one row says it failed, and the log never repeats its message.
+    log(
+      `console: rail ${config.lnBackend} could not list its settings (${error instanceof Error ? error.name : typeof error})`,
+    )
+    railRows = [{ path: `rails.lightning["${config.lnBackend}"]`, value: '(could not be listed: see the log)' }]
+  }
+  const taken = new Set(knobs.flatMap((knob) => [knob.key, path(knob.key)]))
+  for (const { path: where, value } of railRows) {
+    if (taken.has(where) || taken.has(path(where))) continue
+    taken.add(where).add(path(where))
+    knobs.push({ key: where, value, source: 'config', editable: false })
+  }
 
   return knobs.map((knob) => ({ ...knob, path: path(knob.key) }))
 }
