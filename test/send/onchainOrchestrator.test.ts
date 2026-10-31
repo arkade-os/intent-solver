@@ -1518,6 +1518,54 @@ describe('OnchainSendSwapService', () => {
     expect(done.failureReason).toContain('no claim txid')
   })
 
+  it('finishes instead of parking when the provable spend was OUR OWN claim', async () => {
+    const row = await claiming()
+    deps.outputs.delete(row.pkScript)
+    deps.spent.add(row.pkScript)
+    deps.arkade.findLockupOutpoints = async () => [{ txid: 'lockup-tx', vout: 0, spent: true, unrolled: false }]
+    deps.arkade.findClaimPreimage = async () => P
+
+    const done = await service.tick(row.id)
+    expect(done.state).toBe('claimed')
+    expect(done.claimArkTxid).toBeNull()
+  })
+
+  it('still parks when our claim landed but another adopted output is uncollected', async () => {
+    const outcome = await service.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    const pk = outcome.swap.pkScript
+    deps.outputs.set(pk, [
+      { txid: 'lockup-a', vout: 0, value: 25_000 },
+      { txid: 'lockup-b', vout: 0, value: 25_000 },
+    ])
+    const funded = await service.tick(outcome.swap.id)
+    deps.onchain.spendClaim(funded.fundingTxid!, 0, [
+      new Uint8Array([0xaa]),
+      P,
+      new Uint8Array([0xbb]),
+      new Uint8Array([0xcc]),
+    ])
+    deps.arkade.claim = async () => {
+      throw new Error('arkade server briefly unreachable')
+    }
+    await expect(service.tick(funded.id)).rejects.toThrow('briefly unreachable')
+    deps.outputs.delete(pk)
+    deps.spent.add(pk)
+    deps.arkade.findLockupOutpoints = async () => [
+      { txid: 'lockup-a', vout: 0, spent: true, unrolled: false },
+      { txid: 'lockup-b', vout: 0, spent: false, unrolled: false },
+    ]
+    deps.arkade.findClaimPreimage = async () => P
+
+    expect((await service.tick(funded.id)).state).toBe('stuck')
+  })
+
   it('parks a lockup that holds only a dust asset vtxo after the clean funding was swept', async () => {
     const row = await claiming()
     deps.outputs.set(row.pkScript, [

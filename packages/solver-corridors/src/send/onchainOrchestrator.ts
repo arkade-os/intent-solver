@@ -1100,6 +1100,13 @@ export class OnchainSendSwapService {
           `swap ${row.id}: lockup holds ${held} < ${row.amountSats} while claiming but no spend is provable (${evidence})`,
         )
       }
+      // A spend revealing OUR preimage is our own claim that landed before a crash took the txid.
+      // Like the normal path, never `claimed` while an adopted output is still out.
+      const outpoints = (await arkade.findLockupOutpoints?.(row.pkScript)) ?? []
+      const ours = outpoints.length > 0 && (await arkade.findClaimPreimage?.(outpoints, row.paymentHash))
+      if (ours && (await lockupLeftover(arkade, row, [], null)).length === 0) {
+        return store.transition(row.id, 'claiming', 'claimed', { claim_ark_txid: null })
+      }
       await store.fail(
         row.id,
         'claiming',

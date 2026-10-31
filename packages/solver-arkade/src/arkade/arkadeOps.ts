@@ -51,6 +51,11 @@ export interface ArkadeOps {
   findLockupOutpoints?(
     pkScriptHex: string,
   ): Promise<{ txid: string; vout: number; spent: boolean; unrolled: boolean }[]>
+  /** The preimage revealed by whatever spent `outpoints`, verified against the hash, or null — lets a claim that landed before a crash be recognised as ours. */
+  findClaimPreimage?(
+    outpoints: readonly { txid: string; vout: number }[],
+    paymentHashHex: string,
+  ): Promise<Uint8Array | null>
   /** One step of the co-signed L1 claim of one output the client unrolled. Absent: it waits for the operator. */
   claimUnrolled?(
     row: CovenantScriptRow,
