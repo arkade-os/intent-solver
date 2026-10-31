@@ -231,8 +231,10 @@ engine-strict` returns `undefined`, and `.npmrc` does not set it), so an
 
   `admin.allowedHosts` is the DNS-rebinding guard: a state-changing request
   must carry a `Host` the console expects — the bound host and its loopback
-  aliases by default. A reverse proxy or a non-loopback bind presents its own
-  name, so list it here (comma-separated in `ADMIN_ALLOWED_HOSTS`), or those
+  aliases by default. A reverse proxy, a non-loopback bind or a tunnel on
+  another local port presents its own name, so list it here as an array, port
+  included unless it is the scheme's default (`["admin.example.com"]` behind a
+  proxy on 443, `["admin.example.com:8788"]` on a direct bind), or those
   requests answer `403 host_not_allowed`.
 
   `admin.restartEnabled` lets the console restart the solver, which is how a

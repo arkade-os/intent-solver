@@ -120,8 +120,10 @@ export const buildAdminApp = (deps: AdminDeps): Hono => {
       return c.json({ error: 'cross_origin', message: 'a cross-origin request cannot change this solver' }, 403)
     }
     // `c.req.url`'s host is the Host header — the node adapter builds the URL from it.
-    if (allowedHosts.size > 0 && !allowedHosts.has(new URL(c.req.url).host.toLowerCase())) {
-      return c.json({ error: 'host_not_allowed', message: 'this Host is not an address the console is served at' }, 403)
+    const host = new URL(c.req.url).host.toLowerCase()
+    if (allowedHosts.size > 0 && !allowedHosts.has(host)) {
+      const message = `${host} is not a Host this console is served at; add it to admin.allowedHosts`
+      return c.json({ error: 'host_not_allowed', message }, 403)
     }
     // A form post cannot set this header; `DELETE` is the one the console sends bodiless.
     const mediaType = (c.req.header('content-type') ?? '').split(';')[0]!.trim().toLowerCase()
