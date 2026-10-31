@@ -26,6 +26,8 @@
  *                                     tick that throws forever. Does not refund or claim.
  *   onchain-refund-now <id>           the same, for an onchain-corridor swap — its ARKADE LOCKUP
  *                                     only; the only way a `stuck` one's lockup ever moves again
+ *   onchain-claim-now <id>            the claim side: re-drive a `stuck` onchain swap the solver
+ *                                     already paid on L1, claiming the Arkade lockup it is owed
  *   reclaim-l1-htlc <id>              the OTHER leg of an onchain-corridor swap: re-broadcast the
  *                                     solver's OWN Bitcoin L1 HTLC refund, to the solver
  *   test-refund <sats>                fund a short-deadline covenant script, then refund it
@@ -91,7 +93,7 @@ import { refundNow, onchainRefundNow, reclaimL1Htlc } from './ops/refunds.js'
 import { planExitForSwap } from './ops/unilateralExit.js'
 import { quoteUnilateralExit, startUnilateralExit } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
 import { unilateralExitDepsFor } from '@arkade-os/solver-arkade/arkade/unilateralExitOps.js'
-import { claimNow } from './ops/claims.js'
+import { claimNow, onchainClaimNow } from './ops/claims.js'
 import { poolPlan, mintPool } from './ops/pool.js'
 import { maybeMintPool, runFloatLifecycle } from './ops/float.js'
 import { withEvmSendSweep } from './ops/evmSendSweep.js'
@@ -1768,6 +1770,16 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
         return
       }
       log('COVENANT REFUND PUSHED, arkTxid', result.txid)
+    })
+  },
+
+  async 'onchain-claim-now'([id]) {
+    if (!id) throw new GiveUp('usage: onchain-claim-now <id>')
+    await withServices({ allCorridors: true }, async (services) => {
+      const row = await services.onchainStore.get(id)
+      log('swap', row.id, 'is', row.state, row.failureReason ? `— ${row.failureReason}` : '')
+      await onchainClaimNow(services, id)
+      log('swap returned to claiming — the sweep will push the claim')
     })
   },
 
