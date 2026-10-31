@@ -23,6 +23,7 @@
 import type { CovenantScriptRow } from '@arkade-os/solver-arkade/arkade/covenantRow.js'
 import type { EvmSendSwapRow } from '../db/evmSendSwaps.js'
 import type { EvmReceiveSwapRow } from '../db/evmReceiveSwaps.js'
+import type { AssetEvmSendSwapRow } from '../db/assetEvmSendSwaps.js'
 
 const covenantRowWith = (row: EvmSendSwapRow | EvmReceiveSwapRow, receiverPubkey: string): CovenantScriptRow => ({
   id: row.id,
@@ -41,6 +42,29 @@ const covenantRowWith = (row: EvmSendSwapRow | EvmReceiveSwapRow, receiverPubkey
   nonInteractiveParameters: row.nonInteractiveParameters,
 })
 
+/**
+ * Asset send leg: the send leg's roles, plus the DENOMINATION.
+ *
+ * `assetId` is the only field that differs, and omitting it would rebuild the
+ * BTC script for a lockup funded at the asset one. @see CovenantScriptRow.assetId.
+ */
+export const assetEvmSendCovenantRowFor = (row: AssetEvmSendSwapRow): CovenantScriptRow => ({
+  id: row.id,
+  receiverPubkey: row.providerPubkey,
+  serverPubkey: row.serverPubkey,
+  paymentHash: row.paymentHash,
+  refundLocktime: row.refundLocktime,
+  claimDelay: row.claimDelay,
+  emulatorPubkey: row.emulatorPubkey,
+  refundPkScript: row.refundPkScript,
+  pkScript: row.pkScript,
+  clientRefundPubkey: row.clientRefundPubkey,
+  refundWithoutReceiverDelay: row.refundWithoutReceiverDelay,
+  refundDelay: row.refundDelay,
+  receiverPkScript: row.receiverPkScript,
+  assetId: row.assetId,
+  nonInteractiveParameters: row.nonInteractiveParameters,
+})
 /** Send leg: the SOLVER claims the client's lockup, so it is the receiver. */
 export const evmSendCovenantRowFor = (row: EvmSendSwapRow): CovenantScriptRow =>
   covenantRowWith(row, row.providerPubkey)
