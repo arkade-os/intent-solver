@@ -204,13 +204,9 @@ describe('e2e arkade:BTC->onchain:BTC (send) — refusals, wrong preimages and t
       expect(refused.failureReason).toBe(overfundedReason)
       // Nothing went out onchain: the solver refuses before it funds.
       expect(refused.fundingTxid).toBeNull()
-      // Recorded on the LIGHTNING send leg, not this one: `whenQuoted` patches
-      // `lockup_value` before failing there and does not here, so the refused
-      // row carries no record of what actually arrived. Harmless — this leg's
-      // `findRefundable` and `pushRefund` place no value condition, so the
-      // sweep below still returns it — but asserted so the asymmetry is a
-      // known, deliberate one rather than a surprise to the next reader.
-      expect(refused.onchainLockupValue).toBeNull()
+      // Recorded before the refusal (SND-12), like the asset-vtxo leg, so the
+      // sweep and P&L read what arrived rather than inferring it from the quote.
+      expect(refused.onchainLockupValue).toBe(overfunded)
 
       const swept = await poll(
         async () => {
@@ -417,8 +413,7 @@ const driveUntil = (
 /**
  * Tick until the swap is refused FOR THE EXPECTED REASON.
  *
- * Keyed on the reason rather than on a value column because this leg does not
- * record one on the overfunded path (see the assertion at that call site). The
+ * Keyed on the reason rather than on a value column. The
  * wait is the same one the Lightning leg's twin helper needs: an Arkade send
  * returns as soon as it is accepted, and a tick landing before the indexer
  * catches up sees an empty script and refuses for "lockup timeout" — a real
