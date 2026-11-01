@@ -2444,6 +2444,9 @@ describe('OnchainSendSwapService', () => {
     const row = await service.tick(outcome.swap.id)
     expect(row.state).toBe('refused')
     expect(row.fundingTxid).toBeNull()
+    // Record what was actually at the script, like the asset-vtxo refusal does — the refund
+    // sweep and the P&L both need to know the overfunded amount, not guess it from the quote.
+    expect(row.onchainLockupValue).toBe(60_000)
 
     const broadcasts = captureBroadcasts()
     await expect(service.reclaimOnchainHtlc(row.id)).rejects.toThrow(/nothing was ever broadcast/)
