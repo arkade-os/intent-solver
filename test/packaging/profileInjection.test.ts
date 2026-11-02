@@ -53,6 +53,20 @@ describe('a registered config profile', () => {
     await expect(exportConfig(env)).rejects.toThrow(REFUSAL)
   })
 
+  it('lets the profile change a legacy corridor whose enable flag was omitted', async () => {
+    const printed = await exportConfig({
+      SWAP_NETWORK: 'regtest',
+      ARK_MNEMONIC: 'test mnemonic, never a real one',
+      ARK_SERVER_URL: 'http://localhost:7070',
+      EMULATOR_URL: 'http://localhost:7073',
+      LN_BACKEND: 'fake',
+      DB_DIR: join(tmpdir(), 'profile-injection-absent-omitted'),
+    })
+    const doc = JSON.parse(printed)
+    expect(doc.corridors['arkade:BTC->onchain:BTC']).toEqual({})
+    expect(load(doc).corridorEnabled['arkade:BTC->onchain:BTC']).toBe(false)
+  })
+
   it('is registered once', () => {
     expect(() => sdk.registerConfigProfile((doc) => doc)).toThrow('a config profile is already registered')
   })

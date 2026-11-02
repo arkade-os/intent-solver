@@ -31,9 +31,9 @@ const corridor = (stem: string, extra: Record<string, string> = {}) => ({
 })
 
 const FIXED_BTC = {
-  'arkade:BTC->lightning:BTC': { enabled: true },
-  'lightning:BTC->arkade:BTC': { enabled: true },
-  'arkade:BTC->onchain:BTC': { enabled: true },
+  'arkade:BTC->lightning:BTC': {},
+  'lightning:BTC->arkade:BTC': {},
+  'arkade:BTC->onchain:BTC': {},
 }
 
 /** Every setting the solver reads, each set to a value it accepts. */

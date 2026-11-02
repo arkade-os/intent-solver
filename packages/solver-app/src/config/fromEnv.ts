@@ -88,9 +88,9 @@ export const envToDocument = (
   if (railBlock !== undefined) setAt(doc, ['rails', 'lightning', backend!], railBlock)
 
   for (const { pair, envStem } of ALL_DESCRIPTORS) {
+    setAt(doc, ['corridors', pair], {})
     for (const field of CORRIDOR_FIELDS[BTC_FAMILY[pair]!]) {
-      const name = corridorKnob(envStem, field)
-      put(['corridors', pair, field], read(name) ?? (field === 'enabled' ? 'true' : undefined))
+      put(['corridors', pair, field], read(corridorKnob(envStem, field)))
     }
   }
 
