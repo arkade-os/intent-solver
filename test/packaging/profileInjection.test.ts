@@ -33,7 +33,10 @@ describe('a registered config profile', () => {
   })
 
   it('gives way to one passed explicitly', () => {
-    const config = sdk.loadConfig({ env: { SOLVER_CONFIG_JSON: JSON.stringify(document()) }, profile: (doc) => doc })
+    const config = sdk.loadConfig({
+      env: { SOLVER_CONFIG_JSON: JSON.stringify(document({ 'arkade:BTC->onchain:BTC': {} })) },
+      profile: (doc) => doc,
+    })
     expect(config.corridorEnabled['arkade:BTC->onchain:BTC']).toBe(true)
   })
 
@@ -48,6 +51,20 @@ describe('a registered config profile', () => {
       ONCHAIN_SEND_ENABLED: 'true',
     }
     await expect(exportConfig(env)).rejects.toThrow(REFUSAL)
+  })
+
+  it('lets the profile change a legacy corridor whose enable flag was omitted', async () => {
+    const printed = await exportConfig({
+      SWAP_NETWORK: 'regtest',
+      ARK_MNEMONIC: 'test mnemonic, never a real one',
+      ARK_SERVER_URL: 'http://localhost:7070',
+      EMULATOR_URL: 'http://localhost:7073',
+      LN_BACKEND: 'fake',
+      DB_DIR: join(tmpdir(), 'profile-injection-absent-omitted'),
+    })
+    const doc = JSON.parse(printed)
+    expect(doc.corridors['arkade:BTC->onchain:BTC']).toEqual({})
+    expect(load(doc).corridorEnabled['arkade:BTC->onchain:BTC']).toBe(false)
   })
 
   it('is registered once', () => {

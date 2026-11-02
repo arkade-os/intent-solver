@@ -330,7 +330,9 @@ describe('loadConfig — LN_BACKEND is required unless no BTC corridor is served
   it('names the accepted set and the exemption, so the error is self-fixing', () => {
     delete process.env.LN_BACKEND
     expect(() => configFromKnobs(process.env)).toThrow(/lnd, fake/)
-    expect(() => configFromKnobs(process.env)).toThrow(/_ENABLED=false/)
+    expect(() => configFromKnobs(process.env)).toThrow(
+      /set each of LN_SEND_ENABLED, LN_RECEIVE_ENABLED, ONCHAIN_SEND_ENABLED to false/,
+    )
   })
 
   it('allows it to be unset once every BTC corridor is disabled', () => {
