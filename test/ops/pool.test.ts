@@ -115,7 +115,6 @@ const servicesWith = (over: {
     },
     onchainStore: zero(),
     receiveStore: zero(),
-    onchainReceiveStore: zero(),
   }
   return {
     config: { limits: { minSats: 1_000, maxSats: 100_000 }, maxExposedSats: 300_000 },
@@ -259,14 +258,13 @@ describe('committedAcrossCorridors', () => {
   const reader = (pair: string, sats: number) =>
     ({ descriptor: { pair }, committedSats: vi.fn().mockResolvedValue(sats) }) as never
 
-  it('sums all four corridors, not just the Lightning one', async () => {
+  it('sums all three corridors, not just the Lightning one', async () => {
     const set = createCorridorReaderSet([
       reader('arkade:BTC->lightning:BTC', 1),
       reader('arkade:BTC->onchain:BTC', 2),
       reader('lightning:BTC->arkade:BTC', 4),
-      reader('onchain:BTC->arkade:BTC', 8),
     ])
-    expect(await committedAcrossCorridors(set)).toBe(15)
+    expect(await committedAcrossCorridors(set)).toBe(7)
   })
 
   /**

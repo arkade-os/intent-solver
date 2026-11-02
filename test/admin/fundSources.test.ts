@@ -667,6 +667,27 @@ describe('withdrawing from the rail — the checks that run before the backend i
     const keys = onchain.fund.mock.calls.map((call) => (call[0] as { idempotencyKey: string }).idempotencyKey)
     expect(keys[0]).not.toBe(keys[1])
   })
+
+  // The withdraw wallet is the onchain-send funding wallet; a funded send already claimed part of it.
+  const owing = (sats: number) => ({ onchainStore: { owedPayoutSats: vi.fn().mockResolvedValue(sats) } })
+
+  it('refuses sats already owed to a funded onchain send, even when confirmed covers it', async () => {
+    const onchain = onchainBackend()
+    await expect(
+      withdraw(fakeServices({ onchain, ...owing(700_000) }), { address: REGTEST_ADDRESS, amount: '500000' }),
+    ).rejects.toThrow(/owed: 700000/)
+    expect(onchain.fund).not.toHaveBeenCalled()
+  })
+
+  it('pays what is left once the owed payouts are set aside', async () => {
+    const onchain = onchainBackend()
+    const result = await withdraw(fakeServices({ onchain, ...owing(700_000) }), {
+      address: REGTEST_ADDRESS,
+      amount: '300000',
+    })
+    expect(onchain.fund).toHaveBeenCalledWith(expect.objectContaining({ amountSats: 300_000 }))
+    expect(result).toMatchObject({ amount: '300000' })
+  })
 })
 
 describe('withdrawing from the arkade float — both rails out, routed by the destination', () => {

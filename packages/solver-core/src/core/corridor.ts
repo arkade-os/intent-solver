@@ -268,9 +268,6 @@ export interface Corridor extends CorridorReader {
 
   /** Operator-forced refund. Absent means the console offers no such button. */
   refundNow?(id: string): Promise<string | null>
-
-  /** Operator-forced claim. Absent means the console offers no such button. */
-  claimNow?(id: string): Promise<{ txid: string } | { refused: string }>
 }
 
 export interface CorridorSet extends Iterable<Corridor> {

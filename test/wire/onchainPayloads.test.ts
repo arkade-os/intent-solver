@@ -43,11 +43,17 @@ const row: OnchainSendSwapRow = {
   preimage: null,
   claimArkTxid: null,
   onchainRefundTxid: null,
+  onchainRefundFeeRate: null,
+  onchainRefundBroadcastAt: null,
+  onchainRefundPriorTxids: [],
   refundArkTxid: null,
   refundOutcome: null,
   failureReason: null,
   rfqId: null,
   fundStartedAt: null,
+  fundingTx: null,
+  unrolledClaim: null,
+  lockupOutpoints: null,
 }
 
 describe('RfqRequest for arkade:BTC->onchain:BTC', () => {
@@ -126,6 +132,7 @@ describe('onchainRfqQuotePayload', () => {
         min_confirmations: row.minConfirmations,
         lockup_address: row.lockupAddress,
         htlc_address: row.onchainAddress,
+        refund_without_receiver_delay: row.refundWithoutReceiverDelay,
       },
     })
   })
@@ -149,6 +156,12 @@ describe('onchainRfqStateFromRow', () => {
     expect(onchainRfqStateFromRow({ ...row, state: 'refunded' })).toBe('refunded')
     expect(onchainRfqStateFromRow({ ...row, state: 'stuck' })).toBe('stuck')
     expect(onchainRfqStateFromRow({ ...row, state: 'refused' })).toBe('refused')
+  })
+
+  it('reports a refunded stuck row as refunded, like the Lightning leg', () => {
+    // `stuck` is an operator word; once the client's lockup went back, the client's
+    // own status is `refunded`. The LN mapper already answers this way.
+    expect(onchainRfqStateFromRow({ ...row, state: 'stuck', refundOutcome: 'pushed' })).toBe('refunded')
   })
 })
 

@@ -7,22 +7,20 @@
  * each descriptor moves beside its corridor and this file becomes the
  * composition root's list.
  *
- * The four descriptor modules import ONLY types, so tsc erases every one of
- * their imports and they emit with no runtime dependency at all. That is
- * load-bearing rather than incidental: `config.ts` imports this file as a
- * value, and `db/driver.ts` statically imports the `better-sqlite3` native
- * binding — so re-exporting the stores' `NON_TERMINAL`/`EXPOSED` here would
+ * The descriptor modules value-import nothing but `../machines/*`, which import
+ * only the dependency-free `core/stateMachine.js`. That is load-bearing:
+ * `config.ts` imports this file as a value, and `db/driver.ts` statically
+ * imports the `better-sqlite3` native binding — so importing a store here would
  * pull a native module into every caller of `loadConfig()`, including tests
- * that touch no database. `test/corridors/registry.test.ts` guards both that
- * property and the resulting duplication.
+ * that touch no database. `test/corridors/registry.test.ts` guards that
+ * property and the remaining LN duplication.
  */
 import { createCorridorRegistry, type CorridorDescriptor } from '@arkade-os/solver-core/core/corridorDescriptor.js'
 import { LN_SEND } from './lnSend.js'
 import { LN_RECEIVE } from './lnReceive.js'
 import { ONCHAIN_SEND } from './onchainSend.js'
-import { ONCHAIN_RECEIVE } from './onchainReceive.js'
 
-export const ALL_DESCRIPTORS: readonly CorridorDescriptor[] = [LN_SEND, LN_RECEIVE, ONCHAIN_SEND, ONCHAIN_RECEIVE]
+export const ALL_DESCRIPTORS: readonly CorridorDescriptor[] = [LN_SEND, LN_RECEIVE, ONCHAIN_SEND]
 
 export const CORRIDOR_REGISTRY = createCorridorRegistry(ALL_DESCRIPTORS)
 
@@ -41,4 +39,4 @@ export const descriptorFor = (pair: string): CorridorDescriptor => {
   return descriptor
 }
 
-export { LN_SEND, LN_RECEIVE, ONCHAIN_SEND, ONCHAIN_RECEIVE }
+export { LN_SEND, LN_RECEIVE, ONCHAIN_SEND }

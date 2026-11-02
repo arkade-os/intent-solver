@@ -1,6 +1,6 @@
 /**
  * LOAD TEST — a hundred independent wallets swapping through one solver, on all
- * four corridors at once, against the live regtest stack.
+ * three corridors at once, against the live regtest stack.
  *
  * NOT part of `pnpm test` and NOT part of `pnpm test:e2e`. It has its own
  * config and its own script (`pnpm test:perf`) because it is slow, it moves a
@@ -52,7 +52,7 @@
  * is named for WHOSE wait it is:
  *
  *   `quote`         the solver's `quote()` call, start to return. No external
- *                   wait on three corridors; on `lightning:BTC->arkade:BTC` it
+ *                   wait on two corridors; on `lightning:BTC->arkade:BTC` it
  *                   includes minting a real hold invoice on LND, because that
  *                   side effect genuinely is inside `quote()`.
  *   `client_*`      something the CLIENT does — funding a lockup, broadcasting
@@ -66,9 +66,6 @@
  *                   `solver_*` phase that follows precisely so it is not billed
  *                   to the solver: under load both grow, and neither is the
  *                   solver's doing.
- *   `chain_confirm` waiting for a Bitcoin block. Nothing in this repo can make
- *                   it faster, and it is kept in its own phase so it never
- *                   contaminates a solver number.
  *
  * THE PHASES ARE AS FINE-GRAINED AS THE CODE ALLOWS, AND NO FINER. `tick()` is
  * a `while (await step())` loop, so a single call routinely crosses several
@@ -98,10 +95,9 @@
  *   - the solver's Arkade wallet funded and SETTLED with enough float to fan
  *     out to the send-side wallets AND fund every concurrent receive lockup;
  *     `beforeAll` fails with the exact shortfall and the command to fix it.
- *   - a MINING miner. `onchain:BTC->arkade:BTC` waits on real confirmations, so
- *     this file drives the chain itself while that corridor has work in flight
- *     (see {@link startMiner}) — additive and non-destructive, the same thing
- *     `receiveOnchain.e2e.test.ts` already does.
+ *   - a MINING miner. `arkade:BTC->onchain:BTC` waits on the LND wallet's change
+ *     confirming, so this file drives the chain itself while that corridor has
+ *     work in flight (see {@link startMiner}) — additive and non-destructive.
  *
  * Run: `pnpm test:perf`  (and nothing else against the stack at the same time —
  * two runs would fight over the solver's float and the channel's liquidity)
@@ -119,7 +115,6 @@ import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { type Corridor } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { decodeInvoice } from '@arkade-os/solver-core/invoice/decode.js'
-import { OnchainReceiveSwapStore } from '@arkade-os/solver-corridors/db/onchainReceiveSwaps.js'
 import { OnchainSendSwapStore } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
 import { ReceiveSwapStore } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
 import { SwapStore } from '@arkade-os/solver-corridors/db/swaps.js'
@@ -128,8 +123,6 @@ import { buildOnchainHtlc, ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onch
 import type { OnchainSendBackend } from '@arkade-os/solver-core/ports/onchain.js'
 import type { OnchainSigner } from '@arkade-os/solver-rails/onchain/refund.js'
 import { receiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive/arkadeOps.js'
-import { onchainReceiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive/onchainArkadeOps.js'
-import { OnchainReceiveSwapService } from '@arkade-os/solver-corridors/receive/onchainOrchestrator.js'
 import { ReceiveSwapService } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import { arkadeOpsFromContext } from '@arkade-os/solver-corridors/send/arkadeOps.js'
 import { OnchainSendSwapService } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
@@ -180,7 +173,6 @@ const count = (name: string, fallback: number): number => {
 const LN_SEND = count('PERF_LN_SEND', 40)
 const LN_RECEIVE = count('PERF_LN_RECEIVE', 40)
 const ONCHAIN_SEND = count('PERF_ONCHAIN_SEND', 10)
-const ONCHAIN_RECEIVE = count('PERF_ONCHAIN_RECEIVE', 10)
 /**
  * Coupled self-payment refreshes: one client quoting BOTH Lightning corridors
  * against one bolt11. Each consumes one wallet and two Arkade lockups, and no
@@ -188,7 +180,7 @@ const ONCHAIN_RECEIVE = count('PERF_ONCHAIN_RECEIVE', 10)
  * for the boltz-lnd channel.
  */
 const SELF_PAYMENT = count('PERF_SELF_PAYMENT', 10)
-const TOTAL_SWAPS = LN_SEND + LN_RECEIVE + ONCHAIN_SEND + ONCHAIN_RECEIVE + SELF_PAYMENT
+const TOTAL_SWAPS = LN_SEND + LN_RECEIVE + ONCHAIN_SEND + SELF_PAYMENT
 
 /**
  * How many swaps may be in flight at once.
@@ -226,51 +218,24 @@ const POLL_MS = count('PERF_POLL_MS', 250)
 const POLL_ATTEMPTS = count('PERF_POLL_ATTEMPTS', 2400)
 
 /**
- * How long a client's L1 funding may keep retrying, and how often.
- *
- * THE CEILING THIS EXISTS FOR IS REAL AND WORTH READING. Both onchain corridors
- * put every client's funding through the SOLVER's own LND wallet, because the
- * stack has no second onchain wallet to give them (the same both-roles
- * shortcut `receiveOnchain.e2e.test.ts` takes). That wallet holds TWO confirmed
- * UTXOs — measured on the live stack with `lncli listunspent` — and
- * `sendToChainAddress` selects confirmed inputs only. So the first two
- * concurrent fundings spend both, their change is unconfirmed, and every
- * further funding fails outright with
- * `503,InsufficientBalanceToSendToChainAddress` on a wallet holding 198 million
- * sats. Observed exactly that way at five concurrent onchain receives: two
- * succeeded, three failed instantly.
- *
- * That is a property of the STACK's wallet, not of the solver — a real
- * deployment's clients each fund from their own wallet and never contend — so
- * it is absorbed here rather than allowed to fail the run. It is absorbed
- * VISIBLY: the wait lands in the `client_fund` phase, which is already labelled
- * as the client's, so the number is reported rather than hidden. The same wall
- * bounds the SOLVER's own HTLC funding on `arkade:BTC->onchain:BTC`, and there
- * it needs no special handling — a throwing `tick` costs one `poll` attempt and
- * the loop retries, which is what `poll` is documented to do.
- *
- * The escape is a confirmed block: {@link startMiner} is what makes the change
- * spendable again, which is why the miner runs for EITHER onchain corridor and
- * not just the one that waits on confirmations.
+ * How often a client's funding retries. The stack's LND wallet holds two confirmed UTXOs, so the solver's own
+ * HTLC fundings on `arkade:BTC->onchain:BTC` contend until change confirms — {@link startMiner} is the escape.
  */
-const ONCHAIN_FUND_ATTEMPTS = count('PERF_ONCHAIN_FUND_ATTEMPTS', 90)
 const ONCHAIN_FUND_INTERVAL_MS = count('PERF_ONCHAIN_FUND_INTERVAL_MS', 2000)
 
-/** The whole workload's budget. Generous: the onchain receive corridor waits on blocks. */
+/** The whole workload's budget. Generous: the onchain corridor waits on blocks. */
 const RUN_TIMEOUT_MS = count('PERF_RUN_TIMEOUT_MS', 45 * 60_000)
 const SETUP_TIMEOUT_MS = count('PERF_SETUP_TIMEOUT_MS', 15 * 60_000)
 
 /**
- * How often to mine while onchain-receive swaps are waiting.
+ * How often to mine while onchain swaps are waiting.
  *
  * arkade-regtest's auto-miner produces a block every 600 seconds, which is
  * slower than this whole run. Mining is additive and non-destructive — it
  * appends blocks to a chain that was going to get them anyway and touches no
  * configuration — which is what makes it safe from a test on a shared stack.
- * Worth stating plainly for anyone reading the results: the onchain receive
- * corridor's numbers are what they are BECAUSE something mined by hand, and its
- * `chain_confirm` phase is bounded below by this interval rather than by
- * anything in this repo.
+ * Worth stating plainly for anyone reading the results: the onchain corridor's
+ * numbers are what they are BECAUSE something mined by hand.
  */
 const MINE_INTERVAL_MS = count('PERF_MINE_INTERVAL_MS', 5_000)
 
@@ -285,7 +250,7 @@ const RECLAIM = process.env.PERF_RECLAIM !== '0'
  * How many separate vtxos to split the solver's float into before the run.
  *
  * OFF by default (`1` is a no-op), because it was measured and it does not
- * help: the receive corridors' funding is serialised inside the single Arkade
+ * help: the receive corridor's funding is serialised inside the single Arkade
  * wallet, not by coin selection, so more coins buy nothing. `splitSolverFloat`
  * carries the full measurement. The knob stays so the experiment is one
  * environment variable to repeat, and so a future SDK that DOES parallelise can
@@ -317,7 +282,6 @@ let arkadeOps: Awaited<ReturnType<typeof arkadeOpsFromContext>>
 let sendService: SendSwapService
 let receiveService: ReceiveSwapService
 let onchainSendService: OnchainSendSwapService
-let onchainReceiveService: OnchainReceiveSwapService
 /** Pre-minted BOLT11s for the send corridor, keyed by the wallet that will use one. */
 const sendInvoices = new Map<number, { invoice: string; paymentHash: string }>()
 /** Every counterparty payment left running, stopped in `afterAll` so no fork is held open. */
@@ -464,27 +428,12 @@ const awaitHtlcHeld = (paymentHash: string, label: string): Promise<unknown> =>
   )
 
 /**
- * The client's L1 HTLC funding, retried until the shared LND wallet has a
- * confirmed input to spend. See {@link ONCHAIN_FUND_ATTEMPTS} for the whole
- * story; the short version is that a hundred clients sharing one two-UTXO
- * wallet is the harness's problem, not the solver's.
- */
-const fundAsOnchainClient = (address: string, amountSats: number, label: string): Promise<{ txid: string }> =>
-  poll(() => onchain.fund({ address, amountSats, idempotencyKey: `perf-${address}` }), {
-    attempts: ONCHAIN_FUND_ATTEMPTS,
-    intervalMs: ONCHAIN_FUND_INTERVAL_MS,
-    whenExhausted: `${label}: the shared LND wallet never had a confirmed UTXO to fund the client's HTLC with`,
-  })
-
-/**
  * Mine on an interval for as long as the returned handle is open.
  *
  * Only started when an onchain corridor has swaps in the plan: nothing else in
  * this file needs a block, and a run that does not need blocks should not be
- * adding them to a stack it shares. BOTH onchain corridors need it, for two
- * different reasons — `onchain:BTC->arkade:BTC` waits out `min_confirmations`,
- * and both of them need the shared LND wallet's change to confirm before the
- * next funding can select an input.
+ * adding them to a stack it shares. The onchain corridor needs the shared LND
+ * wallet's change to confirm before the next funding can select an input.
  *
  * Overlapping calls are suppressed rather than queued — `regtest.mjs mine`
  * shells out to a container and can occasionally take longer than the interval,
@@ -759,98 +708,6 @@ const runOnchainSend = async (wallet: FleetWallet): Promise<SwapTiming> => {
 }
 
 /**
- * `onchain:BTC->arkade:BTC`. The client funds a real L1 HTLC, the solver waits
- * out `min_confirmations`, funds an Arkade lockup out of its own float, the
- * client claims it, and the solver spends the L1 HTLC with the revealed `P`.
- *
- * The client's L1 funding comes out of the SOLVER's own LND wallet — the same
- * both-roles-one-process shortcut `receiveOnchain.e2e.test.ts` takes, and it
- * costs only fees since the solver's claim pays back into the same wallet.
- */
-const runOnchainReceive = async (wallet: FleetWallet): Promise<SwapTiming> => {
-  const timeline = new Timeline('onchain:BTC->arkade:BTC', wallet.index)
-  try {
-    const sealed = newSealedPreimage(nobody())
-    const clientRefundPub = schnorr.getPublicKey(schnorr.utils.randomSecretKey())
-
-    const outcome = await timeline.phase('quote', () =>
-      onchainReceiveService.quote({
-        paymentHash: sealed.paymentHash,
-        amountSats: ONCHAIN_AMOUNT_SATS,
-        claimPacket: sealed.packet,
-        refundPubkey: hex.encode(clientRefundPub),
-        payoutAddress: wallet.address,
-        payoutPubkey: wallet.pubkey,
-      }),
-    )
-    if (!outcome.accepted) throw new Error(`solver refused the quote: ${outcome.reason}`)
-    const swap = outcome.swap
-    const label = `onchain-receive ${swap.id}`
-
-    const localHtlc = buildOnchainHtlc({
-      network: ONCHAIN_NETWORKS[arkade.network],
-      paymentHash: sealed.paymentHash,
-      claimPubkey: hex.decode(swap.htlcPubkey),
-      refundPubkey: clientRefundPub,
-      refundLocktime: swap.htlcLocktime,
-    })
-    if (localHtlc.address !== swap.onchainAddress) {
-      throw new Error(`${label}: client derivation does not reproduce the solver HTLC address`)
-    }
-
-    await timeline.phase('client_fund', () => fundAsOnchainClient(swap.onchainAddress, ONCHAIN_AMOUNT_SATS, label))
-
-    await timeline.phase('solver_notice', () =>
-      driveUntil(
-        onchainReceiveService,
-        swap.id,
-        ['awaiting_confirmations', 'funding_arkade', 'awaiting_claim', 'claimed', 'settled', 'refused', 'stuck'],
-        label,
-      ),
-    )
-    // The block wait, alone in its own phase. `startMiner` is what makes it
-    // finite; on the stack's own 600s cadence this corridor cannot finish
-    // inside any budget a test would accept.
-    const awaiting = await timeline.phase('chain_confirm_and_fund', () =>
-      driveUntil(onchainReceiveService, swap.id, ['awaiting_claim', 'claimed', 'settled', 'refused', 'stuck'], label),
-    )
-    expectState(awaiting, 'awaiting_claim', label)
-
-    await timeline.phase('client_claim', () =>
-      clientClaimLockup(
-        wallet.ctx,
-        {
-          payoutPubkey: awaiting.clientPayoutPubkey,
-          payoutAddress: wallet.address,
-          payoutPkScript: awaiting.clientPayoutPkScript,
-          solverPubkey: awaiting.providerPubkey,
-          solverRefundPkScript: awaiting.refundPkScript,
-          serverPubkey: awaiting.serverPubkey,
-          emulatorPubkey: awaiting.emulatorPubkey,
-          paymentHash: awaiting.paymentHash,
-          refundLocktime: awaiting.refundLocktime,
-          claimDelay: awaiting.claimDelay,
-          refundDelay: awaiting.refundDelay,
-          refundWithoutReceiverDelay: awaiting.refundWithoutReceiverDelay,
-          pkScript: awaiting.pkScript,
-          nonInteractiveParameters: awaiting.nonInteractiveParameters ?? false,
-        },
-        sealed.preimage,
-      ),
-    )
-
-    const settled = await timeline.phase('solver_settle', () =>
-      driveUntil(onchainReceiveService, swap.id, ['settled', 'refunded', 'refused', 'stuck'], label),
-    )
-    expectState(settled, 'settled', label)
-    if (!settled.onchainClaimTxid) throw new Error(`${label}: settled with no onchain claim txid`)
-    return timeline.succeeded()
-  } catch (error) {
-    return timeline.failed(error)
-  }
-}
-
-/**
  * A client refreshing its OWN Arkade funds through the solver: quote
  * `lightning:BTC->arkade:BTC`, quote `arkade:BTC->lightning:BTC` against the
  * bolt11 that came back, fund the send lockup, take the payout, claim it, and
@@ -984,13 +841,10 @@ const buildPlan = (wallets: readonly FleetWallet[]): PlannedSwap[] => {
   for (let i = 0; i < ONCHAIN_SEND; i += 1) {
     plan.push({ corridor: 'arkade:BTC->onchain:BTC', wallet: at(LN_SEND + LN_RECEIVE + i) })
   }
-  for (let i = 0; i < ONCHAIN_RECEIVE; i += 1) {
-    plan.push({ corridor: 'onchain:BTC->arkade:BTC', wallet: at(LN_SEND + LN_RECEIVE + ONCHAIN_SEND + i) })
-  }
   for (let i = 0; i < SELF_PAYMENT; i += 1) {
     plan.push({
       corridor: 'self-payment',
-      wallet: at(LN_SEND + LN_RECEIVE + ONCHAIN_SEND + ONCHAIN_RECEIVE + i),
+      wallet: at(LN_SEND + LN_RECEIVE + ONCHAIN_SEND + i),
     })
   }
   return plan
@@ -1006,14 +860,14 @@ const buildPlan = (wallets: readonly FleetWallet[]): PlannedSwap[] => {
  * "Insufficient funds" — but it dies deep in the run rather than at setup.
  */
 const sendSideFunding = (wallets: readonly FleetWallet[]): { lightning: FleetWallet[]; onchain: FleetWallet[] } => {
-  const selfPaymentStart = LN_SEND + LN_RECEIVE + ONCHAIN_SEND + ONCHAIN_RECEIVE
+  const selfPaymentStart = LN_SEND + LN_RECEIVE + ONCHAIN_SEND
   return {
     lightning: [...wallets.slice(0, LN_SEND), ...wallets.slice(selfPaymentStart, selfPaymentStart + SELF_PAYMENT)],
     onchain: wallets.slice(LN_SEND + LN_RECEIVE, LN_SEND + LN_RECEIVE + ONCHAIN_SEND),
   }
 }
 
-describe('perf — parallel swaps across all four corridors', () => {
+describe('perf — parallel swaps across all three corridors', () => {
   beforeAll(async () => {
     await requireStack('perf', ['arkd', 'emulator', 'esplora', 'lnd', 'ln-counterparty'])
     arkade = await openArkade()
@@ -1024,7 +878,6 @@ describe('perf — parallel swaps across all four corridors', () => {
     const store = await SwapStore.open(`${dir}/send.sqlite`)
     const onchainStore = await OnchainSendSwapStore.open(`${dir}/onchain-send.sqlite`)
     const receiveStore = await ReceiveSwapStore.open(`${dir}/receive.sqlite`)
-    const onchainReceiveStore = await OnchainReceiveSwapStore.open(`${dir}/onchain-receive.sqlite`)
 
     arkadeOps = await arkadeOpsFromContext(arkade.ctx, arkade.emulator)
     const refundAddress = await onchain.newReceiveAddress()
@@ -1039,12 +892,13 @@ describe('perf — parallel swaps across all four corridors', () => {
       store,
       ln,
       arkade: arkadeOps,
+      network: arkade.network,
       limits: arkade.limits,
       invoicePrefix: arkade.profile.invoicePrefix,
       maxExposedSats: arkade.maxExposedSats,
       totalCommitted: () => store.committedSats(),
       admission: new AdmissionControl(),
-      peerStores: [onchainStore, onchainReceiveStore],
+      peerStores: [onchainStore],
       coupling: {
         receiveStore,
         findLockupOutpoints: (pkScript) => findLockupOutpoints(arkade.ctx, pkScript),
@@ -1062,7 +916,7 @@ describe('perf — parallel swaps across all four corridors', () => {
       admission: new AdmissionControl(),
       signer,
       refundDestinationScript: refundScript,
-      peerStores: [store, receiveStore, onchainReceiveStore],
+      peerStores: [store, receiveStore],
     })
     receiveService = new ReceiveSwapService({
       acceptUnilateralGap: false,
@@ -1074,22 +928,8 @@ describe('perf — parallel swaps across all four corridors', () => {
       maxExposedSats: arkade.maxExposedSats,
       totalCommitted: () => receiveStore.committedSats(),
       admission: new AdmissionControl(),
-      peerStores: [onchainStore, onchainReceiveStore],
+      peerStores: [onchainStore],
       coupledSendStore: store,
-    })
-    onchainReceiveService = new OnchainReceiveSwapService({
-      store: onchainReceiveStore,
-      onchain,
-      arkade: await onchainReceiveArkadeOpsFromContext(arkade.ctx, arkade.emulator),
-      covclaimd: null,
-      limits: arkade.limits,
-      network: arkade.network,
-      maxExposedSats: arkade.maxExposedSats,
-      totalCommitted: () => onchainReceiveStore.committedSats(),
-      admission: new AdmissionControl(),
-      signer,
-      claimDestinationScript: refundScript,
-      peerStores: [store, onchainStore, receiveStore],
     })
 
     fleet = await openFleet(arkade, TOTAL_SWAPS)
@@ -1106,7 +946,6 @@ describe('perf — parallel swaps across all four corridors', () => {
       funding.lightning.length * AMOUNT_SATS +
       funding.onchain.length * ONCHAIN_AMOUNT_SATS +
       LN_RECEIVE * AMOUNT_SATS +
-      ONCHAIN_RECEIVE * ONCHAIN_AMOUNT_SATS +
       SELF_PAYMENT * AMOUNT_SATS
     await assertArkadeSpendable(arkade, Math.max(needed, FLOAT_COINS * FLOAT_COIN_SATS))
 
@@ -1162,7 +1001,7 @@ describe('perf — parallel swaps across all four corridors', () => {
     'runs the whole mixed workload concurrently and reports per-corridor, per-phase latency',
     async () => {
       const plan = buildPlan(fleet.wallets)
-      const miner = ONCHAIN_RECEIVE + ONCHAIN_SEND > 0 ? startMiner(MINE_INTERVAL_MS) : null
+      const miner = ONCHAIN_SEND > 0 ? startMiner(MINE_INTERVAL_MS) : null
 
       const startedAt = performance.now()
       let timings: SwapTiming[]
@@ -1175,8 +1014,6 @@ describe('perf — parallel swaps across all four corridors', () => {
               return runLightningReceive(planned.wallet)
             case 'arkade:BTC->onchain:BTC':
               return runOnchainSend(planned.wallet)
-            case 'onchain:BTC->arkade:BTC':
-              return runOnchainReceive(planned.wallet)
             case 'self-payment':
               return runSelfPayment(planned.wallet)
           }

@@ -77,6 +77,6 @@ describe('the offers screen distinguishes "none" from "not serving"', () => {
   it('says so when the deployment serves no market, rather than showing an empty table', () => {
     const standing = offersView().slice(0, offersView().indexOf('d.offers.length === 0'))
     expect(standing).toContain('d.serving')
-    expect(standing).toMatch(/OFFER_MARKETS/)
+    expect(standing).toMatch(/offers\.markets/)
   })
 })

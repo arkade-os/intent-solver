@@ -63,15 +63,14 @@ Every corridor projects its own rows into one shape (`analytics/economics.ts`).
 Only the corridor knows which of its columns the solver received and which it
 paid out, and the asymmetry is real:
 
-| corridor                    | intake                               | outlay                                |
-| --------------------------- | ------------------------------------ | ------------------------------------- |
-| `arkade:BTC->lightning:BTC` | `lockup_value`                       | **the invoice, re-decoded**           |
-| `lightning:BTC->arkade:BTC` | `amount_sats`                        | `payout_sats`                         |
-| `arkade:BTC->onchain:BTC`   | `amount_sats`                        | `payout_sats`                         |
-| `onchain:BTC->arkade:BTC`   | `funded_value_sats` ?? `amount_sats` | `funded_payout_sats` ?? `payout_sats` |
-| `arkade:<X>->arkade:<Y>`    | the client's deposit                 | what the covenant must deliver        |
-| ERC20 send                  | `amount_sats`                        | the ERC20                             |
-| ERC20 receive               | the ERC20                            | `payout_sats`                         |
+| corridor                    | intake               | outlay                         |
+| --------------------------- | -------------------- | ------------------------------ |
+| `arkade:BTC->lightning:BTC` | `lockup_value`       | **the invoice, re-decoded**    |
+| `lightning:BTC->arkade:BTC` | `amount_sats`        | `payout_sats`                  |
+| `arkade:BTC->onchain:BTC`   | `amount_sats`        | `payout_sats`                  |
+| `arkade:<X>->arkade:<Y>`    | the client's deposit | what the covenant must deliver |
+| ERC20 send                  | `amount_sats`        | the ERC20                      |
+| ERC20 receive               | the ERC20            | `payout_sats`                  |
 
 **The Lightning send leg is the one worth checking twice, and not for the reason
 it looks like.** `amount_sats` there is _the lockup_, not the invoice —
@@ -84,10 +83,6 @@ whole corridor at any fee setting. The outlay is the invoice, re-decoded from
 the row: the orchestrator calls the persisted invoice authoritative for exactly
 this question, and `wire/payloads.ts` already answers the client's `to_amount`
 the same way.
-
-`payout_sats` on the onchain-receive leg is read together with
-`funded_value_sats` — mixing an amended intake with a quoted payout invents a
-spread neither number describes.
 
 **Volume** is the sats size of a trade, taken from whichever leg is sats rather
 than from the intake. On the ERC20 receive direction the intake is a token and
@@ -111,7 +106,7 @@ to `unpricedCount`: without it, "nothing is outstanding" and "something is
 outstanding and nobody can price it" render as the same reassuring zero.
 
 > On the two ERC20 legs this is an **upper bound**. Their stores' `fail()`
-> transitions to `stuck` unconditionally, unlike the four BTC stores, which
+> transitions to `stuck` unconditionally, unlike the three BTC stores, which
 > route a failure by exposure. Narrowing it means changing a money path and
 > belongs in its own commit.
 >

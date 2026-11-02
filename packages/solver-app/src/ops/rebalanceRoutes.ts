@@ -126,6 +126,7 @@ export const createArkadeRebalanceSource = async (
   services: Services,
   driver: SqlDriver,
   admission: AdmissionControl,
+  mode: 'active' | 'passive' = 'active',
 ): Promise<RebalanceSource> => {
   const { wallet, reservations } = services.arkade
   const repository = new RebalanceRfqRepository(driver)
@@ -165,7 +166,9 @@ export const createArkadeRebalanceSource = async (
     })
     return managerStack
   }
-  if ((await repository.getAllRfqSwaps()).some((record) => validTxid(record.fundingTxid))) await ensureManager()
+  // Restoring starts the manager, whose refund callback must not also run in a one-shot beside the daemon's.
+  if (mode === 'active' && (await repository.getAllRfqSwaps()).some((record) => validTxid(record.fundingTxid)))
+    await ensureManager()
 
   const routerQuote = (
     destination: string,

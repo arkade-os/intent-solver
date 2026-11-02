@@ -28,7 +28,6 @@ const fakeServices = (over: Record<string, unknown> = {}) => {
     store: store(),
     receiveStore: store(),
     onchainStore: store(),
-    onchainReceiveStore: store(),
     ...over,
   }
   const config = {
@@ -49,19 +48,16 @@ const fakeServices = (over: Record<string, unknown> = {}) => {
       'arkade:BTC->lightning:BTC': true,
       'lightning:BTC->arkade:BTC': true,
       'arkade:BTC->onchain:BTC': true,
-      'onchain:BTC->arkade:BTC': true,
     },
     corridorFees: {
       'arkade:BTC->lightning:BTC': { bps: 0, flatSats: 0 },
       'lightning:BTC->arkade:BTC': { bps: 0, flatSats: 0 },
       'arkade:BTC->onchain:BTC': { bps: 0, flatSats: 0 },
-      'onchain:BTC->arkade:BTC': { bps: 0, flatSats: 0 },
     },
     corridorLimits: {
       'arkade:BTC->lightning:BTC': { minSats: 1_000, maxSats: 100_000 },
       'lightning:BTC->arkade:BTC': { minSats: 1_000, maxSats: 100_000 },
       'arkade:BTC->onchain:BTC': { minSats: 1_000, maxSats: 100_000 },
-      'onchain:BTC->arkade:BTC': { minSats: 1_000, maxSats: 100_000 },
     },
   }
   return {
@@ -285,9 +281,9 @@ describe('GET /api/overview', () => {
     expect(await response.json()).toMatchObject({ balances: { lightningSats: null, lightningError: 'down' } })
   })
 
-  it('lists all four corridors with their effective policy', async () => {
+  it('lists all three corridors with their effective policy', async () => {
     const body = (await (await get('/api/overview')).json()) as { corridors: { corridor: string }[] }
-    expect(body.corridors).toHaveLength(4)
+    expect(body.corridors).toHaveLength(3)
   })
 
   // A repair an operator is never told about leaves a healthy deployment and one

@@ -113,7 +113,7 @@ const railDeposit = async (services: Services): Promise<FundDeposit> => {
   } catch {
     throw new Error(
       `the rail handed back ${address}, which is not a ${network} address — this deployment's backend is ` +
-        'pointed at a different chain. Do NOT send to it; fix LN_BACKEND / the node it points at first.',
+        'pointed at a different chain. Do NOT send to it; fix rails.lightning.backend / the node it points at first.',
     )
   }
   return {
@@ -271,10 +271,12 @@ const railWithdraw = async (
   }
 
   const balance = await onchain.getBalance()
-  if (amountSats > balance.confirmedSats) {
+  // Admission reserves `owedPayoutSats` the same way; spending it robs a funded-but-unbroadcast send.
+  const owed = (await services.onchainStore?.owedPayoutSats()) ?? 0
+  if (amountSats > balance.confirmedSats - owed) {
     throw new Error(
-      `withdrawal of ${amountSats} sats exceeds the rail's confirmed onchain balance ` +
-        `[requested: ${amountSats}, confirmed: ${balance.confirmedSats}, unconfirmed: ${balance.unconfirmedSats} sats]`,
+      `withdrawal of ${amountSats} sats exceeds the rail's withdrawable onchain balance ` +
+        `[requested: ${amountSats}, confirmed: ${balance.confirmedSats}, owed: ${owed}, unconfirmed: ${balance.unconfirmedSats} sats]`,
     )
   }
 

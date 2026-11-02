@@ -285,7 +285,7 @@ describe('one activity page', () => {
     const state = {
       data: {},
       activityErrors: { swaps: 'unknown_corridor' },
-      filters: { q: '', corridor: 'onchain:BTC->arkade:BTC', phase: '' },
+      filters: { q: '', corridor: 'bogus:BTC->arkade:BTC', phase: '' },
     }
     const controls: { spec: string; args: unknown[] }[] = []
     const h = (spec: string, ...args: unknown[]) => {

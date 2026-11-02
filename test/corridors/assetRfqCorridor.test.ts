@@ -152,11 +152,10 @@ describe('the eleven required members', () => {
    * 2-of-2 of the FUNDER and the Arkade Service — this solver holds neither
    * key, so any refund button would be one that cannot work.
    */
-  it('declares no refund or claim capability, because it holds no such key', async () => {
+  it('declares no refund capability, because it holds no such key', async () => {
     const { corridor } = await harness()
     expect(corridor.refundSweep).toBeUndefined()
     expect(corridor.refundNow).toBeUndefined()
-    expect(corridor.claimNow).toBeUndefined()
   })
 
   /**
@@ -342,6 +341,14 @@ describe('the read half', () => {
     await corridor.quote(rfqRequest())
     const detail = await corridor.detail('swap-1')
     expect(detail?.swap).toMatchObject({ corridor: BUY.pair, state: 'quoted', phase: 'open' })
+  })
+
+  it('ships a raw row the console can serialise — bigint amounts become strings, not a 500', async () => {
+    const { corridor } = await harness()
+    await corridor.quote(rfqRequest())
+    const detail = await corridor.detail('swap-1')
+    expect(() => JSON.stringify(detail?.raw)).not.toThrow()
+    expect(typeof (detail?.raw as { fromAmount: unknown }).fromAmount).toBe('string')
   })
 
   /**

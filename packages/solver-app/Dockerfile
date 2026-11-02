@@ -125,18 +125,17 @@ COPY --from=build /app/packages/solver-app/src/admin/static ./packages/solver-ap
 COPY --from=build /app/scripts ./scripts
 
 # Durable state lives on a volume: the swap DB is the money-critical file.
-# DB_DIR places every database file this service opens itself; the heartbeat is
-# not one — the HEALTHCHECK below reads that exact path — so it is named
-# separately.
-RUN mkdir -p /data && chown node:node /data /app
-ENV DB_DIR=/data \
-    RELAY_HEALTH_PATH=/data/relay-health
+# storage.dir and relay.healthPath default to .data/… relative to /app, and
+# /app/.data IS the volume, so a document that sets neither lands on it. Linked
+# rather than set in an ENV block: any setting left in the environment stops
+# the solver at startup.
+RUN mkdir -p /data && chown node:node /data /app && ln -s /data /app/.data
 VOLUME /data
 
 USER node
 
 # Health, for a container with no port to probe: `relay` touches the mtime of
-# RELAY_HEALTH_PATH every 10s, but ONLY while the relay socket is up. Reconnect
+# relay.healthPath every 10s, but ONLY while the relay socket is up. Reconnect
 # is automatic and unbounded, so a process check reports a disconnected solver
 # healthy for as long as it stays deaf — which is how one shipped.
 #
@@ -162,19 +161,21 @@ USER node
 # probe instead. The `swap-provider-http` service in docker-compose.yml carries
 # the override verbatim; keeping one copy means one thing to change.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=2 \
-  CMD test $(( $(date +%s) - $(stat -c %Y "${RELAY_HEALTH_PATH:-/data/relay-health}" 2>/dev/null || echo 0) )) -lt 60
+  CMD test $(( $(date +%s) - $(stat -c %Y /data/relay-health 2>/dev/null || echo 0) )) -lt 60
 
-# The admin console, when ADMIN_PORT is set. Not published by default and not
+# The admin console, when admin.port is set. Not published by default and not
 # EXPOSEd with a fixed number, because there is deliberately no default port:
 # the console is opt-in, and a declared port on an image whose console is off
 # would advertise something that is not listening.
 #
 # THERE IS NO AUTHENTICATION ON THAT PORT. Anything that can reach it can move
-# money. In a container ADMIN_HOST must be 0.0.0.0 to be reachable at all, so
+# money. In a container admin.host must be 0.0.0.0 to be reachable at all, so
 # publish it only behind a reverse proxy that adds auth — never with a bare
 # `-p 8788:8788` on a public host. See docs/runbook.md.
 
-# Secrets come from the environment (docker secrets / --env-file), never from
-# the image. `relay` additionally needs RELAY_URL.
+# Configuration, secrets included, is one JSON document: mount it and set
+# SOLVER_CONFIG to its path, or pass SOLVER_CONFIG_JSON. Never baked into the
+# image. `relay` additionally needs relay.url. Keep relay.healthPath at its
+# default: the HEALTHCHECK above reads that path.
 ENTRYPOINT ["node", "--enable-source-maps", "--experimental-eventsource", "packages/solver-app/dist/cli.js"]
 CMD ["relay"]

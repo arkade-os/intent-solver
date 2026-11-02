@@ -1,16 +1,16 @@
 /**
- * Configuration, read once from the environment.
+ * Configuration, read once from a knobs map: the config document flattened to
+ * setting ids by `config/knobs.ts`, and loaded by `config/load.ts`.
  *
- * Secrets are only ever read from the environment. They are never written to the
- * repository, never logged, and never included in an error message — a mnemonic
- * that reaches a log is a mnemonic that has to be rotated.
+ * Secrets are never written to the repository, never logged, and never
+ * included in an error message — a mnemonic that reaches a log is a mnemonic
+ * that has to be rotated.
  */
 
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { base64 } from '@scure/base'
 import { narrow, resolveLimits, type Limits } from '@arkade-os/solver-core/core/limits.js'
-import { defaultMaxBandWidthSats, DEFAULT_BAND_BELOW_SHARE } from '@arkade-os/solver-core/core/onchainReceive.js'
 import { DEFAULT_LOCKUP_TIMEOUT, MAX_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/send.js'
 import { MAX_BIP68_BLOCKS, MAX_BIP68_SECONDS, relativeDelayFrom } from '@arkade-os/solver-core/core/timelocks.js'
 import { corridorEnabledFrom } from '@arkade-os/solver-core/core/corridorEnabled.js'
@@ -30,12 +30,16 @@ import { parseAssetRfqTokens, type AssetRfqToken } from './ops/assetRfqMarkets.j
 import type { ArkadeWalletConfig } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import type { AdPublishMode } from '@arkade-os/solver-transport/relay/adPublisher.js'
 import { parseSentryDsn, type SentryOptions } from './ops/sentry.js'
+import { loadEvmChainConfig, type EvmChainConfig } from '@arkade-os/solver-rails-evm/evm/config.js'
 
 /** The network a deployment that sets nothing runs as. */
 const DEFAULT_NETWORK = 'regtest'
 
-const required = (name: string): string => {
-  const value = process.env[name]
+/** Setting name to raw value, as the environment spells both. */
+export type Knobs = Readonly<Record<string, string | undefined>>
+
+const required = (env: Knobs, name: string): string => {
+  const value = env[name]
   if (!value) throw new Error(`${name} is not set`)
   return value
 }
@@ -45,13 +49,13 @@ const required = (name: string): string => {
  * set-but-empty variable would otherwise silently become 0 while logs claim
  * the default. Empty/whitespace counts as unset.
  */
-const intFromEnv = (name: string, fallback: number, min: number, max = Infinity): number => {
-  const raw = process.env[name]?.trim()
+const intFromEnv = (env: Knobs, name: string, fallback: number, min: number, max = Infinity): number => {
+  const raw = env[name]?.trim()
   if (!raw) return fallback
   const value = Number(raw)
   if (!Number.isInteger(value) || value < min || value > max) {
     const range = max === Infinity ? `an integer >= ${min}` : `an integer between ${min} and ${max}`
-    throw new Error(`${name} must be ${range}, got ${process.env[name]}`)
+    throw new Error(`${name} must be ${range}, got ${env[name]}`)
   }
   return value
 }
@@ -60,12 +64,12 @@ const intFromEnv = (name: string, fallback: number, min: number, max = Infinity)
  * An integer knob whose ABSENCE is meaningful. `intFromEnv`'s fallback is wrong
  * wherever zero is itself valid: the approval threshold's zero gates everything.
  */
-const optionalIntFromEnv = (name: string, min: number): number | null => {
-  const raw = process.env[name]?.trim()
+const optionalIntFromEnv = (env: Knobs, name: string, min: number): number | null => {
+  const raw = env[name]?.trim()
   if (!raw) return null
   const value = Number(raw)
   if (!Number.isInteger(value) || value < min) {
-    throw new Error(`${name} must be an integer >= ${min}, got ${process.env[name]}`)
+    throw new Error(`${name} must be an integer >= ${min}, got ${env[name]}`)
   }
   return value
 }
@@ -83,8 +87,8 @@ const optionalIntFromEnv = (name: string, min: number): number | null => {
  * non-empty, and there is no safe default for "how much of the float may one
  * offer take" — that number is the deployment's to state.
  */
-const requiredBigintFromEnv = (name: string): bigint => {
-  const raw = process.env[name]?.trim()
+const requiredBigintFromEnv = (env: Knobs, name: string): bigint => {
+  const raw = env[name]?.trim()
   if (!raw) throw new Error(`${name} is not set, and OFFER_MARKETS names a market to fill`)
   // `BigInt` accepts `0x`/`0o` prefixes and rejects `5e5` and `1.0`; the digit
   // test pins it to the plain decimal an operator would write, so a value that
@@ -101,8 +105,8 @@ export interface LndConfig {
   /** Base64-serialized macaroon. */
   macaroon: string
   /**
-   * Esplora base URL, for the ONCHAIN RECEIVE corridor only. LND's own chain
-   * view is wallet-scoped and carries no per-output values, so it cannot see a
+   * Esplora base URL, for the ONCHAIN RECEIVE corridor and the Lightning receive leg's L1 claim read.
+   * LND's own chain view is wallet-scoped and carries no per-output values, so it cannot see a
    * client's funding transaction — see `onchain/lnd/adapter.ts`'s `findOutputs`.
    * Optional: unset is fine for a send-only deployment, and the receive path
    * fails loudly rather than under-reporting.
@@ -147,15 +151,6 @@ export interface Config {
    */
   corridorFees: Record<Corridor, Fee>
   /**
-   * How far a funded `onchain:BTC->arkade:BTC` amount may sit from its quote,
-   * from `ONCHAIN_RECEIVE_MAX_BAND_SATS`. Separate from `corridorLimits` on
-   * purpose: how far an amount may DRIFT is a different risk from how large it
-   * may be, and an operator may want the first tight and the second wide.
-   */
-  onchainReceiveMaxBandSats: number
-  /** From `ONCHAIN_RECEIVE_BAND_BELOW_SHARE`. Only reachable when `ONCHAIN_RECEIVE_MAX_BAND_SATS` binds. */
-  onchainReceiveBandBelowShare: number
-  /**
    * The bounds a corridor prices its own EXECUTION COST inside, or null to keep
    * charging {@link Config.corridorFees}' flat and nothing else.
    *
@@ -180,7 +175,7 @@ export interface Config {
   onchainFeeRateRefreshMs: number
   onchainFeeRateStaleMs: number
   /**
-   * Which corridors this deployment quotes. All four by default.
+   * Which corridors this deployment quotes. The legacy knob layer defaults the three BTC corridors on.
    *
    * A disabled corridor is never constructed in `createServices`, so its pair
    * is refused as unsupported at the ingress by name — the answer a solver
@@ -308,11 +303,6 @@ export interface Config {
    * mainnet-gated on an explicit cap, and shown in the console. The window it waives is
    * still not one this corridor can be served without on mainnet; that is the trade,
    * stated as a trade.
-   *
-   * Lightning leg only. `onchain:BTC->arkade:BTC` carries the same gate and is
-   * deliberately NOT covered: there `E` is the client's own onchain locktime with no
-   * routing ceiling above it, so a long delay makes that corridor expensive rather
-   * than impossible.
    */
   lnReceiveAcceptUnilateralGap: boolean
   /** Cap on the summed amount across all concurrently-exposed swaps. */
@@ -396,7 +386,7 @@ export interface Config {
    * at compile time in a repo whose whole point is that someone else can add
    * one.
    *
-   * NULL exactly when no BTC corridor is enabled. All four take both their legs
+   * NULL exactly when no BTC corridor is enabled. All three take both their legs
    * from this one value, so a deployment serving only EVM or asset flow has
    * nothing to name — and demanding a Lightning node from it would be demanding
    * infrastructure for corridors it does not run. Any other combination is
@@ -435,6 +425,8 @@ export interface Config {
    * anything that can reach this port can move money.
    */
   adminHost: string
+  /** Extra `Host` values a state-changing request may carry; see `adminHostAllowlist` in admin/server.ts. */
+  adminAllowedHosts: readonly string[]
   /** Off unless set: a supervisor is what restarts, so without one this only stops. */
   adminRestartEnabled: boolean
   /** Outbound relay URL for `relay` mode; null when not configured. */
@@ -455,8 +447,19 @@ export interface Config {
    * HEALTHCHECK reads exactly this path.
    */
   relayHealthPath: string
-  /** Crash reporting, or null when `SENTRY_DSN` is unset. @see sentryOptionsFromEnv */
+  /** Crash reporting, or null when `SENTRY_DSN` is unset. @see sentryOptionsFromKnobs */
   sentry: SentryOptions | null
+  /** The registry card's name; null leaves the card unbuildable. */
+  solverName: string | null
+  /** Relays the card lists after `relayUrl`, credentials not yet stripped. */
+  cardRelays: readonly string[]
+  latencyDiagnostics: boolean
+  /** Null when `EVM_RPC_URL` is unset: no chain, so no EVM corridor can run. */
+  evmChain: EvmChainConfig | null
+  /** Setting id to its path in the config document; empty when no document was read. */
+  configPaths: ReadonlyMap<string, string>
+  /** A registered rail's own block of the document, for that rail to validate. */
+  lightningRailBlock: unknown | null
   /**
    * Whether this solver advertises itself on Nostr (kind 38859).
    *
@@ -478,20 +481,20 @@ export interface Config {
  * stale file value or a copy-pasted-twice env block ships the wrong
  * macaroon, so both-set and neither-set are equally errors.
  */
-const resolveLndSecret = (varName: string): string => {
-  const inline = process.env[varName]?.trim()
-  const path = process.env[`${varName}_PATH`]?.trim()
+const resolveLndSecret = (env: Knobs, varName: string): string => {
+  const inline = env[varName]?.trim()
+  const path = env[`${varName}_PATH`]?.trim()
   if (inline && path) throw new Error(`set only one of ${varName} or ${varName}_PATH, not both`)
   if (inline) return inline
   if (path) return base64.encode(readFileSync(path))
   throw new Error(`one of ${varName} or ${varName}_PATH must be set`)
 }
 
-const loadLndConfig = (): LndConfig => ({
-  socket: required('LND_SOCKET'),
-  cert: resolveLndSecret('LND_CERT'),
-  macaroon: resolveLndSecret('LND_MACAROON'),
-  esploraUrl: process.env.LND_ESPLORA_URL,
+const loadLndConfig = (env: Knobs): LndConfig => ({
+  socket: required(env, 'LND_SOCKET'),
+  cert: resolveLndSecret(env, 'LND_CERT'),
+  macaroon: resolveLndSecret(env, 'LND_MACAROON'),
+  esploraUrl: env.LND_ESPLORA_URL,
 })
 
 /**
@@ -509,7 +512,7 @@ const loadLndConfig = (): LndConfig => ({
  * start a solver writing every swap row to a file it deletes on exit, reporting
  * nothing wrong.
  */
-const dbDir = (): string => process.env.DB_DIR?.trim() || '.data'
+const dbDir = (env: Knobs): string => env.DB_DIR?.trim() || '.data'
 
 /**
  * The swap database path, and nothing else.
@@ -521,7 +524,7 @@ const dbDir = (): string => process.env.DB_DIR?.trim() || '.data'
  *
  * `loadConfig` calls this too, so the default cannot drift between them.
  */
-export const swapDbPath = (): string => process.env.SWAP_DB_PATH?.trim() || join(dbDir(), 'swaps.sqlite')
+export const swapDbPath = (env: Knobs): string => env.SWAP_DB_PATH?.trim() || join(dbDir(env), 'swaps.sqlite')
 
 /**
  * The Arkade wallet's own database. Separate file, same directory rule.
@@ -532,7 +535,7 @@ export const swapDbPath = (): string => process.env.SWAP_DB_PATH?.trim() || join
  * wallet than the service under test, on any deployment that moved the
  * directory.
  */
-export const arkDbPath = (): string => process.env.ARK_DB_PATH?.trim() || join(dbDir(), 'ark.sqlite')
+export const arkDbPath = (env: Knobs): string => env.ARK_DB_PATH?.trim() || join(dbDir(env), 'ark.sqlite')
 
 /**
  * Crash reporting, or null when `SENTRY_DSN` is unset.
@@ -541,20 +544,20 @@ export const arkDbPath = (): string => process.env.ARK_DB_PATH?.trim() || join(d
  * the process handlers before {@link loadConfig} runs. A malformed DSN throws
  * rather than disabling itself — silent non-reporting is found during incidents.
  */
-export const sentryOptionsFromEnv = (): SentryOptions | null => {
-  const dsn = process.env.SENTRY_DSN?.trim()
+export const sentryOptionsFromKnobs = (env: Knobs): SentryOptions | null => {
+  const dsn = env.SENTRY_DSN?.trim()
   if (!dsn) return null
   return {
     dsn: parseSentryDsn(dsn),
     // Shared with loadConfig below, so a default deployment's events are not
     // filed under an environment the solver is not running as.
-    environment: process.env.SENTRY_ENVIRONMENT?.trim() || process.env.SWAP_NETWORK?.trim() || DEFAULT_NETWORK,
-    release: process.env.SENTRY_RELEASE?.trim() || undefined,
+    environment: env.SENTRY_ENVIRONMENT?.trim() || env.SWAP_NETWORK?.trim() || DEFAULT_NETWORK,
+    release: env.SENTRY_RELEASE?.trim() || undefined,
   }
 }
 
 /** The fake backend's preimage map — regtest's database, in every sense. */
-const fakeLnStatePath = (): string => process.env.FAKE_LN_STATE_PATH?.trim() || join(dbDir(), 'fake-ln.json')
+const fakeLnStatePath = (env: Knobs): string => env.FAKE_LN_STATE_PATH?.trim() || join(dbDir(env), 'fake-ln.json')
 
 /** The rails this repo ships. Everything else `LN_BACKEND` accepts was registered. */
 const BUILT_IN_LN_BACKENDS = ['lnd', 'fake'] as const
@@ -562,13 +565,13 @@ const BUILT_IN_LN_BACKENDS = ['lnd', 'fake'] as const
 /**
  * Which BTC rail to talk to, or null on a deployment that needs none.
  *
- * REQUIRED whenever any BTC corridor is enabled, which is the default — all four
- * take their Lightning and their onchain leg from this one value, so `servesBtc`
- * is the whole exemption: a solver serving only EVM or asset flow states that by
- * disabling the four, and is not then asked for a Lightning node it has no use
- * for. There is deliberately no default rail. One would mean a deployment that
- * forgot the variable silently coming up on whichever vendor this file happened
- * to name, holding the operator's money.
+ * REQUIRED whenever any BTC corridor is enabled. All three take their Lightning
+ * and their onchain leg from this one value, so `servesBtc` is the whole
+ * exemption: the document makes the three opt-in, and a solver serving only EVM
+ * or asset flow leaves them out rather than being asked for a Lightning node it
+ * has no use for. There is deliberately no default rail. One would mean a
+ * deployment that forgot the value silently coming up on whichever vendor this
+ * file happened to name, holding the operator's money.
  *
  * An unrecognised value THROWS rather than falling through to anything: a typo
  * that resolved to a working backend is the failure this function exists to
@@ -579,25 +582,27 @@ const BUILT_IN_LN_BACKENDS = ['lnd', 'fake'] as const
  * The error names the accepted set, registry included, so an operator who
  * mistyped a consumer rail's name is told what this build actually has.
  */
-const lnBackendFromEnv = (servesBtc: boolean): string | null => {
+const lnBackendFromEnv = (env: Knobs, servesBtc: boolean): string | null => {
   const accepted = [...BUILT_IN_LN_BACKENDS, ...lightningRailNames()]
-  const raw = process.env.LN_BACKEND?.trim()
+  const raw = env.LN_BACKEND?.trim()
   if (!raw) {
     if (!servesBtc) return null
+    const corridorEnables = ALL_DESCRIPTORS.map(({ envStem }) => `${envStem}_ENABLED`).join(', ')
     throw new Error(
       `LN_BACKEND must be set to one of ${accepted.join(', ')}: every BTC corridor takes both its legs from ` +
-        `it. Only a deployment with all four disabled (<STEM>_ENABLED=false) may leave it unset.`,
+        `it. Only a deployment with all three BTC corridors disabled may leave it unset; set each of ` +
+        `${corridorEnables} to false.`,
     )
   }
   const match = accepted.find((backend) => backend === raw)
   if (!match) {
-    throw new Error(`LN_BACKEND must be one of ${accepted.join(', ')}, got ${process.env.LN_BACKEND}`)
+    throw new Error(`LN_BACKEND must be one of ${accepted.join(', ')}, got ${env.LN_BACKEND}`)
   }
   return match
 }
 
 /**
- * A per-corridor amount range for each of the four corridors.
+ * A per-corridor amount range for each of the three corridors.
  *
  * Layered rather than independent: each corridor narrows the range `limits`
  * already produced, so a corridor knob can only ever reduce what
@@ -608,47 +613,20 @@ const lnBackendFromEnv = (servesBtc: boolean): string | null => {
  * Absent knobs mean "same as everything else", so a deployment that never sets
  * one behaves exactly as it did before per-corridor ranges existed.
  */
-const corridorLimitsFromEnv = (base: Limits): Record<Corridor, Limits> => {
+const corridorLimitsFromEnv = (env: Knobs, base: Limits): Record<Corridor, Limits> => {
   const entries = ALL_DESCRIPTORS.map(({ pair, envStem: stem }) => {
     const bound = (suffix: string): number | undefined => {
-      const raw = process.env[`${stem}_${suffix}`]?.trim()
+      const raw = env[`${stem}_${suffix}`]?.trim()
       if (!raw) return undefined
       const value = Number(raw)
       if (!Number.isInteger(value) || value <= 0) {
-        throw new Error(`${stem}_${suffix} must be a positive integer, got ${process.env[`${stem}_${suffix}`]}`)
+        throw new Error(`${stem}_${suffix} must be a positive integer, got ${env[`${stem}_${suffix}`]}`)
       }
       return value
     }
     return [pair, narrow(base, { minSats: bound('MIN_SATS'), maxSats: bound('MAX_SATS') }, stem)] as const
   })
   return Object.fromEntries(entries) as Record<Corridor, Limits>
-}
-
-/** Defaults to all of it below the quote, the side that cannot cost the operator. A policy default, not a correctness property. */
-const onchainReceiveBandBelowShareFromEnv = (): number => {
-  const raw = process.env.ONCHAIN_RECEIVE_BAND_BELOW_SHARE?.trim()
-  if (!raw) return DEFAULT_BAND_BELOW_SHARE
-  const value = Number(raw)
-  if (!Number.isFinite(value) || value < 0 || value > 1) {
-    throw new Error(
-      `ONCHAIN_RECEIVE_BAND_BELOW_SHARE must be a number between 0 and 1, got ${process.env.ONCHAIN_RECEIVE_BAND_BELOW_SHARE}`,
-    )
-  }
-  return value
-}
-
-/** Absent, the whole range that corridor already serves. Same one-way rule as every amount knob here: it may only reduce. */
-const onchainReceiveMaxBandSatsFromEnv = (onchainReceiveLimits: Limits): number => {
-  const fallback = defaultMaxBandWidthSats(onchainReceiveLimits)
-  const raw = process.env.ONCHAIN_RECEIVE_MAX_BAND_SATS?.trim()
-  if (!raw) return fallback
-  const value = Number(raw)
-  if (!Number.isInteger(value) || value < 0) {
-    throw new Error(
-      `ONCHAIN_RECEIVE_MAX_BAND_SATS must be a non-negative integer, got ${process.env.ONCHAIN_RECEIVE_MAX_BAND_SATS}`,
-    )
-  }
-  return Math.min(fallback, value)
 }
 
 /**
@@ -661,9 +639,9 @@ const onchainReceiveMaxBandSatsFromEnv = (onchainReceiveLimits: Limits): number 
  * Unset and zero are the same thing here, unlike the amount knobs, where unset
  * means "inherit" and zero is illegal. A fee genuinely can be zero.
  */
-const corridorFeesFromEnv = (): Record<Corridor, Fee> => {
+const corridorFeesFromEnv = (env: Knobs): Record<Corridor, Fee> => {
   const entries = ALL_DESCRIPTORS.map(({ pair, envStem: stem }) => {
-    const component = (suffix: string, max: number): number => intFromEnv(`${stem}_${suffix}`, 0, 0, max)
+    const component = (suffix: string, max: number): number => intFromEnv(env, `${stem}_${suffix}`, 0, 0, max)
     // bps is capped at 10_000 (100%) because a spread at or above it leaves the
     // taker nothing; the flat cap is a sanity bound, not a policy — a flat fee
     // in the millions is a typo, and one that would quietly refuse every swap
@@ -677,7 +655,7 @@ const corridorFeesFromEnv = (): Record<Corridor, Fee> => {
 /**
  * The corridors that can answer "what will executing this swap cost me".
  *
- * The two onchain legs can: a chain cost is `vsize x sats/vbyte`, both halves of
+ * The onchain send leg can: a chain cost is `vsize x sats/vbyte`, both halves of
  * which the solver knows before it quotes. The Lightning legs cannot yet — the
  * backend port has no "what would routing this cost" call, so a solver only
  * learns a routing fee by being refused for budgeting too little, which is
@@ -689,7 +667,7 @@ const corridorFeesFromEnv = (): Record<Corridor, Fee> => {
  * quote is how an operator comes to believe they are pricing dynamically while
  * still charging a flat they guessed at boot.
  */
-const NETWORK_FEE_CAPABLE: readonly Corridor[] = ['arkade:BTC->onchain:BTC', 'onchain:BTC->arkade:BTC']
+const NETWORK_FEE_CAPABLE: readonly Corridor[] = ['arkade:BTC->onchain:BTC']
 
 /**
  * What each corridor may charge for EXECUTION, from `<STEM>_FEE_CAP_SATS` and
@@ -706,12 +684,12 @@ const NETWORK_FEE_CAPABLE: readonly Corridor[] = ['arkade:BTC->onchain:BTC', 'on
  * spike or the wrong units. There is no safe way to read an estimate without
  * one, so there is no way to ask for one.
  */
-const corridorNetworkFeesFromEnv = (): Record<Corridor, NetworkFeeBounds | null> => {
+const corridorNetworkFeesFromEnv = (env: Knobs): Record<Corridor, NetworkFeeBounds | null> => {
   const entries = ALL_DESCRIPTORS.map(({ pair, envStem: stem }) => {
     // Unset stays `undefined`, not 0: absence is what keeps the old pricing.
     const sats = (suffix: string, min: number): number | undefined => {
       const name = `${stem}_${suffix}`
-      return process.env[name]?.trim() ? intFromEnv(name, 0, min, 1_000_000) : undefined
+      return env[name]?.trim() ? intFromEnv(env, name, 0, min, 1_000_000) : undefined
     }
     // A cap of 0 would mean "charge nothing for execution, ever", which is
     // `<STEM>_FEE_FLAT_SATS=0` written so that it looks like it does something.
@@ -741,10 +719,10 @@ const corridorNetworkFeesFromEnv = (): Record<Corridor, NetworkFeeBounds | null>
   return Object.fromEntries(entries) as Record<Corridor, NetworkFeeBounds | null>
 }
 
-const corridorEnabledFromEnv = (): Record<Corridor, boolean> => {
+const corridorEnabledFromEnv = (env: Knobs): Record<Corridor, boolean> => {
   const entries = ALL_DESCRIPTORS.map(({ pair, envStem }) => {
     const name = `${envStem}_ENABLED`
-    return [pair, corridorEnabledFrom(name, process.env[name])] as const
+    return [pair, corridorEnabledFrom(name, env[name])] as const
   })
   return Object.fromEntries(entries) as Record<Corridor, boolean>
 }
@@ -767,8 +745,8 @@ const corridorEnabledFromEnv = (): Record<Corridor, boolean> => {
  * check, since the server advertises the value being overridden. Deliberately NOT
  * constrained below the advertised delay either — raising it is the safe direction.
  */
-const unilateralExitDelayOverride = (): number | undefined => {
-  const raw = process.env.ARK_UNILATERAL_EXIT_DELAY?.trim()
+const unilateralExitDelayOverride = (env: Knobs): number | undefined => {
+  const raw = env.ARK_UNILATERAL_EXIT_DELAY?.trim()
   if (!raw) return undefined
   const value = Number(raw)
   if (!Number.isInteger(value) || value <= 0) {
@@ -810,15 +788,15 @@ const unilateralExitDelayOverride = (): number | undefined => {
  * cap — inheriting the profile default is not the same act as choosing the number you
  * are prepared to lose. Test networks are exempt.
  */
-const lnReceiveAcceptUnilateralGapFromEnv = (network: SwapNetwork): boolean => {
-  const raw = process.env.LN_RECEIVE_ACCEPT_UNILATERAL_GAP?.trim()
+const lnReceiveAcceptUnilateralGapFromEnv = (env: Knobs, network: SwapNetwork): boolean => {
+  const raw = env.LN_RECEIVE_ACCEPT_UNILATERAL_GAP?.trim()
   if (!raw) return false
   if (raw !== 'true' && raw !== 'false') {
     throw new Error(
-      `LN_RECEIVE_ACCEPT_UNILATERAL_GAP must be 'true' or 'false', got ${process.env.LN_RECEIVE_ACCEPT_UNILATERAL_GAP}`,
+      `LN_RECEIVE_ACCEPT_UNILATERAL_GAP must be 'true' or 'false', got ${env.LN_RECEIVE_ACCEPT_UNILATERAL_GAP}`,
     )
   }
-  if (raw === 'true' && network === 'bitcoin' && !process.env.LN_RECEIVE_MAX_SATS?.trim()) {
+  if (raw === 'true' && network === 'bitcoin' && !env.LN_RECEIVE_MAX_SATS?.trim()) {
     throw new Error(
       'LN_RECEIVE_ACCEPT_UNILATERAL_GAP=true on bitcoin also needs LN_RECEIVE_MAX_SATS set explicitly: ' +
         'it accepts a bounded loss, and the bound is that cap. Set it to the most you are prepared ' +
@@ -836,11 +814,11 @@ const lnReceiveAcceptUnilateralGapFromEnv = (network: SwapNetwork): boolean => {
  * they had explicitly tried to decline. Same rule `corridorEnabledFromEnv`
  * applies, for the same reason.
  */
-const poolAutoMintFromEnv = (): boolean => {
-  const raw = process.env.POOL_AUTO_MINT?.trim()
+const poolAutoMintFromEnv = (env: Knobs): boolean => {
+  const raw = env.POOL_AUTO_MINT?.trim()
   if (!raw) return false
   if (raw !== 'true' && raw !== 'false') {
-    throw new Error(`POOL_AUTO_MINT must be 'true' or 'false', got ${process.env.POOL_AUTO_MINT}`)
+    throw new Error(`POOL_AUTO_MINT must be 'true' or 'false', got ${env.POOL_AUTO_MINT}`)
   }
   return raw === 'true'
 }
@@ -893,8 +871,8 @@ const poolAutoMintFromEnv = (): boolean => {
  * No boolean beside it: unset or empty is an empty set, which is today's
  * behaviour, and a non-empty list is its own opt-in.
  */
-const sendHintScidDenylistFromEnv = (): ReadonlySet<string> => {
-  const raw = process.env.LN_SEND_HINT_SCID_DENYLIST?.trim()
+const sendHintScidDenylistFromEnv = (env: Knobs): ReadonlySet<string> => {
+  const raw = env.LN_SEND_HINT_SCID_DENYLIST?.trim()
   if (!raw) return new Set()
   const entries = raw.split(',').map((entry) => entry.trim().toLowerCase())
   for (const entry of entries) {
@@ -911,40 +889,36 @@ const sendHintScidDenylistFromEnv = (): ReadonlySet<string> => {
   return new Set(entries)
 }
 
-export const loadConfig = (): Config => {
-  const raw = process.env.SWAP_NETWORK ?? DEFAULT_NETWORK
+export const configFromKnobs = (env: Knobs): Config => {
+  const raw = env.SWAP_NETWORK ?? DEFAULT_NETWORK
   if (!isSwapNetwork(raw)) {
     throw new Error(`SWAP_NETWORK must be one of ${Object.keys(NETWORKS).join(', ')}, got ${raw}`)
   }
   const profile = NETWORKS[raw]
 
   // Read BEFORE the rail, because it decides whether a rail is required at all.
-  // Every one of the four takes both its legs from `LN_BACKEND`, so "does this
+  // Every one of the three takes both its legs from `LN_BACKEND`, so "does this
   // deployment need a Lightning node" is exactly "does it serve any of them".
-  const corridorEnabled = corridorEnabledFromEnv()
-  const lnBackend = lnBackendFromEnv(Object.values(corridorEnabled).some(Boolean))
+  const corridorEnabled = corridorEnabledFromEnv(env)
+  const lnBackend = lnBackendFromEnv(env, Object.values(corridorEnabled).some(Boolean))
 
-  const override = process.env.MAX_SWAP_SATS !== undefined ? { maxSats: Number(process.env.MAX_SWAP_SATS) } : undefined
+  const override = env.MAX_SWAP_SATS !== undefined ? { maxSats: Number(env.MAX_SWAP_SATS) } : undefined
   const limits = resolveLimits(raw, override)
 
   // Default: three max-size swaps in flight. The same non-finite rule as the
   // per-swap limits — absorbing NaN here silently removes the cap.
-  const corridorLimits = corridorLimitsFromEnv(limits)
+  const corridorLimits = corridorLimitsFromEnv(env, limits)
 
-  const maxExposedSats =
-    process.env.MAX_EXPOSED_SATS !== undefined ? Number(process.env.MAX_EXPOSED_SATS) : limits.maxSats * 3
+  const maxExposedSats = env.MAX_EXPOSED_SATS !== undefined ? Number(env.MAX_EXPOSED_SATS) : limits.maxSats * 3
   if (!Number.isFinite(maxExposedSats) || maxExposedSats <= 0) {
-    throw new Error(`MAX_EXPOSED_SATS must be a positive finite number, got ${process.env.MAX_EXPOSED_SATS}`)
+    throw new Error(`MAX_EXPOSED_SATS must be a positive finite number, got ${env.MAX_EXPOSED_SATS}`)
   }
 
   // Default 30 days. Same non-finite rule as the caps above: absorbing NaN here
   // would silently retire contracts on whatever `now - NaN >= NaN` decides.
-  const contractRetentionDays =
-    process.env.CONTRACT_RETENTION_DAYS !== undefined ? Number(process.env.CONTRACT_RETENTION_DAYS) : 30
+  const contractRetentionDays = env.CONTRACT_RETENTION_DAYS !== undefined ? Number(env.CONTRACT_RETENTION_DAYS) : 30
   if (!Number.isFinite(contractRetentionDays) || contractRetentionDays <= 0) {
-    throw new Error(
-      `CONTRACT_RETENTION_DAYS must be a positive finite number, got ${process.env.CONTRACT_RETENTION_DAYS}`,
-    )
+    throw new Error(`CONTRACT_RETENTION_DAYS must be a positive finite number, got ${env.CONTRACT_RETENTION_DAYS}`)
   }
 
   // The fake backend forges its own invoices and "pays" without moving sats.
@@ -958,20 +932,20 @@ export const loadConfig = (): Config => {
   // Default matches orchestrator.ts's own prior hardcoded value. Overridable
   // because the ceiling that matters is the indexer's/LN backend's, not ours —
   // an operator on a backend with a lower connection limit has no other lever.
-  const sweepConcurrency = process.env.SWEEP_CONCURRENCY !== undefined ? Number(process.env.SWEEP_CONCURRENCY) : 8
+  const sweepConcurrency = env.SWEEP_CONCURRENCY !== undefined ? Number(env.SWEEP_CONCURRENCY) : 8
   if (!Number.isInteger(sweepConcurrency) || sweepConcurrency <= 0) {
-    throw new Error(`SWEEP_CONCURRENCY must be a positive integer, got ${process.env.SWEEP_CONCURRENCY}`)
+    throw new Error(`SWEEP_CONCURRENCY must be a positive integer, got ${env.SWEEP_CONCURRENCY}`)
   }
 
   // A minute, because a mempool's fee estimate does not move meaningfully
   // faster than that and a read is what triggers the fetch — an idle solver
   // makes no requests at all, and a busy one makes at most one a minute.
-  const onchainFeeRateRefreshMs = intFromEnv('ONCHAIN_FEE_RATE_REFRESH_MS', 60_000, 1)
+  const onchainFeeRateRefreshMs = intFromEnv(env, 'ONCHAIN_FEE_RATE_REFRESH_MS', 60_000, 1)
   // Fifteen minutes: longer than a block interval plus slack, so a source that
   // is merely slow keeps its answer being served, while one that has been down
   // long enough for the mempool to have turned over stops being believed and
   // pricing falls back to the configured flat.
-  const onchainFeeRateStaleMs = intFromEnv('ONCHAIN_FEE_RATE_STALE_MS', 900_000, 1)
+  const onchainFeeRateStaleMs = intFromEnv(env, 'ONCHAIN_FEE_RATE_STALE_MS', 900_000, 1)
   // `freshly` throws on this too, but from inside `createServices`, where the
   // message would name neither variable. Below or equal, every read past the
   // refresh age returns null and the sample degrades to "always null" —
@@ -985,11 +959,11 @@ export const loadConfig = (): Config => {
   // The bounds are read ONLY when a market is served, so a deployment that
   // serves none needs neither variable — the same shape as the EVM knobs, which
   // are inert without `EVM_TOKENS`. Zeroes here are unread, not permissive.
-  const offerMarkets = parseAssetMarkets(process.env.OFFER_MARKETS)
-  const offerMinFillAmount = offerMarkets.length > 0 ? requiredBigintFromEnv('OFFER_MIN_FILL_AMOUNT') : 0n
-  const offerMaxFillAmount = offerMarkets.length > 0 ? requiredBigintFromEnv('OFFER_MAX_FILL_AMOUNT') : 0n
-  const offerChargesDeliveredCarrier = process.env.OFFER_CHARGE_CARRIER?.trim() === 'true'
-  const assetCarrierPricing = process.env.ASSET_CARRIER_PRICING?.trim() === 'true'
+  const offerMarkets = parseAssetMarkets(env.OFFER_MARKETS)
+  const offerMinFillAmount = offerMarkets.length > 0 ? requiredBigintFromEnv(env, 'OFFER_MIN_FILL_AMOUNT') : 0n
+  const offerMaxFillAmount = offerMarkets.length > 0 ? requiredBigintFromEnv(env, 'OFFER_MAX_FILL_AMOUNT') : 0n
+  const offerChargesDeliveredCarrier = env.OFFER_CHARGE_CARRIER?.trim() === 'true'
+  const assetCarrierPricing = env.ASSET_CARRIER_PRICING?.trim() === 'true'
   // Refused at boot rather than per offer: inverted bounds refuse every offer,
   // which is indistinguishable from a quiet market and would be diagnosed as
   // one. `evaluateOfferFill` compares against both, so it cannot report this.
@@ -1007,20 +981,18 @@ export const loadConfig = (): Config => {
     // amount at risk smaller.
     limits,
     corridorLimits,
-    corridorFees: corridorFeesFromEnv(),
-    onchainReceiveMaxBandSats: onchainReceiveMaxBandSatsFromEnv(corridorLimits['onchain:BTC->arkade:BTC']),
-    onchainReceiveBandBelowShare: onchainReceiveBandBelowShareFromEnv(),
-    corridorNetworkFees: corridorNetworkFeesFromEnv(),
+    corridorFees: corridorFeesFromEnv(env),
+    corridorNetworkFees: corridorNetworkFeesFromEnv(env),
     onchainFeeRateRefreshMs,
     onchainFeeRateStaleMs,
     corridorEnabled,
     // Reads the ALREADY-NARROWED house limits, so a per-token knob inherits a
     // bound an override may have tightened rather than the raw environment's.
-    evmCorridors: evmCorridorPolicies(parseEvmTokens(process.env.EVM_TOKENS), limits, (name) => process.env[name]),
+    evmCorridors: evmCorridorPolicies(parseEvmTokens(env.EVM_TOKENS), limits, (name) => env[name]),
     // Loaded here rather than at first quote so a token whose price cannot be
     // resolved stops the deployment instead of advertising a pair it will then
     // refuse every request against.
-    evmMarkets: evmMarkets(parseEvmTokens(process.env.EVM_TOKENS), (name) => process.env[name]),
+    evmMarkets: evmMarkets(parseEvmTokens(env.EVM_TOKENS), (name) => env[name]),
     offerMarkets,
     offerMinFillAmount,
     offerMaxFillAmount,
@@ -1029,58 +1001,71 @@ export const loadConfig = (): Config => {
     // Read here so a malformed list refuses at boot beside every other knob.
     // What each named asset is WORTH still comes from the console's market rows,
     // which `createServices` joins to these.
-    assetRfqTokens: parseAssetRfqTokens(process.env.ASSET_MARKETS, (name) => process.env[name]),
-    assetQuoteValiditySeconds: intFromEnv('ASSET_QUOTE_VALIDITY_SECONDS', 30, 5, 900),
-    swapDbPath: swapDbPath(),
-    poolAutoMint: poolAutoMintFromEnv(),
-    lnReceiveAcceptUnilateralGap: lnReceiveAcceptUnilateralGapFromEnv(raw),
+    assetRfqTokens: parseAssetRfqTokens(env.ASSET_MARKETS, (name) => env[name]),
+    assetQuoteValiditySeconds: intFromEnv(env, 'ASSET_QUOTE_VALIDITY_SECONDS', 30, 5, 900),
+    swapDbPath: swapDbPath(env),
+    poolAutoMint: poolAutoMintFromEnv(env),
+    lnReceiveAcceptUnilateralGap: lnReceiveAcceptUnilateralGapFromEnv(env, raw),
     maxExposedSats,
-    approvalThresholdSats: optionalIntFromEnv('APPROVAL_THRESHOLD_SATS', 0),
+    approvalThresholdSats: optionalIntFromEnv(env, 'APPROVAL_THRESHOLD_SATS', 0),
     notify: {
       // `|| null`, not `?? null`: a blank variable is not a credential.
-      telegramBotToken: process.env.TELEGRAM_BOT_TOKEN?.trim() || null,
-      telegramChatId: process.env.TELEGRAM_CHAT_ID?.trim() || null,
-      slackWebhookUrl: process.env.SLACK_WEBHOOK_URL?.trim() || null,
+      telegramBotToken: env.TELEGRAM_BOT_TOKEN?.trim() || null,
+      telegramChatId: env.TELEGRAM_CHAT_ID?.trim() || null,
+      slackWebhookUrl: env.SLACK_WEBHOOK_URL?.trim() || null,
     },
-    balanceReportIntervalMinutes: optionalIntFromEnv('BALANCE_REPORT_INTERVAL_MINUTES', 5),
+    balanceReportIntervalMinutes: optionalIntFromEnv(env, 'BALANCE_REPORT_INTERVAL_MINUTES', 5),
     contractRetentionMs: contractRetentionDays * 86_400_000,
     sweepConcurrency,
-    chainTipEsploraUrl: process.env.CHAIN_TIP_ESPLORA_URL?.trim() || process.env.LND_ESPLORA_URL?.trim(),
+    chainTipEsploraUrl: env.CHAIN_TIP_ESPLORA_URL?.trim() || env.LND_ESPLORA_URL?.trim(),
     // Ceiling imported (= REFUND_SAFETY_MARGIN) so it cannot drift: a longer window only yields swaps that
     // refuse themselves at payment time. The 60s floor rules out one nobody can fund.
-    lockupTimeoutSeconds: intFromEnv('LOCKUP_TIMEOUT_SECONDS', DEFAULT_LOCKUP_TIMEOUT, 60, MAX_LOCKUP_TIMEOUT),
-    sendHintScidDenylist: sendHintScidDenylistFromEnv(),
+    lockupTimeoutSeconds: intFromEnv(env, 'LOCKUP_TIMEOUT_SECONDS', DEFAULT_LOCKUP_TIMEOUT, 60, MAX_LOCKUP_TIMEOUT),
+    sendHintScidDenylist: sendHintScidDenylistFromEnv(env),
     lnBackend,
-    fakeLnStatePath: fakeLnStatePath(),
-    lnd: lnBackend === 'lnd' ? loadLndConfig() : null,
-    port: intFromEnv('PORT', 8787, 1, 65535),
-    host: process.env.HOST?.trim() || '127.0.0.1',
+    fakeLnStatePath: fakeLnStatePath(env),
+    lnd: lnBackend === 'lnd' ? loadLndConfig(env) : null,
+    port: intFromEnv(env, 'PORT', 8787, 1, 65535),
+    host: env.HOST?.trim() || '127.0.0.1',
     // The fallback is never reached: it is only consulted when the variable is
     // absent, and absence is already answered with null on the line above.
     // A bad value still throws through intFromEnv rather than reading as "off".
-    adminPort: process.env.ADMIN_PORT?.trim() ? intFromEnv('ADMIN_PORT', 8788, 1, 65535) : null,
-    adminHost: process.env.ADMIN_HOST?.trim() || '127.0.0.1',
-    adminRestartEnabled: process.env.ADMIN_RESTART_ENABLED?.trim() === 'true',
+    adminPort: env.ADMIN_PORT?.trim() ? intFromEnv(env, 'ADMIN_PORT', 8788, 1, 65535) : null,
+    adminHost: env.ADMIN_HOST?.trim() || '127.0.0.1',
+    adminAllowedHosts: (env.ADMIN_ALLOWED_HOSTS ?? '')
+      .split(',')
+      .map((host) => host.trim().toLowerCase())
+      .filter(Boolean),
+    adminRestartEnabled: env.ADMIN_RESTART_ENABLED?.trim() === 'true',
     /** Outbound relay URL for the `relay` command; unset = relay mode unavailable. */
-    relayUrl: process.env.RELAY_URL?.trim() || null,
+    relayUrl: env.RELAY_URL?.trim() || null,
     // Defaults to the production dialect: a deployment pointed at a real
     // Nostr relay with the dev framing connects and then goes silently deaf —
     // the worst failure shape — so speaking Nostr must not need a knob.
     relayProtocol: (() => {
-      const raw = process.env.RELAY_PROTOCOL?.trim()
+      const raw = env.RELAY_PROTOCOL?.trim()
       if (!raw || raw === 'nostr') return 'nostr' as const
       if (raw === 'dev') return 'dev' as const
-      throw new Error(`RELAY_PROTOCOL must be 'nostr' or 'dev', got ${process.env.RELAY_PROTOCOL}`)
+      throw new Error(`RELAY_PROTOCOL must be 'nostr' or 'dev', got ${env.RELAY_PROTOCOL}`)
     })(),
-    openRfqMaxBidsPerMinute: intFromEnv('OPEN_RFQ_MAX_BIDS_PER_MIN', 30, 0),
+    openRfqMaxBidsPerMinute: intFromEnv(env, 'OPEN_RFQ_MAX_BIDS_PER_MIN', 30, 0),
     // Relative like every other durable-file knob here; the Dockerfile's ENV
     // block supplies the container path, so /data lives in one place — beside
     // the VOLUME that declares it — rather than baked into an app default.
-    relayHealthPath: process.env.RELAY_HEALTH_PATH?.trim() || '.data/relay-health',
-    sentry: sentryOptionsFromEnv(),
+    relayHealthPath: env.RELAY_HEALTH_PATH?.trim() || '.data/relay-health',
+    sentry: sentryOptionsFromKnobs(env),
+    solverName: env.SOLVER_NAME?.trim() || null,
+    cardRelays: (env.SOLVER_CARD_RELAYS ?? '')
+      .split(',')
+      .map((relay) => relay.trim())
+      .filter(Boolean),
+    latencyDiagnostics: env.SOLVER_LATENCY_DIAGNOSTICS === '1',
+    evmChain: loadEvmChainConfig(env),
+    configPaths: new Map(),
+    lightningRailBlock: null,
     /** `off` (default) | `manual` | `auto`. See docs/rfq-protocol.md § 3. */
     nostrAdPublish: ((): AdPublishMode => {
-      const raw = (process.env.NOSTR_AD_PUBLISH ?? 'off').trim().toLowerCase()
+      const raw = (env.NOSTR_AD_PUBLISH ?? 'off').trim().toLowerCase()
       // Set-but-empty is unset, the discipline `intFromEnv` states above.
       if (!raw) return 'off'
       if (raw === 'manual' || raw === 'auto' || raw === 'off') return raw
@@ -1090,11 +1075,11 @@ export const loadConfig = (): Config => {
     // emulator co-signs covenant spends, so a URL baked in here would point a
     // deployment's money path at whichever service this repository happened to
     // name — a choice that belongs to whoever runs the solver.
-    emulatorUrl: required('EMULATOR_URL'),
+    emulatorUrl: required(env, 'EMULATOR_URL'),
     // Optional: the non-interactive claim daemon the receive legs reveal funded
     // lockups to (its Reveal API). Unset keeps the client-claims-itself default.
     covclaimdUrl: (() => {
-      const raw = process.env.COVCLAIMD_URL?.trim()
+      const raw = env.COVCLAIMD_URL?.trim()
       if (!raw) return undefined
       let url: URL
       try {
@@ -1114,18 +1099,18 @@ export const loadConfig = (): Config => {
       throw new Error(`COVCLAIMD_URL must use https on mainnet, got "${url.protocol}//${url.host}"`)
     })(),
     arkade: {
-      mnemonic: required('ARK_MNEMONIC'),
-      arkServerUrl: required('ARK_SERVER_URL'),
-      databasePath: arkDbPath(),
+      mnemonic: required(env, 'ARK_MNEMONIC'),
+      arkServerUrl: required(env, 'ARK_SERVER_URL'),
+      databasePath: arkDbPath(env),
       isMainnet: profile.isMainnet,
       arkadeHrp: profile.arkadeHrp,
-      unilateralExitDelayOverride: unilateralExitDelayOverride(),
+      unilateralExitDelayOverride: unilateralExitDelayOverride(env),
       // Separate from LND_ESPLORA_URL above on purpose. That one is the
       // Lightning side's explorer; this is the Arkade wallet's view of L1, and
       // a deployment can legitimately point them at different hosts. Unset
       // takes the SDK's per-network default, which on regtest is a localhost
       // URL that resolves to the container itself.
-      esploraUrl: process.env.ARK_ESPLORA_URL,
+      esploraUrl: env.ARK_ESPLORA_URL,
       expectedArkdNetwork: profile.arkdNetwork,
     },
   }

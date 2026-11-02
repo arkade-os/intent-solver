@@ -146,6 +146,7 @@ const receiveOps = (): ReceiveArkadeOps => ({
     return (chain.everOutputs.get(pkScript) ?? []).map((o) => ({
       ...o,
       spent: !spendable.some((s) => s.txid === o.txid && s.vout === o.vout),
+      unrolled: false,
     }))
   },
   fund: async (address, amountSats) => {

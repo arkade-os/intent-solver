@@ -154,9 +154,9 @@ const MARKETS = [
   {
     quoteNamespace: CHAIN_NAMESPACE.onchain,
     quoteFrom: 'arkade:BTC->onchain:BTC',
-    baseFrom: 'onchain:BTC->arkade:BTC',
+    baseFrom: null,
   },
-] as const satisfies readonly { quoteNamespace: ChainNamespace; quoteFrom: Corridor; baseFrom: Corridor }[]
+] as const satisfies readonly { quoteNamespace: ChainNamespace; quoteFrom: Corridor; baseFrom: Corridor | null }[]
 
 const cardAsset = (leg: string | null, decimals: number, network: SwapNetwork): Record<string, unknown> => {
   if (!Number.isInteger(decimals) || decimals < 0 || decimals > MAX_DECIMALS) {
@@ -273,8 +273,8 @@ const assetMarketEntry = (
     if (market.buyBase === undefined && market.sellBase === undefined) {
       throw new Error(
         `${pair} states no bounds of its own and there is no deployment-wide pair to inherit: give the ` +
-          `market its own min/max amounts in the console, or set OFFER_MIN_FILL_AMOUNT and ` +
-          `OFFER_MAX_FILL_AMOUNT, which are only read when OFFER_MARKETS names a market`,
+          `market its own min/max amounts in the console, or set offers.minFillAmount and ` +
+          `offers.maxFillAmount, which are only read when offers.markets names a market`,
       )
     }
     throw new Error(`${pair} enables neither side, and the registry requires at least one`)
@@ -407,7 +407,7 @@ export const buildSolverCard = (inputs: SolverCardInputs): SolverCard => {
   }
   const relays = [...new Set(inputs.relays)]
   if (relays.length === 0) {
-    throw new Error('a corridor card needs at least one wss:// relay — set RELAY_URL (or SOLVER_CARD_RELAYS)')
+    throw new Error('a corridor card needs at least one wss:// relay — set relay.url (or relay.cardRelays)')
   }
   if (relays.length > MAX_RELAYS) {
     throw new Error(`at most ${MAX_RELAYS} relays, got ${relays.length}`)
@@ -441,7 +441,7 @@ export const buildSolverCard = (inputs: SolverCardInputs): SolverCard => {
   }
   const assetMarkets = assetMarketEntries(inputs.assetMarkets ?? [], inputs.network)
   const markets = MARKETS.flatMap((market) => {
-    const base = inputs.corridors[market.baseFrom]
+    const base = market.baseFrom === null ? undefined : inputs.corridors[market.baseFrom]
     const quote = inputs.corridors[market.quoteFrom]
     if (!base && !quote) return []
     // A market's fee is the HIGHER of its two directions, because one card entry

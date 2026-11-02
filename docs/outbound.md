@@ -87,12 +87,15 @@ disappears.
 # stack + two funded wallets (see runbook § "Replicating end to end on regtest")
 #   .env.regtest         provider wallet
 #   .env.regtest.client  a DISTINCT client wallet, funded the same way
-node scripts/mock-relay.mjs &   # dev broker :7447 — requires RELAY_PROTOCOL=dev on both ends
-RELAY_URL=ws://localhost:7447 RELAY_PROTOCOL=dev \
-  node --experimental-eventsource --env-file=.env.regtest packages/solver-app/dist/cli.js relay &   # provider, no ports
+node scripts/mock-relay.mjs &   # dev broker :7447 — both ends must speak the dev protocol
+# the provider reads a config document: its env file plus the relay settings
+RELAY_URL=ws://localhost:7447 RELAY_PROTOCOL=dev node --experimental-eventsource --env-file=.env.regtest \
+  packages/solver-app/dist/cli.js config-from-env > solver.regtest.json
+SOLVER_CONFIG=solver.regtest.json \
+  node --experimental-eventsource packages/solver-app/dist/cli.js relay &   # provider, no ports
 
 # client: request over the relay, fund own derivation, watch on-chain
-invoice=$(node --experimental-eventsource --env-file=.env.regtest packages/solver-app/dist/cli.js invoice 1000 | tail -1)
+invoice=$(SOLVER_CONFIG=solver.regtest.json node --experimental-eventsource packages/solver-app/dist/cli.js invoice 1000 | tail -1)
 node --experimental-eventsource --env-file=.env.regtest.client \
   examples/send-client-relay.mjs ws://localhost:7447 <providerPubkey> "$invoice"
 ```

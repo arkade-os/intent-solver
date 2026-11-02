@@ -160,6 +160,7 @@ describe('scheduled, inline (no queue binding)', () => {
     }
     const explodingOnchain: OnchainSendBackend = {
       fund: unreachable,
+      signFunding: unreachable,
       findOutputs: async () => [],
       findSpendWitness: async () => null,
       transactionOutcome: unreachable,

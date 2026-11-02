@@ -108,10 +108,10 @@ already uses for send-leg refunds, proven on mainnet and regtest.)
 | Send: non-interactive refund (not drawn, implied by user-offline) | **Implemented** | Covenant refund pushable by anyone; emulator co-signs |
 | Send: offer discovered on the arkd stream, no API/relay | **Rescoped: spot pairs only** | Stream discovery is the liquid-spot-pair model (e.g. BTC/USD), not a pending step for this leg — the Lightning legs negotiate by RFQ permanently ([`rfq-protocol.md`](./rfq-protocol.md)). `subscribeForScripts`/`getSubscription` verified available for when the spot flow is built |
 | Send: open claim — ANY solver claims with `P`, keeps deposit | **Rescoped: spot-market feature** | Today the claim leaf carries the quoted solver's key, and under RFQ it stays that way. The open-claim leaf belongs to the spot-pair flow; its deposit/fee economics are still to design |
-| Receive: RFQ over relay, both sides outbound-only | **Implemented** | The relay ingress + outbound WS client carry the `rfq_*` family on all four corridors (the only wire family — the pre-RFQ `ln_send_*` shape was removed unserved) |
+| Receive: RFQ over relay, both sides outbound-only | **Implemented** | The relay ingress + outbound WS client carry the `rfq_*` family on all three corridors (the only wire family — the pre-RFQ `ln_send_*` shape was removed unserved) |
 | Receive: hold invoice for `H` | **Implemented** | `createHoldInvoice`/`getHoldState`/`settleHold` in the LN port + adapters, driven by `packages/solver-corridors/src/receive/orchestrator.ts` |
 | Receive: ClaimPacket sealed to covclaimd; covclaimd pushes claim | **Implemented, covclaimd optional** | Wire protocol + ECIES documented in `environment.md`; covclaimd is a separate service, deliberately — this provider never accepts a preimage. The client holds the covenant's `receiver` key and can claim its own lockup, so a deployment runs correctly with covclaimd unset |
-| Receive: covenant pins payout to the user's script | **Implemented** | Same covenant as send-leg refunds; both receive corridors fund through it |
+| Receive: covenant pins payout to the user's script | **Implemented** | Same covenant as send-leg refunds; the receive corridors fund through it |
 | "nostr relay" specifically | **Implemented** | The Nostr codec (`packages/solver-transport/src/relay/nostr.ts`) is the default relay dialect: NIP-01 `REQ`/`EVENT`/`CLOSE`, NIP-44-sealed directed traffic, wallet identity as the transport key. The dev broker framing remains behind `RELAY_PROTOCOL=dev` for integration tests |
 
 **Verdict:** the diagram is consistent with everything built so far — nothing
@@ -119,6 +119,6 @@ in the running code contradicts it. Its two unbuilt elements, *stream
 discovery* and the *open claim* leaf, are both rescoped to the liquid-spot-pair
 flow rather than pending for the Lightning legs; those negotiate by RFQ
 permanently, and the RFQ layer for every corridor is specified in
-[`rfq-protocol.md`](./rfq-protocol.md). All four corridors — Lightning send
-and receive, onchain send and receive — are implemented and driven by their
+[`rfq-protocol.md`](./rfq-protocol.md). All three corridors — Lightning send
+and receive, onchain send — are implemented and driven by their
 own orchestrators today.

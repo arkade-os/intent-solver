@@ -159,7 +159,7 @@ describe('the console explorer links', () => {
       "['lockupTxid', 'arkade'",
       "['onchainLockupTxid', 'onchain'",
       "['fundingTxid', 'onchain'",
-      "['onchainClaimTxid', 'onchain'",
+      "['onchainRefundTxid', 'onchain'",
     ]) {
       expect(js, pair).toContain(pair)
     }

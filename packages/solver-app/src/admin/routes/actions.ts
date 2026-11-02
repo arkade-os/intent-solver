@@ -21,16 +21,9 @@
  */
 
 import type { Hono } from 'hono'
-import {
-  refundNow,
-  onchainRefundNow,
-  reclaimL1Htlc,
-  receiveRefundNow,
-  onchainReceiveRefundNow,
-  onchainReceiveClaimNow,
-} from '../../ops/refunds.js'
+import { refundNow, onchainRefundNow, reclaimL1Htlc, receiveRefundNow } from '../../ops/refunds.js'
 import { hex } from '@scure/base'
-import { claimNow } from '../../ops/claims.js'
+import { claimNow, onchainClaimNow } from '../../ops/claims.js'
 import { planExitForSwap } from '../../ops/unilateralExit.js'
 import { requireLn } from '../../ops/rails.js'
 import { capabilityRefusal, fundSources, requireFundSource, summarise } from '../../ops/fundSources.js'
@@ -41,7 +34,7 @@ import { requestRestart } from '../../ops/restart.js'
 import type { Services } from '../../ops/services.js'
 import type { AdminDeps } from '../server.js'
 import { clampLimit } from '@arkade-os/solver-core/core/page.js'
-import { messageOf } from '@arkade-os/solver-core/util/poll.js'
+import { log, messageOf } from '@arkade-os/solver-core/util/poll.js'
 import { CORRIDORS, isCorridor, type Corridor } from '@arkade-os/solver-core/core/corridorPolicy.js'
 
 export type ActionTier = 'safe' | 'armed'
@@ -472,6 +465,18 @@ export const ACTIONS: Record<string, ActionDefinition> = {
     run: (services, body) => onchainRefundNow(services, requireId(body)),
   },
 
+  'onchain-claim-now': {
+    tier: 'armed',
+    confirmKind: 'swap-id',
+    expectedConfirm: bodyId,
+    target: bodyId,
+    warning:
+      'For a `stuck` arkade:BTC->onchain:BTC row the solver ALREADY PAID the client on L1 and still holds the ' +
+      'preimage. Returns the row to claiming so the sweep claims the Arkade lockup the solver is owed. The opposite ' +
+      'of onchain-refund-now, which on such a row is the DOUBLE-PAYOUT. Refuses a row carrying no preimage.',
+    run: (services, body) => onchainClaimNow(services, requireId(body)),
+  },
+
   /**
    * The two RECEIVE legs, and the reason they read less alarming than the send
    * ones above: this money is the solver's own. The receive corridors fund the
@@ -493,37 +498,6 @@ export const ACTIONS: Record<string, ActionDefinition> = {
       'output out from under them and their held payment fails back to the payer, killing a live swap. Read the ' +
       'row first; on a `stuck` row this is the only way out.',
     run: (services, body) => receiveRefundNow(services, requireId(body)),
-  },
-
-  'onchain-receive-refund-now': {
-    tier: 'armed',
-    confirmKind: 'swap-id',
-    expectedConfirm: bodyId,
-    target: bodyId,
-    warning:
-      "RECOVERS THE SOLVER'S OWN Arkade lockup on the onchain:BTC->arkade:BTC leg. Same direction and same caveat " +
-      'as receive-refund-now: our money, but refunding under a client who can still claim kills a live swap.',
-    run: (services, body) => onchainReceiveRefundNow(services, requireId(body)),
-  },
-
-  /**
-   * The fee-dust retry, and the one operator action here that carries no
-   * judgement call at all: every attempt spends the SAME output, so a
-   * redundant broadcast is a double-spend the network rejects. Armed anyway,
-   * because it is a broadcast — but the warning says what it is rather than
-   * inventing a hazard.
-   */
-  'onchain-receive-claim-now': {
-    tier: 'armed',
-    confirmKind: 'swap-id',
-    expectedConfirm: bodyId,
-    target: bodyId,
-    warning:
-      "Retries the solver's own claim of the CLIENT's L1 HTLC at today's fee rate, for a row that parked in " +
-      '`stuck` because the fee once left less than dust. Safe to repeat — every attempt spends the same output, ' +
-      'so a redundant broadcast is a double-spend the network rejects, never a second payout. Refuses with both ' +
-      'numbers if the fee still eats the payout.',
-    run: (services, body) => onchainReceiveClaimNow(services, requireId(body)),
   },
 
   'reclaim-l1-htlc': {
@@ -602,7 +576,7 @@ export const ACTIONS: Record<string, ActionDefinition> = {
     expectedConfirm: () => 'RESTART',
     warning:
       'Stops this process so a supervisor starts a new one, which is how a stored override or market edit takes ' +
-      'effect. In-flight swaps are picked up again by recovery on boot. Requires ADMIN_RESTART_ENABLED=true AND a ' +
+      'effect. In-flight swaps are picked up again by recovery on boot. Requires admin.restartEnabled = true AND a ' +
       'supervisor that restarts the solver — without one this stops it and nothing brings it back.',
     // Before the shutdown is armed, so the audit row carries the real exposure.
     run: async (services) => {
@@ -811,28 +785,27 @@ export const registerActionRoutes = (app: Hono, deps: AdminDeps): void => {
     // secret, but recording the ceremony alongside the action is noise.
     const params = JSON.stringify({ ...body, confirm: undefined })
 
+    // Best-effort: the action may have moved money, so a failed audit write must not
+    // decide the HTTP result — a 500 reads as failure and invites a retry (a second pay).
+    const record = async (outcome: 'ok' | 'error', detail: string): Promise<void> => {
+      try {
+        await deps.services.adminStore.recordAction({ action: name, target, params, outcome, detail })
+      } catch (error) {
+        log(`admin action ${name}: audit record failed`, messageOf(error))
+      }
+    }
+
+    let result: unknown
     try {
-      const result = await definition.run(deps.services, body)
-      await deps.services.adminStore.recordAction({
-        action: name,
-        target,
-        params,
-        outcome: 'ok',
-        detail: JSON.stringify(result).slice(0, 500),
-      })
-      return c.json({ ok: true, result })
+      result = await definition.run(deps.services, body)
     } catch (error) {
-      await deps.services.adminStore.recordAction({
-        action: name,
-        target,
-        params,
-        outcome: 'error',
-        detail: messageOf(error),
-      })
+      await record('error', messageOf(error))
       // 500 with a readable body rather than a thrown fault: the operator needs
       // the reason, and the action WAS attempted, unlike a confirm failure.
       return c.json({ ok: false, error: 'action_failed', message: messageOf(error) }, 500)
     }
+    await record('ok', JSON.stringify(result).slice(0, 500))
+    return c.json({ ok: true, result })
   })
 
   app.get('/api/audit', async (c) => {

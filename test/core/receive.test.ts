@@ -17,6 +17,7 @@ import { SECONDS_PER_BLOCK } from '@arkade-os/solver-core/core/send.js'
 import {
   deriveUnilateralDelays,
   LOCKTIME_THRESHOLD,
+  NOMINAL_BLOCK_SECONDS,
   SEQUENCE_GRANULARITY_SECONDS,
 } from '@arkade-os/solver-core/core/timelocks.js'
 
@@ -92,6 +93,14 @@ describe('evaluateReceiveFunding', () => {
           }),
         ),
       ).toEqual({ fund: true })
+    })
+
+    it('reads a BLOCK-typed solo recourse in seconds, so the gate still binds', () => {
+      expect(
+        evaluateReceiveFunding(
+          input({ unilateralRefundWithoutReceiverDelay: 20, htlcExpiresAt: NOW + 20 * NOMINAL_BLOCK_SECONDS }),
+        ),
+      ).toEqual({ fund: false, reason: 'unilateral_recourse_after_htlc' })
     })
 
     it('refuses a mainnet-scale ladder against an ordinary htlc deadline', () => {

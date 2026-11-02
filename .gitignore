@@ -15,8 +15,11 @@ dist/
 # holds the mnemonics — so every template has to be named back in explicitly,
 # and one that is not is silently absent rather than refused.
 !.env.example
-!.env.sample
 !.env.*.example
+# A real config document holds the mnemonics too; only the example is committed.
+solver.json
+solver.*.json
+!solver.example.json
 .DS_Store
 coverage/
 

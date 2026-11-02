@@ -20,43 +20,103 @@ run inside a Workers isolate, which is NOT yet verified (both hold long-lived
 connections). Until verified, run the money-mover as the Node process and only
 the API on Workers if you want Workers at all.
 
-## Configuration (environment)
+## Configuration
 
-| Var                                  | Required                                                     | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| ------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SWAP_NETWORK`                       | yes (`bitcoin`\|`signet`\|`mutinynet`\|`regtest`)            | selects the network profile (limits, prefixes, emulator)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `LN_BACKEND`                         | yes, unless all four BTC corridors are off                   | `lnd` = talk to a real LND node's gRPC directly; `fake` = forge-and-pay-own-invoices backend for regtest E2E, refused on `bitcoin`. A rail a consumer registered through `registerLightningRail` is accepted by name too. **No default.** A rail is a PAIR — one wallet answers both the Lightning and the onchain port — so all four BTC corridors take their backend from this one value, and it may be left unset only where every one of them is switched off (`<CORRIDOR>_ENABLED=false`). An unrecognised value throws and names the accepted set |
-| `LND_SOCKET`                         | yes if `LN_BACKEND=lnd`                                      | `host:port` of the LND node's gRPC listener                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `LND_CERT` / `LND_CERT_PATH`         | yes if `LN_BACKEND=lnd` (exactly one)                        | LND's `tls.cert`, inline base64 or a file path                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `LND_MACAROON` / `LND_MACAROON_PATH` | yes if `LN_BACKEND=lnd` (exactly one)                        | LND's macaroon, inline base64 or a file path                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `FAKE_LN_STATE_PATH`                 | no (`<DB_DIR>/fake-ln.json`)                                 | the fake backend's preimage map                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `ARK_MNEMONIC`                       | yes                                                          | Arkade wallet. Secret — never logged                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `ARK_SERVER_URL`                     | yes                                                          | arkd endpoint; startup refuses a server reporting a different network than `SWAP_NETWORK`                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `DB_DIR`                             | no (`.data`; `/data` in the image)                           | directory for every database file; the two below override it per file                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `ARK_DB_PATH`                        | no (`<DB_DIR>/ark.sqlite`)                                   | Arkade wallet state                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `SWAP_DB_PATH`                       | no (`<DB_DIR>/swaps.sqlite`)                                 | swap rows — one file, or five on an older deployment; see Backups                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `EMULATOR_URL`                       | no on `bitcoin` (defaults to the known emulator), else yes   | covenant co-signer                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `MAX_SWAP_SATS`                      | no                                                           | narrows the per-swap cap (can never widen)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `MAX_EXPOSED_SATS`                   | no (3 × maxSats)                                             | aggregate exposure cap across concurrent swaps                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `LOCKUP_TIMEOUT_SECONDS`             | no (`900`)                                                   | UPPER bound on the funding window a Lightning-send quote grants, before the sweep abandons the swap; clipped to the invoice when that expires first (`lockupDeadlineFor`), so it sets no minimum invoice life. Integer in `[60, 7200]`, the ceiling derived from `REFUND_SAFETY_MARGIN` — the window is spent out of the claim margin, so a longer one only yields swaps that refuse themselves                                                                                                                                                         |
-| `LN_SEND_HINT_SCID_DENYLIST`         | no (empty)                                                   | comma-separated lowercase hex `short_channel_id`s whose route hints are not priced, so the refund deadline is not sized against a route nobody can take. Ships EMPTY and with no example: add an entry ONLY on authoritative confirmation (vendor, node operator, recipient) that the channel cannot route. A scid's shape is not confirmation — `option_scid_alias` values are unrelated to any real height. **A wrong entry is a fund-risk, not a lost swap**: see "Denylisting an unroutable route hint"                                             |
-| `PORT` / `HOST`                      | no (`8787` / `127.0.0.1`)                                    | `serve` binding                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `ADMIN_PORT`                         | no (off)                                                     | admin console port. Unset means no console and no new socket. **No authentication — see "The admin console"**                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `ADMIN_HOST`                         | no (`127.0.0.1`)                                             | admin console binding. A non-loopback value is ALLOWED (the container needs it); access control is a reverse proxy's job                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `RELAY_URL`                          | yes for `relay` (the default command)                        | outbound relay WebSocket URL (e.g. `wss://nostr.arkade.sh`) — `wss://`, not `https://`                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `RELAY_HEALTH_PATH`                  | no (`.data/relay-health`; `/data/relay-health` in the image) | `relay` refreshes this file's mtime every 10s while the relay socket is up; the image's HEALTHCHECK reads it                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `RELAY_PROTOCOL`                     | no (`nostr`)                                                 | relay wire dialect; `dev` speaks the mock-relay broker framing                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `OPEN_RFQ_MAX_BIDS_PER_MIN`          | no (`30`)                                                    | open-RFQ bidding rate cap (`relay` mode); `0` disables bidding                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `ARK_UNILATERAL_EXIT_DELAY`          | no (believe the server)                                      | seconds, or BLOCKS if this deployment's arkd is block-typed (below 512 is a block count — see "Block-typed timelocks"). Must match the server's own unit or boot refuses it. Overrides the unilateral exit delay arkd advertises, for a server that enforces a shorter minimum than it announces. Sets the CSV timelocks in every covenant — too LOW writes a script rejected at SPEND, with money already in it. See "The recourse window on mainnet"                                                                                                  |
-| `LN_RECEIVE_ACCEPT_UNILATERAL_GAP`   | no (`false`)                                                 | `true`/`false` exactly. Serves `lightning:BTC->arkade:BTC` when the solver's solo recourse opens after the htlc's `E` — **required for the corridor to run on mainnet at all**, see "The recourse window on mainnet" below. Accepts a bounded loss; `bitcoin` additionally requires `LN_RECEIVE_MAX_SATS` to be set explicitly                                                                                                                                                                                                                          |
-| `<CORRIDOR>_ENABLED`                 | no (`true`)                                                  | `false` darkens that corridor (`LN_SEND`, `LN_RECEIVE`, `ONCHAIN_SEND`, `ONCHAIN_RECEIVE`): never constructed, and its pair is refused `unsupported_pair` at the ingress. Rows already on disk stay readable, but the sweep stops driving them. **Exactly `true` or `false` once trimmed** — unset, empty or whitespace is on, anything else refuses to boot; see "When the solver refuses to boot on an _ENABLED value"                                                                                                                                |
-| `PAYEE_MNEMONIC`                     | test-only                                                    | payee wallet for `invoice` self-tests, which mint from a wallet of their own                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+One JSON document holds every setting, secrets included: named by
+`SOLVER_CONFIG` (a file) or carried whole in `SOLVER_CONFIG_JSON`. README §
+"The config document" says how it is read and checked; `solver.example.json`
+sets every field. Below, `rails.lightning.backend` is a path into it, and
+`rails.lightning.backend: "lnd"` gives one a value.
+
+| Path                                                                | Required                                                     | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ------------------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `network`                                                           | no (`regtest`)                                               | `bitcoin`\|`signet`\|`mutinynet`\|`regtest`: selects the network profile (limits, prefixes, emulator). Set it on every real deployment                                                                                                                                                                                                                                                                                                                                                                                   |
+| `rails.lightning.backend`                                           | yes, if any BTC corridor is present and enabled              | `lnd` = talk to a real LND node's gRPC directly; `fake` = forge-and-pay-own-invoices backend for regtest E2E, refused on `bitcoin`. A rail a consumer registered through `registerLightningRail` is accepted by name too. **No default.** A rail is a PAIR — one wallet answers both the Lightning and the onchain port — so all three BTC corridors take their backend from this one value. Leaving those three blocks out disables them and leaves this unset. An unrecognised value throws and names the accepted set |
+| `rails.lightning.lnd.socket`                                        | yes if `rails.lightning.backend: "lnd"`                      | `host:port` of the LND node's gRPC listener                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `rails.lightning.lnd.cert` / `rails.lightning.lnd.certPath`         | yes if `rails.lightning.backend: "lnd"` (exactly one)        | LND's `tls.cert`, inline base64 or a file path                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `rails.lightning.lnd.macaroon` / `rails.lightning.lnd.macaroonPath` | yes if `rails.lightning.backend: "lnd"` (exactly one)        | LND's macaroon, inline base64 or a file path                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `rails.lightning.fake.statePath`                                    | no (`<storage.dir>/fake-ln.json`)                            | the fake backend's preimage map                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `rails.arkade.mnemonic`                                             | yes                                                          | Arkade wallet. Secret — never logged                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `rails.arkade.serverUrl`                                            | yes                                                          | arkd endpoint; startup refuses a server reporting a different network than `network`                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `storage.dir`                                                       | no (`.data`; `/data` in the image)                           | directory for every database file; the two below override it per file                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `storage.arkDb`                                                     | no (`<storage.dir>/ark.sqlite`)                              | Arkade wallet state                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `storage.swapDb`                                                    | no (`<storage.dir>/swaps.sqlite`)                            | swap rows — one file, or five on an older deployment; see Backups                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `rails.arkade.emulatorUrl`                                          | no on `bitcoin` (defaults to the known emulator), else yes   | covenant co-signer                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `limits.maxSwapSats`                                                | no                                                           | narrows the per-swap cap (can never widen)                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `limits.maxExposedSats`                                             | no (3 × maxSats)                                             | aggregate exposure cap across concurrent swaps                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `rails.lightning.lockupTimeoutSeconds`                              | no (`900`)                                                   | UPPER bound on the funding window a Lightning-send quote grants, before the sweep abandons the swap; clipped to the invoice when that expires first (`lockupDeadlineFor`), so it sets no minimum invoice life. Integer in `[60, 7200]`, the ceiling derived from `REFUND_SAFETY_MARGIN` — the window is spent out of the claim margin, so a longer one only yields swaps that refuse themselves                                                                                                                          |
+| `rails.lightning.sendHintScidDenylist`                              | no (empty)                                                   | list of lowercase hex `short_channel_id`s whose route hints are not priced, so the refund deadline is not sized against a route nobody can take. Ships EMPTY and with no example: add an entry ONLY on authoritative confirmation (vendor, node operator, recipient) that the channel cannot route. A scid's shape is not confirmation — `option_scid_alias` values are unrelated to any real height. **A wrong entry is a fund-risk, not a lost swap**: see "Denylisting an unroutable route hint"                      |
+| `http.port` / `http.host`                                           | no (`8787` / `127.0.0.1`)                                    | `serve` binding                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `admin.port`                                                        | no (off)                                                     | admin console port. Unset means no console and no new socket. **No authentication — see "The admin console"**                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `admin.host`                                                        | no (`127.0.0.1`)                                             | admin console binding. A non-loopback value is ALLOWED (the container needs it); access control is a reverse proxy's job                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `admin.allowedHosts`                                                | no (loopback aliases of the bound port)                      | array of `Host` values a state-changing request may carry, beside the bound host and its loopback aliases; include the port unless it is the scheme's default. A non-loopback bind, a reverse proxy or a tunnel on another local port presents its own name — declare it here, or the console answers `403 host_not_allowed` to protect against DNS rebinding                                                                                                                                                            |
+| `relay.url`                                                         | yes for `relay` (the default command)                        | outbound relay WebSocket URL (e.g. `wss://nostr.arkade.sh`) — `wss://`, not `https://`                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `relay.healthPath`                                                  | no (`.data/relay-health`; `/data/relay-health` in the image) | `relay` refreshes this file's mtime every 10s while the relay socket is up; the image's HEALTHCHECK reads it                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `relay.protocol`                                                    | no (`nostr`)                                                 | relay wire dialect; `dev` speaks the mock-relay broker framing                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `relay.openRfqMaxBidsPerMinute`                                     | no (`30`)                                                    | open-RFQ bidding rate cap (`relay` mode); `0` disables bidding                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `rails.arkade.unilateralExitDelay`                                  | no (believe the server)                                      | seconds, or BLOCKS if this deployment's arkd is block-typed (below 512 is a block count — see "Block-typed timelocks"). Must match the server's own unit or boot refuses it. Overrides the unilateral exit delay arkd advertises, for a server that enforces a shorter minimum than it announces. Sets the CSV timelocks in every covenant — too LOW writes a script rejected at SPEND, with money already in it. See "The recourse window on mainnet"                                                                   |
+| `rails.lightning.receiveAcceptUnilateralGap`                        | no (`false`)                                                 | `true`/`false` exactly. Serves `lightning:BTC->arkade:BTC` when the solver's solo recourse opens after the htlc's `E` — **required for the corridor to run on mainnet at all**, see "The recourse window on mainnet" below. Accepts a bounded loss; `bitcoin` additionally requires `corridors["lightning:BTC->arkade:BTC"].maxSats` to be set explicitly                                                                                                                                                                |
+| `corridors["<pair>"].enabled`                                       | no (`true` when present; fixed BTC absent = off)             | `false` darkens that corridor (any key of `corridors`, such as `arkade:BTC->onchain:BTC`): never constructed, and its pair is refused `unsupported_pair` at the ingress. Rows already on disk stay readable, but the sweep stops driving them. **A JSON boolean** — a present block defaults on, anything else refuses to boot; see "When the solver refuses to boot on an `enabled` value"                                                                                                                              |
+
+`PAYEE_MNEMONIC` stays outside the document: test-only, the payee wallet for
+`invoice` self-tests on a rail that can mint them.
+
+### Migrating from environment variables
+
+This version reads no setting from the environment, and refuses to start while
+one of the old variables is still set, naming it. `HOST` and `PORT` alone are
+ignored with a log line, because platforms set them; put `http.host` and
+`http.port` in the document if the solver relied on them. What Kubernetes
+derives from a Service's name (`EVM_RPC_SERVICE_HOST`, `LND_PORT_10009_TCP` and
+the like) is left alone too.
+
+1. **Export the document with the new image, under the old environment** and
+   with the deployment's own data volume mounted, so the stored asset-market
+   rows can be read. Compose prefixes the volume with its project name, so find
+   it with `docker volume ls` (here `<project>_swap-data`):
+
+   ```bash
+   docker run --rm --env-file .env -v <project>_swap-data:/data <new image> config-from-env > solver.json
+   chmod 600 solver.json
+   ```
+
+   The export is checked by the loader that will read it, so an old value the
+   document cannot hold is refused now, by path, rather than at the next boot.
+   So is an old asset direction (`ASSET_<SYMBOL>_BUY_ENABLED`) it cannot place
+   for want of those rows.
+   It holds every secret the environment did, printed to stdout only;
+   `.gitignore` already lists `solver.json`. `config-from-env` ships for this
+   one release.
+
+2. **Read it.** The old image set `DB_DIR` and `RELAY_HEALTH_PATH` itself, so
+   neither appears unless your environment set it too. The new image links
+   `/app/.data` onto the volume instead, so the defaults land in `/data`.
+   Leave `relay.healthPath` at its default: the image's HEALTHCHECK reads only
+   that path.
+
+3. **Remove every old variable** — `.env`, compose file or platform settings
+   alike — and supply the document instead: mount it and set `SOLVER_CONFIG`
+   (as `docker-compose.yml` does), or put the whole of it in
+   `SOLVER_CONFIG_JSON`.
+
+4. **Deploy.** A variable you missed stops the solver at startup, naming it,
+   before anything has moved. Rolling back means the old image with the old
+   variables: the old image cannot read the document and the new one refuses
+   the variables, so neither mix starts.
+
+**Upgraded without these steps?** The new image refuses to start for want of a
+document, then logs the one its old variables describe: step 1's export, with
+each credential written as the variable holding it (`"mnemonic": "<ARK_MNEMONIC>"`),
+because a log is no place for one. Put each value back and carry on from step 2.
+A placeholder left in is refused at startup, naming the variable. Where a
+credential reached the document in a form no variable holds, as a rail's own
+block can, nothing is logged but that fact: run step 1 instead.
 
 ## Shape 1 — single Node process
 
 ```
 pnpm install && pnpm build
-node --experimental-eventsource --env-file=.env packages/solver-app/dist/cli.js serve
+SOLVER_CONFIG=solver.json node --experimental-eventsource packages/solver-app/dist/cli.js serve
 ```
 
 One process = API + recovery + tick loop + refund sweep. Restart-safe: on boot
@@ -69,26 +129,25 @@ truth.
 funded script whose row is lost is unclaimable AND unrefundable by us (clients
 can still be refunded by anyone reconstructing the script, but do not rely on
 it). Snapshot at least every few minutes; SQLite online backup or litestream
-both work. `ARK_DB_PATH` is wallet cache + state; back it up too, it is cheap.
+both work. `storage.arkDb` is wallet cache + state; back it up too, it is cheap.
 
 WHICH files those are depends on when the deployment was first started, and the
 service picks whichever it finds — it never moves rows between them.
 
 **Started fresh on this version or later — one file.** Every corridor's tables
-live in `SWAP_DB_PATH` itself. Back up that one file and you have everything.
+live in `storage.swapDb` itself. Back up that one file and you have everything.
 
-**Started earlier — five files.** Each corridor opened its own database, named
-off `SWAP_DB_PATH` by suffix. At the default `<DB_DIR>/swaps.sqlite`:
+**Started earlier — four files.** Each corridor opened its own database, named
+off `storage.swapDb` by suffix. At the default `<storage.dir>/swaps.sqlite`:
 
-| file                           | holds                          |
-| ------------------------------ | ------------------------------ |
-| `swaps.sqlite`                 | Lightning-send rows            |
-| `swaps-onchain.sqlite`         | onchain-send rows              |
-| `swaps-receive.sqlite`         | Lightning-receive rows         |
-| `swaps-onchain-receive.sqlite` | onchain-receive rows           |
-| `swaps-admin.sqlite`           | settings overrides + audit log |
+| file                   | holds                          |
+| ---------------------- | ------------------------------ |
+| `swaps.sqlite`         | Lightning-send rows            |
+| `swaps-onchain.sqlite` | onchain-send rows              |
+| `swaps-receive.sqlite` | Lightning-receive rows         |
+| `swaps-admin.sqlite`   | settings overrides + audit log |
 
-**Back up ALL of them.** Copying only `swaps.sqlite` loses three corridors'
+**Back up ALL of them.** Copying only `swaps.sqlite` loses two corridors'
 worth of funded swaps — the mistake this table exists to prevent. litestream
 replicates one database per stanza, so it needs an entry per file rather than
 the single-file one-liner.
@@ -96,7 +155,7 @@ the single-file one-liner.
 Losing `swaps-admin.sqlite` alone strands no money, but it silently reverts
 every override — a corridor an operator DISABLED comes back on at the next boot.
 
-To tell which layout you have, look for a suffixed file next to `SWAP_DB_PATH`:
+To tell which layout you have, look for a suffixed file next to `storage.swapDb`:
 any one of them means the five-file layout. Moving an existing deployment onto
 the single file is deliberately not automatic — it would mean copying funded
 rows between databases at startup, and a half-finished copy is worse than the
@@ -135,7 +194,7 @@ once the balance passes the amount before that drop.
 With notification sinks configured, checkpoint decreases also send a
 `POSSIBLE LOSS` alert through the existing notification queue, and recoveries a
 `RECOVERED` follow-up. These alerts do not
-require `BALANCE_REPORT_INTERVAL_MINUTES`. Periodic balance reports include signed
+require `notify.balanceReportIntervalMinutes`. Periodic balance reports include signed
 BTC and Arkade asset changes since the previous complete report, using a separate
 baseline retained across restarts. Minute checkpoints
 do not reset that report baseline. The first report establishes a baseline;
@@ -173,10 +232,10 @@ SQLite file — the swap database(s) and the Arkade wallet. CI builds and smoke-
   the container changes.
 - **Scaling is capital, not compute.** The loop is O(non-terminal swaps) with a
   few outbound RPCs each; a 1-vCPU box runs hundreds of concurrent swaps, and
-  `MAX_EXPOSED_SATS` caps the workload long before CPU does. Scale by raising
+  `limits.maxExposedSats` caps the workload long before CPU does. Scale by raising
   exposure and inventory.
 - **One wallet = one process — never replicate the container.** Two processes on
-  the same `ARK_MNEMONIC` cannot see each other's funding reservations — those
+  the same `rails.arkade.mnemonic` cannot see each other's funding reservations — those
   live in a process-local ledger — so one can spend a coin out from under the
   other's in-flight funding. Horizontal scale is N solver identities: N
   containers, N mnemonics, N volumes. That maps one-to-one onto the future bus
@@ -212,7 +271,7 @@ the container does — quote ingestion, LN payment, claim, refund, fund-watch
 polling — is now an outbound connection. **Zero listening ports.** Proven end to
 end on regtest with a distinct client wallet: `scripts/e2e-relay.sh`.
 
-Set `SOLVER_LATENCY_DIAGNOSTICS=1` on the `relay` process to log
+Set `diagnostics.latency: true` on the `relay` process to log
 `rfq_relay_timing` for each answered RFQ and `receive_quote_timing` for each
 successful Lightning receive quote. Both include an RFQ ID prefix for
 correlation. The receive record splits preparation, hold-invoice creation,
@@ -261,8 +320,8 @@ real LND; both are verified.
   reply recovers by asking again.
 - The wire dialect lives behind the `WireCodec` seam in
   `packages/solver-transport/src/relay/connection.ts`. Two ship: the Nostr codec (`packages/solver-transport/src/relay/nostr.ts`,
-  the default, `RELAY_PROTOCOL=nostr`) and the dev broker framing
-  (`RELAY_PROTOCOL=dev`, for `scripts/mock-relay.mjs`). Nothing above the
+  the default, `relay.protocol: "nostr"`) and the dev broker framing
+  (`relay.protocol: "dev"`, for `scripts/mock-relay.mjs`). Nothing above the
   codec changes between them.
 - **What is proven:** the ingress loop (subscribe → quote → publish, refusals,
   redelivery recovery) and the frame codec against an in-memory relay; the
@@ -361,11 +420,11 @@ An operator console — swaps, quotes, asset markets, settings, wallet, backend
 status, audit — on **its own port**, served from inside the running provider.
 
 ```bash
-ADMIN_PORT=8788 pnpm cli relay     # or serve, or watch
+SOLVER_CONFIG=solver.json pnpm cli relay   # or serve, or watch; the document sets admin.port: 8788
 # then http://127.0.0.1:8788
 ```
 
-Off unless `ADMIN_PORT` is set. A deployment that sets nothing opens no new
+Off unless `admin.port` is set. A deployment that sets nothing opens no new
 socket and behaves exactly as before.
 
 ### There is no authentication on this port
@@ -378,11 +437,11 @@ auth system in this codebase.
 
 What follows from that:
 
-- `ADMIN_HOST` defaults to `127.0.0.1`. On a host you have shell access to,
+- `admin.host` defaults to `127.0.0.1`. On a host you have shell access to,
   leave it there and reach the console over an SSH tunnel:
   `ssh -L 8788:127.0.0.1:8788 <host>`.
 - In Docker, loopback is unreachable from outside the container, so
-  `ADMIN_HOST=0.0.0.0` is required — and then publishing the port without a
+  `admin.host: "0.0.0.0"` is required — and then publishing the port without a
   proxy in front exposes every action above to anything that can route to it.
   Publish it to the proxy's network, never to the world.
 - The app does **not** refuse a non-loopback bind. Every other ambiguous knob
@@ -480,8 +539,8 @@ anything the node echoed back, because that encoded value is what a payer's node
 enforces. The console renders the time remaining and replaces it with a banner
 once it has passed; press the button again for a fresh one.
 
-`rail` is absent entirely on a deployment with no `LN_BACKEND`, the same way the
-four BTC corridors are. `arkade` declines to settle on purpose: settling boarded
+`rail` is absent entirely on a deployment with no `rails.lightning.backend`, the same way the
+three BTC corridors are. `arkade` declines to settle on purpose: settling boarded
 sats is `float-lifecycle`'s job (it carries the CLTV guard, and a bare
 `settle()` would merge the whole float into one coin). It does withdraw, and the
 destination's form picks the rail — an Arkade address is paid offchain at once,
@@ -490,7 +549,7 @@ the withdrawal spends **every asset-free coin no live swap's funding has pinned*
 holding all of them until it settles — for a bitcoin address that is the next
 batch, and until then no swap can be funded from the float — and
 returns the rest as one change coin, so the float's piece count drops to one
-until `pool-mint` splits it again — on its own only with `POOL_AUTO_MINT=true`,
+until `pool-mint` splits it again — on its own only with `rails.arkade.poolAutoMint: true`,
 otherwise at the next renewal or by hand. The pinned coins are left alone, because
 the SDK's own selection cannot be told "not that one". The destination receives
 exactly the typed amount; the exit's intent fees — one per coin spent — come out
@@ -515,7 +574,7 @@ the exit fee. It is **not safe to repeat**: nothing persists or re-drives it, so
 each attempt is a separate payment and a withdrawal that timed out must be
 checked against the chain before retrying.
 
-Remember what `ADMIN_HOST` is: with the console reachable, `fund-withdraw` lets
+Remember what `admin.host` is: with the console reachable, `fund-withdraw` lets
 anything that can reach the port send a source's balance to an address of its
 choosing, and no `confirm` value can prevent that — the confirmation is supplied
 by the same caller. It is friction against operator error, not access control.
@@ -546,12 +605,12 @@ policy: the ingress corridor gate, the open-RFQ bidder, and the registry card.
 A card advertising a fee the corridor does not charge would be a listing that
 lies, so `cli card` reads overrides too.
 
-Overrides **replace** what the environment allowed, in either direction. A
+Overrides **replace** what the config document allowed, in either direction. A
 console override may raise a corridor's maximum or the global exposure cap
-above the deployment's own environment, as well as lower it. `narrow()` still
-governs the env layers themselves (`MAX_SWAP_SATS` and the per-corridor
-variables can only narrow the network default), but it no longer constrains
-this one — so the environment bounds what a _restart without overrides_ would
+above the deployment's own document, as well as lower it. `narrow()` still
+governs the document's layers (`limits.maxSwapSats` and the per-corridor
+limits can only narrow the network default), but it no longer constrains
+this one — so the document bounds what a _restart without overrides_ would
 quote, not what this solver can be made to quote.
 
 > **The admin API has no authentication of its own.** A reverse proxy is
@@ -561,9 +620,9 @@ quote, not what this solver can be made to quote.
 > Treat the proxy's auth and the bind address as the controls that matter.
 
 Fees move freely too, within the same bounds `config.ts` validates. A corridor
-the environment disabled cannot be enabled here at all: no service was
+the document disabled cannot be enabled here at all: no service was
 constructed for it. A minimum and maximum that cross fall back to the
-environment's range for that corridor rather than leaving it quoting nothing.
+document's range for that corridor rather than leaving it quoting nothing.
 
 Secrets are not shown. Not redacted — absent, so there is no field for a bug to
 un-redact.
@@ -572,8 +631,8 @@ un-redact.
 
 Overrides only. `createServices` snapshots `bootOverrides` at startup and the
 console diffs the store against that snapshot, with each knob's running and
-stored values (`LN_SEND_FEE_BPS 0 → 25`). A key whose effective value did not
-move is dropped: an override equal to the environment's own value changes
+stored values (`corridors["arkade:BTC->lightning:BTC"].feeBps 0 → 25`). A key whose effective value did not
+move is dropped: an override equal to the document's own value changes
 nothing a restart would apply.
 
 Asset markets are not in the banner. They apply live (see above), so a
@@ -631,7 +690,8 @@ the reasons to take one.
   "Working a `stuck` row" below.**
 - **`claimed` with `claim_ark_txid: null`** = claim landed but a crash ate the
   txid (only recorded as success BEFORE the refund deadline, where nobody else
-  could spend). Verify once by hand if you care about the txid.
+  could spend). Verify once by hand if you care about the txid. A row carrying
+  `unrolled_claim` is the exception: it claimed on L1 (see below).
 - **`claimed` carrying an `onchain_claim_txid`, or `refunding_onchain` carrying
   an `onchain_refund_txid`, is a row WAITING FOR A BLOCK** and needs nothing.
   The spend is broadcast and the row stays non-terminal until it confirms,
@@ -639,16 +699,41 @@ the reasons to take one.
   moved. If one sits for many blocks, look the txid up: still in the mempool is
   a fee-rate problem, and absent from the chain entirely means the broadcast
   never stuck — the next sweep rebuilds it at today's rate on its own.
-- **`settled` with `onchain_claim_txid: null` on onchain-receive** is a LEGACY
-  recovery path, not a missing write, and only a row quoted before the txid was
-  pre-committed can show it. The solver crashed after broadcasting its
-  L1 claim and before recording it; on the next tick it found the HTLC already
-  spent, recognised its own preimage in the witness, and settled on that
-  evidence. `findSpendWitness` returns the witness stack and never the spending
-  txid, so there is nothing truthful to put in the column — the state is the
-  record. To find the transaction, look up the spend of the row's
-  `funding_txid`:`funding_vout` on a block explorer rather than expecting a
-  txid in the row.
+- **A receive row in `refunding` or `refunding_arkade` carrying
+  `unrolled_refund` is refunding a lockup the client unrolled onto Bitcoin.**
+  arkd co-signs the refund on L1 through `CosignOnchainTx`, so this needs arkd
+  v0.9.22 or later. The refund pays the solver's boarding address, and the
+  float's boarding settle brings it back into Arkade.
+  - arkd co-signs an outpoint once, so the refund is never replaced. If it
+    drops, the row rebroadcasts the same transaction. If it has not confirmed
+    after 20 minutes, it gets one co-signed CPFP child.
+  - A refund that dropped before any explorer kept it cannot be resent. arkd
+    refuses to co-sign the outpoint again, so every retry shows up as a tick
+    error naming arkd's refusal. The row escalates once arkd's window closes,
+    and the failure reason names the solo leaf.
+  - On arkd older than v0.9.22 the co-sign endpoint returns 404. That also
+    shows up as a tick error every interval, not as a startup check.
+  - The row escalates to `stuck` only once `P` can no longer be collected.
+    That happens when the lockup was spent with no `P` in the witness, or when
+    arkd stops co-signing because the client's own exit is near. The failure
+    reason then names the solo leaf.
+- **A send row in `claiming` carrying `unrolled_claim` is claiming lockup
+  outputs the client unrolled onto Bitcoin**, one co-signed L1 claim per output,
+  through the same arkd endpoint. It records `claimed` once every claim
+  confirms. If every output was unrolled, `claim_ark_txid` stays null and
+  `unrolled_claim` holds the L1 txids.
+  - A `claiming` row can already carry `claim_ark_txid`. It is not done: the
+    outputs still on Arkade were claimed, and the L1 claims have not all
+    confirmed.
+  - The row escalates to `stuck` once an output is lost and no claim is still
+    pending. An output is lost when another transaction spent it, or when arkd
+    stopped co-signing. The failure reason names each lost output and the solo
+    `unilateralClaim` leaf. An output the client unrolled after the solver had
+    already claimed it on Arkade also ends up here: arkd spends it with its own
+    checkpoint transaction, and the solver's claim stands.
+  - A `stuck` row carrying `unrolled_claim` can still have claims in the
+    mempool. For example, the Arkade claim of the other outputs may have failed
+    past the refund deadline. Look up each txid before acting.
 - **Refund sweep needs no keys** and is safe to run anywhere, even many times
   concurrently: the covenant only lets the money go to the client. Push errors
   are retried next sweep. `FORFEIT_CLOSURE_LOCKED` = locktime not yet matured
@@ -659,12 +744,12 @@ the reasons to take one.
   before the rotation (the key is snapshotted per row). If the emulator
   operator announces a rotation, drain: stop quoting, let in-flight swaps
   finish, then resume.
-- **Provider key rotation** (`ARK_MNEMONIC`) is a drain-first operation too:
+- **Provider key rotation** (`rails.arkade.mnemonic`) is a drain-first operation too:
   swaps quoted under the old key refuse to pay (the lockup takes the covenant
   refund back to the client), and a swap already paid can only be claimed by
   the OLD key — keep it until every in-flight swap is terminal.
 - **Gate the emulator at the network level.** This service only ever calls
-  out to `EMULATOR_URL` — it is external Arkade-ecosystem infrastructure,
+  out to `rails.arkade.emulatorUrl` — it is external Arkade-ecosystem infrastructure,
   not something this repo hosts, so there is no application-level fix here.
   The covenant itself is the correctness boundary (the emulator co-signs
   based on script satisfaction, not caller identity), but an emulator open
@@ -702,16 +787,16 @@ the reasons to take one.
   `cli pool --mint` (or console `pool-mint`) merges up to 50 of them into the
   pool's pieces plus one remainder, in one Arkade transaction and at no intent
   fee; repeat until the reason stops saying `consolidating`. With
-  `POOL_AUTO_MINT=true` the watch loop does one pass per lifecycle cadence
+  `rails.arkade.poolAutoMint: true` the watch loop does one pass per lifecycle cadence
   while no swap is in flight.
 
 - **Exposure**: `cli balances` shows current exposed sats vs the cap. The cap
   counts every non-terminal swap including bare quotes, and quote creation is
   metered per requester (5 per 15-minute window, keyed by socket IP on `serve`,
   author pubkey on `relay`) so squatting the cap takes a distributed effort,
-  not one script. Raising `MAX_SWAP_SATS`/`MAX_EXPOSED_SATS` is a deliberate
+  not one script. Raising `limits.maxSwapSats`/`limits.maxExposedSats` is a deliberate
   operator act — and since console overrides may now widen as well as narrow,
-  so is anything with access to the admin port. The env value is a starting
+  so is anything with access to the admin port. The document's value is a starting
   point, not a ceiling; see "Settings changes need a restart".
 - **Known limits** (details in `environment.md`): no server-independent claim
   is implemented yet (a censoring Arkade server after payment is an unmitigated
@@ -805,13 +890,12 @@ overview, newest first, each linking to its detail.
 
 The procedure above is `arkade:BTC->lightning:BTC`, and `read-payment` is that
 corridor's action alone — it asks a Lightning backend what became of a payment,
-which is a question the other three do not have. Their resolve actions:
+which is a question the other two do not have. Their resolve actions:
 
-| corridor                    | actions                                                   |
-| --------------------------- | --------------------------------------------------------- |
-| `lightning:BTC->arkade:BTC` | `receive-refund-now`                                      |
-| `arkade:BTC->onchain:BTC`   | `onchain-refund-now`, `reclaim-l1-htlc`                   |
-| `onchain:BTC->arkade:BTC`   | `onchain-receive-refund-now`, `onchain-receive-claim-now` |
+| corridor                    | actions                                 |
+| --------------------------- | --------------------------------------- |
+| `lightning:BTC->arkade:BTC` | `receive-refund-now`                    |
+| `arkade:BTC->onchain:BTC`   | `onchain-refund-now`, `reclaim-l1-htlc` |
 
 `recheck` and `park-swap` apply everywhere.
 
@@ -858,37 +942,28 @@ cli test-refund 500                # covenant refund path, matures immediately
 All three were last proven on mainnet 2026-08-04: funding `831e51ce…`, claim
 `0937f4a7…`, covenant refund `99935874…`.
 
-### When the solver refuses to boot on an `_ENABLED` value
+### When the solver refuses to boot on an `enabled` value
 
 ```
-EVM_SEND_USDC_ENABLED must be 'true' or 'false', got "FALSE"
+corridors["arkade:BTC->USDC@arbitrum"].enabled: must be a boolean
 ```
 
-The value is trimmed first, and what remains must be exactly lowercase `true` or
-`false` — so `false` is fine, and `FALSE` is not. Nothing remaining is **on**:
-unset, empty and whitespace-only all mean enabled, so a deployment that sets none
-of them serves what it always served. Any other spelling refuses to boot rather
-than being coerced to a boolean, and that is the design: a value silently meaning
-"on" leaves a corridor quoting that its operator believes is dark, and this knob
-exists for the corridor that loses money on every swap.
+`enabled` is a JSON boolean, `true` or `false` unquoted, on every key in
+`corridors`. Omitted is **on**, so a document that sets none serves what it
+always served. A string — `"false"` included — refuses to boot rather than
+being coerced, and that is the design: a value silently meaning "on" leaves a
+corridor quoting that its operator believes is dark, and this field exists for
+the corridor that loses money on every swap. `cli config-from-env` carries an
+old `_ENABLED` value that is not exactly `true` or `false` through as a
+string, so the export refuses it the same way.
 
-The stems that reach this parse, and there are no others:
-
-| stem                                                       | where the name comes from                                                                                                                   |
-| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `LN_SEND`, `LN_RECEIVE`, `ONCHAIN_SEND`, `ONCHAIN_RECEIVE` | fixed — the four BTC corridors                                                                                                              |
-| `EVM_SEND_<SYMBOL>`, `EVM_RECEIVE_<SYMBOL>`                | one pair per token listed in `EVM_TOKENS`, `<SYMBOL>` exactly as spelled there (already uppercase) — e.g. `EVM_SEND_USDC_ENABLED`           |
-| `ASSET_<SYMBOL>_BUY`, `ASSET_<SYMBOL>_SELL`                | one pair per market listed in `ASSET_MARKETS`, `<SYMBOL>` exactly as spelled there (also already uppercase) — e.g. `ASSET_USDA_BUY_ENABLED` |
-
-`ADMIN_RESTART_ENABLED` is **not** one of them. It reads `=== 'true'`, so every
-other value — a typo included — leaves it off, which is the safe direction for a
-knob that only grants a privilege.
+`admin.restartEnabled` is a boolean too, and off unless set `true`.
 
 #### On an EVM stem, that corridor was ON — read it before you correct it
 
 Until #64 the per-token flag parsed as "anything that is not the exact string
 `false`", so `FALSE`, `0`, `no` and a plain `flase` all read as **enabled**. The
-four BTC corridors and the asset RFQ directions were strict already and never had
+three BTC corridors and the asset RFQ directions were strict already and never had
 this window; only `EVM_SEND_<SYMBOL>_ENABLED` and `EVM_RECEIVE_<SYMBOL>_ENABLED`
 did.
 
@@ -946,11 +1021,11 @@ double-collect window on every deployment.
 
 There is a second fix below, and it applies to both rows — but only where the
 offending hint can be CONFIRMED not to name a routable channel: see
-`LN_SEND_HINT_SCID_DENYLIST`. How a scid looks is never that confirmation.
+`rails.lightning.sendHintScidDenylist`. How a scid looks is never that confirmation.
 
-### Denylisting an unroutable route hint (`LN_SEND_HINT_SCID_DENYLIST`)
+### Denylisting an unroutable route hint (`rails.lightning.sendHintScidDenylist`)
 
-`LN_SEND_HINT_SCID_DENYLIST` is a comma-separated list of `short_channel_id`s
+`rails.lightning.sendHintScidDenylist` is a list of `short_channel_id`s
 whose route hints this deployment will not price. A hint carrying one is dropped
 WHOLE — a hint is a path, and one with a hop cut out of the middle is a path that
 does not exist — before either CLTV total is taken, so the gates keep protecting
@@ -1040,10 +1115,11 @@ taking it, or get the rail to cap the route it picks.
    hop carries a node pubkey; that node, or the wallet vendor whose invoice it
    is, is who can answer.
 
-3. **Add it and restart.** The list is read once at startup:
+3. **Add it to `rails.lightning.sendHintScidDenylist` and restart.** The list
+   is read once at startup:
 
    ```
-   LN_SEND_HINT_SCID_DENYLIST=<confirmed scid>,<another confirmed scid>
+   "sendHintScidDenylist": ["<confirmed scid>", "<another confirmed scid>"]
    ```
 
    Entries are 16 lowercase hex characters; anything else refuses to boot rather
@@ -1073,19 +1149,19 @@ when the payment goes out, and nothing on the row records which one quoted it
 payment). A `funded` row has no staleness bound either — the funding deadline is
 checked in `quoted`, not after.
 
-So an `LN_BACKEND` change from a rail that enforces a route-CLTV cap to one that
+So an `rails.lightning.backend` change from a rail that enforces a route-CLTV cap to one that
 does not inherits rows whose deadlines were sized off the BEST route hint,
 because the old rail could decline the worst and the new one declines nothing.
 The gate refuses those rows rather than paying them.
 
 What to check, in order:
 
-1. **Did `LN_BACKEND` change recently?** That is the cause, and it clears on its
+1. **Did `rails.lightning.backend` change recently?** That is the cause, and it clears on its
    own once the rows quoted under the old rail have drained or timed out. Moving
    back to `lnd` until they have is the only way to pay them.
 2. **If not, look for a stalled worker.** On a rail that cannot cap, the quoted
    deadline already reserves the whole funding window, so without a rail change
-   this fires only when a row was PAID more than `LOCKUP_TIMEOUT_SECONDS` after
+   this fires only when a row was PAID more than `rails.lightning.lockupTimeoutSeconds` after
    it was quoted — which the ordinary sweep cannot do, since a tick carries a row
    from `funded` through payment in one pass. The reachable path is crash
    recovery, where the gap between quoting and paying is unbounded.
@@ -1156,7 +1232,7 @@ There are two ways out, and they are different decisions.
 
 **If arkd enforces less than it advertises, shorten the delay.** The advertised
 value is what this service reads, and on mainnet it is not the minimum the server
-checks scripts against. `ARK_UNILATERAL_EXIT_DELAY=<seconds>` makes the solver
+checks scripts against. `rails.arkade.unilateralExitDelay: <seconds>` makes the solver
 believe the real number, and **anything at or below 296448s (~3.43 days) serves
 the corridor with every gate intact** — no risk accepted, gate (d) untouched. The
 cliff is `maxServableExitDelay()`, derived from `MAX_FINAL_CLTV_BLOCKS` rather
@@ -1235,7 +1311,7 @@ is not symmetric with the one it removes:
   under-short one writes a script the server **rejects at spend, not at
   funding** — `INVALID_VTXO_SCRIPT: exit delay is too short` arrives when there
   is already money in it.
-- **It changes every covenant, on all four corridors**, not just Lightning
+- **It changes every covenant, on all three corridors**, not just Lightning
   receive. The send legs work on mainnet today; this moves their scripts too.
 - **Nothing here can check it.** The value being overridden is the only thing
   the server tells us, so there is no truthful comparison available. It is an
@@ -1249,7 +1325,7 @@ On any other deployment, get the number from whoever runs the server rather than
 from an approximation — the margin is thinner than it sounds. A 3.0-day delay
 leaves 246 blocks of headroom, 3.4 days leaves 17, and 3.44 is over the cliff.
 
-**Otherwise, accept the window.** `LN_RECEIVE_ACCEPT_UNILATERAL_GAP=true` is the second way the corridor runs. It
+**Otherwise, accept the window.** `rails.lightning.receiveAcceptUnilateralGap: true` is the second way the corridor runs. It
 drops gate (d) and nothing else: the binding bound falls back to the
 collaborative refund deadline, 8100s or **54 blocks**, which routes without
 comment. Gates (a)–(c) still refuse an expired invoice, an unarmed htlc, a
@@ -1258,14 +1334,14 @@ settle window too little to use, and a committed refund deadline past `E`.
 What you accept, plainly: with the Arkade server **gone or censoring for longer
 than its exit delay** AND `E` already passed, a trader can let the htlc fail back
 to its payer at no cost and only then claim the Arkade payout unilaterally —
-both sides, one preimage. It is bounded by `LN_RECEIVE_MAX_SATS` per swap
-and `MAX_EXPOSED_SATS` in aggregate, which is why `bitcoin` refuses to accept the
+both sides, one preimage. It is bounded by `corridors["lightning:BTC->arkade:BTC"].maxSats` per swap
+and `limits.maxExposedSats` in aggregate, which is why `bitcoin` refuses to accept the
 window unless you have set the former by hand.
 
 **That co-requirement is `bitcoin`-only.** `regtest`, `signet` and `mutinynet`
 accept the window with no cap set, and the reason is that demanding the ceremony
 where nothing is at risk only teaches people to perform it. The exposure on those
-networks is still bounded — by whatever `LN_RECEIVE_MAX_SATS` or the network
+networks is still bounded — by whatever `corridors["lightning:BTC->arkade:BTC"].maxSats` or the network
 profile's own limit already says — but nothing prompts you to choose the number.
 Worth knowing before running a signet or mutinynet deployment against
 real-value assets, where the default cap is the only thing standing behind the
@@ -1284,7 +1360,7 @@ against something the solver could otherwise do.
 The honest summary is that this corridor trusts mainnet arkd not to censor for
 as long as its exit delay. Prefer the shorter delay above where the real number
 is known — it removes the exposure rather than accepting it — and turn this knob
-back off once `ARK_UNILATERAL_EXIT_DELAY` puts the deployment under the cliff.
+back off once `rails.arkade.unilateralExitDelay` puts the deployment under the cliff.
 
 Two more worth knowing before wiring a deployment:
 
@@ -1337,8 +1413,8 @@ cli card <name> > <registry-checkout>/solvers/<network>/<name>.json
 
 The card advertises one corridor market (`BTC/lightning:BTC`, quote side
 bounded by the live limits: the network profile's minimum
-(`packages/solver-core/src/core/networks.ts`, not env-overridable) and the `MAX_SWAP_SATS` cap),
-lists `RELAY_URL` (plus any comma-separated `SOLVER_CARD_RELAYS`) as the RFQ
+(`packages/solver-core/src/core/networks.ts`, not configurable) and the `limits.maxSwapSats` cap),
+lists `relay.url` (plus any `relay.cardRelays`) as the RFQ
 rendezvous, and is BIP340-signed by the wallet identity — the same x-only key
 clients already address relay traffic to, which the registry requires for
 corridor cards.
@@ -1349,7 +1425,7 @@ key change — the old card keeps quoting stale bounds until replaced.
 corridors: arkade-os/solver-registry#13.)
 
 The `relay` command also publishes this same card to its relay as kind 38859
-(`NOSTR_AD_PUBLISH`, `SOLVER_NAME` required). Once wallets read cards from
+(`relay.adPublish`, `name` required). Once wallets read cards from
 relays, the registry needs only a pointer — `cli card <name> --pointer`, the
 card without its markets — filed once; the markets then stay current on the
 relay. Until those wallets are out, keep the full card in the registry: older
@@ -1365,7 +1441,7 @@ Two gotchas:
 - **Submit only after solver-registry PR #12 has merged** — that PR adds
   corridor-market support to the registry's schema and validator; the
   pre-corridor `main` rejects every corridor field this card carries.
-- **`RELAY_URL` must be `wss://` to generate a card**, even where the
+- **`relay.url` must be `wss://` to generate a card**, even where the
   service itself tolerates a plaintext `ws://` relay locally (regtest):
   the registry only accepts TLS relay URLs, so `cli card` refuses them
   up front rather than emitting a card CI would bounce.
@@ -1392,7 +1468,7 @@ hard way. The numbers below are the smallest legal values, not arbitrary ones.
   and it is checked at **settle**, not at startup. A smaller value (1024, say)
   therefore brings the stack up perfectly happily and only fails once funds are
   actually settled. Non-regtest equivalent: `DEFAULT_MIN_BATCH_EXPIRY_SECONDS =
-  86400`.
+86400`.
 - **`COVCLAIMD_IMAGE` must be set explicitly, and at `v0.0.1-rc.5` or above.**
   `regtest.mjs` silently drops covclaimd from the stack when it is unset — no
   error, the container simply is not there. Setting it is not enough on its own:
@@ -1407,7 +1483,7 @@ Three more things that cost time if forgotten:
   fund the other.
 - **A stack rebuild regenerates boltz-lnd's TLS cert and macaroon.** The
   repo-root copies must be re-extracted with the two `docker cp` lines in the
-  LND walkthrough below, or both onchain corridors fail in `beforeAll` with
+  LND walkthrough below, or the onchain corridor fails in `beforeAll` with
   `14 UNAVAILABLE ... self-signed certificate in certificate chain`.
 - **Settle the Arkade wallet before `pnpm test:e2e`.** Unsettled
   (`preconfirmed`) balance makes the per-fork startup balance check racy: it can
@@ -1431,7 +1507,7 @@ Three more things that cost time if forgotten:
 ## Replicating end to end on regtest
 
 Everything above runs against [arkade-regtest](https://github.com/arklabsHQ/arkade-regtest)
-with NO Lightning network: `LN_BACKEND=fake` swaps the Lightning vendor for a
+with NO Lightning network: `rails.lightning.backend: "fake"` swaps the Lightning vendor for a
 file-backed fake that FORGES its own BOLT11 invoices (real, decodable, with
 preimages it chose) and "pays" them by revealing the preimage. Everything
 Arkade-side — funding, the covenant script, the claim co-signed by arkd, the
@@ -1457,7 +1533,10 @@ pnpm install && pnpm build
 node --experimental-eventsource --env-file=.env.regtest scripts/regtest-fund.mjs ../arkade-regtest
 
 # 4. full send E2E: forged invoice -> quote -> fund own derivation -> claim
-cli() { node --experimental-eventsource --env-file=.env.regtest packages/solver-app/dist/cli.js "$@"; }
+#    The CLI reads a config document, made once from the env file (step 6's relay settings included).
+RELAY_PROTOCOL=dev RELAY_URL=ws://localhost:7447 node --experimental-eventsource --env-file=.env.regtest \
+  packages/solver-app/dist/cli.js config-from-env > solver.regtest.json
+cli() { SOLVER_CONFIG=solver.regtest.json node --experimental-eventsource packages/solver-app/dist/cli.js "$@"; }
 cli invoice 1000 | tail -1 | xargs -I{} sh -c 'cli send "{}"'
 
 # 5. covenant refund E2E against the local emulator
@@ -1465,7 +1544,7 @@ cli test-refund 1000
 
 # 6. the purely-outbound flow over the mock relay
 node scripts/mock-relay.mjs &                                # dev broker, :7447
-RELAY_PROTOCOL=dev RELAY_URL=ws://localhost:7447 cli relay & # provider, no ports (mock relay speaks the dev framing)
+cli relay &                                                  # provider, no ports (mock relay speaks the dev framing)
 node scripts/relay-client.mjs <providerPubkey> <bolt11> <refundAddress>
 ```
 
@@ -1483,11 +1562,11 @@ Notes from a real run of the above (all four legs green):
 
 ## Replicating end to end on regtest, with a real Lightning backend (LND)
 
-The `LN_BACKEND=fake` walkthrough above never sends a real Lightning payment
+The `rails.lightning.backend: "fake"` walkthrough above never sends a real Lightning payment
 — it forges and self-settles invoices, so it needs no Lightning node at all and
 never touches arkade-regtest's own LND nodes.
 
-`LN_BACKEND=lnd` removes that limitation: arkade-regtest's `boltz` profile
+`rails.lightning.backend: "lnd"` removes that limitation: arkade-regtest's `boltz` profile
 brings up its own `boltz-lnd` node, already funded on-chain and channeled to
 a second counterparty `lnd` node by the stack's own setup (`lib/setup/boltz.mjs`
 funds it, opens the channel, mines confirmations, and balances it — nothing
@@ -1517,8 +1596,9 @@ pnpm install && pnpm build
 # 4. fund the provider's Arkade wallet (boarding -> faucet -> settle), same as the fake walkthrough
 node --experimental-eventsource --env-file=.env.regtest.lnd scripts/regtest-fund.mjs ../arkade-regtest
 
-# 5. sanity-check the LND connection
-cli() { node --experimental-eventsource --env-file=.env.regtest.lnd packages/solver-app/dist/cli.js "$@"; }
+# 5. sanity-check the LND connection (the CLI reads a config document, made once from the env file)
+node --experimental-eventsource --env-file=.env.regtest.lnd packages/solver-app/dist/cli.js config-from-env > solver.regtest-lnd.json
+cli() { SOLVER_CONFIG=solver.regtest-lnd.json node --experimental-eventsource packages/solver-app/dist/cli.js "$@"; }
 cli balances
 
 # 6. full send E2E: a REAL invoice from the counterparty lnd -> quote -> fund own derivation -> pay over the boltz-lnd<->lnd channel -> claim
@@ -1535,7 +1615,7 @@ reach `claimed` — the same convention the fake-backend walkthrough uses).
 ## Replicating end to end on regtest, onchain leg (`arkade:BTC->onchain:BTC`)
 
 Reuses the SAME LND setup as the section above — `OnchainSendBackend`
-selection follows `LN_BACKEND` exactly (no separate onchain config knob), so
+selection follows `rails.lightning.backend` exactly (no separate onchain config knob), so
 pointing this service at `boltz-lnd` already gives it a real onchain wallet
 (`sendToChainAddress`, `getChainTransactions`, `broadcastChainTransaction` —
 `packages/solver-rails-lnd/src/onchain/lnd/adapter.ts`) with no additional setup beyond steps 1-5 above.
@@ -1591,11 +1671,11 @@ claim/refund paths already use — no separate key material to provision.
 
 ## Corridor e2e suite (`test/e2e`)
 
-The walkthroughs above, as code, for all four corridors. Same stack, same env
+The walkthroughs above, as code, for all three corridors. Same stack, same env
 files, but asserting on the swap ROW rather than on grepped stdout — and
-covering the two RECEIVE corridors, which have no CLI command and no RFQ
-ingress routing to shell out to. For those the test constructs
-`ReceiveSwapService` / `OnchainReceiveSwapService` against real adapters and
+covering the RECEIVE corridor, which has no CLI command and no RFQ
+ingress routing to shell out to. For it the test constructs
+`ReceiveSwapService` against real adapters and
 drives `quote`/`tick` directly, which is what `packages/solver-app/src/cli.ts`'s self-tests do
 internally anyway.
 
@@ -1627,14 +1707,13 @@ cannot quietly run nowhere. After each leg, `scripts/e2e-report.mjs` prints the
 per-file durations and fails on a skipped test or a file that never ran: vitest
 exits 0 for both.
 
-| File                           | Corridor                    | Needs                                        |
-| ------------------------------ | --------------------------- | -------------------------------------------- |
-| `sendLightning.e2e.test.ts`    | `arkade:BTC->lightning:BTC` | arkd, emulator                               |
-| `sendOnchain.e2e.test.ts`      | `arkade:BTC->onchain:BTC`   | arkd, emulator, LND, esplora                 |
-| `receiveLightning.e2e.test.ts` | `lightning:BTC->arkade:BTC` | arkd, emulator                               |
-| `receiveOnchain.e2e.test.ts`   | `onchain:BTC->arkade:BTC`   | arkd, emulator, LND, esplora, a MINING miner |
+| File                           | Corridor                    | Needs                        |
+| ------------------------------ | --------------------------- | ---------------------------- |
+| `sendLightning.e2e.test.ts`    | `arkade:BTC->lightning:BTC` | arkd, emulator               |
+| `sendOnchain.e2e.test.ts`      | `arkade:BTC->onchain:BTC`   | arkd, emulator, LND, esplora |
+| `receiveLightning.e2e.test.ts` | `lightning:BTC->arkade:BTC` | arkd, emulator               |
 
-No covclaimd is required by any of them: on both receive corridors the CLIENT
+No covclaimd is required by any of them: on the receive corridor the CLIENT
 claims the Arkade lockup itself, through the covenant's collaborative claim
 leaf. covclaimd stays supported and optional (`ReceiveServiceDeps.covclaimd`); it
 CAN claim this covenant as of `v0.0.1-rc.5`, which `covclaimdClaim.e2e.test.ts`
@@ -1645,9 +1724,9 @@ covers separately — see "covclaimd" below.
   `test/e2e/support/preflight.ts` so `pnpm test:e2e` stays one command.
   Anything already exported wins, so a one-off override still works.
   `COVCLAIMD_URL` (default `http://localhost:7271`) and `ESPLORA_URL` (default
-  `http://localhost:3000/api`) carry e2e defaults here; `COVCLAIMD_URL` is also
-  a real `packages/solver-app/src/config.ts` setting, so an exported one wires
-  the deployed receive legs to it too — see § covclaimd before you do.
+  `http://localhost:3000/api`) carry e2e defaults here. A deployed solver reads
+  covclaimd from `rails.arkade.covclaimdUrl` instead, and refuses to start with
+  `COVCLAIMD_URL` still exported — see § covclaimd before you set either.
 - **A missing dependency FAILS, it never skips.** A suite that runs this rarely
   and skips quietly is a suite that rots into one that cannot pass at all. The
   preflight probes every dependency and prints the whole stack as a table,
@@ -1662,7 +1741,7 @@ covers separately — see "covclaimd" below.
   arkade-regtest exposes no scriptable Lightning payer to this repo. The
   onchain corridors use the REAL LND wallet, because there the counterparty's
   action (funding an address, broadcasting a claim) is scriptable from here.
-  Everything Arkade-side is real in all four.
+  Everything Arkade-side is real in all three.
 - **Swap stores go to a temp directory**, never the configured `SWAP_DB_PATH`,
   so a run leaves no rows in an operator's own database. The Arkade wallet
   database (`ARK_DB_PATH`) is used as configured — it is the wallet.
@@ -1681,7 +1760,7 @@ covers separately — see "covclaimd" below.
 
 ### covclaimd
 
-Optional, and unwired unless `COVCLAIMD_URL` names one — but the reason has an
+Optional, and unwired unless `rails.arkade.covclaimdUrl` names one — but the reason has an
 expiry date on it now, so read the version before repeating the old conclusion.
 
 **What was observed (regtest, 2026-08-07).** Against a live
@@ -1718,9 +1797,9 @@ note says otherwise.
 
 **Required operator action: leave covclaimd unwired.** There is no safe middle
 setting to pick here, and nothing in the code enforces it: `createServices`
-wires covclaimd whenever `COVCLAIMD_URL` is set
+wires covclaimd whenever `rails.arkade.covclaimdUrl` is set
 (`packages/solver-app/src/ops/services.ts`), so leaving it unwired means
-leaving that variable unset. Every quote path now writes
+leaving that setting unset. Every quote path now writes
 `nonInteractiveParameters: true` unconditionally — all six `insertQuote` call
 sites, with no config gate and no per-swap opt-out — so wiring covclaimd would
 put it against a nine-leaf tree on EVERY newly funded lockup, not on some
@@ -1731,7 +1810,7 @@ gates that either — `assertScriptMatchesRow` guards the solver's own
 derivation, not covclaimd's independent service.
 
 Leaving it unwired costs nothing, which is why it was already unset before this
-leaf existed: no corridor requires covclaimd (above — on both receive corridors
+leaf existed: no corridor requires covclaimd (above — on the receive corridor
 the CLIENT claims its own lockup through the collaborative claim leaf). Rows
 quoted before the leaf shipped keep the eight-leaf shape and stay claimable, so
 it is only newly funded lockups that move out of covclaimd's reach.
@@ -1801,13 +1880,6 @@ Green against a live `arkade-regtest` + `boltz-lnd` stack on 2026-08-07:
   (the solver's own capital back through the emulator-co-signed covenant).
   The happy path is what finally proves the `ConditionWitness`
   `toPSBT()`/`fromPSBT()` round trip against a live Arkade node.
-
-Still failing, for a reason outside the test: `receiveOnchain`. The solver
-never adopts the client's HTLC funding, because `packages/solver-rails-lnd/src/onchain/lnd/adapter.ts`'s
-`outputsForAddress` reports the transaction's `tokens` (amount + fee) as an
-output's `valueSats`, and behind that only sees the LND wallet's own
-transactions. Both are documented at that function; the corridor goes green
-once the adapter grows a per-output, any-address chain view.
 
 Three things worth knowing before a run:
 
@@ -1883,8 +1955,6 @@ recoverable: 235696`, settled back to `available: 233338` (the 2358-sat
   when the recovery path itself refuses — papering over a state you can clear
   is a mistake, papering over one you cannot is just continuing.
 
-- **arkade-regtest's miner can be up but not mining.** Only `receiveOnchain`
-  cares, and it names the miner rather than just timing out.
 - **Renewal pays an intent fee.** arkade-regtest configures
   `ARK_OFFCHAIN_INPUT_FEE="amount * 0.01"` by default (`.env.defaults`), so every
   settlement costs 1% of each input, and this is operator policy rather than a
@@ -1898,15 +1968,15 @@ recoverable: 235696`, settled back to `available: 233338` (the 2358-sat
 
 ## Load test (`test/perf`)
 
-A hundred independent client wallets swapping through one solver, on all four
+A hundred independent client wallets swapping through one solver, on all three
 corridors at once, against the same regtest stack the e2e suite uses. Where the
 corridor e2e tests answer "does this work", this answers "how fast, how many at
 once, and where does the time actually go".
 
 ```bash
-pnpm test:perf                                   # 40 ln-send / 40 ln-receive / 10+10 onchain
+pnpm test:perf                                   # 40 ln-send / 40 ln-receive / 10 onchain
 PERF_LN_SEND=2 PERF_LN_RECEIVE=2 \
-  PERF_ONCHAIN_SEND=0 PERF_ONCHAIN_RECEIVE=0 \
+  PERF_ONCHAIN_SEND=0 \
   pnpm test:perf                                 # a ~25s smoke run
 PERF_CONCURRENCY=10 pnpm test:perf               # same workload, throttled
 ```
@@ -2009,7 +2079,7 @@ a Lightning HTLC deadline against.
 |                     |                                                                                                                                                                                                                                                                  |
 | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Longest base delay  | **503 blocks.** Not BIP68's ceiling: the ladder stacks 8 blocks of solo-refund headroom on top, and a top rung of 512 stops meaning blocks and starts meaning seconds — an ~85-minute window where ~3.5 days was meant. Boot refuses a base above this.          |
-| Override unit       | `ARK_UNILATERAL_EXIT_DELAY` must be expressed in the **server's** unit. Against a block-typed arkd, `4096` looks like "about an hour" and would be read as seconds; boot refuses it and names both values.                                                       |
+| Override unit       | `rails.arkade.unilateralExitDelay` must be expressed in the **server's** unit. Against a block-typed arkd, `4096` looks like "about an hour" and would be read as seconds; boot refuses it and names both values.                                                |
 | Ladder consistency  | All three rungs must count one clock. A mixed ladder compiles and funds — it just inverts which recourse opens first, which is the ordering that lets a funder take money from a claimant holding the preimage. `CovenantSwapScript` refuses it at construction. |
 | Deadline arithmetic | Unchanged, and still entirely in unix seconds. A block delay is converted at 600s/block (`NOMINAL_BLOCK_SECONDS`) wherever it meets a wall clock.                                                                                                                |
 
@@ -2026,7 +2096,7 @@ bitcoin-cli -regtest generatetoaddress 30 "$(bitcoin-cli -regtest getnewaddress)
 bitcoin-cli -regtest generatetoaddress 15 "$(bitcoin-cli -regtest getnewaddress)"
 ```
 
-Set `CHAIN_TIP_ESPLORA_URL` (or rely on `LND_ESPLORA_URL`) so the service can
+Set `rails.onchain.chainTipEsploraUrl` (or rely on `rails.onchain.esploraUrl`) so the service can
 read a height. Without one, a block-typed row makes the orchestrator throw a
 named error rather than guess — guessing "not reached" strands a refund forever,
 and "reached" pushes one the chain will reject.

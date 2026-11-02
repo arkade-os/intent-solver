@@ -20,7 +20,7 @@ export const openRebalanceArkade = async (
   const ctx = await createArkadeContext({
     mnemonic,
     arkServerUrl,
-    databasePath: options.databasePath ?? arkDbPath(),
+    databasePath: options.databasePath ?? arkDbPath(process.env),
     isMainnet: false,
     arkadeHrp: profile.arkadeHrp,
     expectedArkdNetwork: profile.arkdNetwork,

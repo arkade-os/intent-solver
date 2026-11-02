@@ -43,7 +43,7 @@ describe('createServices — one admission control for every corridor', () => {
     // takes — a service missing it silently falls back to a private control,
     // which bounds that corridor alone rather than the house.
     //
-    // SIX, not four. This assertion said FOUR while two more services already
+    // Every service, not just the BTC ones. This assertion said FOUR while two more services already
     // existed, so it kept passing and quietly stopped covering the ones it was
     // written for: the EVM corridors took `totalCommitted` WITHOUT the control,
     // and their quote() did a plain read-then-check. Two concurrent quotes could
@@ -51,8 +51,8 @@ describe('createServices — one admission control for every corridor', () => {
     // under — the cap race, reopened for two corridors and invisible because
     // the number was hard-coded to the corridors that existed when it was written.
     const body = createServicesBody()
-    expect(body.match(/^\s*admission,$/gm) ?? []).toHaveLength(6)
-    expect(body.match(/^\s*totalCommitted,$/gm) ?? []).toHaveLength(6)
+    expect(body.match(/^\s*admission,$/gm) ?? []).toHaveLength(5)
+    expect(body.match(/^\s*totalCommitted,$/gm) ?? []).toHaveLength(5)
   })
 
   it('reads one house-wide committed total, every exposure-bearing store in it', () => {
@@ -76,13 +76,7 @@ describe('createServices — stores follow the resolved layout', () => {
 
   it('opens every store on the shared driver when consolidated', () => {
     const body = createServicesBody()
-    for (const store of [
-      'SwapStore.open',
-      'OnchainSendSwapStore.open',
-      'ReceiveSwapStore.open',
-      'OnchainReceiveSwapStore.open',
-      'AdminStore.open',
-    ]) {
+    for (const store of ['SwapStore.open', 'OnchainSendSwapStore.open', 'ReceiveSwapStore.open', 'AdminStore.open']) {
       const at = body.indexOf(`${store}(`)
       expect(at, `${store} is not opened in createServices`).toBeGreaterThan(-1)
       // `shared ?? layout.x` — the shared connection when there is one, that

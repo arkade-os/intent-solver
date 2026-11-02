@@ -64,3 +64,25 @@ export const claimNow = async (services: Services, id: string, preimageHex?: str
   }
   return { state: 'claiming' }
 }
+
+// {@link claimNow} for the onchain leg; the row stuck mid-claim so the preimage is already on it. Refusing
+// one that carries none (or a mismatched one) is what keeps the `stuck -> claiming` edge sound.
+export const onchainClaimNow = async (services: Services, id: string): Promise<ClaimOutcome> => {
+  const row = await services.onchainStore.get(id)
+  if (row.state !== 'stuck') {
+    throw new Error(`swap ${id} is ${row.state}, not stuck; only a stuck row is recovered by hand`)
+  }
+  if (!row.preimage) {
+    throw new Error(
+      `swap ${id} has no preimage on the row: nothing proves the client revealed P, so this is not a claim to ` +
+        'recover. If the client never claimed the onchain HTLC, the refund paths are onchain-refund-now and reclaim-l1-htlc.',
+    )
+  }
+  if (!preimageMatchesHash(row.preimage, row.paymentHash)) {
+    throw new Error(`the preimage on swap ${id} does not hash to its payment hash (${row.paymentHash})`)
+  }
+  if (!(await services.onchainStore.transition(id, 'stuck', 'claiming', {}))) {
+    throw new Error(`swap ${id} moved out of stuck while being recovered; re-read it before trying again`)
+  }
+  return { state: 'claiming' }
+}

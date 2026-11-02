@@ -16,6 +16,7 @@ import { hex } from '@scure/base'
 import { findLockups, findSweptLockups, refundSwapScript } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { refundSweptSwapScript } from '@arkade-os/solver-arkade/arkade/sweptRefund.js'
 import { covenantScriptFromRow } from '@arkade-os/solver-corridors/send/arkadeOps.js'
+import { EXPOSED } from '@arkade-os/solver-corridors/db/swaps.js'
 import type { Services } from './services.js'
 
 /** A pushed refund, or the reason nothing was pushed. */
@@ -38,6 +39,14 @@ export const refundNow = async (services: Services, id: string): Promise<RefundO
   const row = await services.store.get(id)
   if (!row.refundPkScript || !row.emulatorPubkey) {
     throw new Error(`swap ${id} is not a covenant swap: missing refund destination or emulator key`)
+  }
+  // The gate this bypasses exists because refunding a lockup we may already have paid out
+  // over Lightning pays the client twice. `stuck`/`refused` are safe (the payout failed or
+  // never started); an EXPOSED or `claimed` row is the double payout itself.
+  if (EXPOSED.includes(row.state) || row.state === 'claimed') {
+    throw new Error(
+      `swap ${id} is ${row.state}: the Lightning payout is in flight or done, so refunding the lockup now would pay the client twice — resolve the payment, do not refund`,
+    )
   }
   const script = covenantScriptFromRow(row)
   const pkScript = hex.encode(script.pkScript)
@@ -161,42 +170,4 @@ export const receiveRefundNow = async (services: Services, id: string): Promise<
   const txid = await services.receiveService.refundNow(id)
   if (!txid) return { skipped: NOTHING_AT_SCRIPT }
   return { txid }
-}
-
-/** {@link receiveRefundNow} for the onchain receive leg. Same money, same direction. */
-export const onchainReceiveRefundNow = async (services: Services, id: string): Promise<RefundOutcome> => {
-  if (!services.onchainReceiveService) {
-    throw new Error(
-      'the onchain:BTC->arkade:BTC service is not available; build Services with allCorridors, or wait for LND to answer',
-    )
-  }
-  await services.onchainReceiveStore.get(id)
-  const txid = await services.onchainReceiveService.refundNow(id)
-  if (!txid) return { skipped: NOTHING_AT_SCRIPT }
-  return { txid }
-}
-
-/**
- * NOT a refund — the onchain receive leg's fee-dust retry (TLA+ F4). It lives here
- * because this is where the operator overrides live.
- *
- * A row at `claimed` has already paid the client out; if the fee then made the L1 claim
- * uneconomic, the solver is out the payout and holding a `stuck` row it cannot collect
- * on. The fee rate is the one lever, and this is it. `refused` is a normal outcome
- * carrying both numbers, so an operator knows to come back later.
- *
- * Distinct from {@link onchainReceiveRefundNow} in direction as well as leg: that
- * recovers the solver's Arkade lockup, which on a `claimed` row is already gone.
- */
-export const onchainReceiveClaimNow = async (
-  services: Services,
-  id: string,
-): Promise<{ txid: string } | { refused: string }> => {
-  if (!services.onchainReceiveService) {
-    throw new Error(
-      'the onchain:BTC->arkade:BTC service is not available; build Services with allCorridors, or wait for LND to answer',
-    )
-  }
-  await services.onchainReceiveStore.get(id)
-  return services.onchainReceiveService.claimNow(id)
 }

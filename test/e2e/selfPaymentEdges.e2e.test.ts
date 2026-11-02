@@ -75,6 +75,7 @@ const sendWith = (): SendSwapService =>
     store: sendStore,
     ln,
     arkade: sendOps,
+    network: arkade.network,
     limits: arkade.limits,
     invoicePrefix: arkade.profile.invoicePrefix,
     maxExposedSats: arkade.maxExposedSats,

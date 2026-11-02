@@ -119,11 +119,11 @@ export const pinInputs = (
 }
 
 /**
- * The four corridor stores and nothing else, so `src/cli.ts` can call this during
+ * The three corridor stores and nothing else, so `src/cli.ts` can call this during
  * startup — before a whole `Services` exists — without a cast that would go on
  * compiling if this later reached for a field the caller never passed.
  */
-export type CorridorStores = Pick<Services, 'store' | 'onchainStore' | 'receiveStore' | 'onchainReceiveStore'>
+export type CorridorStores = Pick<Services, 'store' | 'onchainStore' | 'receiveStore'>
 
 /**
  * Sats riding on non-terminal rows in every corridor — money the provider may

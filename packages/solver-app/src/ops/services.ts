@@ -33,15 +33,16 @@ import type { Config } from '../config.js'
 import type { PricingStrategy } from '@arkade-os/solver-core/core/pricing.js'
 import { onchainCorridorPricing, onchainFeeRateSampler } from './onchainPricing.js'
 import { onchainFloatSampler, type FloatSampler } from './floatSampler.js'
-import { claimSpendVsize, fundingTxVsize } from '@arkade-os/solver-rails/onchain/sizing.js'
+import { fundingTxVsize } from '@arkade-os/solver-rails/onchain/sizing.js'
 import { esploraChainTip } from '@arkade-os/solver-rails/onchain/chainTip.js'
 import { createEsploraClient } from '@arkade-os/solver-rails-esplora/esplora.js'
 import type { Corridor } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { SwapStore } from '@arkade-os/solver-corridors/db/swaps.js'
 import { OnchainSendSwapStore } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
+import { OnchainSendMachine } from '@arkade-os/solver-corridors/machines/onchainSend.js'
 import { EvmSendSwapStore } from '@arkade-os/solver-corridors-evm/db/evmSendSwaps.js'
 import { EvmReceiveSwapStore } from '@arkade-os/solver-corridors-evm/db/evmReceiveSwaps.js'
-import { loadEvmChainConfig } from '@arkade-os/solver-rails-evm/evm/config.js'
+import { setLatencyDiagnostics } from '@arkade-os/solver-core/util/diagnostics.js'
 import { createJsonRpc } from '@arkade-os/solver-rails-evm/evm/rpc.js'
 import { createEvmHtlcBackend } from '@arkade-os/solver-rails-evm/evm/backend.js'
 import { probeLogScanRange } from '@arkade-os/solver-rails-evm/evm/logScanProbe.js'
@@ -76,7 +77,6 @@ import { arkadeOpsFromContext } from '@arkade-os/solver-corridors/send/arkadeOps
 import { SendSwapService } from '@arkade-os/solver-corridors/send/orchestrator.js'
 import { OnchainSendSwapService } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
 import { ReceiveSwapStore } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
-import { OnchainReceiveSwapStore } from '@arkade-os/solver-corridors/db/onchainReceiveSwaps.js'
 import { AdminStore, type SwapApprovalRequest } from '../admin/db.js'
 import { createNotifier } from './notify.js'
 import { sinksFrom } from './notifySinks.js'
@@ -96,7 +96,6 @@ import { formatSats, type CorridorStates, type TransitionHook } from '@arkade-os
 import { LN_SEND } from '@arkade-os/solver-corridors/corridors/lnSend.js'
 import { LN_RECEIVE } from '@arkade-os/solver-corridors/corridors/lnReceive.js'
 import { ONCHAIN_SEND } from '@arkade-os/solver-corridors/corridors/onchainSend.js'
-import { ONCHAIN_RECEIVE } from '@arkade-os/solver-corridors/corridors/onchainReceive.js'
 import {
   EVM_SEND_NON_TERMINAL,
   EVM_SEND_EXPOSED,
@@ -109,10 +108,8 @@ import { createOfferRefusalTail, type OfferRefusalRecorder } from '../admin/offe
 import { createRfqRefusalTail, type RfqRefusalRecorder } from '../admin/rfqRefusals.js'
 import { ReceiveSwapService } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import { driveCoupledPeers } from '@arkade-os/solver-corridors/coupledHandoff.js'
-import { OnchainReceiveSwapService } from '@arkade-os/solver-corridors/receive/onchainOrchestrator.js'
 import { createCovclaimdClient } from '@arkade-os/solver-corridors/receive/covclaimd.js'
 import { receiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive/arkadeOps.js'
-import { onchainReceiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive/onchainArkadeOps.js'
 import { json, log, messageOf, nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { watchRail, type RailWatch } from './railWatch.js'
 import { createSerialiser } from '@arkade-os/solver-core/util/serialise.js'
@@ -176,11 +173,10 @@ export interface Services {
   store: SwapStore
   onchainStore: OnchainSendSwapStore
   receiveStore: ReceiveSwapStore
-  onchainReceiveStore: OnchainReceiveSwapStore
   /**
    * The EVM corridors' stores, or NULL when this deployment serves no token.
    *
-   * Nullable rather than always-open, unlike the four BTC stores. Those are
+   * Nullable rather than always-open, unlike the three BTC stores. Those are
    * opened unconditionally because every deployment has them; opening these
    * unconditionally would create two SQLite files on every solver that has
    * never heard of an ERC20, which is a visible change to a deployment that
@@ -194,7 +190,7 @@ export interface Services {
   /**
    * The EVM corridors' orchestrators, or NULL on a deployment serving no token.
    *
-   * `null` rather than `undefined`, unlike the four BTC services above. Those
+   * `null` rather than `undefined`, unlike the three BTC services above. Those
    * are optional because each is independently switched off by
    * `corridorEnabled`; these two exist or do not TOGETHER, on whether a chain
    * is configured at all — the same condition their stores turn on. Matching
@@ -269,7 +265,7 @@ export interface Services {
    *
    * Nullable together, because they are one wallet (@see ops/rails.ts) and one
    * knob selects them — `config.lnBackend === null`, which `loadConfig` permits
-   * only while all four BTC corridors are disabled. Nothing that runs on such a
+   * only while all three BTC corridors are disabled. Nothing that runs on such a
    * deployment legitimately reads either; `requireLn`/`requireOnchain` are what
    * an accidental read gets, and they say which deployment this is rather than
    * reporting a zero balance.
@@ -285,14 +281,13 @@ export interface Services {
    * specific operator actions (`reclaimOnchainHtlc`, `settleRefundDeposits`,
    * `refundNow`), and those are per-corridor by nature rather than something
    * the registry generalises. The registry below is what every CORRIDOR-AGNOSTIC
-   * caller uses; these four are the deliberate exception, not a leftover.
+   * caller uses; these three are the deliberate exception, not a leftover.
    */
   service?: SendSwapService
   onchainService?: OnchainSendSwapService
   /** Exposed so `railWithdraw` can drop it: that spend leaves no row to count. */
   onchainFloat?: FloatSampler
   receiveService?: ReceiveSwapService
-  onchainReceiveService?: OnchainReceiveSwapService
   /**
    * The corridors this deployment SERVES, keyed by pair.
    *
@@ -428,10 +423,6 @@ export const openReportReaders = async (
     const store = track('store', await SwapStore.open(swapFile))
     const onchainStore = track('onchainStore', await OnchainSendSwapStore.open(shared ?? layout.onchainSend))
     const receiveStore = track('receiveStore', await ReceiveSwapStore.open(shared ?? layout.receive))
-    const onchainReceiveStore = track(
-      'onchainReceiveStore',
-      await OnchainReceiveSwapStore.open(shared ?? layout.onchainReceive),
-    )
     const servesEvm = config.evmCorridors.length > 0
     const evmSendStore = servesEvm ? track('evmSendStore', await EvmSendSwapStore.open(swapFile)) : null
     const evmReceiveStore = servesEvm ? track('evmReceiveStore', await EvmReceiveSwapStore.open(swapFile)) : null
@@ -454,7 +445,6 @@ export const openReportReaders = async (
       store,
       onchainStore,
       receiveStore,
-      onchainReceiveStore,
       ...(evmSendStore ? { evmSendStore } : {}),
       ...(evmReceiveStore ? { evmReceiveStore } : {}),
       evmCorridors: policy.evmCorridors,
@@ -489,11 +479,16 @@ export const openReportReaders = async (
  * sweep, same ingress, same status route. They are not subject to
  * `corridorEnabled`, which is keyed by the closed union of built-in pairs — a
  * consumer passes the corridors it wants served.
+ *
+ * `opts.rebalance: 'active'` makes this process the one that drives wallet rebalancing; omitted, it only
+ * reads that state. The daemon commands pass it, and so must an embedding host that wants rebalancing.
  */
 export const createServices = async (
   config: Config,
-  opts?: { allCorridors?: boolean; corridors?: readonly CorridorPlugin[] },
+  opts?: { allCorridors?: boolean; corridors?: readonly CorridorPlugin[]; rebalance?: 'active' },
 ): Promise<Services> => {
+  setLatencyDiagnostics(config.latencyDiagnostics)
+  const settingPath = (id: string): string => config.configPaths?.get(id) ?? id
   // One file on a fresh install, the five it already has on an existing one —
   // see src/db/layout.ts for why nothing ever moves rows between them.
   const layout = resolveDbLayout(config.swapDbPath)
@@ -513,8 +508,7 @@ export const createServices = async (
   const store = await SwapStore.open(swapFile)
   const onchainStore = await OnchainSendSwapStore.open(shared ?? layout.onchainSend)
   const receiveStore = await ReceiveSwapStore.open(shared ?? layout.receive)
-  const onchainReceiveStore = await OnchainReceiveSwapStore.open(shared ?? layout.onchainReceive)
-  // NOT opened unconditionally, unlike the four above. A deployment serving no
+  // NOT opened unconditionally, unlike the three above. A deployment serving no
   // token would otherwise get EVM tables it never asked for, which is a visible
   // change for a solver that has never heard of an ERC20. One store per
   // DIRECTION rather than per token — `token_address` is a column.
@@ -609,15 +603,6 @@ export const createServices = async (
     LN_RECEIVE.states,
     satsTerms(async (id) => {
       const row = await receiveStore.get(id)
-      return { amountSats: row.amountSats, payoutSats: row.payoutSats }
-    }),
-  )
-  announceOutcomes(
-    onchainReceiveStore,
-    ONCHAIN_RECEIVE.pair,
-    ONCHAIN_RECEIVE.states,
-    satsTerms(async (id) => {
-      const row = await onchainReceiveStore.get(id)
       return { amountSats: row.amountSats, payoutSats: row.payoutSats }
     }),
   )
@@ -736,15 +721,15 @@ export const createServices = async (
   if (policy.approvalThresholdSats !== null || assetThresholds.size > 0) {
     const ungated = ungatedAssetSymbols(config.assetRfqTokens)
     if (ungated.length > 0) {
-      log(`approval gate: no ASSET_<SYMBOL>_APPROVAL_THRESHOLD for ${ungated.join(', ')} — payouts in them are ungated`)
+      log(`approval gate: no approvalThreshold in assets for ${ungated.join(', ')} — payouts in them are ungated`)
     }
     const offerAssets = [...new Set(policy.offerMarkets.flatMap((m) => [m.a, m.b]))].filter(
       (id): id is string => id !== null && !assetThresholds.has(id),
     )
     if (offerAssets.length > 0) {
       log(
-        `approval gate: OFFER_MARKETS pays ${offerAssets.join(', ')} with no threshold — ` +
-          'name the asset in ASSET_MARKETS to give it a symbol one can be set under',
+        `approval gate: offers.markets pays ${offerAssets.join(', ')} with no threshold — ` +
+          'list the asset in assets to give it an approvalThreshold',
       )
     }
   }
@@ -783,19 +768,23 @@ export const createServices = async (
    * NO FEED PROBE. Whether the URL answers today is deliberately not a boot
    * condition: it was checked when the market was written, the runtime already
    * fails closed on a read that fails, and making a solver's startup depend on a
-   * third party's uptime would take four unrelated BTC corridors down with a
+   * third party's uptime would take three unrelated BTC corridors down with a
    * price API. @see admin/routes/markets.ts
    */
   const marketRows = await adminStore.listMarkets()
-  for (const line of marketServingDivergence(marketRows, {
-    offerMarkets: config.offerMarkets,
-    tokens: config.assetRfqTokens,
-  })) {
+  for (const line of marketServingDivergence(
+    marketRows,
+    {
+      offerMarkets: config.offerMarkets,
+      tokens: config.assetRfqTokens,
+    },
+    config.configPaths,
+  )) {
     log(`market serving divergence — ${line}`)
   }
   const assetMarkets = assetMarketPolicy(marketRows)
   // NULL exactly when `config.lnBackend` is, which `loadConfig` permits only
-  // while all four BTC corridors are disabled — a deployment serving EVM or
+  // while all three BTC corridors are disabled — a deployment serving EVM or
   // asset flow alone, which has no use for a Lightning node and is not made to
   // stand one up. Nothing below constructs a BTC corridor without it.
   const rail =
@@ -806,14 +795,7 @@ export const createServices = async (
           assertNoPendingOutgoing: async () => {
             const pending =
               (await store.countByStates(['funded', 'paying', 'paid', 'claiming', 'stuck'])) +
-              (await onchainStore.countByStates([
-                'funded',
-                'funding_onchain',
-                'awaiting_claim',
-                'claiming',
-                'refunding_onchain',
-                'stuck',
-              ]))
+              (await onchainStore.countByStates(OnchainSendMachine.where('outgoing')))
             if (pending > 0) throw new Error('cannot initialize wallet budget with pending outgoing swaps')
           },
         })
@@ -969,7 +951,7 @@ export const createServices = async (
   // holds. EVM and asset read direct — their readers narrow per token and pair.
   const totalCommitted = async (): Promise<number> => {
     const totals = await Promise.all([
-      committedAcrossCorridors(readerSetFromDeps({ store, onchainStore, receiveStore, onchainReceiveStore })),
+      committedAcrossCorridors(readerSetFromDeps({ store, onchainStore, receiveStore })),
       evmSendStore?.committedSats() ?? 0,
       evmReceiveStore?.committedSats() ?? 0,
       assetRfqStore.committedSats(),
@@ -981,7 +963,7 @@ export const createServices = async (
    * Whether to build a BTC corridor's service — its own switch, and a rail to
    * run on.
    *
-   * The rail half is not a second policy: all four take both their legs from it,
+   * The rail half is not a second policy: all three take both their legs from it,
    * so with `LN_BACKEND` unset there is nothing to construct them against.
    * `opts.allCorridors` deliberately does NOT override that — it exists so a
    * one-shot command can unwind rows of a corridor an operator switched off,
@@ -1082,6 +1064,7 @@ export const createServices = async (
         sweepConcurrency: config.sweepConcurrency,
         lockupTimeout: config.lockupTimeoutSeconds,
         sendHintScidDenylist: config.sendHintScidDenylist,
+        network: config.network,
         approvalGate: gateFor('arkade:BTC->lightning:BTC'),
         // Every other corridor's store, so a hash that is live anywhere is
         // spoken for here too.
@@ -1093,9 +1076,7 @@ export const createServices = async (
         // at once, the loop would re-refuse every coupling. In neither, the
         // duplicate check against that store would silently disappear, so with
         // coupling off it stays here, exactly as it always was.
-        peerStores: selfPaymentCoupling
-          ? [onchainStore, onchainReceiveStore]
-          : [onchainStore, receiveStore, onchainReceiveStore],
+        peerStores: selfPaymentCoupling ? [onchainStore] : [onchainStore, receiveStore],
         // Recognise-and-collect, wired as one unit: the store that spots a
         // coupling, plus the two indexer reads that later recover `P` from the
         // client's claim on our payout. Half of this would mean accepting
@@ -1169,7 +1150,7 @@ export const createServices = async (
       signer: { sign: (tx, inputIndexes) => arkade.identity.sign(tx, inputIndexes) },
       refundDestinationScript: onchainRefundDestinationScript,
       approvalGate: gateFor('arkade:BTC->onchain:BTC'),
-      peerStores: [store, receiveStore, onchainReceiveStore],
+      peerStores: [store, receiveStore],
       feeRate: onchainFeeRate ?? undefined,
       float: onchainFloat && {
         read: () => onchainFloat.read(),
@@ -1217,6 +1198,8 @@ export const createServices = async (
         ln: rail!.ln,
         backendName: config.lnBackend ?? undefined,
         arkade: receiveOps,
+        // LND reads a third party's spend through Esplora alone; without one that read throws every tick.
+        ...(config.lnBackend === 'lnd' && !config.lnd?.esploraUrl ? {} : { onchain: rail!.onchain }),
         limits: policy.corridorLimits['lightning:BTC->arkade:BTC'],
         fee: policy.corridorFees['lightning:BTC->arkade:BTC'],
         // From `config`, not `policy`: this is not a console-editable knob and
@@ -1233,9 +1216,7 @@ export const createServices = async (
         // with coupling on, a live send row on our hash is the coupled leg,
         // not a conflict, and refusing it here would kill the flow at the
         // quote that creates it.
-        peerStores: selfPaymentCoupling
-          ? [onchainStore, onchainReceiveStore]
-          : [store, onchainStore, onchainReceiveStore],
+        peerStores: selfPaymentCoupling ? [onchainStore] : [store, onchainStore],
         // Gated on the SAME value the send corridor's `coupling` is, so the
         // pay half can never be wired without the collect half.
         coupledSendStore: selfPaymentCoupling ? store : undefined,
@@ -1249,74 +1230,17 @@ export const createServices = async (
       sendStore: store,
       receiveStore,
       onError: (error) => log('coupled peer tick failed:', error instanceof Error ? error.message : String(error)),
-      onTiming:
-        process.env.SOLVER_LATENCY_DIAGNOSTICS === '1'
-          ? (sample) => log('coupled_handoff_timing', json(sample))
-          : undefined,
+      onTiming: config.latencyDiagnostics ? (sample) => log('coupled_handoff_timing', json(sample)) : undefined,
     })
   }
 
-  // Its own address, not the send leg's refund destination. The two are the
-  // same wallet and reusing one script would work, but they are opposite flows
-  // — money coming IN off a client's HTLC versus money coming BACK off our own
-  // — and giving each its own output keeps them separable in the wallet's
-  // history when reconciling. Resolved once at startup, like the refund
-  // destination above, and hoisted for the same reason: it is the claim
-  // spend's only variable-size field, so this corridor's cost depends on it.
-  let onchainReceiveService: OnchainReceiveSwapService | undefined
-  // Read at boot like every other Arkade call: only the LND half below may wait for the node.
-  const onchainReceiveOps = enabled('onchain:BTC->arkade:BTC')
-    ? await onchainReceiveArkadeOpsFromContext(arkade, { url: config.emulatorUrl, pubkey: emulatorInfo.signerPubkey })
-    : undefined
-  let onchainClaimAddress: string | undefined
-  const buildOnchainReceive = async (): Promise<void> => {
-    if (!enabled('onchain:BTC->arkade:BTC') || !onchainReceiveOps || onchainReceiveService) return
-    onchainClaimAddress ??= await rail!.onchain.newReceiveAddress()
-    const onchainClaimDestinationScript = OutScript.encode(
-      Address(ONCHAIN_NETWORKS[config.network]).decode(onchainClaimAddress),
-    )
-    onchainReceiveService = new OnchainReceiveSwapService({
-      quoteLimiter,
-      store: onchainReceiveStore,
-      onchain: rail!.onchain,
-      arkade: onchainReceiveOps,
-      limits: policy.corridorLimits['onchain:BTC->arkade:BTC'],
-      maxBandWidthSats: policy.onchainReceiveMaxBandSats,
-      bandBelowShare: policy.onchainReceiveBandBelowShare,
-      fee: policy.corridorFees['onchain:BTC->arkade:BTC'],
-      // Here the CLIENT funds the HTLC and the solver claims it, so the
-      // transaction this corridor pays for is that claim — which
-      // `solver-rails` sizes exactly, down to this deployment's own
-      // destination script.
-      pricing: onchainPricingFor(
-        'onchain:BTC->arkade:BTC',
-        claimSpendVsize({
-          network: ONCHAIN_NETWORKS[config.network],
-          destinationScript: onchainClaimDestinationScript,
-        }),
-      ),
-      network: config.network,
-      maxExposedSats: policy.maxExposedSats,
-      totalCommitted,
-      admission,
-      signer: { sign: (tx, inputIndexes) => arkade.identity.sign(tx, inputIndexes) },
-      claimDestinationScript: onchainClaimDestinationScript,
-      peerStores: [store, onchainStore, receiveStore],
-      covclaimd,
-    })
-    wireTickErrors(onchainReceiveService, 'onchain receive tick')
-  }
-
-  // Both onchain legs need an LND address, and `createChainAddress` is a write with no deadline: asked only of a
-  // node that just answered, else a half-open one would hang boot. Missing legs are built when it next answers.
-  const onchainLegsMissing = (): boolean =>
-    (enabled('arkade:BTC->onchain:BTC') && !onchainService) ||
-    (enabled('onchain:BTC->arkade:BTC') && !onchainReceiveService)
+  // The onchain send leg needs an LND address, and `createChainAddress` is a write with no deadline: asked only of a
+  // node that just answered, else a half-open one would hang boot. A missing leg is built when it next answers.
+  const onchainLegsMissing = (): boolean => enabled('arkade:BTC->onchain:BTC') && !onchainService
   let onchainLegsError: string | undefined
   const buildOnchainLegs = async (): Promise<void> => {
     try {
       await buildOnchainSend()
-      await buildOnchainReceive()
     } catch (error) {
       const message = messageOf(error)
       if (message !== onchainLegsError) log(`onchain corridors wait for LND: ${message}`)
@@ -1326,7 +1250,7 @@ export const createServices = async (
   if (railUpAtBoot) await buildOnchainLegs()
   else if (onchainLegsMissing()) log('onchain corridors wait for LND: it did not answer at boot')
 
-  // The EVM corridors. BOTH LEGS OR NEITHER, unlike the four above: each of
+  // The EVM corridors. BOTH LEGS OR NEITHER, unlike the three above: each of
   // those is switched off independently by `corridorEnabled`, whereas these two
   // share one chain, one contract, one signing key and — critically — one nonce
   // sequence, so there is nothing to turn off separately.
@@ -1338,10 +1262,10 @@ export const createServices = async (
   // money locked against a corridor this process cannot drive. That is the same
   // failure `evm/config.ts` refuses one level down — "a half-configured chain
   // must not start, because the missing half is always a safety knob."
-  const evmChain = loadEvmChainConfig()
+  const evmChain = config.evmChain
   if (servesEvm && evmChain === null) {
     throw new Error(
-      'EVM_TOKENS names corridors but EVM_RPC_URL is not set — ' +
+      `assets lists erc20 tokens but ${settingPath('EVM_RPC_URL')} is not set — ` +
         'the ingress would quote swaps no orchestrator exists to drive',
     )
   }
@@ -1364,7 +1288,7 @@ export const createServices = async (
     })
     if (probe.kind === 'range_rejected') {
       throw new Error(
-        `EVM_LOG_SCAN_RANGE=${evmChain.logScanRange} is wider than ${endpointHost(evmChain.rpcUrl)} allows: ` +
+        `${settingPath('EVM_LOG_SCAN_RANGE')} ${evmChain.logScanRange} is wider than ${endpointHost(evmChain.rpcUrl)} allows: ` +
           `${probe.message}. Lower it to the endpoint's cap; too low only costs round trips, ` +
           'too high loses claims silently.',
       )
@@ -1372,18 +1296,20 @@ export const createServices = async (
     if (probe.kind === 'inconclusive') {
       // NOT fatal: a node that blinked is not evidence about the setting.
       log(
-        `evm: could not verify EVM_LOG_SCAN_RANGE=${evmChain.logScanRange} against ${endpointHost(evmChain.rpcUrl)}`,
+        `evm: could not verify ${settingPath('EVM_LOG_SCAN_RANGE')} ${evmChain.logScanRange} against ${endpointHost(evmChain.rpcUrl)}`,
         probe.message,
       )
     } else if (probe.blocks < BigInt(evmChain.logScanRange)) {
-      log(`evm: EVM_LOG_SCAN_RANGE=${evmChain.logScanRange} unproven — the chain is only ${probe.blocks} blocks long`)
+      log(
+        `evm: ${settingPath('EVM_LOG_SCAN_RANGE')} ${evmChain.logScanRange} unproven — the chain is only ${probe.blocks} blocks long`,
+      )
     }
     // Boot only fails fast; every timelock read re-checks, so an inconclusive probe cannot let a mismatch through.
     const clock = await probeTimelockClock(rpc)
     if (clock.kind === 'distinct' && evmChain.timelockCadence === null) {
       throw new Error(
         `${endpointHost(evmChain.rpcUrl)} is at block ${clock.height} but contracts read block.number ${clock.clock}: ` +
-          'set EVM_TIMELOCK_FASTEST_SECONDS_PER_BLOCK and EVM_TIMELOCK_SLOWEST_SECONDS_PER_BLOCK for that clock',
+          `set ${settingPath('EVM_TIMELOCK_FASTEST_SECONDS_PER_BLOCK')} and ${settingPath('EVM_TIMELOCK_SLOWEST_SECONDS_PER_BLOCK')} for that clock`,
       )
     }
     if (clock.kind === 'inconclusive') {
@@ -1414,7 +1340,9 @@ export const createServices = async (
       // unmined until the base fee falls — an operator needs to know that from
       // the log rather than infer it from swaps that stop settling.
       onCappedByPolicy: (call) =>
-        log(`evm fee capped by policy on a call to ${call.to} — raise EVM_MAX_FEE_PER_GAS_CEILING or wait`),
+        log(
+          `evm fee capped by policy on a call to ${call.to} — raise ${settingPath('EVM_MAX_FEE_PER_GAS_CEILING')} or wait`,
+        ),
     })
     // Keyed by token address: one store per DIRECTION serves every token, so one
     // service does too. @see EvmSendServiceDeps.markets
@@ -1465,7 +1393,7 @@ export const createServices = async (
       approvalGate: gateFor('arkade:BTC->ethereum'),
       maxExposedSats: policy.maxExposedSats,
       totalCommitted,
-      // The SAME control the other four corridors hold. A private one would
+      // The SAME control the other three corridors hold. A private one would
       // bound this corridor alone, which is not what the cap means.
       admission,
       markets: marketsFor('send'),
@@ -1480,7 +1408,7 @@ export const createServices = async (
         quoteValiditySeconds: evmChain.quoteValiditySeconds,
         orderMarginSeconds: evmChain.orderMarginSeconds,
       },
-      peerStores: [store, onchainStore, receiveStore, onchainReceiveStore],
+      peerStores: [store, onchainStore, receiveStore],
       // The late-lock watch reports here too; a bare log line gave it no dedup and no `failing` panel.
       onTickError: tickErrorLogger('evm send tick'),
     })
@@ -1509,10 +1437,10 @@ export const createServices = async (
       },
       maxExposedSats: policy.maxExposedSats,
       totalCommitted,
-      // The SAME control the other four corridors hold. A private one would
+      // The SAME control the other three corridors hold. A private one would
       // bound this corridor alone, which is not what the cap means.
       admission,
-      peerStores: [store, onchainStore, receiveStore, onchainReceiveStore],
+      peerStores: [store, onchainStore, receiveStore],
       onTickError: tickErrorLogger('evm receive tick'),
     })
   }
@@ -1539,8 +1467,6 @@ export const createServices = async (
       onchainStore,
       receiveService,
       receiveStore,
-      onchainReceiveService,
-      onchainReceiveStore,
       evmSendService,
       evmSendStore,
       evmReceiveService,
@@ -1583,13 +1509,12 @@ export const createServices = async (
   const completeOnchainLegs = (): void => {
     if (onchainLegsBuilding || !onchainLegsMissing()) return
     onchainLegsBuilding = true
-    const had = { send: onchainService, receive: onchainReceiveService }
+    const had = { send: onchainService }
     buildOnchainLegs()
       .then(() => {
-        if (onchainService === had.send && onchainReceiveService === had.receive) return
+        if (onchainService === had.send) return
         return replaceQueue(async () => {
           services.onchainService = onchainService
-          services.onchainReceiveService = onchainReceiveService
           services.corridors.replace([
             ...setsFrom(services.policy, services.assetRfqMarkets, readableMarkets).corridors,
           ])
@@ -1681,7 +1606,6 @@ export const createServices = async (
     store,
     onchainStore,
     receiveStore,
-    onchainReceiveStore,
     evmSendStore,
     evmReceiveStore,
     evmSendService,
@@ -1710,7 +1634,6 @@ export const createServices = async (
     service,
     onchainService,
     receiveService,
-    onchainReceiveService,
     corridors,
     readers,
     // ABSENT with no sink configured, which is what spares an unconfigured
@@ -1754,7 +1677,6 @@ export const createServices = async (
         ['store', () => store.close()],
         ['onchainStore', () => onchainStore.close()],
         ['receiveStore', () => receiveStore.close()],
-        ['onchainReceiveStore', () => onchainReceiveStore.close()],
         ['offerStore', () => offerStore?.close()],
         ['assetRfqStore', () => assetRfqStore.close()],
         ['adminStore', () => adminStore.close()],
@@ -1779,23 +1701,36 @@ export const createServices = async (
     const rebalancePolicy =
       storedPolicy === undefined ? disabledRebalancePolicy() : validateRebalancePolicy(JSON.parse(storedPolicy))
     const rebalanceStore = await RebalanceStore.open(swapFile)
-    const source = await createArkadeRebalanceSource(services, swapFile, inventoryAdmission)
-    runtimeRebalance = await RebalanceService.create({
-      store: rebalanceStore,
-      backend: rail.rebalance,
-      source,
-      policy: rebalancePolicy,
-      savePolicy: async (next) => adminStore.setOverride('REBALANCE_POLICY', JSON.stringify(next)),
-    })
+    // Only the long-lived daemon drives rebalancing; a one-shot CLI shares this db but must not
+    // reserve coins or rewrite in-flight rows (both process-local) under the running daemon.
+    const active = opts?.rebalance === 'active'
+    const source = await createArkadeRebalanceSource(
+      services,
+      swapFile,
+      inventoryAdmission,
+      active ? 'active' : 'passive',
+    )
+    runtimeRebalance = await RebalanceService.create(
+      {
+        store: rebalanceStore,
+        backend: rail.rebalance,
+        source,
+        policy: rebalancePolicy,
+        savePolicy: async (next) => adminStore.setOverride('REBALANCE_POLICY', JSON.stringify(next)),
+      },
+      active ? 'active' : 'passive',
+    )
     services.rebalance = runtimeRebalance
-    const tickRebalance = (): void => {
-      void runtimeRebalance
-        ?.tick()
-        .catch((error) => log('rebalance pass failed:', error instanceof Error ? error.message : String(error)))
+    if (active) {
+      const tickRebalance = (): void => {
+        void runtimeRebalance
+          ?.tick()
+          .catch((error) => log('rebalance pass failed:', error instanceof Error ? error.message : String(error)))
+      }
+      rebalanceTimer = setInterval(tickRebalance, 60_000)
+      rebalanceTimer.unref()
+      tickRebalance()
     }
-    rebalanceTimer = setInterval(tickRebalance, 60_000)
-    rebalanceTimer.unref()
-    tickRebalance()
   }
   return services
 }

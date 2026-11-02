@@ -108,12 +108,13 @@ export const REFUSAL_EXPLANATIONS: Record<RefusalReason, RefusalExplanation> = {
   // --- quote-time gates on the send leg ---
   wrong_network: {
     meaning: 'The invoice is for a different network than this deployment serves.',
-    whatToDo: 'Check SWAP_NETWORK matches the invoices you expect. Otherwise nothing — this is the gate working.',
+    whatToDo:
+      'Check `network` in the config matches the invoices you expect. Otherwise nothing — this is the gate working.',
   },
   amount_out_of_range: {
     meaning: 'The amount falls outside the configured per-swap limits for this corridor.',
     whatToDo:
-      'Nothing, unless you meant to serve it — then widen the corridor limits (see MAX_SWAP_SATS and the per-corridor overrides).',
+      'Nothing, unless you meant to serve it — then widen the corridor limits (see `limits.maxSwapSats` and the per-corridor overrides).',
   },
   zero_amount_invoice: {
     meaning:
@@ -167,7 +168,7 @@ export const REFUSAL_EXPLANATIONS: Record<RefusalReason, RefusalExplanation> = {
       'Deposit into the rail. Unlike `provider_at_capacity` there is no cap to relax: the corridor keeps refusing until spendable balance covers this payout and those already owed.',
   },
   provider_at_capacity: {
-    meaning: 'Serving this swap would push total exposure across live swaps past MAX_EXPOSED_SATS.',
+    meaning: 'Serving this swap would push total exposure across live swaps past `limits.maxExposedSats`.',
     whatToDo:
       'Nothing immediately. If it is frequent, either the cap is too tight or swaps are not clearing — check for a backlog of non-terminal rows.',
   },
@@ -215,13 +216,13 @@ export const REFUSAL_EXPLANATIONS: Record<RefusalReason, RefusalExplanation> = {
     meaning:
       'What is left before the refund deadline can no longer hold an HTLC the payee is entitled to keep alive, so there is no CLTV budget left to route within. Usually means the swap sat unfunded for a long time before being funded.',
     whatToDo:
-      'Nothing. Paying here is precisely the case where the outbound HTLC could outlive the client refund and both sides get taken. If it is frequent, LOCKUP_TIMEOUT_SECONDS may be set too close to the safety margin.',
+      'Nothing. Paying here is precisely the case where the outbound HTLC could outlive the client refund and both sides get taken. If it is frequent, `rails.lightning.lockupTimeoutSeconds` may be set too close to the safety margin.',
   },
   uncapped_route_deadline_too_short: {
     meaning:
       'This deployment’s Lightning rail cannot cap the CLTV of the route it picks — its pay call exposes no max-CLTV control — and the refund deadline stored on the swap cannot contain the longest HTLC such a route could build. Not the same as cltv_budget_too_short: there the deadline was sized correctly for this rail and the clock ran down; here the deadline was never sized for the rail now paying it. The ordinary cause is a deployment moved from LND to an uncapped rail with rows already quoted and funded — LND sizes the deadline off the best route hint because it can decline the worst, and an uncapped rail can decline nothing. A row funded more than REFUND_SAFETY_MARGIN before payment, typically after a crash, reaches it too.',
     whatToDo:
-      'Nothing for the swap itself — it refunds, and paying it is exactly the case where the outbound HTLC outlives the client refund and both sides get taken. If it appeared right after an LN_BACKEND change, that is the cause and it clears once the rows quoted under the old rail have drained; the alternative is to move back to LND until they have. Seeing it on a settled deployment means swaps are being funded long after they were quoted — check for a stalled worker.',
+      'Nothing for the swap itself — it refunds, and paying it is exactly the case where the outbound HTLC outlives the client refund and both sides get taken. If it appeared right after a `rails.lightning.backend` change, that is the cause and it clears once the rows quoted under the old rail have drained; the alternative is to move back to LND until they have. Seeing it on a settled deployment means swaps are being funded long after they were quoted — check for a stalled worker.',
   },
 
   // --- receive-leg funding gates ---

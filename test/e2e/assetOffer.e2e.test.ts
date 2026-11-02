@@ -38,7 +38,7 @@ import { poll } from '@arkade-os/solver-core/util/poll.js'
 import { assetMarketPolicy, DEFAULT_SERVING } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { AssetOfferService, parseAssetMarkets } from '@arkade-os/solver-app/ops/assetOffers.js'
 import { createServices } from '@arkade-os/solver-app/ops/services.js'
-import { loadConfig } from '@arkade-os/solver-app/config.js'
+import { configFromKnobs } from '@arkade-os/solver-app/config.js'
 import { marketCapability } from '@arkade-os/solver-app/admin/marketCapability.js'
 import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
 import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
@@ -427,7 +427,7 @@ describe('e2e arkade offers — what OFFER_MARKETS actually builds', () => {
     setEnv('OFFER_MARKETS', offerMarkets)
     setEnv('OFFER_MIN_FILL_AMOUNT', '1')
     setEnv('OFFER_MAX_FILL_AMOUNT', '1000000000000')
-    return createServices(loadConfig())
+    return createServices(configFromKnobs(process.env))
   }
 
   it(

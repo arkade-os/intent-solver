@@ -159,7 +159,7 @@ export const createEvmHtlcBackend = (deps: EvmHtlcBackendDeps): EvmHtlcBackend =
       if (timelockClockIsHeight && clock !== tip)
         throw new Error(
           `block.number ${clock} differs from height ${tip}: ` +
-            'set EVM_TIMELOCK_FASTEST_SECONDS_PER_BLOCK and EVM_TIMELOCK_SLOWEST_SECONDS_PER_BLOCK for this chain',
+            'set timelockFastestSecondsPerBlock and timelockSlowestSecondsPerBlock in rails.evm for this chain',
         )
       return asTimelockHeight(clock)
     },

@@ -11,7 +11,7 @@
 //
 // `--experimental-eventsource` is required for the same reason regtest-settle
 // gives: without it the SDK's ContractWatcher throws out of its listen loop.
-import { loadConfig } from '../packages/solver-app/dist/config.js'
+import { configFromKnobs } from '../packages/solver-app/dist/config.js'
 import { createArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { createOffer } from '@arkade-os/swap'
 import { asset } from '@arkade-os/sdk'
@@ -24,7 +24,8 @@ if (!wantAssetId || !wantAmountRaw) {
 const wantAmount = BigInt(wantAmountRaw)
 const depositSats = Number(depositRaw ?? 1000)
 
-const config = loadConfig()
+// The e2e env file, not a config document: these are regtest tooling.
+const config = configFromKnobs(process.env)
 const arkade = await createArkadeContext(config.arkade)
 
 const balance = await arkade.wallet.getBalance()

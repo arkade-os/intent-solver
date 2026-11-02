@@ -117,10 +117,21 @@ describe('actButton — what the operator sees', () => {
     expect(bodyOf('actButton')).toMatch(/disabled: busy \|\| attrs\.disabled === true/)
   })
 
+  const pressed = (running: unknown, attrs: Record<string, unknown>): string => {
+    const h = (spec: string, ...rest: unknown[]) => ({ spec, rest })
+    const actButton = new Function('state', 'h', `${bodyOf('actButton')}; return actButton`)({ running }, h)
+    return JSON.stringify(actButton('button.act', attrs, 'label'))
+  }
+
   it('marks the one that is running, so the wait has a subject', () => {
-    const body = bodyOf('actButton')
-    expect(body).toMatch(/state\.running\?\.name === attrs\['data-action'\]/)
-    expect(body).toContain("h('span.spinner')")
+    expect(pressed({ name: 'refund-now' }, { 'data-action': 'refund-now' })).toContain('span.spinner')
+    expect(pressed({ name: 'refund-now' }, { 'data-action': 'claim-now' })).not.toContain('span.spinner')
+  })
+
+  // A button with no action of its own (every Cancel) matched an idle console: both sides read undefined.
+  it('marks nothing while nothing runs, a button with no action included', () => {
+    expect(pressed(null, {})).not.toContain('span.spinner')
+    expect(pressed(null, {})).not.toContain('running')
   })
 
   it('keeps the classes the caller asked for', () => {

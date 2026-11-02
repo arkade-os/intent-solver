@@ -14,13 +14,14 @@
     "build": "pnpm -r build",
     "typecheck": "tsc -p tsconfig.json",
     "typecheck:examples": "tsc -p tsconfig.examples.json",
-    "start": "node --enable-source-maps --experimental-eventsource --env-file=.env packages/solver-app/dist/cli.js watch",
-    "cli": "pnpm build && node --enable-source-maps --experimental-eventsource --env-file=.env packages/solver-app/dist/cli.js",
+    "start": "node --enable-source-maps --experimental-eventsource packages/solver-app/dist/cli.js watch",
+    "cli": "pnpm build && node --enable-source-maps --experimental-eventsource packages/solver-app/dist/cli.js",
     "test": "vitest run --exclude e2e",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "test:watch": "vitest",
     "format": "prettier --write test packages",
     "format:check": "prettier --check test packages",
+    "gen:config-schema": "node scripts/gen-config-schema.mjs",
     "test:perf": "vitest run --config vitest.perf.config.ts"
   },
   "dependencies": {
@@ -59,7 +60,8 @@
     "vitest": "^3.2.7",
     "ws": "^8.21.2",
     "@foundry-rs/anvil": "1.7.1",
-    "solc": "0.8.30"
+    "solc": "0.8.30",
+    "zod-to-json-schema": "^3.25.2"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

@@ -184,6 +184,7 @@ const serviceWith = (now?: () => number, ops: ArkadeOps = arkadeOps): SendSwapSe
     store,
     ln,
     arkade: ops,
+    network: arkade.network,
     limits: arkade.limits,
     invoicePrefix: arkade.profile.invoicePrefix,
     maxExposedSats: arkade.maxExposedSats,

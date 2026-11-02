@@ -144,7 +144,7 @@ const replaceSpans = (text: string, spans: Array<[number, number]>): string => {
  * NINE, in SQL DDL. The checksum only ever ADDS a span, so a truncated, mistyped
  * or transposed phrase — still brute-forceable — is redacted exactly as before.
  */
-const redactMnemonics = (text: string): string => {
+export const redactMnemonics = (text: string): string => {
   const words: Token[] = []
   for (let m = WORD.exec(text); m; m = WORD.exec(text)) {
     words.push({ word: m[0], start: m.index, end: m.index + m[0].length })
@@ -170,7 +170,7 @@ const redactMnemonics = (text: string): string => {
 }
 
 /** `key: "value"` and `key=value` for anything whose name says it is a secret. */
-const SECRET_KEY = 'mnemonic|seed|macaroon|passphrase|password|secret|private_?key|priv_?key|api_?key|token|auth'
+export const SECRET_KEY = 'mnemonic|seed|macaroon|passphrase|password|secret|private_?key|priv_?key|api_?key|token|auth'
 const QUOTED_SECRET = new RegExp(`("?(?:${SECRET_KEY})"?\\s*[:=]\\s*)"[^"]*"`, 'gi')
 const BARE_SECRET = new RegExp(`("?(?:${SECRET_KEY})"?\\s*[:=]\\s*)[^\\s,;}\\]]+`, 'gi')
 /** `scheme://user:pass@host` — an RPC or relay URL with its credentials inline. */

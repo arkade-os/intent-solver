@@ -17,7 +17,7 @@ import {
   retainReadableMarkets,
   ungatedAssetSymbols,
 } from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
-import { assetRfqDescriptor, assetRfqEnvStem } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
+import { assetRfqDescriptor } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
 import {
   DEFAULT_SERVING,
   rfqSymbolFor,
@@ -94,7 +94,12 @@ describe('parseAssetRfqTokens', () => {
 
   it('reads SYMBOL:<asset id>, both directions on and no approval threshold', () => {
     expect(parseAssetRfqTokens(`USDA:${USDA}`, none)).toEqual([
-      { symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: true }, approvalThresholdUnits: null },
+      {
+        symbol: 'USDA',
+        assetId: USDA,
+        enabled: { clientGivesAsset: true, clientGetsAsset: true },
+        approvalThresholdUnits: null,
+      },
     ])
   })
 
@@ -114,16 +119,16 @@ describe('parseAssetRfqTokens', () => {
     expect(parseAssetRfqTokens(`USDA:${USDA}`, read)[0]!.approvalThresholdUnits).toBeNull()
   })
 
-  it('closes exactly the direction whose stem says so', () => {
-    // The stems are the corridor's own, not restated here: a rename there must
-    // change which variable an operator sets, not silently stop being read.
-    const read = (name: string) =>
-      name === `${assetRfqEnvStem({ symbol: 'USDA' }, 'buy_base')}_ENABLED` ? 'false' : undefined
-    expect(parseAssetRfqTokens(`USDA:${USDA}`, read)[0]!.enabled).toEqual({ sell_base: true, buy_base: false })
+  it('closes exactly the direction its setting names', () => {
+    const read = (name: string) => (name === 'ASSET_USDA_FROM_BTC_ENABLED' ? 'false' : undefined)
+    expect(parseAssetRfqTokens(`USDA:${USDA}`, read)[0]!.enabled).toEqual({
+      clientGivesAsset: true,
+      clientGetsAsset: false,
+    })
   })
 
   it('refuses a direction flag that is neither true nor false', () => {
-    const stem = `${assetRfqEnvStem({ symbol: 'USDA' }, 'buy_base')}_ENABLED`
+    const stem = 'ASSET_USDA_FROM_BTC_ENABLED'
     for (const bad of ['flase', 'FALSE', '0', 'no']) {
       expect(() => parseAssetRfqTokens(`USDA:${USDA}`, (name) => (name === stem ? bad : undefined))).toThrow(
         /_ENABLED must be 'true' or 'false'/,
@@ -234,7 +239,7 @@ describe('ungatedAssetSymbols', () => {
   const token = (symbol: string, approvalThresholdUnits: bigint | null) => ({
     symbol,
     assetId: symbol.toLowerCase().padEnd(68, '0'),
-    enabled: { sell_base: true, buy_base: true },
+    enabled: { clientGivesAsset: true, clientGetsAsset: true },
     approvalThresholdUnits,
   })
 
