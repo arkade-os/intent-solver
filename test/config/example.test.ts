@@ -63,4 +63,9 @@ describe('solver-config.schema.json', () => {
     const schema = read('solver-config.schema.json')
     expect(schema.properties.offers.properties.minFillAmount).toMatchObject({ type: 'string', pattern: '^\\d+$' })
   })
+
+  it('requires the offer covenant version list to be unique', () => {
+    const schema = read('solver-config.schema.json')
+    expect(schema.properties.offers.properties.covenantVersions).toMatchObject({ uniqueItems: true })
+  })
 })

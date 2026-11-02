@@ -290,6 +290,13 @@ export class AssetOfferService {
 
   private async considerInner({ offer, txid, vout }: DiscoveredOffer): Promise<ConsiderOutcome> {
     const outpoint = `${txid}:${vout}`
+    if (!this.deps.serverPubkey && this.covenantVersions.size < OFFER_COVENANT_VERSIONS.length) {
+      return this.refuse(
+        outpoint,
+        'offer_version_unverified',
+        'a narrowed offers.covenantVersions needs serverPubkey so the covenant version is verified from script',
+      )
+    }
     // Idempotent on the outpoint: rediscovering a funded offer must not open a
     // second intent against the same deposit.
     const existing = await this.deps.store.findLiveByOutpoint(txid, vout)

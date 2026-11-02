@@ -13,8 +13,20 @@ const typeDecimals = (node) => {
   return typed.description === DECIMAL ? { ...typed, type: 'string', pattern: '^\\d+$' } : typed
 }
 
+const uniqueOfferVersions = (node, key) => {
+  if (Array.isArray(node)) return node.map((entry) => uniqueOfferVersions(entry, key))
+  if (!node || typeof node !== 'object') return node
+  const typed = Object.fromEntries(
+    Object.entries(node).map(([childKey, value]) => [childKey, uniqueOfferVersions(value, childKey)]),
+  )
+  return key === 'covenantVersions' && typed.type === 'array' ? { ...typed, uniqueItems: true } : typed
+}
+
 export const configJsonSchema = (documentSchema) => ({
-  ...typeDecimals(zodToJsonSchema(documentSchema, { $refStrategy: 'none', target: 'jsonSchema7' })),
+  ...uniqueOfferVersions(
+    typeDecimals(zodToJsonSchema(documentSchema, { $refStrategy: 'none', target: 'jsonSchema7' })),
+    '',
+  ),
   title: 'Arkade intent-solver config document',
 })
 

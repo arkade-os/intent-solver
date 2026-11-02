@@ -315,7 +315,8 @@
               2
             ]
           },
-          "minItems": 1
+          "minItems": 1,
+          "uniqueItems": true
         },
         "minFillAmount": {
           "description": "decimal string",

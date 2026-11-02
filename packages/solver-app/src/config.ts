@@ -101,7 +101,7 @@ const requiredBigintFromEnv = (env: Knobs, name: string): bigint => {
 const offerCovenantVersionsFromEnv = (raw: string | undefined): readonly OfferCovenantVersion[] => {
   if (raw === undefined) return OFFER_COVENANT_VERSIONS
   const entries = raw.split(',').map((entry) => entry.trim())
-  if (entries.length === 0 || entries.some((entry) => entry !== '1' && entry !== '2')) {
+  if (entries.some((entry) => entry !== '1' && entry !== '2')) {
     throw new Error('OFFER_COVENANT_VERSIONS must list 1 and/or 2, comma-separated')
   }
   const versions = entries.map(Number) as OfferCovenantVersion[]

@@ -74,6 +74,8 @@ export type OfferFillRefusal =
   | 'offer_inconsistent'
   /** The offer's covenant version is not in the operator's rollout set. */
   | 'offer_version_disabled'
+  /** A narrowed rollout needs script verification, but no signer key was wired. */
+  | 'offer_version_unverified'
 
 export type OfferFillDecision = { fill: true } | { fill: false; reason: OfferFillRefusal }
 

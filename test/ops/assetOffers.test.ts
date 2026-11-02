@@ -239,6 +239,19 @@ describe('offer covenant versions', () => {
       failureReason: expect.stringContaining('offer_version_disabled'),
     })
   })
+
+  it('refuses a narrowed rollout when script identity cannot be verified', async () => {
+    const withExit = honest(true)
+    const { service } = await build({
+      covenantVersions: new Set([2]),
+      outputsAt: funded(withExit).outputsAt,
+    })
+
+    expect(await service.consider(at(withExit))).toEqual({
+      fill: false,
+      reason: 'offer_version_unverified',
+    })
+  })
 })
 
 describe('the price gate', () => {
