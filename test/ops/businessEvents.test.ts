@@ -178,7 +178,7 @@ describe('createSwapOutcomeReporter', () => {
     try {
       const errors: unknown[] = []
       const { report, posted } = reporter({
-        balances: { current: () => reading(), refresh: () => new Promise<void>(() => {}) },
+        balances: { current: () => reading(), refresh: () => new Promise<boolean>(() => {}) },
         onError: (error: unknown) => errors.push(error),
       })
       report({ id: 'swap-1', from: 'claiming', to: 'claimed' })
@@ -400,7 +400,7 @@ describe('createBalanceSampler', () => {
     expect(s.current()?.arkade?.value).toBe(300)
   })
 
-  it('starts another read when refresh is requested after the previous refresh has started', async () => {
+  it('coalesces requests made after a read is already running, then starts one fresh read', async () => {
     let releaseFirst!: (sats: number) => void
     let releaseSecond!: (sats: number) => void
     const readArkadeAvailableSats = vi
@@ -412,11 +412,15 @@ describe('createBalanceSampler', () => {
     const first = s.refresh()
     await vi.waitFor(() => expect(readArkadeAvailableSats).toHaveBeenCalledTimes(1))
     const second = s.refresh()
+    const third = s.refresh()
+    expect(third).toBe(second)
     releaseFirst(100)
     await first
     await vi.waitFor(() => expect(readArkadeAvailableSats).toHaveBeenCalledTimes(2))
     releaseSecond(200)
     await second
+    await third
+    expect(readArkadeAvailableSats).toHaveBeenCalledTimes(2)
     expect(s.current()?.arkade?.value).toBe(200)
   })
 })
