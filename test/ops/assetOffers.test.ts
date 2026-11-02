@@ -240,6 +240,32 @@ describe('offer covenant versions', () => {
     })
   })
 
+  it('refuses an unversioned fillable row while still fillable when the rollout is narrowed', async () => {
+    const settle = vi.fn(async () => 'fill-txid')
+    const { store, service } = await build({
+      covenantVersions: new Set([2]),
+      settle,
+    })
+    await store.insertIntent({
+      id: 'unversioned-intent',
+      offerTxid: found.txid,
+      offerVout: found.vout,
+      offerPkScript: SCRIPT_HEX,
+      covenantVersion: null as never,
+      wantAssetId: null,
+      wantAmount: 1_000n,
+      offerAssetId: USDT,
+      offerAmount: 900n,
+    })
+
+    expect(await service.tickAll()).toBe(0)
+    expect(settle).not.toHaveBeenCalled()
+    expect(await store.findById('unversioned-intent')).toMatchObject({
+      state: 'refused',
+      failureReason: expect.stringContaining('offer_version_unverified'),
+    })
+  })
+
   it('refuses a narrowed rollout when script identity cannot be verified', async () => {
     const withExit = honest(true)
     const { service } = await build({

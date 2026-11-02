@@ -397,6 +397,19 @@ export class AssetOfferService {
     let filled = 0
     for (const row of await this.deps.store.listNonTerminal()) {
       if (row.state !== 'fillable') continue
+      if (row.covenantVersion === null && this.covenantVersions.size < OFFER_COVENANT_VERSIONS.length) {
+        this.deps.onRefused?.(
+          `${row.offerTxid}:${row.offerVout}`,
+          'offer_version_unverified',
+          'an unversioned pre-migration offer cannot be admitted while offers.covenantVersions is narrowed',
+        )
+        await this.deps.store.fail(
+          row.id,
+          'fillable',
+          'offer_version_unverified; an unversioned pre-migration offer cannot be admitted while offers.covenantVersions is narrowed',
+        )
+        continue
+      }
       if (row.covenantVersion !== null && !this.covenantVersions.has(row.covenantVersion)) {
         this.deps.onRefused?.(
           `${row.offerTxid}:${row.offerVout}`,

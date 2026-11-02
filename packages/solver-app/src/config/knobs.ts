@@ -18,7 +18,14 @@ export interface Flattened {
   railBlock: unknown | null
 }
 
-type Row = readonly [path: string, knob: string, encode?: (value: unknown) => string]
+type Row = readonly [
+  path: string,
+  knob: string,
+  encode?: (value: unknown) => string,
+  decode?: (value: string) => unknown,
+]
+
+const covenantVersions = (raw: string): unknown => raw.split(',').map((value) => Number(value.trim()))
 
 export const PATHS: readonly Row[] = [
   ['network', 'SWAP_NETWORK'],
@@ -56,6 +63,7 @@ export const PATHS: readonly Row[] = [
     'offers.covenantVersions',
     'OFFER_COVENANT_VERSIONS',
     (versions) => (Array.isArray(versions) ? versions.join(',') : String(versions)),
+    covenantVersions,
   ],
   ['offers.chargeCarrier', 'OFFER_CHARGE_CARRIER'],
   ['offers.carrierPricing', 'ASSET_CARRIER_PRICING'],
@@ -82,7 +90,12 @@ export const PATHS: readonly Row[] = [
   ['notify.telegramChatId', 'TELEGRAM_CHAT_ID'],
   ['notify.slackWebhookUrl', 'SLACK_WEBHOOK_URL'],
   ['notify.balanceReportIntervalMinutes', 'BALANCE_REPORT_INTERVAL_MINUTES'],
-  ['diagnostics.latency', 'SOLVER_LATENCY_DIAGNOSTICS', (on) => (on ? '1' : '0')],
+  [
+    'diagnostics.latency',
+    'SOLVER_LATENCY_DIAGNOSTICS',
+    (on) => (on ? '1' : '0'),
+    (raw) => (raw === '1' ? true : raw === '0' ? false : raw),
+  ],
 ]
 
 export const EVM_FIELDS: Readonly<Record<string, string>> = {
