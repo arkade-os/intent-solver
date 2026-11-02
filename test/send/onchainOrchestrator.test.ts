@@ -2061,6 +2061,23 @@ describe('OnchainSendSwapService', () => {
     expect(after.state).toBe('stuck')
   })
 
+  it('refundNow() refuses once the client has claimed the onchain HTLC, rather than refunding over a payout', async () => {
+    const row = await driveToStuck()
+    // Claim leaf has no locktime, so the client can claim the L1 HTLC after stuck, revealing P.
+    deps.onchain.spendClaim(row.fundingTxid!, 0, [
+      new Uint8Array([0xaa]),
+      P,
+      new Uint8Array([0xbb]),
+      new Uint8Array([0xcc]),
+    ])
+
+    await expect(service.refundNow(row.id)).rejects.toThrow(hex.encode(P))
+    expect(await deps.arkade.findLockups(row.pkScript)).toHaveLength(1)
+    const after = await deps.store.get(row.id)
+    expect(after.refundArkTxid).toBeNull()
+    expect(after.refundOutcome).toBeNull()
+  })
+
   it('refundNow() records an already-emptied lockup as external rather than inventing a txid', async () => {
     const row = await driveToStuck()
     // The client took it themselves, via the covenant's client-only
