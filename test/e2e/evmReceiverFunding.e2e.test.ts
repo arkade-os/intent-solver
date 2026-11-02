@@ -37,6 +37,7 @@ import {
   balanceOf,
   evmChainReady,
   evmRpc,
+  pinAnvilClock,
   fundWithWeth,
   installContracts,
   sendFrom,
@@ -110,9 +111,14 @@ beforeAll(async () => {
   if ((await arkade.ctx.wallet.getBalance()).available < AMOUNT_SATS) return
 
   rpc = evmRpc()
-  // Earlier refund cases advance Anvil time; this file needs honest wall-clock cutoff checks.
+  // Earlier cases both advance Anvil time and, on current Anvil, walk it one
+  // second per block. `anvil_reset` restores process start, not wall time, so
+  // the next block is stamped at now before any cutoff check.
   await rpc('anvil_reset', [])
   await rpc('anvil_setAutomine', [true])
+  await pinAnvilClock(rpc)
+  await rpc('evm_setNextBlockTimestamp', [Math.floor(Date.now() / 1000)])
+  await rpc('anvil_mine', [1])
   const fixture = (name: string) =>
     readFileSync(fileURLToPath(new URL(`fixtures/${name}.runtime.hex`, import.meta.url)), 'utf8')
   await installContracts(rpc, fixture('erc20swap'), fixture('weth9'))
