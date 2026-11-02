@@ -22,7 +22,7 @@ export interface BalanceReading {
 export interface BalanceSampler {
   current(): BalanceReading | null
   /** Start a read after any older sample finishes, so it observes a completed transition. */
-  refresh(): Promise<void>
+  refresh(): Promise<boolean>
 }
 
 export interface BalanceSamplerOptions {
@@ -36,13 +36,18 @@ export interface BalanceSamplerOptions {
 export const createBalanceSampler = (options: BalanceSamplerOptions): BalanceSampler & { sample(): Promise<void> } => {
   let reading: BalanceReading | null = null
   // `getBalance()` has no deadline, so a caller that does not await must not stack reads behind a hung one.
-  let inFlight: Promise<void> | null = null
-  let refreshes: Promise<void> = Promise.resolve()
-  const readSide = async <T>(read: (() => Promise<T>) | undefined, label: string): Promise<T | undefined> => {
+  let inFlight: Promise<boolean> | null = null
+  let refreshAfter: Promise<boolean> | null = null
+  const readSide = async <T>(
+    read: (() => Promise<T>) | undefined,
+    label: string,
+    onFailure: () => void,
+  ): Promise<T | undefined> => {
     if (!read) return undefined
     try {
       return await read()
     } catch (error) {
+      onFailure()
       const message = error instanceof Error ? error.message : String(error)
       options.onError?.(new Error(`${label} balance: ${message}`, { cause: error }))
       return undefined
@@ -51,30 +56,38 @@ export const createBalanceSampler = (options: BalanceSamplerOptions): BalanceSam
   // `undefined` from a configured side means the read failed: keep the previous sample.
   const remember = <T>(previous: Sampled<T> | null, next: T | undefined, at: number): Sampled<T> | null =>
     next === undefined ? previous : { value: next, at }
-  const read = async () => {
+  const read = async (): Promise<boolean> => {
+    let failed = false
     try {
       const at = options.now()
       const [arkade, lightning] = await Promise.all([
-        readSide(options.readArkadeAvailableSats, 'arkade'),
-        readSide(options.readLightning, 'lightning'),
+        readSide(options.readArkadeAvailableSats, 'arkade', () => {
+          failed = true
+        }),
+        readSide(options.readLightning, 'lightning', () => {
+          failed = true
+        }),
       ])
       reading = {
         arkade: remember(reading?.arkade ?? null, arkade, at),
         lightning: options.readLightning ? remember(reading?.lightning ?? null, lightning, at) : null,
       }
+      return !failed
     } finally {
       inFlight = null
     }
   }
   return {
     current: () => reading,
-    sample: () => (inFlight ??= read()),
+    sample: () => (inFlight ??= read()).then(() => {}),
     refresh: () => {
-      const turn = refreshes.then(async () => {
-        await inFlight
-        await (inFlight ??= read())
+      if (refreshAfter) return refreshAfter
+      const turn = (inFlight ? inFlight.catch(() => false) : Promise.resolve(false)).then(() => {
+        const result = (inFlight ??= read())
+        refreshAfter = null
+        return result
       })
-      refreshes = turn.catch(() => {})
+      refreshAfter = turn
       return turn
     },
   }
@@ -161,10 +174,15 @@ export const createSwapOutcomeReporter = (
       void (async () => {
         try {
           let refreshed = true
-          const balancesRead = within(() => balances.refresh(), BALANCE_REFRESH_TIMEOUT_MS)().catch((error) => {
-            refreshed = false
-            onError?.(error)
-          })
+          const balancesRead = within(() => balances.refresh(), BALANCE_REFRESH_TIMEOUT_MS)().then(
+            (fresh) => {
+              refreshed = fresh
+            },
+            (error) => {
+              refreshed = false
+              onError?.(error)
+            },
+          )
           let size: string | null = null
           try {
             size = await terms(id)

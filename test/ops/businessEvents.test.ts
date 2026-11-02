@@ -28,7 +28,7 @@ const reading = (over: Partial<BalanceReading> = {}): BalanceReading => ({
 
 const sampler = (over: Partial<BalanceReading> = {}) => ({
   current: () => reading(over),
-  refresh: async () => {},
+  refresh: async () => true,
 })
 
 const terms = (size = 'amount 10,000 sats') => size
@@ -90,6 +90,7 @@ describe('createSwapOutcomeReporter', () => {
         arkade: { value: 1_002_012, at: 2_000 },
         lightning: { value: { availableSats: 1_997_989, incomingSats: 0 }, at: 2_000 },
       })
+      return true
     })
     const { report, posted } = reporter({ balances: { current: () => current, refresh } })
     report({ id: 'swap-1', from: 'claiming', to: 'claimed' })
@@ -191,8 +192,17 @@ describe('createSwapOutcomeReporter', () => {
     }
   })
 
+  it('marks the reading as not refreshed when a configured balance read fails', async () => {
+    const { report, posted } = reporter({
+      balances: { current: () => reading(), refresh: async () => false },
+    })
+    report({ id: 'swap-1', from: 'claiming', to: 'claimed' })
+    await vi.waitFor(() => expect(posted).toHaveLength(1))
+    expect(posted[0]).toContain('balances not refreshed')
+  })
+
   it('still announces when no balance has been sampled yet', async () => {
-    const { report, posted } = reporter({ balances: { current: () => null, refresh: async () => {} } })
+    const { report, posted } = reporter({ balances: { current: () => null, refresh: async () => true } })
     report({ id: 'swap-1', from: 'claiming', to: 'claimed' })
     await vi.waitFor(() => expect(posted).toHaveLength(1))
     expect(posted[0]).toContain('unread')
@@ -240,6 +250,7 @@ describe('createSwapOutcomeReporter', () => {
         current: () => reading(),
         refresh: async () => {
           balancesTouched = true
+          return true
         },
       },
       terms: async () => {
@@ -336,6 +347,76 @@ describe('createBalanceSampler', () => {
     await vi.waitFor(() => expect(readArkadeAvailableSats).toHaveBeenCalledTimes(2))
     releaseSecond(200)
     await refreshed
+    expect(s.current()?.arkade?.value).toBe(200)
+  })
+
+  it('reports a failed configured read while keeping the previous value', async () => {
+    let fail = false
+    const errors: unknown[] = []
+    const s = createBalanceSampler({
+      readArkadeAvailableSats: async () => {
+        if (fail) throw new Error('node down')
+        return 900
+      },
+      now: () => 10,
+      onError: (error) => errors.push(error),
+    })
+
+    await s.sample()
+    fail = true
+    await expect(s.refresh()).resolves.toBe(false)
+    expect(s.current()?.arkade?.value).toBe(900)
+    expect(errors).toHaveLength(1)
+  })
+
+  it('coalesces refreshes waiting on one unresolved sample, then refreshes again', async () => {
+    let releaseFirst!: (sats: number) => void
+    let releaseSecond!: (sats: number) => void
+    let releaseThird!: (sats: number) => void
+    const readArkadeAvailableSats = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise<number>((resolve) => (releaseFirst = resolve)))
+      .mockImplementationOnce(() => new Promise<number>((resolve) => (releaseSecond = resolve)))
+      .mockImplementationOnce(() => new Promise<number>((resolve) => (releaseThird = resolve)))
+    const s = createBalanceSampler({ readArkadeAvailableSats, now: () => 10 })
+
+    const timerSample = s.sample()
+    const first = s.refresh()
+    const second = s.refresh()
+    expect(second).toBe(first)
+
+    releaseFirst(100)
+    await timerSample
+    await vi.waitFor(() => expect(readArkadeAvailableSats).toHaveBeenCalledTimes(2))
+
+    const third = s.refresh()
+    expect(readArkadeAvailableSats).toHaveBeenCalledTimes(2)
+    releaseSecond(200)
+    await first
+    await second
+    await vi.waitFor(() => expect(readArkadeAvailableSats).toHaveBeenCalledTimes(3))
+    releaseThird(300)
+    await third
+    expect(s.current()?.arkade?.value).toBe(300)
+  })
+
+  it('starts another read when refresh is requested after the previous refresh has started', async () => {
+    let releaseFirst!: (sats: number) => void
+    let releaseSecond!: (sats: number) => void
+    const readArkadeAvailableSats = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise<number>((resolve) => (releaseFirst = resolve)))
+      .mockImplementationOnce(() => new Promise<number>((resolve) => (releaseSecond = resolve)))
+    const s = createBalanceSampler({ readArkadeAvailableSats, now: () => 10 })
+
+    const first = s.refresh()
+    await vi.waitFor(() => expect(readArkadeAvailableSats).toHaveBeenCalledTimes(1))
+    const second = s.refresh()
+    releaseFirst(100)
+    await first
+    await vi.waitFor(() => expect(readArkadeAvailableSats).toHaveBeenCalledTimes(2))
+    releaseSecond(200)
+    await second
     expect(s.current()?.arkade?.value).toBe(200)
   })
 })
