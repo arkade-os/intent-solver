@@ -34,10 +34,11 @@
  */
 
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
-import { assertColumns } from './baseSwapStore.js'
+import { addColumns, assertColumns } from './baseSwapStore.js'
 import { pageQuery, takePage, type PageOptions, type PageRawFields } from '@arkade-os/solver-core/core/page.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { announceTransition, type TransitionHook } from '@arkade-os/solver-core/core/businessEvent.js'
+import type { OfferCovenantVersion } from '@arkade-os/solver-core/core/offerCovenant.js'
 
 // List first, union derived: `LEGAL_EDGES` stops compiling if the two separate.
 export const OFFER_FILL_STATES = ['fillable', 'filling', 'filled', 'lost', 'refused', 'stuck'] as const
@@ -75,6 +76,8 @@ export interface OfferFillRow {
   offerVout: number
   /** The offer covenant's script, hex. What a spend must come from. */
   offerPkScript: string
+  /** Null only on rows written before covenant versioning. */
+  covenantVersion: OfferCovenantVersion | null
   /** What the covenant obliges a filler to pay, and to whom. */
   wantAssetId: string | null
   wantAmount: bigint
@@ -94,6 +97,7 @@ export interface OfferFillRecord {
   offerTxid: string
   offerVout: number
   offerPkScript: string
+  covenantVersion: OfferCovenantVersion
   wantAssetId: string | null
   wantAmount: bigint
   offerAssetId: string | null
@@ -109,6 +113,7 @@ const OFFER_FILL_COLUMNS = `
   offer_txid      TEXT NOT NULL,
   offer_vout      INTEGER NOT NULL,
   offer_pk_script TEXT NOT NULL,
+  covenant_version INTEGER,
   want_asset_id   TEXT,
   want_amount     TEXT NOT NULL,
   offer_asset_id  TEXT,
@@ -157,6 +162,10 @@ const toRow = (raw: Raw): OfferFillRow => ({
   offerTxid: String(raw.offer_txid),
   offerVout: Number(raw.offer_vout),
   offerPkScript: String(raw.offer_pk_script),
+  covenantVersion:
+    raw.covenant_version === null || raw.covenant_version === undefined
+      ? null
+      : (Number(raw.covenant_version) as OfferCovenantVersion),
   wantAssetId: raw.want_asset_id === null ? null : String(raw.want_asset_id),
   wantAmount: BigInt(String(raw.want_amount)),
   offerAssetId: raw.offer_asset_id === null ? null : String(raw.offer_asset_id),
@@ -175,6 +184,7 @@ export class OfferFillStore {
   static async open(driver: SqlDriver | string, now: () => number = nowSeconds): Promise<OfferFillStore> {
     const store = new OfferFillStore(typeof driver === 'string' ? betterSqliteDriver(driver) : driver, now)
     await store.driver.exec(SCHEMA)
+    await addColumns(store.driver, 'offer_fill', [['covenant_version', 'INTEGER']])
     return store
   }
 
@@ -195,9 +205,9 @@ export class OfferFillStore {
     const at = this.now()
     await this.driver.run(
       `INSERT INTO offer_fill (
-         id, state, created_at, updated_at, offer_txid, offer_vout, offer_pk_script,
+         id, state, created_at, updated_at, offer_txid, offer_vout, offer_pk_script, covenant_version,
          want_asset_id, want_amount, offer_asset_id, offer_amount, fill_txid, failure_reason, rfq_id
-       ) VALUES (?, 'fillable', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
+       ) VALUES (?, 'fillable', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
       [
         record.id,
         at,
@@ -205,6 +215,7 @@ export class OfferFillStore {
         record.offerTxid,
         record.offerVout,
         record.offerPkScript,
+        record.covenantVersion,
         record.wantAssetId,
         record.wantAmount.toString(),
         record.offerAssetId,

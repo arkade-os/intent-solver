@@ -19,6 +19,13 @@ const str = z.string()
 const num = z.number()
 const bool = z.boolean()
 const strings = z.array(z.string())
+const offerCovenantVersion = z.union([z.literal(1), z.literal(2)], {
+  errorMap: () => ({ message: 'must be one of 1, 2' }),
+})
+const offerCovenantVersions = z
+  .array(offerCovenantVersion)
+  .min(1)
+  .refine((values) => new Set(values).size === values.length, { message: 'must not repeat a version' })
 
 const section = <T extends z.ZodRawShape>(shape: T) => z.object(shape).partial().strict()
 
@@ -118,6 +125,7 @@ const buildSchema = (railNames: readonly string[]) =>
     corridors: z.record(str, corridorTerms),
     offers: section({
       markets: strings,
+      covenantVersions: offerCovenantVersions,
       minFillAmount: decimal,
       maxFillAmount: decimal,
       chargeCarrier: bool,
@@ -145,9 +153,9 @@ const buildSchema = (railNames: readonly string[]) =>
     diagnostics: section({ latency: bool }),
   })
 
-export type SolverDocument = z.infer<ReturnType<typeof buildSchema>>
+export type SolverDocument = z.output<ReturnType<typeof buildSchema>>
 
-export const documentSchema = (railNames: readonly string[]): z.ZodType<SolverDocument> => buildSchema(railNames)
+export const documentSchema = (railNames: readonly string[]) => buildSchema(railNames)
 
 const IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/
 

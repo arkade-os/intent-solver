@@ -14,6 +14,7 @@ const record = (over: Record<string, unknown> = {}) => ({
   offerTxid: 'ab'.repeat(32),
   offerVout: 0,
   offerPkScript: 'cc'.repeat(20),
+  covenantVersion: 1 as const,
   wantAssetId: null,
   wantAmount: 5_000n,
   offerAssetId: USDT,
@@ -61,6 +62,7 @@ describe('GET /api/offers: a filled offer is visible', () => {
     const { body } = await get(app)
     expect(body.offers[0]).toMatchObject({
       outpoint: `${'ab'.repeat(32)}:0`,
+      covenantVersion: 1,
       wantAssetId: null,
       wantAmount: '5000',
       offerAssetId: USDT,

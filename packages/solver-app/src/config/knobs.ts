@@ -52,6 +52,11 @@ export const PATHS: readonly Row[] = [
   ['limits.approvalThresholdSats', 'APPROVAL_THRESHOLD_SATS'],
   ['offers.minFillAmount', 'OFFER_MIN_FILL_AMOUNT'],
   ['offers.maxFillAmount', 'OFFER_MAX_FILL_AMOUNT'],
+  [
+    'offers.covenantVersions',
+    'OFFER_COVENANT_VERSIONS',
+    (versions) => (Array.isArray(versions) ? versions.join(',') : String(versions)),
+  ],
   ['offers.chargeCarrier', 'OFFER_CHARGE_CARRIER'],
   ['offers.carrierPricing', 'ASSET_CARRIER_PRICING'],
   ['offers.quoteValiditySeconds', 'ASSET_QUOTE_VALIDITY_SECONDS'],

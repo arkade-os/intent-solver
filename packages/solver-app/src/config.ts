@@ -31,6 +31,7 @@ import type { ArkadeWalletConfig } from '@arkade-os/solver-arkade/arkade/wallet.
 import type { AdPublishMode } from '@arkade-os/solver-transport/relay/adPublisher.js'
 import { parseSentryDsn, type SentryOptions } from './ops/sentry.js'
 import { loadEvmChainConfig, type EvmChainConfig } from '@arkade-os/solver-rails-evm/evm/config.js'
+import { OFFER_COVENANT_VERSIONS, type OfferCovenantVersion } from '@arkade-os/solver-core/core/offerCovenant.js'
 
 /** The network a deployment that sets nothing runs as. */
 const DEFAULT_NETWORK = 'regtest'
@@ -95,6 +96,19 @@ const requiredBigintFromEnv = (env: Knobs, name: string): bigint => {
   // parses to something other than what was typed cannot get through.
   if (!/^\d+$/.test(raw)) throw new Error(`${name} must be a whole number of units, got ${JSON.stringify(raw)}`)
   return BigInt(raw)
+}
+
+const offerCovenantVersionsFromEnv = (raw: string | undefined): readonly OfferCovenantVersion[] => {
+  if (raw === undefined) return OFFER_COVENANT_VERSIONS
+  const entries = raw.split(',').map((entry) => entry.trim())
+  if (entries.length === 0 || entries.some((entry) => entry !== '1' && entry !== '2')) {
+    throw new Error('OFFER_COVENANT_VERSIONS must list 1 and/or 2, comma-separated')
+  }
+  const versions = entries.map(Number) as OfferCovenantVersion[]
+  if (new Set(versions).size !== versions.length) {
+    throw new Error('OFFER_COVENANT_VERSIONS must not repeat a version')
+  }
+  return versions
 }
 
 export interface LndConfig {
@@ -243,6 +257,8 @@ export interface Config {
    */
   offerMinFillAmount: bigint
   offerMaxFillAmount: bigint
+  /** Offer covenant versions this deployment accepts on the packet path. */
+  offerCovenantVersions: readonly OfferCovenantVersion[]
   /**
    * `OFFER_CHARGE_CARRIER`. Off by default: the MAKER prices this path and the
    * card has no field to tell them the carrier exists, so charging would refuse
@@ -962,6 +978,7 @@ export const configFromKnobs = (env: Knobs): Config => {
   const offerMaxFillAmount = offerMarkets.length > 0 ? requiredBigintFromEnv(env, 'OFFER_MAX_FILL_AMOUNT') : 0n
   const offerChargesDeliveredCarrier = env.OFFER_CHARGE_CARRIER?.trim() === 'true'
   const assetCarrierPricing = env.ASSET_CARRIER_PRICING?.trim() === 'true'
+  const offerCovenantVersions = offerCovenantVersionsFromEnv(env.OFFER_COVENANT_VERSIONS)
   // Refused at boot rather than per offer: inverted bounds refuse every offer,
   // which is indistinguishable from a quiet market and would be diagnosed as
   // one. `evaluateOfferFill` compares against both, so it cannot report this.
@@ -994,6 +1011,7 @@ export const configFromKnobs = (env: Knobs): Config => {
     offerMarkets,
     offerMinFillAmount,
     offerMaxFillAmount,
+    offerCovenantVersions,
     offerChargesDeliveredCarrier,
     assetCarrierPricing,
     // Read here so a malformed list refuses at boot beside every other knob.

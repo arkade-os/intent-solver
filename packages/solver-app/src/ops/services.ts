@@ -867,6 +867,7 @@ export const createServices = async (
         chargesDeliveredCarrier: policy.offerChargesDeliveredCarrier,
         minFillAmount: policy.offerMinFillAmount,
         maxFillAmount: policy.offerMaxFillAmount,
+        covenantVersions: new Set(policy.offerCovenantVersions),
         // AVAILABLE, never total, and read fresh per decision. @see offerInventory.ts
         balance: () => arkade.wallet.getBalance(),
         outputsAt: (offerPkScript) => offerOutputsAt(arkade, offerPkScript),
@@ -876,7 +877,11 @@ export const createServices = async (
         serverPubkey: arkade.wallet.arkServerPublicKey,
         // THE SPEND. Wired here because this is where the wallet and the
         // emulator meet; every guard on it lives in `arkade/offerSettle.ts`.
-        settle: offerSettleFor({ ctx: arkade, emulatorUrl: config.emulatorUrl }),
+        settle: offerSettleFor({
+          ctx: arkade,
+          emulatorUrl: config.emulatorUrl,
+          covenantVersions: new Set(policy.offerCovenantVersions),
+        }),
         approvalGate: gateFor('arkade offer fill'),
         onError: (id, error) => log(`offer ${id} failed:`, error instanceof Error ? error.message : String(error)),
         // Refusals are NOT errors, so they never reached `onError` above. The log

@@ -72,6 +72,8 @@ export type OfferFillRefusal =
    * § 5.1). Decided by the adapter that can reconstruct the script, not here.
    */
   | 'offer_inconsistent'
+  /** The offer's covenant version is not in the operator's rollout set. */
+  | 'offer_version_disabled'
 
 export type OfferFillDecision = { fill: true } | { fill: false; reason: OfferFillRefusal }
 

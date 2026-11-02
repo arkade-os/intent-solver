@@ -187,6 +187,12 @@ describe('documentToKnobs — assets', () => {
     })
     expect(knobs.OFFER_MARKETS).toBe(`BTC/${USDA_ID},BTC/${'ab'.repeat(34)}`)
   })
+
+  it('flattens the accepted offer covenant versions', () => {
+    const { knobs, pathOf } = documentToKnobs({ offers: { covenantVersions: [1, 2] } })
+    expect(knobs.OFFER_COVENANT_VERSIONS).toBe('1,2')
+    expect(pathOf.get('OFFER_COVENANT_VERSIONS')).toBe('offers.covenantVersions')
+  })
 })
 
 describe('documentToKnobs — rail block', () => {

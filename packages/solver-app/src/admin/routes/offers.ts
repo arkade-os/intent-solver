@@ -23,6 +23,7 @@ const offerJson = (row: OfferFillRow) => ({
   offerTxid: row.offerTxid,
   offerVout: row.offerVout,
   offerPkScript: row.offerPkScript,
+  covenantVersion: row.covenantVersion,
   wantAssetId: row.wantAssetId,
   wantAmount: String(row.wantAmount),
   offerAssetId: row.offerAssetId,

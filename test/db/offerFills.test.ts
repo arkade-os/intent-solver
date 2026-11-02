@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { OfferFillStore, NON_TERMINAL, type OfferFillState } from '@arkade-os/solver-corridors/db/offerFills.js'
+import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
 
 let now = 1_800_000_000
 const clock = () => now
@@ -11,6 +12,7 @@ const baseIntent = {
   offerTxid: 'aa'.repeat(32),
   offerVout: 0,
   offerPkScript: '66'.repeat(34),
+  covenantVersion: 1 as const,
   // The client wants an asset; this service pays it out of the float.
   wantAssetId: '41bcbb06921a0e9f6fe4f1b003b878cbb43d9ca3f6d14cab7940090458765a390000',
   wantAmount: 2_000n,
@@ -54,6 +56,55 @@ describe('OfferFillStore', () => {
     const row = await store.insertIntent(baseIntent)
     expect(row.offerAssetId).toBeNull()
     expect(row.wantAssetId).toBe(baseIntent.wantAssetId)
+  })
+
+  it('round-trips the covenant version priced at admission', async () => {
+    const row = await store.insertIntent({ ...baseIntent, covenantVersion: 2 })
+    expect((await store.findById(row.id))?.covenantVersion).toBe(2)
+  })
+})
+
+describe('OfferFillStore: additive covenant-version migration', () => {
+  it('opens a pre-version table, leaves old rows unversioned and writes versions on new rows', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    await driver.exec(`
+      CREATE TABLE offer_fill (
+        id TEXT PRIMARY KEY,
+        state TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        offer_txid TEXT NOT NULL,
+        offer_vout INTEGER NOT NULL,
+        offer_pk_script TEXT NOT NULL,
+        want_asset_id TEXT,
+        want_amount TEXT NOT NULL,
+        offer_asset_id TEXT,
+        offer_amount TEXT NOT NULL,
+        fill_txid TEXT,
+        failure_reason TEXT,
+        rfq_id TEXT
+      );
+      INSERT INTO offer_fill (
+        id, state, created_at, updated_at, offer_txid, offer_vout, offer_pk_script,
+        want_asset_id, want_amount, offer_asset_id, offer_amount
+      ) VALUES (
+        'old', 'fillable', 1, 1, '${baseIntent.offerTxid}', 0, '${baseIntent.offerPkScript}',
+        NULL, '1', '${baseIntent.wantAssetId}', '2'
+      );
+    `)
+
+    const migrated = await OfferFillStore.open(driver, clock)
+    expect((await migrated.findById('old'))?.covenantVersion).toBeNull()
+    expect(
+      (
+        await migrated.insertIntent({
+          ...baseIntent,
+          id: 'new',
+          offerTxid: 'bb'.repeat(32),
+        })
+      ).covenantVersion,
+    ).toBe(1)
+    await migrated.close()
   })
 })
 

@@ -13,6 +13,24 @@
  */
 import { offerVtxoScript, type Offer } from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
+import { offerCovenantVersionOf, type OfferCovenantVersion } from '@arkade-os/solver-core/core/offerCovenant.js'
+
+export interface OfferCovenantMatch {
+  version: OfferCovenantVersion
+}
+
+/**
+ * The covenant version the offer's terms compile to, or null when the script
+ * does not encode those terms.
+ */
+export const offerCovenantMatch = (offer: Offer, serverPubkey: Uint8Array): OfferCovenantMatch | null => {
+  try {
+    const matches = hex.encode(offerVtxoScript(offer, serverPubkey).pkScript) === hex.encode(offer.swapPkScript)
+    return matches ? { version: offerCovenantVersionOf(offer) } : null
+  } catch {
+    return null
+  }
+}
 
 /**
  * True when the offer's `swapPkScript` is the one its own terms compile to.
@@ -22,9 +40,5 @@ import { hex } from '@scure/base'
  * an offer whose script cannot be built is an offer whose script cannot agree.
  */
 export const offerIsConsistent = (offer: Offer, serverPubkey: Uint8Array): boolean => {
-  try {
-    return hex.encode(offerVtxoScript(offer, serverPubkey).pkScript) === hex.encode(offer.swapPkScript)
-  } catch {
-    return false
-  }
+  return offerCovenantMatch(offer, serverPubkey) !== null
 }

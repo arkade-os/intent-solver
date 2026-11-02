@@ -64,6 +64,7 @@ const intentFor = (published: Offer, raw: string, over: Partial<OfferFillIntent>
   offerTxid: txidOf(raw),
   offerVout: 0,
   offerPkScript: hex.encode(published.swapPkScript),
+  covenantVersion: published.exitDelay === undefined ? 1 : 2,
   wantAssetId: published.wantAsset?.toString() ?? null,
   wantAmount: published.wantAmount,
   offerAssetId: published.offerAsset?.toString() ?? null,
@@ -161,6 +162,26 @@ describe('offerSettleFor — it refuses before it spends', () => {
     const { settle, fulfill } = build(raw)
     const wrong = intentFor(published, raw, { offerPkScript: '51' + '20' + 'ee'.repeat(32) })
     await expect(settle(wrong)).rejects.toThrow(/script/)
+    expect(fulfill).not.toHaveBeenCalled()
+  })
+
+  it('when the funding transaction uses a different covenant version than the intent priced', async () => {
+    const withExit = offer({ exitDelay: { type: 'seconds', value: 4096n } })
+    const withExitRaw = fundingTx(withExit)
+    const { settle, fulfill } = build(withExitRaw)
+
+    await expect(settle(intentFor(withExit, withExitRaw, { covenantVersion: 1 }))).rejects.toThrow(/covenant v2/)
+    expect(fulfill).not.toHaveBeenCalled()
+  })
+
+  it('when an unversioned old intent points at a covenant version now disabled', async () => {
+    const withExit = offer({ exitDelay: { type: 'seconds', value: 4096n } })
+    const withExitRaw = fundingTx(withExit)
+    const { settle, fulfill } = build(withExitRaw, { covenantVersions: new Set([1]) })
+
+    await expect(settle(intentFor(withExit, withExitRaw, { covenantVersion: null }))).rejects.toThrow(
+      /covenant v2.*disabled/,
+    )
     expect(fulfill).not.toHaveBeenCalled()
   })
 

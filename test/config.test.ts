@@ -114,6 +114,7 @@ const CONFIG_KEYS = [
   'OFFER_MARKETS',
   'OFFER_MIN_FILL_AMOUNT',
   'OFFER_MAX_FILL_AMOUNT',
+  'OFFER_COVENANT_VERSIONS',
   // Same reason again: a leaked `ASSET_MARKETS` gives every later test an
   // atomic-class corridor it never asked for, and one that then demands a
   // console market row those tests do not write.
@@ -940,6 +941,20 @@ describe('OFFER_MARKETS', () => {
     process.env.OFFER_MIN_FILL_AMOUNT = '5000'
     process.env.OFFER_MAX_FILL_AMOUNT = '1000'
     expect(() => configFromKnobs(process.env)).toThrow(/OFFER_MAX_FILL_AMOUNT/)
+  })
+
+  it('accepts both covenant versions by default, including for a deployment serving no offers', () => {
+    expect(configFromKnobs(process.env).offerCovenantVersions).toEqual([1, 2])
+  })
+
+  it('reads the covenant versions the operator enables', () => {
+    process.env.OFFER_COVENANT_VERSIONS = '2'
+    expect(configFromKnobs(process.env).offerCovenantVersions).toEqual([2])
+  })
+
+  it.each(['', '1,3', '2,2', 'v2'])('refuses the covenant version list %j', (value) => {
+    process.env.OFFER_COVENANT_VERSIONS = value
+    expect(() => configFromKnobs(process.env)).toThrow(/OFFER_COVENANT_VERSIONS/)
   })
 })
 

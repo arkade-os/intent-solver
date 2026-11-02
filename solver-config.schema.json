@@ -306,6 +306,17 @@
             "type": "string"
           }
         },
+        "covenantVersions": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "enum": [
+              1,
+              2
+            ]
+          },
+          "minItems": 1
+        },
         "minFillAmount": {
           "description": "decimal string",
           "type": "string",

@@ -42,6 +42,13 @@ describe('parseDocument', () => {
     )
   })
 
+  it('accepts only the offer covenant versions the runtime knows', () => {
+    expect(() => parseDocument({ offers: { covenantVersions: [1, 2] } }, [])).not.toThrow()
+    expect(() => parseDocument({ offers: { covenantVersions: [1, 3] } }, [])).toThrow(
+      'offers.covenantVersions[1]: must be one of 1, 2',
+    )
+  })
+
   it('refuses a wrong type and says which', () => {
     expect(() => parseDocument({ limits: { maxSwapSats: '5000' } }, [])).toThrow('limits.maxSwapSats: must be a number')
   })

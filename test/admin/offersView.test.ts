@@ -48,6 +48,10 @@ describe('the offers screen shows a fill', () => {
     expect(offersView()).toContain('offer.offerAmount')
     expect(offersView()).toContain('offer.wantAmount')
   })
+
+  it('names the covenant version that was priced', () => {
+    expect(offersView()).toContain('offer.covenantVersion')
+  })
 })
 
 describe('the offers screen shows a refusal', () => {
