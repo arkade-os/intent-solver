@@ -587,9 +587,11 @@ const lnBackendFromEnv = (env: Knobs, servesBtc: boolean): string | null => {
   const raw = env.LN_BACKEND?.trim()
   if (!raw) {
     if (!servesBtc) return null
+    const corridorEnables = ALL_DESCRIPTORS.map(({ envStem }) => `${envStem}_ENABLED`).join(', ')
     throw new Error(
       `LN_BACKEND must be set to one of ${accepted.join(', ')}: every BTC corridor takes both its legs from ` +
-        `it. Only a deployment with all three disabled (<STEM>_ENABLED=false) may leave it unset.`,
+        `it. Only a deployment with all three BTC corridors disabled may leave it unset; set enabled: false on ` +
+        `${corridorEnables}.`,
     )
   }
   const match = accepted.find((backend) => backend === raw)

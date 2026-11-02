@@ -141,6 +141,16 @@ describe('loadConfig — the old environment', () => {
 })
 
 describe('loadConfig — the document', () => {
+  it('names every BTC corridor to disable when an asset-only document omits the backend', () => {
+    const doc = { network: 'regtest', rails: { arkade: minimalDoc.rails.arkade } }
+    const message = errorOf(() => loadConfig({ env: inline(doc) }))
+    expect(message).toContain('rails.lightning.backend must be set')
+    expect(message).toContain('corridors["arkade:BTC->lightning:BTC"].enabled')
+    expect(message).toContain('corridors["lightning:BTC->arkade:BTC"].enabled')
+    expect(message).toContain('corridors["arkade:BTC->onchain:BTC"].enabled')
+    expect(message).not.toMatch(/LN_BACKEND|<STEM>|_ENABLED/)
+  })
+
   it('names the JSON path in a validation error', () => {
     const doc = { ...minimalDoc, corridors: { 'arkade:BTC->lightning:BTC': { feeBps: 10000 } } }
     expect(() => loadConfig({ env: inline(doc) })).toThrow(
