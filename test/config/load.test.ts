@@ -148,6 +148,7 @@ describe('loadConfig — the document', () => {
     expect(message).toContain('corridors["arkade:BTC->lightning:BTC"].enabled')
     expect(message).toContain('corridors["lightning:BTC->arkade:BTC"].enabled')
     expect(message).toContain('corridors["arkade:BTC->onchain:BTC"].enabled')
+    expect(message).toContain('to false')
     expect(message).not.toMatch(/LN_BACKEND|<STEM>|_ENABLED/)
   })
 
