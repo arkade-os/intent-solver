@@ -19,6 +19,7 @@ import { Extension, UnknownPacket, asset } from '@arkade-os/sdk'
 import { Transaction } from '@scure/btc-signer'
 import { base64, hex } from '@scure/base'
 import { schnorr } from '@noble/curves/secp256k1.js'
+import { OFFER_COVENANT_V1, OFFER_COVENANT_V2 } from '@arkade-os/solver-core/core/offerCovenant.js'
 
 const USDT = '11'.repeat(34)
 const SCRIPT = new Uint8Array(34).fill(0xab)
@@ -195,15 +196,15 @@ describe('offer covenant versions', () => {
 
     expect(await legacyRun.service.consider(at(legacy))).toEqual({ fill: true, id: 'fill-1' })
     expect(await currentRun.service.consider(at(current))).toEqual({ fill: true, id: 'fill-1' })
-    expect(await legacyRun.store.findById('fill-1')).toMatchObject({ covenantVersion: 1 })
-    expect(await currentRun.store.findById('fill-1')).toMatchObject({ covenantVersion: 2 })
+    expect(await legacyRun.store.findById('fill-1')).toMatchObject({ covenantVersion: OFFER_COVENANT_V1 })
+    expect(await currentRun.store.findById('fill-1')).toMatchObject({ covenantVersion: OFFER_COVENANT_V2 })
   })
 
   it('refuses a version the operator switched off', async () => {
     const legacy = honest(false)
     const { store, service } = await build({
       serverPubkey,
-      covenantVersions: new Set([2]),
+      covenantVersions: new Set([OFFER_COVENANT_V2]),
       outputsAt: funded(legacy).outputsAt,
     })
 
@@ -217,7 +218,7 @@ describe('offer covenant versions', () => {
   it('refuses an already-recorded intent when its version is no longer enabled', async () => {
     const settle = vi.fn(async () => 'fill-txid')
     const { store, service } = await build({
-      covenantVersions: new Set([2]),
+      covenantVersions: new Set([OFFER_COVENANT_V2]),
       settle,
     })
     await store.insertIntent({
@@ -225,7 +226,7 @@ describe('offer covenant versions', () => {
       offerTxid: found.txid,
       offerVout: found.vout,
       offerPkScript: SCRIPT_HEX,
-      covenantVersion: 1,
+      covenantVersion: OFFER_COVENANT_V1,
       wantAssetId: null,
       wantAmount: 1_000n,
       offerAssetId: USDT,
@@ -243,7 +244,7 @@ describe('offer covenant versions', () => {
   it('refuses an unversioned fillable row while still fillable when the rollout is narrowed', async () => {
     const settle = vi.fn(async () => 'fill-txid')
     const { store, service } = await build({
-      covenantVersions: new Set([2]),
+      covenantVersions: new Set([OFFER_COVENANT_V2]),
       settle,
     })
     await store.insertIntent({
@@ -269,7 +270,7 @@ describe('offer covenant versions', () => {
   it('refuses a narrowed rollout when script identity cannot be verified', async () => {
     const withExit = honest(true)
     const { service } = await build({
-      covenantVersions: new Set([2]),
+      covenantVersions: new Set([OFFER_COVENANT_V2]),
       outputsAt: funded(withExit).outputsAt,
     })
 

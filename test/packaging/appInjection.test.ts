@@ -98,7 +98,7 @@ const solverConfig = (): Config => {
     // No market, so the offer-packet path is off and its bounds are unread.
     offerMarkets: [],
     offerMinFillAmount: 0n,
-    offerCovenantVersions: [1, 2],
+    offerCovenantVersions: ['offer-v1', 'offer-v2'],
     offerMaxFillAmount: 0n,
     offerChargesDeliveredCarrier: false,
     assetCarrierPricing: false,

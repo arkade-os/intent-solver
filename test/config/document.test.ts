@@ -43,9 +43,9 @@ describe('parseDocument', () => {
   })
 
   it('accepts only the offer covenant versions the runtime knows', () => {
-    expect(() => parseDocument({ offers: { covenantVersions: [1, 2] } }, [])).not.toThrow()
-    expect(() => parseDocument({ offers: { covenantVersions: [1, 3] } }, [])).toThrow(
-      'offers.covenantVersions[1]: must be one of 1, 2',
+    expect(() => parseDocument({ offers: { covenantVersions: ['offer-v1', 'offer-v2'] } }, [])).not.toThrow()
+    expect(() => parseDocument({ offers: { covenantVersions: ['offer-v1', 'offer-v3'] } }, [])).toThrow(
+      'offers.covenantVersions[1]: must be one of offer-v1, offer-v2',
     )
   })
 

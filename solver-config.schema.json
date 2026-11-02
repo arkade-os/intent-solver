@@ -309,10 +309,10 @@
         "covenantVersions": {
           "type": "array",
           "items": {
-            "type": "number",
+            "type": "string",
             "enum": [
-              1,
-              2
+              "offer-v1",
+              "offer-v2"
             ]
           },
           "minItems": 1,

@@ -189,8 +189,8 @@ describe('documentToKnobs — assets', () => {
   })
 
   it('flattens the accepted offer covenant versions', () => {
-    const { knobs, pathOf } = documentToKnobs({ offers: { covenantVersions: [1, 2] } })
-    expect(knobs.OFFER_COVENANT_VERSIONS).toBe('1,2')
+    const { knobs, pathOf } = documentToKnobs({ offers: { covenantVersions: ['offer-v1', 'offer-v2'] } })
+    expect(knobs.OFFER_COVENANT_VERSIONS).toBe('offer-v1,offer-v2')
     expect(pathOf.get('OFFER_COVENANT_VERSIONS')).toBe('offers.covenantVersions')
   })
 })

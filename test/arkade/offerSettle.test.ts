@@ -25,6 +25,7 @@ import { base64, hex } from '@scure/base'
 import { offerSettleFor, type OfferFillIntent } from '@arkade-os/solver-arkade/arkade/offerSettle.js'
 import type { OfferOutpoint } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
 import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { OFFER_COVENANT_V1, OFFER_COVENANT_V2 } from '@arkade-os/solver-core/core/offerCovenant.js'
 
 const USD = '41bcbb06921a0e9f6fe4f1b003b878cbb43d9ca3f6d14cab7940090458765a390000'
 const EUR = '7cfc24fc9b275633780502ba8d7bf8431501b52246856df8d402e4bc9627ebc90000'
@@ -64,7 +65,7 @@ const intentFor = (published: Offer, raw: string, over: Partial<OfferFillIntent>
   offerTxid: txidOf(raw),
   offerVout: 0,
   offerPkScript: hex.encode(published.swapPkScript),
-  covenantVersion: published.exitDelay === undefined ? 1 : 2,
+  covenantVersion: published.exitDelay === undefined ? OFFER_COVENANT_V1 : OFFER_COVENANT_V2,
   wantAssetId: published.wantAsset?.toString() ?? null,
   wantAmount: published.wantAmount,
   offerAssetId: published.offerAsset?.toString() ?? null,
@@ -170,17 +171,19 @@ describe('offerSettleFor — it refuses before it spends', () => {
     const withExitRaw = fundingTx(withExit)
     const { settle, fulfill } = build(withExitRaw)
 
-    await expect(settle(intentFor(withExit, withExitRaw, { covenantVersion: 1 }))).rejects.toThrow(/covenant v2/)
+    await expect(settle(intentFor(withExit, withExitRaw, { covenantVersion: OFFER_COVENANT_V1 }))).rejects.toThrow(
+      /covenant offer-v2/,
+    )
     expect(fulfill).not.toHaveBeenCalled()
   })
 
   it('when an unversioned old intent points at a covenant version now disabled', async () => {
     const withExit = offer({ exitDelay: { type: 'seconds', value: 4096n } })
     const withExitRaw = fundingTx(withExit)
-    const { settle, fulfill } = build(withExitRaw, { covenantVersions: new Set([1]) })
+    const { settle, fulfill } = build(withExitRaw, { covenantVersions: new Set([OFFER_COVENANT_V1]) })
 
     await expect(settle(intentFor(withExit, withExitRaw, { covenantVersion: null }))).rejects.toThrow(
-      /covenant v2.*disabled/,
+      /covenant offer-v2.*disabled/,
     )
     expect(fulfill).not.toHaveBeenCalled()
   })

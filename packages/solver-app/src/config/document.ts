@@ -5,6 +5,7 @@
  * once the document is flattened, by the same readers the environment used.
  */
 import { z } from 'zod'
+import { OFFER_COVENANT_VERSIONS } from '@arkade-os/solver-core/core/offerCovenant.js'
 
 const UNKNOWN_KEY = 'unknown key'
 
@@ -19,8 +20,8 @@ const str = z.string()
 const num = z.number()
 const bool = z.boolean()
 const strings = z.array(z.string())
-const offerCovenantVersion = z.union([z.literal(1), z.literal(2)], {
-  errorMap: () => ({ message: 'must be one of 1, 2' }),
+const offerCovenantVersion = z.enum(OFFER_COVENANT_VERSIONS, {
+  errorMap: () => ({ message: `must be one of ${OFFER_COVENANT_VERSIONS.join(', ')}` }),
 })
 const offerCovenantVersions = z
   .array(offerCovenantVersion)

@@ -38,7 +38,11 @@ import { addColumns, assertColumns } from './baseSwapStore.js'
 import { pageQuery, takePage, type PageOptions, type PageRawFields } from '@arkade-os/solver-core/core/page.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { announceTransition, type TransitionHook } from '@arkade-os/solver-core/core/businessEvent.js'
-import type { OfferCovenantVersion } from '@arkade-os/solver-core/core/offerCovenant.js'
+import {
+  OFFER_COVENANT_V1,
+  OFFER_COVENANT_V2,
+  type OfferCovenantVersion,
+} from '@arkade-os/solver-core/core/offerCovenant.js'
 
 // List first, union derived: `LEGAL_EDGES` stops compiling if the two separate.
 export const OFFER_FILL_STATES = ['fillable', 'filling', 'filled', 'lost', 'refused', 'stuck'] as const
@@ -113,7 +117,7 @@ const OFFER_FILL_COLUMNS = `
   offer_txid      TEXT NOT NULL,
   offer_vout      INTEGER NOT NULL,
   offer_pk_script TEXT NOT NULL,
-  covenant_version INTEGER,
+  covenant_version TEXT,
   want_asset_id   TEXT,
   want_amount     TEXT NOT NULL,
   offer_asset_id  TEXT,
@@ -150,6 +154,19 @@ CREATE INDEX IF NOT EXISTS idx_offer_fill_event_fill ON offer_fill_event(fill_id
 
 type Raw = Record<string, string | number | null>
 
+/**
+ * Identifiers are strings, but a database created by an intermediate build of
+ * this branch can hold the old numeric discriminator. Read those forward so an
+ * operator's local state survives the change; new rows are always written as
+ * the string identifier.
+ */
+const covenantVersionFrom = (raw: string | number | null | undefined): OfferCovenantVersion | null => {
+  if (raw === null || raw === undefined) return null
+  if (raw === 1) return OFFER_COVENANT_V1
+  if (raw === 2) return OFFER_COVENANT_V2
+  return String(raw)
+}
+
 // Amounts are TEXT, not INTEGER. An asset amount is a bigint in atomic units
 // (`docs/rfq-protocol.md` § 2.1) and SQLite's INTEGER is a signed 64-bit, so a
 // value the protocol admits can be one a column silently mangles. Stored as the
@@ -162,10 +179,7 @@ const toRow = (raw: Raw): OfferFillRow => ({
   offerTxid: String(raw.offer_txid),
   offerVout: Number(raw.offer_vout),
   offerPkScript: String(raw.offer_pk_script),
-  covenantVersion:
-    raw.covenant_version === null || raw.covenant_version === undefined
-      ? null
-      : (Number(raw.covenant_version) as OfferCovenantVersion),
+  covenantVersion: covenantVersionFrom(raw.covenant_version),
   wantAssetId: raw.want_asset_id === null ? null : String(raw.want_asset_id),
   wantAmount: BigInt(String(raw.want_amount)),
   offerAssetId: raw.offer_asset_id === null ? null : String(raw.offer_asset_id),
@@ -184,7 +198,7 @@ export class OfferFillStore {
   static async open(driver: SqlDriver | string, now: () => number = nowSeconds): Promise<OfferFillStore> {
     const store = new OfferFillStore(typeof driver === 'string' ? betterSqliteDriver(driver) : driver, now)
     await store.driver.exec(SCHEMA)
-    await addColumns(store.driver, 'offer_fill', [['covenant_version', 'INTEGER']])
+    await addColumns(store.driver, 'offer_fill', [['covenant_version', 'TEXT']])
     return store
   }
 

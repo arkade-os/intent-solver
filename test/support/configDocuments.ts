@@ -81,7 +81,7 @@ export const FULL_DOCUMENT = {
   },
   offers: {
     markets: ['BTC/USDA'],
-    covenantVersions: [1, 2],
+    covenantVersions: ['offer-v1', 'offer-v2'],
     minFillAmount: '1000',
     maxFillAmount: '500000000',
     chargeCarrier: false,

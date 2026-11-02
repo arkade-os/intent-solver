@@ -944,15 +944,15 @@ describe('OFFER_MARKETS', () => {
   })
 
   it('accepts both covenant versions by default, including for a deployment serving no offers', () => {
-    expect(configFromKnobs(process.env).offerCovenantVersions).toEqual([1, 2])
+    expect(configFromKnobs(process.env).offerCovenantVersions).toEqual(['offer-v1', 'offer-v2'])
   })
 
   it('reads the covenant versions the operator enables', () => {
-    process.env.OFFER_COVENANT_VERSIONS = '2'
-    expect(configFromKnobs(process.env).offerCovenantVersions).toEqual([2])
+    process.env.OFFER_COVENANT_VERSIONS = 'offer-v2'
+    expect(configFromKnobs(process.env).offerCovenantVersions).toEqual(['offer-v2'])
   })
 
-  it.each(['', '1,3', '2,2', 'v2'])('refuses the covenant version list %j', (value) => {
+  it.each(['', 'offer-v1,offer-v3', 'offer-v2,offer-v2', '1,2'])('refuses the covenant version list %j', (value) => {
     process.env.OFFER_COVENANT_VERSIONS = value
     expect(() => configFromKnobs(process.env)).toThrow(/OFFER_COVENANT_VERSIONS/)
   })

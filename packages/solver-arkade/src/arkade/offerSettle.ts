@@ -117,12 +117,12 @@ export const offerSettleFor = (deps: OfferSettleDeps): ((intent: OfferFillIntent
     const covenantVersion = offerCovenantVersionOf(found.offer)
     if (!covenantVersions.has(covenantVersion)) {
       throw new Error(
-        `${intent.offerTxid} funds covenant v${covenantVersion}, which is disabled by offers.covenantVersions`,
+        `${intent.offerTxid} funds covenant ${covenantVersion}, which is disabled by offers.covenantVersions`,
       )
     }
     if (intent.covenantVersion !== null && intent.covenantVersion !== covenantVersion) {
       throw new Error(
-        `${intent.offerTxid} funds covenant v${covenantVersion}, but the intent was priced as v${intent.covenantVersion}`,
+        `${intent.offerTxid} funds covenant ${covenantVersion}, but the intent was priced as ${intent.covenantVersion}`,
       )
     }
 

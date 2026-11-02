@@ -67,5 +67,9 @@ describe('solver-config.schema.json', () => {
   it('requires the offer covenant version list to be unique', () => {
     const schema = read('solver-config.schema.json')
     expect(schema.properties.offers.properties.covenantVersions).toMatchObject({ uniqueItems: true })
+    expect(schema.properties.offers.properties.covenantVersions.items).toMatchObject({
+      type: 'string',
+      enum: ['offer-v1', 'offer-v2'],
+    })
   })
 })

@@ -25,7 +25,7 @@ type Row = readonly [
   decode?: (value: string) => unknown,
 ]
 
-const covenantVersions = (raw: string): unknown => raw.split(',').map((value) => Number(value.trim()))
+const covenantVersions = (raw: string): unknown => raw.split(',').map((value) => value.trim())
 
 export const PATHS: readonly Row[] = [
   ['network', 'SWAP_NETWORK'],

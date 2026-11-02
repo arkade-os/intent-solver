@@ -315,7 +315,7 @@ export class AssetOfferService {
       return this.refuse(
         outpoint,
         'offer_version_disabled',
-        `offer covenant v${match.version} is disabled by offers.covenantVersions`,
+        `offer covenant ${match.version} is disabled by offers.covenantVersions`,
       )
     }
 
@@ -414,12 +414,12 @@ export class AssetOfferService {
         this.deps.onRefused?.(
           `${row.offerTxid}:${row.offerVout}`,
           'offer_version_disabled',
-          `offer covenant v${row.covenantVersion} is disabled by offers.covenantVersions`,
+          `offer covenant ${row.covenantVersion} is disabled by offers.covenantVersions`,
         )
         await this.deps.store.fail(
           row.id,
           'fillable',
-          `offer_version_disabled; offer covenant v${row.covenantVersion} is disabled by offers.covenantVersions`,
+          `offer_version_disabled; offer covenant ${row.covenantVersion} is disabled by offers.covenantVersions`,
         )
         continue
       }

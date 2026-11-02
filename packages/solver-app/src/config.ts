@@ -101,14 +101,18 @@ const requiredBigintFromEnv = (env: Knobs, name: string): bigint => {
 const offerCovenantVersionsFromEnv = (raw: string | undefined): readonly OfferCovenantVersion[] => {
   if (raw === undefined) return OFFER_COVENANT_VERSIONS
   const entries = raw.split(',').map((entry) => entry.trim())
-  if (entries.some((entry) => entry !== '1' && entry !== '2')) {
-    throw new Error('OFFER_COVENANT_VERSIONS must list 1 and/or 2, comma-separated')
+  const known = new Set<string>(OFFER_COVENANT_VERSIONS)
+  const unknown = entries.filter((entry) => !known.has(entry))
+  if (unknown.length > 0) {
+    throw new Error(
+      `OFFER_COVENANT_VERSIONS must list a supported covenant identifier (${OFFER_COVENANT_VERSIONS.join(', ')}), ` +
+        `comma-separated; got ${unknown.map((entry) => JSON.stringify(entry)).join(', ')}`,
+    )
   }
-  const versions = entries.map(Number) as OfferCovenantVersion[]
-  if (new Set(versions).size !== versions.length) {
+  if (new Set(entries).size !== entries.length) {
     throw new Error('OFFER_COVENANT_VERSIONS must not repeat a version')
   }
-  return versions
+  return entries
 }
 
 export interface LndConfig {
