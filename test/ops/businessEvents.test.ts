@@ -28,6 +28,7 @@ const reading = (over: Partial<BalanceReading> = {}): BalanceReading => ({
 
 const sampler = (over: Partial<BalanceReading> = {}) => ({
   current: () => reading(over),
+  refresh: async () => {},
 })
 
 const terms = (size = 'amount 10,000 sats') => size
@@ -77,6 +78,24 @@ describe('createSwapOutcomeReporter', () => {
     expect(posted[0]).toContain('✅ *Swap fulfilled*')
     expect(posted[0]).toContain('arkade:BTC → lightning:BTC')
     expect(posted[0]).toContain('`swap-1`')
+  })
+
+  it('refreshes the cached balances after the swap has committed', async () => {
+    let current = reading({
+      arkade: { value: 1_000_000, at: 1_000 },
+      lightning: { value: { availableSats: 2_000_000, incomingSats: 0 }, at: 1_000 },
+    })
+    const refresh = vi.fn(async () => {
+      current = reading({
+        arkade: { value: 1_002_012, at: 2_000 },
+        lightning: { value: { availableSats: 1_997_989, incomingSats: 0 }, at: 2_000 },
+      })
+    })
+    const { report, posted } = reporter({ balances: { current: () => current, refresh } })
+    report({ id: 'swap-1', from: 'claiming', to: 'claimed' })
+    await vi.waitFor(() => expect(posted).toHaveLength(1))
+    expect(refresh).toHaveBeenCalledOnce()
+    expect(posted[0]!.split('\n')[1]).toBe('`swap-1` · Lightning 1,997,989 · Arkade 1,002,012')
   })
 
   it('does not page a refusal — never funded, nothing moved', async () => {
@@ -153,8 +172,27 @@ describe('createSwapOutcomeReporter', () => {
     expect(posted[0]).toContain('balances 600s old')
   })
 
+  it('still posts when a balance refresh hangs, and marks the reading as not refreshed', async () => {
+    vi.useFakeTimers()
+    try {
+      const errors: unknown[] = []
+      const { report, posted } = reporter({
+        balances: { current: () => reading(), refresh: () => new Promise<void>(() => {}) },
+        onError: (error: unknown) => errors.push(error),
+      })
+      report({ id: 'swap-1', from: 'claiming', to: 'claimed' })
+      await vi.advanceTimersByTimeAsync(10_000)
+      await settle()
+      expect(posted).toHaveLength(1)
+      expect(posted[0]).toContain('balances not refreshed')
+      expect(errors).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('still announces when no balance has been sampled yet', async () => {
-    const { report, posted } = reporter({ balances: { current: () => null } })
+    const { report, posted } = reporter({ balances: { current: () => null, refresh: async () => {} } })
     report({ id: 'swap-1', from: 'claiming', to: 'claimed' })
     await vi.waitFor(() => expect(posted).toHaveLength(1))
     expect(posted[0]).toContain('unread')
@@ -195,15 +233,23 @@ describe('createSwapOutcomeReporter', () => {
   })
 
   it('returns synchronously without reading the swap row', () => {
-    let touched = false
+    let termsTouched = false
+    let balancesTouched = false
     const { report } = reporter({
+      balances: {
+        current: () => reading(),
+        refresh: async () => {
+          balancesTouched = true
+        },
+      },
       terms: async () => {
-        touched = true
+        termsTouched = true
         return terms()
       },
     })
     report({ id: 'swap-1', from: 'claiming', to: 'claimed' })
-    expect(touched).toBe(false)
+    expect(termsTouched).toBe(false)
+    expect(balancesTouched).toBe(false)
   })
 })
 
@@ -270,6 +316,27 @@ describe('createBalanceSampler', () => {
     expect(readArkadeAvailableSats).toHaveBeenCalledTimes(2)
     release(8)
     await third
+  })
+
+  it('refreshes after a sample already in flight instead of joining the pre-transition read', async () => {
+    let releaseFirst!: (sats: number) => void
+    let releaseSecond!: (sats: number) => void
+    const readArkadeAvailableSats = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise<number>((resolve) => (releaseFirst = resolve)))
+      .mockImplementationOnce(() => new Promise<number>((resolve) => (releaseSecond = resolve)))
+    const s = createBalanceSampler({ readArkadeAvailableSats, now: () => 10 })
+
+    const timerSample = s.sample()
+    const refreshed = s.refresh()
+    expect(readArkadeAvailableSats).toHaveBeenCalledTimes(1)
+
+    releaseFirst(100)
+    await timerSample
+    await vi.waitFor(() => expect(readArkadeAvailableSats).toHaveBeenCalledTimes(2))
+    releaseSecond(200)
+    await refreshed
+    expect(s.current()?.arkade?.value).toBe(200)
   })
 })
 
