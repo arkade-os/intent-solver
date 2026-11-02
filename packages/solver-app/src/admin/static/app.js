@@ -194,8 +194,8 @@ const assetLabel = (asset) =>
  * What the solver holds in Arkade assets, and what it could pay out of RIGHT NOW.
  *
  * TWO NUMBERS, NOT ONE, whenever they differ. An offer fill is decided against
- * `availableAssets`; `assets` also counts holdings that are gated, intent-locked
- * or awaiting recovery. Showing only the total is how an operator concludes they
+ * `availableAssets`; `assets` also counts holdings in `contractLocked`,
+ * `pendingSettlement` or `deprecatedSignerLocked`. Showing only the total is how an operator concludes they
  * can cover a fill that would fail at submission after the maker was told yes.
  *
  * Amounts are BASE UNITS, matching what an offer names, and are strings because

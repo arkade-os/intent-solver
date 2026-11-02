@@ -16,8 +16,8 @@
  * so the coins need `recoverVtxos()` before coin selection will touch them. Building
  * inventory from `total` there would accept every offer and fail every fill, at
  * submission, after the maker has been told yes. The other buckets are excluded for
- * the same reason: `gated` and `pendingSettlement` are held for a cause, and
- * `pendingRecovery` is not spendable until it recovers.
+ * the same reason: `contractLocked` and `pendingSettlement` are held for a cause, and
+ * `deprecatedSignerLocked` is not spendable until it recovers.
  *
  * NOT a reservation. Between reading a balance and submitting a fill, another
  * corridor's tick can spend the same coins — every corridor draws on one float.
