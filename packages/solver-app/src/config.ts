@@ -32,6 +32,11 @@ import type { AdPublishMode } from '@arkade-os/solver-transport/relay/adPublishe
 import { parseSentryDsn, type SentryOptions } from './ops/sentry.js'
 import { loadEvmChainConfig, type EvmChainConfig } from '@arkade-os/solver-rails-evm/evm/config.js'
 import { OFFER_COVENANT_VERSIONS, type OfferCovenantVersion } from '@arkade-os/solver-core/core/offerCovenant.js'
+import {
+  RFQ_COVENANT_VERSION_ID,
+  RFQ_COVENANT_VERSIONS,
+  type RfqCovenantVersion,
+} from '@arkade-os/solver-core/core/rfqCovenant.js'
 
 /** The network a deployment that sets nothing runs as. */
 const DEFAULT_NETWORK = 'regtest'
@@ -98,19 +103,40 @@ const requiredBigintFromEnv = (env: Knobs, name: string): bigint => {
   return BigInt(raw)
 }
 
-const offerCovenantVersionsFromEnv = (raw: string | undefined): readonly OfferCovenantVersion[] => {
-  if (raw === undefined) return OFFER_COVENANT_VERSIONS
+const covenantVersionsFromEnv = (
+  name: string,
+  raw: string | undefined,
+  knownVersions: readonly string[],
+  fallback: readonly string[],
+): readonly string[] => {
+  if (raw === undefined) return fallback
   const entries = raw.split(',').map((entry) => entry.trim())
-  const known = new Set<string>(OFFER_COVENANT_VERSIONS)
+  const known = new Set<string>(knownVersions)
   const unknown = entries.filter((entry) => !known.has(entry))
   if (unknown.length > 0) {
     throw new Error(
-      `OFFER_COVENANT_VERSIONS must list a supported covenant identifier (${OFFER_COVENANT_VERSIONS.join(', ')}), ` +
+      `${name} must list a supported covenant identifier (${knownVersions.join(', ')}), ` +
         `comma-separated; got ${unknown.map((entry) => JSON.stringify(entry)).join(', ')}`,
     )
   }
   if (new Set(entries).size !== entries.length) {
-    throw new Error('OFFER_COVENANT_VERSIONS must not repeat a version')
+    throw new Error(`${name} must not repeat a version`)
+  }
+  return entries
+}
+
+const rfqCovenantVersionsFromEnv = (raw: string | undefined): readonly RfqCovenantVersion[] => {
+  if (raw === undefined) return RFQ_COVENANT_VERSIONS
+  const entries = raw.split(',').map((entry) => entry.trim())
+  const invalid = entries.filter((entry) => !RFQ_COVENANT_VERSION_ID.test(entry))
+  if (invalid.length > 0) {
+    throw new Error(
+      'RFQ_COVENANT_VERSIONS must list version names or content hashes, comma-separated; ' +
+        `got ${invalid.map((entry) => JSON.stringify(entry)).join(', ')}`,
+    )
+  }
+  if (new Set(entries).size !== entries.length) {
+    throw new Error('RFQ_COVENANT_VERSIONS must not repeat a version')
   }
   return entries
 }
@@ -237,6 +263,9 @@ export interface Config {
   /**
    * Asset-swap markets this solver TAKES offers on (`OFFER_MARKETS`).
    *
+   * @deprecated Packet-style offers are kept for existing deployments. RFQ is
+   * the recommended path for new asset-swap integrations.
+   *
    * Empty is the whole offer-packet path off, and is the default: nothing
    * subscribes, nothing is decided, nothing is spent. Not a corridor — both legs
    * are on Arkade and the maker's covenant obliges the fill to pay them, so
@@ -261,8 +290,21 @@ export interface Config {
    */
   offerMinFillAmount: bigint
   offerMaxFillAmount: bigint
-  /** Offer covenant versions this deployment accepts on the packet path. */
+  /**
+   * Offer covenant versions this deployment accepts on the packet path.
+   *
+   * @deprecated Packet-style offers are kept for existing deployments.
+   */
   offerCovenantVersions: readonly OfferCovenantVersion[]
+  /**
+   * Covenant versions this deployment serves across every RFQ method.
+   *
+   * One allowlist rather than one per corridor: each corridor declares the
+   * version it speaks, and the host refuses its quote path when that string is
+   * absent. Adding a method or a new contract revision adds a name here; it
+   * does not add another config shape.
+   */
+  rfqCovenantVersions: readonly RfqCovenantVersion[]
   /**
    * `OFFER_CHARGE_CARRIER`. Off by default: the MAKER prices this path and the
    * card has no field to tell them the carrier exists, so charging would refuse
@@ -982,7 +1024,13 @@ export const configFromKnobs = (env: Knobs): Config => {
   const offerMaxFillAmount = offerMarkets.length > 0 ? requiredBigintFromEnv(env, 'OFFER_MAX_FILL_AMOUNT') : 0n
   const offerChargesDeliveredCarrier = env.OFFER_CHARGE_CARRIER?.trim() === 'true'
   const assetCarrierPricing = env.ASSET_CARRIER_PRICING?.trim() === 'true'
-  const offerCovenantVersions = offerCovenantVersionsFromEnv(env.OFFER_COVENANT_VERSIONS)
+  const offerCovenantVersions = covenantVersionsFromEnv(
+    'OFFER_COVENANT_VERSIONS',
+    env.OFFER_COVENANT_VERSIONS,
+    OFFER_COVENANT_VERSIONS,
+    OFFER_COVENANT_VERSIONS,
+  )
+  const rfqCovenantVersions = rfqCovenantVersionsFromEnv(env.RFQ_COVENANT_VERSIONS)
   // Refused at boot rather than per offer: inverted bounds refuse every offer,
   // which is indistinguishable from a quiet market and would be diagnosed as
   // one. `evaluateOfferFill` compares against both, so it cannot report this.
@@ -1016,6 +1064,7 @@ export const configFromKnobs = (env: Knobs): Config => {
     offerMinFillAmount,
     offerMaxFillAmount,
     offerCovenantVersions,
+    rfqCovenantVersions,
     offerChargesDeliveredCarrier,
     assetCarrierPricing,
     // Read here so a malformed list refuses at boot beside every other knob.

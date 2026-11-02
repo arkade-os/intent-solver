@@ -20,6 +20,7 @@ import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
 import type { SolverCard } from '@arkade-os/solver-core/core/registryCard.js'
 import { AdPublisher, type AdPublishMode } from '@arkade-os/solver-transport/relay/adPublisher.js'
+import { RFQ_COVENANT_VERSIONS } from '@arkade-os/solver-core/core/rfqCovenant.js'
 
 const SECRET = hexToBytes('B7E151628AED2A6ABF7158809CF4F3C762E7160F38B4DA56A784D9045190CFEF'.toLowerCase())
 const PUBKEY = 'dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659'
@@ -45,6 +46,7 @@ const publisherWith = (mode: AdPublishMode, publish = vi.fn(async () => {})) =>
  * as two routes cheerfully agreeing on nothing.
  */
 const bootPolicy = {
+  rfqCovenantVersions: [...RFQ_COVENANT_VERSIONS],
   corridorLimits: allCorridors({ minSats: 1_000, maxSats: 50_000 }),
   corridorFees: allCorridors({ bps: 0, flatSats: 0 }),
   corridorEnabled: allCorridors(true),

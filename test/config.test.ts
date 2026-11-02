@@ -115,6 +115,7 @@ const CONFIG_KEYS = [
   'OFFER_MIN_FILL_AMOUNT',
   'OFFER_MAX_FILL_AMOUNT',
   'OFFER_COVENANT_VERSIONS',
+  'RFQ_COVENANT_VERSIONS',
   // Same reason again: a leaked `ASSET_MARKETS` gives every later test an
   // atomic-class corridor it never asked for, and one that then demands a
   // console market row those tests do not write.
@@ -956,6 +957,37 @@ describe('OFFER_MARKETS', () => {
     process.env.OFFER_COVENANT_VERSIONS = value
     expect(() => configFromKnobs(process.env)).toThrow(/OFFER_COVENANT_VERSIONS/)
   })
+})
+
+describe('RFQ_COVENANT_VERSIONS', () => {
+  it('accepts every shipped RFQ method version by default', () => {
+    expect(configFromKnobs(process.env).rfqCovenantVersions).toEqual([
+      'lightning-send-v2',
+      'lightning-receive-v2',
+      'onchain-send-v2',
+      'asset-swap-v2',
+      'evm-send-v1',
+      'evm-receive-v1',
+    ])
+  })
+
+  it('reads the RFQ covenant versions the operator enables', () => {
+    process.env.RFQ_COVENANT_VERSIONS = 'asset-swap-v2,evm-send-v1'
+    expect(configFromKnobs(process.env).rfqCovenantVersions).toEqual(['asset-swap-v2', 'evm-send-v1'])
+  })
+
+  it('accepts a custom method name or content hash', () => {
+    process.env.RFQ_COVENANT_VERSIONS = 'my-method-v9,sha256:' + 'ab'.repeat(32)
+    expect(configFromKnobs(process.env).rfqCovenantVersions).toEqual(['my-method-v9', 'sha256:' + 'ab'.repeat(32)])
+  })
+
+  it.each(['', 'bad version', 'asset-swap-v2,asset-swap-v2', 'asset-swap-v2,,evm-send-v1'])(
+    'refuses the RFQ covenant version list %j',
+    (value) => {
+      process.env.RFQ_COVENANT_VERSIONS = value
+      expect(() => configFromKnobs(process.env)).toThrow(/RFQ_COVENANT_VERSIONS/)
+    },
+  )
 })
 
 /**

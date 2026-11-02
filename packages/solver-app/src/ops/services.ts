@@ -1479,6 +1479,7 @@ export const createServices = async (
       evmCorridors: livePolicy.evmCorridors,
       assetRfqService,
       assetRfqStore,
+      rfqCovenantVersions: new Set(livePolicy.rfqCovenantVersions),
       railUp: rail?.probe ? () => railWatch?.up() ?? false : undefined,
     }
     return {

@@ -1,6 +1,9 @@
 /**
  * Wiring for Arkade asset-swap offers: the pieces exist, this composes them.
  *
+ * @deprecated Packet-style offers remain for deployed clients. New asset-swap
+ * integrations should use the RFQ path (`corridors/assetRfq.ts`).
+ *
  * `evaluateOfferFill` (core), the packet/deposit/inventory adapters (arkade) and
  * `OfferFillStore` (corridors) each landed separately and had no caller in
  * `src/`. This is that caller.

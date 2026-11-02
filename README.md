@@ -507,7 +507,24 @@ the range). In atomic units that is ~9e15: no constraint for a 6-decimal token
 such as USDC or USDT, but an 18-decimal token cannot be served until the
 downstream `number`s are widened to bigint, since one whole token is 1e18.
 
+### Config — RFQ covenant versions
+
+Every RFQ method declares the settlement covenant/program it speaks. The
+`rfq.covenantVersions` list is the deployment-wide allowlist:
+
+| Setting                  | Notes                                                                                                                                                                                                                                                                                                                                                 |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rfq.covenantVersions`   | string identifiers for every RFQ method this deployment serves. The default is every version this build ships: `lightning-send-v2`, `lightning-receive-v2`, `onchain-send-v2`, `asset-swap-v2`, `evm-send-v1`, `evm-receive-v1`. Each corridor refuses its quote path when its own identifier is absent; status, recovery and sweep continue for rows already negotiated. Identifiers are opaque strings, so a custom corridor or a future build can use a name or a content hash without a schema change. An empty, repeated or malformed identifier refuses at startup |
+
+The RFQ envelope's integer protocol version (`v: 1`) is separate: this setting
+selects which settlement contract an RFQ method uses, not which wire family it
+speaks.
+
 ### Config — Arkade asset offers (the packet path), off unless `offers.markets` names a pair
+
+**Deprecated.** Packet-style asset offers remain available for existing
+deployments, but RFQ is the recommended path and the one this repository is
+extending. New integrations should use the asset RFQ section below.
 
 Not a corridor, and absent from the corridor tables above rather than missing
 from them. Both legs are on Arkade and the maker's covenant obliges the fill to

@@ -12,6 +12,7 @@
 import type { CorridorDescriptor } from './corridorDescriptor.js'
 import type { PageOptions } from './page.js'
 import type { CorridorLedger, LedgerWindow } from '../analytics/economics.js'
+import { extractRfqId, rfqRefusalPayload } from './rfqProtocol.js'
 
 /** What a corridor hands back from an RFQ. Mirrors `ingress/rfq.ts`'s outcome. */
 export interface CorridorRfqOutcome {
@@ -277,6 +278,16 @@ export interface CorridorSet extends Iterable<Corridor> {
   replace(corridors: readonly Corridor[]): void
 }
 
+export interface CorridorSetOptions {
+  /**
+   * Covenant versions this deployment serves.
+   *
+   * Absent means the caller is not applying an RFQ-version policy (tests and
+   * hand-built sets). The shipped composition root always supplies it.
+   */
+  readonly supportedCovenantVersions?: ReadonlySet<string>
+}
+
 /**
  * Every corridor this deployment has a STORE for, serving or not.
  *
@@ -302,12 +313,15 @@ export interface CorridorReaderSet extends Iterable<CorridorReader> {
  * IS the dispatch, and an unknown pair is a routine client request to refuse
  * rather than a build fault.
  */
-export const createCorridorSet = (corridors: readonly Corridor[]): CorridorSet => {
+export const createCorridorSet = (corridors: readonly Corridor[], options: CorridorSetOptions = {}): CorridorSet => {
+  const supported = options.supportedCovenantVersions
+  const gate = (list: readonly Corridor[]): readonly Corridor[] =>
+    supported === undefined ? list : list.map((corridor) => whileCovenantEnabled(corridor, supported))
   let byPair = new Map<string, Corridor>()
   const index = (list: readonly Corridor[]): void => {
     const next = new Map<string, Corridor>()
     const stems = new Map<string, string>()
-    for (const corridor of list) {
+    for (const corridor of gate(list)) {
       const { pair, envStem } = corridor.descriptor
       if (next.has(pair)) throw new Error(`duplicate corridor pair: ${pair}`)
       const claimed = stems.get(envStem)
@@ -325,6 +339,23 @@ export const createCorridorSet = (corridors: readonly Corridor[]): CorridorSet =
       return byPair.size
     },
     [Symbol.iterator]: () => byPair.values(),
+  }
+}
+
+/**
+ * The host-side version gate. A corridor whose covenant this deployment does
+ * not serve stays readable and sweepable — only its QUOTE path is refused.
+ */
+const whileCovenantEnabled = (corridor: Corridor, supported: ReadonlySet<string>): Corridor => {
+  const version = corridor.descriptor.covenantVersion
+  if (supported.has(version)) return corridor
+  return {
+    ...corridor,
+    quote: async (payload) => ({
+      kind: 'refused',
+      payload: rfqRefusalPayload(extractRfqId(payload), 'unsupported_pair'),
+      detail: `${corridor.descriptor.pair} speaks covenant ${version}, which rfq.covenantVersions disables`,
+    }),
   }
 }
 

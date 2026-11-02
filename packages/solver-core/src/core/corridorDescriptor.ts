@@ -1,4 +1,5 @@
 import type { RailId } from './rail.js'
+import type { RfqCovenantVersion } from './rfqCovenant.js'
 
 /**
  * What a corridor DECLARES about itself.
@@ -38,6 +39,14 @@ export interface CorridorDescriptor<State extends string = string> {
    * `arkade:BTC->lightning:BTC` is not a legal shell identifier.
    */
   readonly envStem: string
+  /**
+   * The settlement covenant/program this corridor speaks.
+   *
+   * Required so a new RFQ method cannot be added without answering which
+   * covenant version it serves. `createCorridorSet` gates this against
+   * `rfq.covenantVersions` before a request reaches `quote`.
+   */
+  readonly covenantVersion: RfqCovenantVersion
   /** Which rail's balance funds this corridor's payout — the destination leg. */
   readonly payoutRail: PayoutRail
   /**

@@ -6,15 +6,16 @@ import type { CorridorDescriptor } from '@arkade-os/solver-core/core/corridorDes
 // `noun` and `lifecycleLabel` are NOT here: they live on `StoreShape` in
 // `db/baseSwapStore.ts`, which is a corridor's persistence concern rather than
 // something the host reads.
-const descriptor = (pair: string, envStem: string): CorridorDescriptor => ({
+const descriptor = (pair: string, envStem: string, covenantVersion = 'test-v1'): CorridorDescriptor => ({
   pair,
   envStem,
+  covenantVersion,
   payoutRail: 'arkade',
   states: { live: ['quoted'], exposed: [], delivered: ['settled'] },
 })
 
-const stub = (pair: string, envStem: string): Corridor => ({
-  descriptor: descriptor(pair, envStem),
+const stub = (pair: string, envStem: string, covenantVersion = 'test-v1'): Corridor => ({
+  descriptor: descriptor(pair, envStem, covenantVersion),
   quote: async () => ({ kind: 'refused', payload: {} }),
   statusFor: async () => null,
   tick: async () => {},
@@ -71,6 +72,25 @@ describe('createCorridorSet', () => {
 
   it('reports how many corridors it holds', () => {
     expect(createCorridorSet([stub('a->b', 'A'), stub('c->d', 'C')]).size).toBe(2)
+  })
+
+  it('refuses an RFQ whose corridor covenant version is not enabled', async () => {
+    const set = createCorridorSet([stub('a->b', 'A', 'example-v1')], {
+      supportedCovenantVersions: new Set(['other-v1']),
+    })
+    const outcome = await set.get('a->b')!.quote({ v: 1, type: 'rfq_request', rfq_id: 'a'.repeat(64) })
+    expect(outcome.kind).toBe('refused')
+    expect(outcome.payload).toMatchObject({ v: 1, type: 'rfq_refusal', reason: 'unsupported_pair' })
+    expect(outcome.detail).toContain('example-v1')
+  })
+
+  it('passes an enabled RFQ covenant version through to the corridor', async () => {
+    const set = createCorridorSet([stub('a->b', 'A', 'example-v1')], {
+      supportedCovenantVersions: new Set(['example-v1']),
+    })
+    const outcome = await set.get('a->b')!.quote({ v: 1, type: 'rfq_request', rfq_id: 'a'.repeat(64) })
+    expect(outcome.kind).toBe('refused')
+    expect(outcome.detail).toBeUndefined()
   })
 })
 
@@ -232,6 +252,7 @@ describe('a corridor the host has never compiled against', () => {
     descriptor: {
       pair: 'arkade:BTC->fake:BTC',
       envStem: 'FAKE',
+      covenantVersion: 'fake-v1',
       payoutRail: 'arkade',
       states: { live: ['dreaming'], exposed: ['dreaming'], delivered: ['woken'] },
     },

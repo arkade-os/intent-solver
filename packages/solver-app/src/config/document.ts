@@ -6,6 +6,7 @@
  */
 import { z } from 'zod'
 import { OFFER_COVENANT_VERSIONS } from '@arkade-os/solver-core/core/offerCovenant.js'
+import { RFQ_COVENANT_VERSION_ID } from '@arkade-os/solver-core/core/rfqCovenant.js'
 
 const UNKNOWN_KEY = 'unknown key'
 
@@ -25,6 +26,11 @@ const offerCovenantVersion = z.enum(OFFER_COVENANT_VERSIONS, {
 })
 const offerCovenantVersions = z
   .array(offerCovenantVersion)
+  .min(1)
+  .refine((values) => new Set(values).size === values.length, { message: 'must not repeat a version' })
+const rfqCovenantVersion = z.string().regex(RFQ_COVENANT_VERSION_ID, 'must be a version name or content hash')
+const rfqCovenantVersions = z
+  .array(rfqCovenantVersion)
   .min(1)
   .refine((values) => new Set(values).size === values.length, { message: 'must not repeat a version' })
 
@@ -132,6 +138,9 @@ const buildSchema = (railNames: readonly string[]) =>
       chargeCarrier: bool,
       carrierPricing: bool,
       quoteValiditySeconds: num,
+    }),
+    rfq: section({
+      covenantVersions: rfqCovenantVersions,
     }),
     relay: section({
       url: str,

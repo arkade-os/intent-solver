@@ -94,6 +94,8 @@ export interface FlatCorridorDeps {
   assetRfqMarkets?: readonly AssetRfqMarket[]
   /** Whether the three BTC corridors' LND answers. Unset means always. */
   railUp?: () => boolean
+  /** Covenant versions this deployment serves. Absent leaves the gate off for hand-built sets. */
+  rfqCovenantVersions?: ReadonlySet<string>
 }
 
 /**
@@ -172,7 +174,9 @@ export const corridorSetFromDeps = (deps: FlatCorridorDeps, extra: readonly Corr
   // Consumer corridors go THROUGH createCorridorSet, so a pair or stem
   // colliding with a built-in is refused at composition rather than shadowing
   // it at dispatch. Last, so they never delay a built-in's status answer.
-  return createCorridorSet([...corridors, ...extra])
+  return createCorridorSet([...corridors, ...extra], {
+    supportedCovenantVersions: deps.rfqCovenantVersions,
+  })
 }
 
 /**

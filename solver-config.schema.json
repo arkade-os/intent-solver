@@ -340,6 +340,21 @@
       },
       "additionalProperties": false
     },
+    "rfq": {
+      "type": "object",
+      "properties": {
+        "covenantVersions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
     "relay": {
       "type": "object",
       "properties": {

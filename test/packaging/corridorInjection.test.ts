@@ -21,6 +21,7 @@ const servicesSource = readFileSync(
 const descriptor = (pair: string, envStem: string): CorridorDescriptor => ({
   pair,
   envStem,
+  covenantVersion: 'example-v1',
   payoutRail: 'arkade',
   states: { live: ['open'], exposed: [], delivered: ['done'] },
 })

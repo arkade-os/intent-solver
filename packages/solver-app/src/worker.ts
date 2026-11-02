@@ -40,6 +40,7 @@
 
 import { buildApp } from '@arkade-os/solver-transport/http/server.js'
 import { corridorSetFromDeps, readerSetFromDeps } from './ops/corridorSet.js'
+import { RFQ_COVENANT_VERSIONS } from '@arkade-os/solver-core/core/rfqCovenant.js'
 import type { SendSwapService } from '@arkade-os/solver-corridors/send/orchestrator.js'
 import type { OnchainSendSwapService } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
 import type { SwapStore } from '@arkade-os/solver-corridors/db/swaps.js'
@@ -77,6 +78,8 @@ export interface WorkerDeps {
    * earns its keep when one slow swap must not delay the others.
    */
   driveQueue?: QueueLike<DriveJob>
+  /** Covenant versions this worker serves. Defaults to every version this build ships. */
+  rfqCovenantVersions?: ReadonlySet<string>
 }
 
 export interface Worker {
@@ -90,8 +93,12 @@ export const buildWorker = (deps: WorkerDeps): Worker => {
   // Workers deployment serves the two send corridors and nothing else, which is
   // exactly what `deps` carries — so the set this builds is the same one the
   // host used to derive for itself.
+  const versionedDeps = {
+    ...deps,
+    rfqCovenantVersions: deps.rfqCovenantVersions ?? new Set(RFQ_COVENANT_VERSIONS),
+  }
   const app = buildApp({
-    corridors: corridorSetFromDeps(deps),
+    corridors: corridorSetFromDeps(versionedDeps),
     readers: readerSetFromDeps(deps),
     network: deps.network,
     // The platform-asserted client address; header spoofing fails on Workers

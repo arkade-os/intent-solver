@@ -17,6 +17,12 @@ import {
   NON_TERMINAL as LN_RECV_LIVE,
 } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
 import { OnchainSendMachine } from '@arkade-os/solver-corridors/machines/onchainSend.js'
+import {
+  RFQ_COVENANT_VERSIONS,
+  RFQ_LIGHTNING_RECEIVE_V2,
+  RFQ_LIGHTNING_SEND_V2,
+  RFQ_ONCHAIN_SEND_V2,
+} from '@arkade-os/solver-core/core/rfqCovenant.js'
 
 const CORRIDORS_DIR = fileURLToPath(new URL('../../packages/solver-corridors/src/corridors/', import.meta.url))
 const MACHINES_DIR = fileURLToPath(new URL('../../packages/solver-corridors/src/machines/', import.meta.url))
@@ -25,6 +31,7 @@ const STATE_MACHINE = fileURLToPath(new URL('../../packages/solver-core/src/core
 const stub = (pair: string, envStem: string): CorridorDescriptor => ({
   pair,
   envStem,
+  covenantVersion: 'test-v1',
   payoutRail: 'arkade',
   states: { live: ['quoted'], exposed: [], delivered: ['settled'] },
 })
@@ -77,6 +84,19 @@ describe('the corridor registry', () => {
       const overlap = descriptor.states.delivered.filter((state) => descriptor.states.live.includes(state))
       expect({ pair: descriptor.pair, overlap }).toEqual({ pair: descriptor.pair, overlap: [] })
     }
+  })
+})
+
+describe('RFQ covenant versions on the built-in corridors', () => {
+  it('names the version each BTC corridor speaks', () => {
+    expect(descriptorFor('arkade:BTC->lightning:BTC').covenantVersion).toBe(RFQ_LIGHTNING_SEND_V2)
+    expect(descriptorFor('lightning:BTC->arkade:BTC').covenantVersion).toBe(RFQ_LIGHTNING_RECEIVE_V2)
+    expect(descriptorFor('arkade:BTC->onchain:BTC').covenantVersion).toBe(RFQ_ONCHAIN_SEND_V2)
+  })
+
+  it('ships every built-in descriptor version in the default allowlist', () => {
+    const shipped = new Set<string>(RFQ_COVENANT_VERSIONS)
+    expect(ALL_DESCRIPTORS.filter((descriptor) => !shipped.has(descriptor.covenantVersion))).toEqual([])
   })
 })
 
@@ -170,13 +190,25 @@ describe('the descriptor modules', () => {
     expect(DESCRIPTOR_MODULES.filter((name) => !here.includes(name))).toEqual([])
   })
 
-  it('value-import only the state machines, so config stays free of native bindings', () => {
+  it('value-import only dependency-free modules, so config stays free of native bindings', () => {
     const offenders = DESCRIPTOR_MODULES.flatMap((name) =>
       valueImports(readFileSync(join(CORRIDORS_DIR, name), 'utf8'))
-        .filter((specifier) => !/^\.\.\/machines\/[A-Za-z]+\.js$/.test(specifier))
+        .filter(
+          (specifier) =>
+            !/^\.\.\/machines\/[A-Za-z]+\.js$/.test(specifier) &&
+            specifier !== '@arkade-os/solver-core/core/rfqCovenant.js',
+        )
         .map((specifier) => `${name} value-imports ${specifier}`),
     )
     expect(offenders.sort()).toEqual([])
+  })
+
+  it('the RFQ version constants stay a dependency-free leaf', () => {
+    const source = readFileSync(
+      fileURLToPath(new URL('../../packages/solver-core/src/core/rfqCovenant.ts', import.meta.url)),
+      'utf8',
+    )
+    expect(source).not.toMatch(/^\s*import\b/m)
   })
 
   it('reach only the dependency-free helper through the state machines', () => {

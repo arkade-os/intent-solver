@@ -88,6 +88,16 @@ export const FULL_DOCUMENT = {
     carrierPricing: false,
     quoteValiditySeconds: 30,
   },
+  rfq: {
+    covenantVersions: [
+      'lightning-send-v2',
+      'lightning-receive-v2',
+      'onchain-send-v2',
+      'asset-swap-v2',
+      'evm-send-v1',
+      'evm-receive-v1',
+    ],
+  },
   relay: {
     url: 'wss://relay.example',
     protocol: 'nostr',

@@ -56,6 +56,9 @@ export const VOUCHER = {
   // operator never named, so `createCorridorSet` refuses that at composition
   // rather than letting it surface as a mystery at dispatch.
   envStem: 'VOUCHER',
+  // The settlement covenant/program this corridor speaks. Required: the host
+  // refuses to quote a corridor whose version is absent from `rfq.covenantVersions`.
+  covenantVersion: 'voucher-v1',
   // Which rail's balance funds the payout. `arkade` because a voucher costs the
   // solver nothing; a corridor paying out somewhere this build has never heard
   // of names its own rail id, and the console reports UNKNOWN — never zero —
@@ -294,8 +297,7 @@ export const voucherCorridor = (options = {}) => {
       [...rows.values()].filter(isLive).map((row) => ({ id: row.id, pkScript: row.pkScript })),
 
     /** Sats this corridor currently has at risk. LIVE rows only. */
-    committedSats: async () =>
-      [...rows.values()].filter(isLive).reduce((total, row) => total + row.amountSats, 0),
+    committedSats: async () => [...rows.values()].filter(isLive).reduce((total, row) => total + row.amountSats, 0),
 
     /** Rows for the console. One page; a real store cursors through `page`. */
     page: async () => ({ swaps: [...rows.values()].map(project), nextCursor: null }),

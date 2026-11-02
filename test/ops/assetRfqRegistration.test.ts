@@ -14,6 +14,7 @@ import { corridorSetFromDeps, readerSetFromDeps } from '@arkade-os/solver-app/op
 import { recoverReadableMarkets } from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { AssetRfqSwapService } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
+import { RFQ_ASSET_SWAP_V2 } from '@arkade-os/solver-core/core/rfqCovenant.js'
 
 const ASSET_A = `${'aa'.repeat(32)}0100`
 const ASSET_B = `${'bb'.repeat(32)}0000`
@@ -67,6 +68,24 @@ describe('corridorSetFromDeps — the serving set', () => {
     })
     expect(set.get(`arkade:BTC->arkade:${ASSET_A}`)).toBeDefined()
     expect(set.get(`arkade:${ASSET_A}->arkade:BTC`)).toBeDefined()
+    expect(set.get(`arkade:BTC->arkade:${ASSET_A}`)?.descriptor.covenantVersion).toBe(RFQ_ASSET_SWAP_V2)
+    await store.close()
+  })
+
+  it('refuses a quote when this method covenant version is disabled', async () => {
+    const { store, service } = await built()
+    const pair = `arkade:BTC->arkade:${ASSET_A}`
+    const set = corridorSetFromDeps({
+      ...base(),
+      assetRfqService: service,
+      assetRfqStore: store,
+      assetRfqMarkets: [market(ASSET_A, 'USDA')],
+      rfqCovenantVersions: new Set(['some-other-version']),
+    })
+    const outcome = await set.get(pair)!.quote({ v: 1, type: 'rfq_request', rfq_id: 'a'.repeat(64) })
+    expect(outcome.kind).toBe('refused')
+    expect(outcome.payload).toMatchObject({ type: 'rfq_refusal', reason: 'unsupported_pair' })
+    expect(outcome.detail).toContain(RFQ_ASSET_SWAP_V2)
     await store.close()
   })
 

@@ -65,6 +65,12 @@ export const PATHS: readonly Row[] = [
     (versions) => (Array.isArray(versions) ? versions.join(',') : String(versions)),
     covenantVersions,
   ],
+  [
+    'rfq.covenantVersions',
+    'RFQ_COVENANT_VERSIONS',
+    (versions) => (Array.isArray(versions) ? versions.join(',') : String(versions)),
+    covenantVersions,
+  ],
   ['offers.chargeCarrier', 'OFFER_CHARGE_CARRIER'],
   ['offers.carrierPricing', 'ASSET_CARRIER_PRICING'],
   ['offers.quoteValiditySeconds', 'ASSET_QUOTE_VALIDITY_SECONDS'],

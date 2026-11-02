@@ -4,7 +4,8 @@ import { fileURLToPath } from 'node:url'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
-import { deploymentCard, type CardSource } from '@arkade-os/solver-app/admin/routes/card.js'
+import { cardOmissions, deploymentCard, type CardSource } from '@arkade-os/solver-app/admin/routes/card.js'
+import { RFQ_COVENANT_VERSIONS } from '@arkade-os/solver-core/core/rfqCovenant.js'
 import { verifyCardSig, type SolverCard } from '@arkade-os/solver-core/core/registryCard.js'
 import { AdPublisher, type AdPublishMode } from '@arkade-os/solver-transport/relay/adPublisher.js'
 
@@ -60,6 +61,7 @@ const makeDeps = (
     assetMarkets?: unknown[]
     assetRfqMarkets?: unknown[]
     offerMarkets?: Array<{ a: string | null; b: string | null }>
+    rfqCovenantVersions?: string[]
     evmCorridors?: { corridor: string; enabled: boolean }[]
     offerFill?: { min: bigint; max: bigint }
     livePolicy?: Record<string, unknown>
@@ -68,6 +70,7 @@ const makeDeps = (
   } = {},
 ) => {
   const bootPolicy = {
+    rfqCovenantVersions: over.rfqCovenantVersions ?? [...RFQ_COVENANT_VERSIONS],
     corridorEnabled: over.allDisabled
       ? allCorridors(false)
       : { ...allCorridors(true), 'arkade:BTC->lightning:BTC': over.lnSendEnabled ?? true },
@@ -642,5 +645,19 @@ describe('deploymentCard', () => {
     const card = await deploymentCard(sourceOf(makeDeps()), 'other-solver')
     expect(card.name).toBe('other-solver')
     expect(verifyCardSig(card)).toBe(true)
+  })
+
+  it('omits a direction whose RFQ covenant version is disabled', async () => {
+    const source = sourceOf(
+      makeDeps({
+        rfqCovenantVersions: RFQ_COVENANT_VERSIONS.filter((version) => version !== 'lightning-send-v2'),
+      }),
+    )
+    const card = await deploymentCard(source)
+    const lightning = card.markets.find((market) =>
+      String((market.quote_asset as { id?: unknown }).id).includes('bolt11:'),
+    )
+    expect(lightning?.max_quote_amount).toBe('0')
+    expect(cardOmissions(source).join(' ')).toContain('lightning-send-v2')
   })
 })
