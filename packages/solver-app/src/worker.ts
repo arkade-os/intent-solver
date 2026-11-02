@@ -128,13 +128,16 @@ export const buildWorker = (deps: WorkerDeps): Worker => {
       }
       // Fan-out: one message per swap so a slow Lightning poll on one swap
       // cannot eat the whole cron budget, plus one sweep job.
-      for (const row of await deps.store.findRecoverable()) {
-        await deps.driveQueue.send({ v: 1, type: 'tick_swap', leg: 'lightning', swap_id: row.id })
-      }
-      for (const row of await deps.onchainStore.findRecoverable()) {
-        await deps.driveQueue.send({ v: 1, type: 'tick_swap', leg: 'onchain', swap_id: row.id })
-      }
-      await deps.driveQueue.send({ v: 1, type: 'refund_sweep' })
+      const queue = deps.driveQueue
+      const [lightning, onchain] = await Promise.all([
+        deps.store.findRecoverable(),
+        deps.onchainStore.findRecoverable(),
+      ])
+      await Promise.all([
+        ...lightning.map((row) => queue.send({ v: 1, type: 'tick_swap', leg: 'lightning', swap_id: row.id })),
+        ...onchain.map((row) => queue.send({ v: 1, type: 'tick_swap', leg: 'onchain', swap_id: row.id })),
+      ])
+      await queue.send({ v: 1, type: 'refund_sweep' })
     },
 
     queue: async (batch) => {

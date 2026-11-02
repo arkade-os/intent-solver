@@ -189,10 +189,10 @@ export class AssetOfferService {
   }
 
   /** Markets are static; inventory is read fresh every decision. */
-  private async policy(bounds: AppliedBounds): Promise<OfferFillPolicy> {
+  private policy(bounds: AppliedBounds, available: SpendableBalance): OfferFillPolicy {
     return {
       markets: this.markets,
-      available: offerInventoryFrom(await this.deps.balance()),
+      available: offerInventoryFrom(available),
       minFillAmount: bounds.min,
       maxFillAmount: bounds.max,
     }
@@ -296,10 +296,10 @@ export class AssetOfferService {
     // Hex, because that is the spelling the deposit adapter compares against
     // `OfferOutputView.script` and the store persists.
     const pkScript = hex.encode(offer.swapPkScript)
-    const outputs = await this.deps.outputsAt(pkScript)
+    const [outputs, available] = await Promise.all([this.deps.outputsAt(pkScript), this.deps.balance()])
     const input = offerFillInputFrom(offer, offerDepositFrom(pkScript, outputs))
     const bounds = this.boundsIn(input)
-    const decision = evaluateOfferFill(input, await this.policy(bounds))
+    const decision = evaluateOfferFill(input, this.policy(bounds, available))
     if (!decision.fill) return this.refuse(outpoint, decision.reason, refusalDetail(input, decision.reason, bounds))
 
     // Price last among the refusals, and before anything is recorded: it is the

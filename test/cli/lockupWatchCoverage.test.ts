@@ -44,15 +44,15 @@ const resyncBody = (): string => {
  */
 describe('the lockup subscription', () => {
   it('iterates the corridor registry rather than naming corridors one by one', () => {
-    expect(resyncBody()).toContain('for (const corridor of services.corridors)')
+    expect(resyncBody()).toContain('[...services.corridors]')
   })
 
   it('drives each corridor with its own findRecoverable and its own tick', () => {
-    // Asserted as ONE call: watching a script and then ticking a DIFFERENT
-    // corridor would look like it worked — the sweep would finish the swap
-    // either way. Substring rather than a whole line, so prettier's wrapping is
-    // not part of the contract.
-    expect(resyncBody()).toContain('watch(await corridor.findRecoverable(), (id) => corridor.tick(id))')
+    // Both on one `corridor` binding: watching a script and then ticking a
+    // DIFFERENT corridor would look like it worked — the sweep would finish
+    // the swap either way. Substring rather than a whole line, so prettier's
+    // wrapping is not part of the contract.
+    expect(resyncBody()).toMatch(/corridor\.findRecoverable\(\)[\s\S]{0,120}corridor\.tick\(id\)/)
   })
 
   /**
