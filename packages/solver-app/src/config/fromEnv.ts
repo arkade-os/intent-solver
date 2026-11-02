@@ -89,7 +89,8 @@ export const envToDocument = (
 
   for (const { pair, envStem } of ALL_DESCRIPTORS) {
     for (const field of CORRIDOR_FIELDS[BTC_FAMILY[pair]!]) {
-      put(['corridors', pair, field], read(corridorKnob(envStem, field)))
+      const name = corridorKnob(envStem, field)
+      put(['corridors', pair, field], read(name) ?? (field === 'enabled' ? 'true' : undefined))
     }
   }
 

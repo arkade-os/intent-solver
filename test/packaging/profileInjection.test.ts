@@ -33,7 +33,10 @@ describe('a registered config profile', () => {
   })
 
   it('gives way to one passed explicitly', () => {
-    const config = sdk.loadConfig({ env: { SOLVER_CONFIG_JSON: JSON.stringify(document()) }, profile: (doc) => doc })
+    const config = sdk.loadConfig({
+      env: { SOLVER_CONFIG_JSON: JSON.stringify(document({ 'arkade:BTC->onchain:BTC': {} })) },
+      profile: (doc) => doc,
+    })
     expect(config.corridorEnabled['arkade:BTC->onchain:BTC']).toBe(true)
   })
 

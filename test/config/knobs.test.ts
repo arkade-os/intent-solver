@@ -60,6 +60,25 @@ describe('documentToKnobs — fixed paths', () => {
 })
 
 describe('documentToKnobs — corridors', () => {
+  it('disables the fixed BTC corridors omitted from the document', () => {
+    const { knobs, pathOf } = documentToKnobs({})
+    expect(knobs).toMatchObject({
+      LN_SEND_ENABLED: 'false',
+      LN_RECEIVE_ENABLED: 'false',
+      ONCHAIN_SEND_ENABLED: 'false',
+    })
+    expect(pathOf.get('LN_SEND_ENABLED')).toBe('corridors["arkade:BTC->lightning:BTC"].enabled')
+  })
+
+  it('enables a corridor whose block is present without enabled', () => {
+    const { knobs } = documentToKnobs({ corridors: { 'arkade:BTC->lightning:BTC': {} } })
+    expect(knobs).toMatchObject({
+      LN_SEND_ENABLED: 'true',
+      LN_RECEIVE_ENABLED: 'false',
+      ONCHAIN_SEND_ENABLED: 'false',
+    })
+  })
+
   it('maps a BTC corridor terms block to its stem', () => {
     const { knobs } = documentToKnobs({ corridors: { 'arkade:BTC->lightning:BTC': { enabled: false, feeBps: 50 } } })
     expect(knobs).toMatchObject({ LN_SEND_ENABLED: 'false', LN_SEND_FEE_BPS: '50' })

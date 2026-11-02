@@ -141,14 +141,51 @@ describe('loadConfig — the old environment', () => {
 })
 
 describe('loadConfig — the document', () => {
-  it('names every BTC corridor to disable when an asset-only document omits the backend', () => {
-    const doc = { network: 'regtest', rails: { arkade: minimalDoc.rails.arkade } }
+  it('disables BTC corridors absent from an asset-only document', () => {
+    const DEPIX = '11'.repeat(34)
+    const doc = {
+      network: 'regtest',
+      rails: { arkade: minimalDoc.rails.arkade },
+      assets: { DEPIX: { kind: 'arkade', assetId: DEPIX } },
+      corridors: {
+        'arkade:BTC->DEPIX': { enabled: true },
+        'DEPIX->arkade:BTC': { enabled: true },
+      },
+    }
+    const config = loadConfig({ env: inline(doc) })
+    expect(config.lnBackend).toBeNull()
+    expect(config.corridorEnabled).toMatchObject({
+      'arkade:BTC->lightning:BTC': false,
+      'lightning:BTC->arkade:BTC': false,
+      'arkade:BTC->onchain:BTC': false,
+    })
+    expect(config.assetRfqTokens[0]!.enabled).toEqual({ clientGivesAsset: true, clientGetsAsset: true })
+  })
+
+  it('enables a BTC corridor whose block is present without an explicit enabled value', () => {
+    const doc = {
+      ...minimalDoc,
+      corridors: { 'arkade:BTC->lightning:BTC': {} },
+    }
+    const config = loadConfig({ env: inline(doc) })
+    expect(config.corridorEnabled).toMatchObject({
+      'arkade:BTC->lightning:BTC': true,
+      'lightning:BTC->arkade:BTC': false,
+      'arkade:BTC->onchain:BTC': false,
+    })
+  })
+
+  it('names BTC corridor paths when a present corridor needs the omitted backend', () => {
+    const doc = {
+      network: 'regtest',
+      rails: { arkade: minimalDoc.rails.arkade },
+      corridors: { 'arkade:BTC->lightning:BTC': {} },
+    }
     const message = errorOf(() => loadConfig({ env: inline(doc) }))
     expect(message).toContain('rails.lightning.backend must be set')
     expect(message).toContain('corridors["arkade:BTC->lightning:BTC"].enabled')
     expect(message).toContain('corridors["lightning:BTC->arkade:BTC"].enabled')
     expect(message).toContain('corridors["arkade:BTC->onchain:BTC"].enabled')
-    expect(message).toContain('to false')
     expect(message).not.toMatch(/LN_BACKEND|<STEM>|_ENABLED/)
   })
 
