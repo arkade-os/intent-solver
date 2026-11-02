@@ -654,7 +654,28 @@ export class OnchainSendSwapService {
    * timelock, so once that decision is made there is nothing left to wait for.
    */
   async refundNow(id: string): Promise<string | null> {
-    return this.pushRefund(await this.deps.store.get(id), { sweptToo: true })
+    const row = await this.deps.store.get(id)
+    const preimage = await this.clientClaimPreimage(row)
+    if (preimage) {
+      throw new Error(
+        `swap ${id}: the client already claimed the onchain HTLC, preimage ${hex.encode(preimage)} — ` +
+          'refunding the arkade lockup would pay them twice; claim the lockup with that preimage instead',
+      )
+    }
+    return this.pushRefund(row, { sweptToo: true })
+  }
+
+  /** The client's revealed preimage if they already claimed the onchain HTLC, else null. */
+  private async clientClaimPreimage(row: OnchainSendSwapRow): Promise<Uint8Array | null> {
+    const { onchain } = this.deps
+    if (!row.fundingTxid || row.fundingVout === null) return null
+    const witness = await onchain.findSpendWitness({
+      txid: row.fundingTxid,
+      vout: row.fundingVout,
+      outputScript: hex.decode(row.onchainPkScript),
+    })
+    const preimage = witness ? preimageFromClaimWitness(witness) : null
+    return preimage && paymentHashFromPreimage(preimage) === row.paymentHash ? preimage : null
   }
 
   /**
