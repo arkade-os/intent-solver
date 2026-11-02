@@ -456,7 +456,7 @@ export class OnchainSendSwapService {
           onchainPkScript: hex.encode(onchainHtlc.pkScript),
           rfqId: request.rfqId,
         })
-        return { accepted: true, swap, lockupDeadline: this.now() + DEFAULT_ONCHAIN_LOCKUP_TIMEOUT }
+        return { accepted: true, swap, lockupDeadline: acceptance.lockupDeadline }
       } catch (error) {
         if (error instanceof UniqueConstraintError) {
           return { accepted: false, reason: 'duplicate_swap' }
@@ -799,6 +799,7 @@ export class OnchainSendSwapService {
     const timedOut = this.now() >= row.createdAt + DEFAULT_ONCHAIN_LOCKUP_TIMEOUT
 
     if (locked > row.amountSats) {
+      await store.patch(row.id, { onchain_lockup_value: held })
       await store.fail(row.id, 'quoted', `overfunded lockup: ${locked} > ${row.amountSats} sats`)
       return false
     }

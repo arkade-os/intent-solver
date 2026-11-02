@@ -115,6 +115,8 @@ export const onchainRfqStateFromRow = (row: OnchainSendSwapRow): RfqState => {
     case 'refunded':
       return 'refunded'
     case 'stuck':
+      // Refunded to the CLIENT once their lockup went back; `stuck` is the operator's word, not theirs.
+      if (row.refundOutcome !== null) return 'refunded'
       return 'stuck'
     case 'refused':
       if (row.refundOutcome !== null) return 'refunded'
