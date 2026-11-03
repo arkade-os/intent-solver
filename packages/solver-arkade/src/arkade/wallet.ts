@@ -486,6 +486,8 @@ export const totalValue = (outputs: readonly FundedOutput[]): number =>
   outputs.reduce((sum, output) => sum + output.value, 0)
 
 /** The address is public: uncapped, sprayed dust pushes every spend past arkd's 40000 `maxTxWeight` (16 run near 13k). */
+// TODO: stopgap. The real bound is arkd's `maxTxWeight` (/v1/info); compute the cap from it
+// with a margin and a pinned per-input weight instead of assuming 16.
 export const MAX_LOCKUP_SPEND_INPUTS = 16
 
 const LOCKUP_SPEND_EXPIRY_MARGIN = 5 * 60

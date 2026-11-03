@@ -1438,6 +1438,26 @@ describe('tick: failure and recovery', () => {
     expect(arkade.refundCalls).toHaveLength(1)
   })
 
+  it('does not record a terminally-failed refund as pushed when it could only cover part of the lockup', async () => {
+    const { swap } = await quoted()
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
+    ln.payResult = { id: 'pay-1', status: 'pending' }
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
+    expect((await service.tick(swap.id)).state).toBe('paid')
+
+    // A near-expiry output lands before the payment dies: the refund can spend f1 but not f2.
+    arkade.lockups = [
+      { txid: 'f1', vout: 0, value: AMOUNT },
+      { txid: 'f2', vout: 0, value: AMOUNT, expiresAt: clock + 60 },
+    ]
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'failed' })
+
+    expect((await service.tick(swap.id)).state).toBe('refused')
+    expect(arkade.refundCalls).toHaveLength(1)
+    expect((await store.get(swap.id)).refundOutcome).toBeNull()
+    expect(await service.refundSweep()).toEqual([swap.id])
+  })
+
   it('still parks in stuck when the refund could NOT be pushed', async () => {
     const { swap } = await quoted()
     // Funded, then nothing at the script when the refund runs: the client is
