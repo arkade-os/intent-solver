@@ -2868,3 +2868,28 @@ describe('ReceiveSwapService.refundNow', () => {
     expect(arkade.state.refundCalls).toBe(1)
   })
 })
+
+describe('ReceiveSwapService.whenArmed — a lost funding response', () => {
+  const armedWithLostFunding = async () => {
+    const outcome = await service.quote(quoteRequest())
+    if (!outcome.accepted) throw new Error(`expected acceptance, got ${outcome.reason}`)
+    await store.transition(outcome.swap.id, 'quoted', 'armed')
+    // A fund attempt ran and its response was lost: the lease stamped fund_started_at but
+    // nothing was ever adopted. Written directly — no store method produces this combination.
+    await driver.run('UPDATE receive_swap SET fund_started_at = ? WHERE id = ?', [now, outcome.swap.id])
+    arkade.state.outputs = []
+    return outcome.swap
+  }
+
+  it('keeps waiting in armed past invoice expiry, so a lagging funding can still be adopted', async () => {
+    const swap = await armedWithLostFunding()
+    now = swap.invoiceExpiresAt + 1
+    expect((await service.tick(swap.id)).state).toBe('armed')
+  })
+
+  it('escalates to stuck at the refund deadline, instead of holding exposure in armed forever', async () => {
+    const swap = await armedWithLostFunding()
+    now = swap.refundLocktime + 1
+    expect((await service.tick(swap.id)).state).toBe('stuck')
+  })
+})

@@ -865,7 +865,19 @@ export class ReceiveSwapService {
       })
     }
     // A lost funding response cannot be turned into a clean refusal by invoice expiry.
-    if (row.fundStartedAt !== null) return false
+    if (row.fundStartedAt !== null) {
+      // But it must not hold exposure in `armed` forever. A lagging funding is still adopted
+      // above, so wait until the REFUND DEADLINE — by then any real lockup has appeared, and a
+      // still-empty script means the swap is dead. Escalate to `stuck` (not `refused`: a lost
+      // response may mean a lockup is out there for an operator to refund).
+      const deadline = await refundDeadlineSeconds(row.refundLocktime, this.now, this.deps.chainTip, DEADLINE_SECONDS_PURPOSE)
+      if (this.now() >= deadline) {
+        await store.transition(row.id, 'armed', 'stuck', {
+          failure_reason: 'funding response lost; refund deadline reached with no lockup adopted — review for a stray lockup',
+        })
+      }
+      return false
+    }
 
     // Re-polled HERE, immediately before funding — not trusted from whenQuoted's
     // observation, which can be minutes stale. Only 'armed' status's E is
