@@ -2233,6 +2233,24 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
     expect(arkade.state.fundCalls).toHaveLength(0)
   })
 
+  it('refuses and retires a coupled payout once the coupled send is refused, rather than waiting in quoted forever', async () => {
+    const svc = coupledService()
+    const swap = await quotedCoupled(svc)
+    // A funded refusal still answers findLiveByPaymentHash, but it will never reach `funded`.
+    sendRow = coupledSendRow('refused')
+    let cancelled = false
+    ln.cancelHold = async () => {
+      cancelled = true
+    }
+
+    const row = await svc.tick(swap.id)
+
+    expect(row.state).toBe('refused')
+    expect(row.failureReason).toContain('refused')
+    expect(cancelled).toBe(true)
+    expect(arkade.state.fundCalls).toHaveLength(0)
+  })
+
   it('does not fund against a coupled send lockup whose sats sit on an asset vtxo', async () => {
     const svc = coupledService()
     const swap = await quotedCoupled(svc)
