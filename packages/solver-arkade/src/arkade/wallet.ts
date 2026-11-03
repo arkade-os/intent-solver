@@ -11,7 +11,6 @@
 import Database from 'better-sqlite3'
 import {
   ArkAddress,
-  assertSubmittedArkTxid,
   buildOffchainTx,
   claimWithPreimageIdentity,
   ConditionWitness,
@@ -21,7 +20,6 @@ import {
   Extension,
   getArkPsbtFields,
   isVtxoSpent,
-  matchServerCheckpoints,
   MnemonicIdentity,
   PrevArkTxField,
   RestArkProvider,
@@ -604,12 +602,6 @@ const preimageSigner = (identity: ArkadeContext['identity'], preimage: Uint8Arra
     preimage,
   )
 
-const withPreimage = (checkpointB64: string, preimage: Uint8Array): string => {
-  const checkpoint = Transaction.fromPSBT(base64.decode(checkpointB64))
-  setArkPsbtField(checkpoint, 0, ConditionWitness, [preimage])
-  return base64.encode(checkpoint.toPSBT())
-}
-
 /** Spend a swap script's claim leaf, revealing the preimage; throws on any server response the SDK cannot verify. */
 export const claimSwapScript = async (
   ctx: ArkadeContext,
@@ -622,18 +614,10 @@ export const claimSwapScript = async (
   const inputs = spendable(funded, 'claim')
   // Anyone can add an asset to a lockup; without its packet arkd refuses the claim, after we already paid.
   const assetPacket = refundAssetPacket(inputs, 'aggregate')
-  const ark = ctx.wallet.arkProvider
   return signAndSubmitOffchainTx({
+    // Signs every checkpoint before submit, so each carries the preimage arkd v0.9.24+ demands there.
     identity: preimageSigner(ctx.identity, preimage),
-    // arkd ≥ v0.9.24 refuses, at submit, a checkpoint whose witness differs from its ark tx input's.
-    provider: {
-      submitTx: (arkTx, checkpoints) =>
-        ark.submitTx(
-          arkTx,
-          checkpoints.map((c) => withPreimage(c, preimage)),
-        ),
-      finalizeTx: (arkTxid, checkpoints) => ark.finalizeTx(arkTxid, checkpoints),
-    },
+    provider: ctx.wallet.arkProvider,
     inputs: inputs.map((output) => ({
       txid: output.txid,
       vout: output.vout,
@@ -652,15 +636,17 @@ export const claimSwapScript = async (
 }
 
 /**
- * Finalize OUR claim that arkd accepted and never finalized, which leaves the lockup spent with no output.
- * Null unless every spent output went into one ark tx through our claim leaf: only that leaf rebuilds
+ * Finalize OUR spend that arkd accepted and never finalized, which leaves the lockup spent with no output;
+ * arkd answers finalizeTx on a tx it already finalized, as a one-shot submit does, with success.
+ * Null unless every spent output went into one ark tx through `leaf`: only that leaf rebuilds
  * the checkpoint txid arkd names as the spender, and it needs our signature.
  */
-export const finalizePendingClaim = async (
+const finalizePendingSpend = async (
   ctx: ArkadeContext,
-  script: ClaimableScript,
+  leaf: TapLeafScript,
+  tapTree: Uint8Array,
   pkScriptHex: string,
-  preimage: Uint8Array,
+  signer: Pick<ArkadeContext['identity'], 'sign'>,
 ): Promise<string | null> => {
   const spent: VirtualCoin[] = []
   for await (const batch of vtxoPages(ctx.wallet.indexerProvider, { scripts: [pkScriptHex] })) {
@@ -670,22 +656,32 @@ export const finalizePendingClaim = async (
   const [arkTxid] = arkTxids
   if (spent.length === 0 || arkTxids.size !== 1 || !arkTxid) return null
   const { checkpoints } = buildOffchainTx(
-    spent.map(({ txid, vout, value }) => ({
-      txid,
-      vout,
-      value,
-      tapLeafScript: script.claim(),
-      tapTree: script.encode(),
-    })),
+    spent.map(({ txid, vout, value }) => ({ txid, vout, value, tapLeafScript: leaf, tapTree })),
     [{ script: hex.decode(pkScriptHex), amount: BigInt(spent.reduce((sum, vtxo) => sum + vtxo.value, 0)) }],
     ctx.wallet.serverUnrollScript,
   )
   if (checkpoints.some((checkpoint, i) => checkpoint.id !== spent[i]!.spentBy)) return null
-  const signer = preimageSigner(ctx.identity, preimage)
   const signed = await Promise.all(checkpoints.map(async (c) => base64.encode((await signer.sign(c, [0])).toPSBT())))
   await ctx.wallet.arkProvider.finalizeTx(arkTxid, signed)
   return arkTxid
 }
+
+/** {@link finalizePendingSpend} through the claim leaf. */
+export const finalizePendingClaim = (
+  ctx: ArkadeContext,
+  script: ClaimableScript,
+  pkScriptHex: string,
+  preimage: Uint8Array,
+): Promise<string | null> =>
+  finalizePendingSpend(ctx, script.claim(), script.encode(), pkScriptHex, preimageSigner(ctx.identity, preimage))
+
+/** {@link finalizePendingSpend} through the `refundWithoutReceiver` leaf. */
+export const finalizePendingRefund = (
+  ctx: ArkadeContext,
+  script: CovenantSwapScript,
+  pkScriptHex: string,
+): Promise<string | null> =>
+  finalizePendingSpend(ctx, script.refundWithoutReceiver(), script.encode(), pkScriptHex, ctx.identity)
 
 /** Raw witness encoding of an empty stack: varint item count 0. */
 export const EMPTY_RAW_WITNESS = Uint8Array.from([0x00])
@@ -848,8 +844,7 @@ export const refundSwapScript = async (
   // which the SDK's identity wrapper specifically swallows.
   const signedArkTx = await ctx.identity.sign(arkTx)
   // The emulator verifies "non-arkd" signatures on checkpoints BEFORE it does
-  // its own arkd-side handshake — unlike claimSwapScript's two-phase flow
-  // (submit unsigned, sign the server's OWN co-signed checkpoints, finalize),
+  // its own arkd-side handshake —
   // this is a single submitTx call, so the receiver's checkpoint signature
   // has to be in place upfront. Each checkpoint carries exactly one relevant
   // input, index 0.
@@ -896,7 +891,7 @@ export const refundSwapScript = async (
  * the very party who benefits from withholding it.
  *
  * Because the leaf keeps the server and drops the covenant, this is an
- * ordinary two-phase Arkade submission — the same shape {@link claimSwapScript}
+ * ordinary arkd submission — the same shape {@link claimSwapScript}
  * uses — rather than the emulator round trip. Two consequences worth stating:
  *
  * - No emulator packets, so no ArkadeScript pins the destination. That is safe
@@ -924,40 +919,22 @@ export const refundWithoutReceiverSwapScript = async (
 ): Promise<string> => {
   if (funded.length === 0) throw new Error('nothing to refund: no funded outputs')
   const inputs = spendable(funded, 'refund')
-
-  const { arkTx, checkpoints } = buildOffchainTx(
-    inputs.map((output) => ({
+  const assetPacket = refundAssetPacket(inputs, 'aggregate')
+  return signAndSubmitOffchainTx({
+    identity: ctx.identity,
+    provider: ctx.wallet.arkProvider,
+    inputs: inputs.map((output) => ({
       txid: output.txid,
       vout: output.vout,
       value: output.value,
       tapLeafScript: script.refundWithoutReceiver(),
       tapTree: script.encode(),
     })),
-    [{ script: refundPkScript, amount: BigInt(totalValue(inputs)) }],
-    ctx.wallet.serverUnrollScript,
-  )
-
-  // BEFORE signing: the packet changes the output set the signature covers.
-  const assetPacket = refundAssetPacket(inputs, 'aggregate')
-  if (assetPacket) attachEmulatorPackets(arkTx, [assetPacket])
-
-  // No index list: every input spends the same leaf, so all are signed.
-  const signedArkTx = await ctx.identity.sign(arkTx)
-  const submitted = await ctx.wallet.arkProvider.submitTx(
-    base64.encode(signedArkTx.toPSBT()),
-    checkpoints.map((c) => base64.encode(c.toPSBT())),
-  )
-
-  assertSubmittedArkTxid(submitted, signedArkTx, 'refundWithoutReceiverSwapScript')
-  const matched = matchServerCheckpoints(submitted.signedCheckpointTxs, checkpoints, 'refundWithoutReceiverSwapScript')
-
-  const finalCheckpoints = await Promise.all(
-    matched.map(async ({ server }) => {
-      const signed = await ctx.identity.sign(server, [0])
-      return base64.encode(signed.toPSBT())
-    }),
-  )
-
-  await ctx.wallet.arkProvider.finalizeTx(submitted.arkTxid, finalCheckpoints)
-  return submitted.arkTxid
+    outputs: [
+      { script: refundPkScript, amount: BigInt(totalValue(inputs)) },
+      ...(assetPacket ? [Extension.create([assetPacket]).txOut()] : []),
+    ],
+    serverUnrollScript: ctx.wallet.serverUnrollScript,
+    verifyServerSignatures: { serverPubkey: script.vhtlcOptions.server },
+  })
 }
