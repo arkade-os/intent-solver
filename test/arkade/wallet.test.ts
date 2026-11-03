@@ -5,6 +5,7 @@ import { ripemd160 } from '@noble/hashes/legacy.js'
 import { hex, base64 } from '@scure/base'
 import {
   ArkAddress,
+  buildOffchainTx,
   MnemonicIdentity,
   Transaction,
   CSVMultisigTapscript,
@@ -44,6 +45,7 @@ vi.mock('@arkade-os/sdk', async (importOriginal) => {
 // hoisting semantics.
 const {
   claimSwapScript,
+  finalizePendingClaim,
   refundSwapScript,
   refundWithoutReceiverSwapScript,
   findClaimPreimage,
@@ -501,6 +503,17 @@ describe('claimSwapScript', () => {
     }
   })
 
+  it('submits every checkpoint carrying the preimage its ark tx input reveals', async () => {
+    const serverSubmit = vi.fn(honestServer)
+    await claimSwapScript(claimCtx(serverSubmit), baseScript(), funded, PREIMAGE, DESTINATION)
+
+    const [, checkpointsB64] = serverSubmit.mock.calls[0]!
+    expect(checkpointsB64).toHaveLength(funded.length)
+    for (const checkpoint of checkpointsB64.map((psbt) => Transaction.fromPSBT(base64.decode(psbt)))) {
+      expect(getArkPsbtFields(checkpoint, 0, ConditionWitness)).toEqual([[PREIMAGE]])
+    }
+  })
+
   it.each<[string, typeof honestServer]>([
     [
       'an ark tx the server did not countersign',
@@ -539,6 +552,53 @@ describe('claimSwapScript', () => {
       { assetId: ASSET_B, vout: 0, amount: 7n },
     ])
     expect(finalizeTx).toHaveBeenCalledOnce()
+  })
+})
+
+describe('finalizePendingClaim', () => {
+  const PREIMAGE = new Uint8Array(32).fill(7)
+  const ARK_TXID = 'a'.repeat(64)
+  const LOCKUP_SCRIPT = hex.encode(baseScript().pkScript)
+  const ourCheckpointId = buildOffchainTx(
+    [{ ...FUNDED[0]!, tapLeafScript: baseScript().claim(), tapTree: baseScript().encode() }],
+    [{ script: DEST, amount: 50_000n }],
+    serverUnrollScript,
+  ).checkpoints[0]!.id
+  const finalizeTx = vi.fn(async (_arkTxid: string, _checkpointsB64: string[]) => undefined)
+  const pendingCtx = (spentBy: string): ArkadeContext =>
+    ({
+      identity: receiverIdentity,
+      wallet: {
+        serverUnrollScript,
+        arkProvider: { finalizeTx },
+        indexerProvider: {
+          getVtxos: vi.fn(async () => ({
+            vtxos: [{ ...FUNDED[0]!, isSpent: true, spentBy, arkTxId: ARK_TXID }],
+          })),
+        },
+      },
+    }) as unknown as ArkadeContext
+
+  it('finalizes the claim arkd accepted, signing the checkpoint it rebuilds', async () => {
+    finalizeTx.mockClear()
+    await expect(
+      finalizePendingClaim(pendingCtx(ourCheckpointId), baseScript(), LOCKUP_SCRIPT, PREIMAGE),
+    ).resolves.toBe(ARK_TXID)
+
+    const [arkTxid, checkpointsB64] = finalizeTx.mock.calls[0]!
+    expect(arkTxid).toBe(ARK_TXID)
+    const checkpoint = Transaction.fromPSBT(base64.decode(checkpointsB64[0]!))
+    expect(checkpoint.id).toBe(ourCheckpointId)
+    expect(getArkPsbtFields(checkpoint, 0, ConditionWitness)).toEqual([[PREIMAGE]])
+    expect(checkpoint.getInput(0).tapScriptSig?.map(([sig]) => hex.encode(sig.pubKey))).toContain(hex.encode(RECEIVER))
+  })
+
+  it('leaves a lockup alone when its spend is not our claim', async () => {
+    finalizeTx.mockClear()
+    await expect(
+      finalizePendingClaim(pendingCtx('c'.repeat(64)), baseScript(), LOCKUP_SCRIPT, PREIMAGE),
+    ).resolves.toBeNull()
+    expect(finalizeTx).not.toHaveBeenCalled()
   })
 })
 

@@ -46,6 +46,8 @@ export interface ArkadeOps {
   lockupSpendEvidence(pkScriptHex: string): Promise<LockupSpendEvidence>
   /** Spend the claim leaf of the script the row describes, revealing the preimage. */
   claim(row: CovenantScriptRow, outputs: FundedOutput[], preimageHex: string): Promise<string>
+  /** Finalize our claim arkd accepted without finalizing; its ark txid, or null when the lockup's spend is not that. */
+  finalizePendingClaim?(row: CovenantScriptRow, preimageHex: string): Promise<string | null>
   /** Push the covenant refund of the script the row describes. Needs no keys of ours. */
   refund(row: CovenantScriptRow, outputs: FundedOutput[]): Promise<string>
   findLockupOutpoints?(

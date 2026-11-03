@@ -2185,6 +2185,29 @@ describe('tick: failure and recovery', () => {
     expect(arkade.claimCalls).toHaveLength(0)
   })
 
+  it('finalizes our own claim arkd accepted but never finalized, and records its txid', async () => {
+    const row = await claiming()
+    arkade.lockups = []
+    arkade.lockupsSpent = true
+    arkade.finalizePendingClaim = async () => 'pending-claim-txid'
+
+    const done = await service.tick(row.id)
+    expect(done.state).toBe('claimed')
+    expect(done.claimArkTxid).toBe('pending-claim-txid')
+  })
+
+  it('keeps claiming while finalizing our pending claim fails, so the sweep retries it', async () => {
+    const row = await claiming()
+    arkade.lockups = []
+    arkade.lockupsSpent = true
+    arkade.finalizePendingClaim = async () => {
+      throw new Error('INVALID_SIGNATURE (18): invalid signature in checkpoint tx')
+    }
+
+    await expect(service.tick(row.id)).rejects.toThrow(/INVALID_SIGNATURE/)
+    expect((await store.get(row.id)).state).toBe('claiming')
+  })
+
   it('parks a lockup that holds only a dust asset vtxo after the clean funding was swept', async () => {
     // claimOutputs falls back to EVERY output when the asset-free ones fall short; if even
     // all of them are below the amount, the clean funding went after we paid.

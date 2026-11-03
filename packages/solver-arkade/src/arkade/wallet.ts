@@ -586,6 +586,28 @@ export const lockupSpendEvidence = async (
   return seen ? 'spent' : 'unknown'
 }
 
+const withoutConditionWitness = (tx: Transaction): Transaction => {
+  const copy = tx.clone()
+  for (let i = 0; i < copy.inputsLength; i++) {
+    const unknown = copy.getInput(i).unknown ?? []
+    copy.updateInput(i, { unknown: unknown.filter((field) => ConditionWitness.decode(field) === null) })
+  }
+  return copy
+}
+
+/** Replaces rather than appends: arkd echoes a submitted witness back, and btcd refuses a duplicate PSBT key. */
+const preimageSigner = (identity: ArkadeContext['identity'], preimage: Uint8Array) =>
+  claimWithPreimageIdentity(
+    { sign: (tx: Transaction, inputIndexes?: number[]) => identity.sign(withoutConditionWitness(tx), inputIndexes) },
+    preimage,
+  )
+
+const withPreimage = (checkpointB64: string, preimage: Uint8Array): string => {
+  const checkpoint = Transaction.fromPSBT(base64.decode(checkpointB64))
+  setArkPsbtField(checkpoint, 0, ConditionWitness, [preimage])
+  return base64.encode(checkpoint.toPSBT())
+}
+
 /** Spend a swap script's claim leaf, revealing the preimage; throws on any server response the SDK cannot verify. */
 export const claimSwapScript = async (
   ctx: ArkadeContext,
@@ -598,9 +620,18 @@ export const claimSwapScript = async (
   const inputs = spendable(funded, 'claim')
   // Anyone can add an asset to a lockup; without its packet arkd refuses the claim, after we already paid.
   const assetPacket = refundAssetPacket(inputs, 'aggregate')
+  const ark = ctx.wallet.arkProvider
   return signAndSubmitOffchainTx({
-    identity: claimWithPreimageIdentity(ctx.identity, preimage),
-    provider: ctx.wallet.arkProvider,
+    identity: preimageSigner(ctx.identity, preimage),
+    // arkd ≥ v0.9.24 refuses, at submit, a checkpoint whose witness differs from its ark tx input's.
+    provider: {
+      submitTx: (arkTx, checkpoints) =>
+        ark.submitTx(
+          arkTx,
+          checkpoints.map((c) => withPreimage(c, preimage)),
+        ),
+      finalizeTx: (arkTxid, checkpoints) => ark.finalizeTx(arkTxid, checkpoints),
+    },
     inputs: inputs.map((output) => ({
       txid: output.txid,
       vout: output.vout,
@@ -616,6 +647,42 @@ export const claimSwapScript = async (
     // The leaf's own key, not the wallet's live one: a lockup quoted before a signer rotation is co-signed under it.
     verifyServerSignatures: { serverPubkey: script.vhtlcOptions.server },
   })
+}
+
+/**
+ * Finalize OUR claim that arkd accepted and never finalized, which leaves the lockup spent with no output.
+ * Null unless every spent output went into one ark tx through our claim leaf: only that leaf rebuilds
+ * the checkpoint txid arkd names as the spender, and it needs our signature.
+ */
+export const finalizePendingClaim = async (
+  ctx: ArkadeContext,
+  script: ClaimableScript,
+  pkScriptHex: string,
+  preimage: Uint8Array,
+): Promise<string | null> => {
+  const spent: VirtualCoin[] = []
+  for await (const batch of vtxoPages(ctx.wallet.indexerProvider, { scripts: [pkScriptHex] })) {
+    spent.push(...batch.filter((vtxo) => isVtxoSpent(vtxo)))
+  }
+  const arkTxids = new Set(spent.map((vtxo) => vtxo.arkTxId))
+  const [arkTxid] = arkTxids
+  if (spent.length === 0 || arkTxids.size !== 1 || !arkTxid) return null
+  const { checkpoints } = buildOffchainTx(
+    spent.map(({ txid, vout, value }) => ({
+      txid,
+      vout,
+      value,
+      tapLeafScript: script.claim(),
+      tapTree: script.encode(),
+    })),
+    [{ script: hex.decode(pkScriptHex), amount: BigInt(spent.reduce((sum, vtxo) => sum + vtxo.value, 0)) }],
+    ctx.wallet.serverUnrollScript,
+  )
+  if (checkpoints.some((checkpoint, i) => checkpoint.id !== spent[i]!.spentBy)) return null
+  const signer = preimageSigner(ctx.identity, preimage)
+  const signed = await Promise.all(checkpoints.map(async (c) => base64.encode((await signer.sign(c, [0])).toPSBT())))
+  await ctx.wallet.arkProvider.finalizeTx(arkTxid, signed)
+  return arkTxid
 }
 
 /** Raw witness encoding of an empty stack: varint item count 0. */
