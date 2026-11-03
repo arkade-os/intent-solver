@@ -46,6 +46,7 @@ vi.mock('@arkade-os/sdk', async (importOriginal) => {
 const {
   claimSwapScript,
   finalizePendingClaim,
+  finalizePendingRefund,
   refundSwapScript,
   refundWithoutReceiverSwapScript,
   findClaimPreimage,
@@ -389,6 +390,54 @@ describe('refundWithoutReceiverSwapScript', () => {
     await expect(refundWithoutReceiverSwapScript(arkCtx(), receiveLegScript(), [], DEST)).rejects.toThrow(
       /nothing to refund/,
     )
+  })
+
+  describe('finalizePendingRefund', () => {
+    const ARK_TXID = 'a'.repeat(64)
+    const LOCKUP_SCRIPT = hex.encode(receiveLegScript().pkScript)
+    const ourCheckpointId = buildOffchainTx(
+      [
+        {
+          ...FUNDED[0]!,
+          tapLeafScript: receiveLegScript().refundWithoutReceiver(),
+          tapTree: receiveLegScript().encode(),
+        },
+      ],
+      [{ script: DEST, amount: 50_000n }],
+      serverUnrollScript,
+    ).checkpoints[0]!.id
+    const pendingCtx = (spentBy: string): ArkadeContext =>
+      ({
+        identity: receiverIdentity,
+        wallet: {
+          serverUnrollScript,
+          arkProvider: { finalizeTx: arkFinalizeTx },
+          indexerProvider: {
+            getVtxos: vi.fn(async () => ({ vtxos: [{ ...FUNDED[0]!, isSpent: true, spentBy, arkTxId: ARK_TXID }] })),
+          },
+        },
+      }) as unknown as ArkadeContext
+
+    it('finalizes our refund arkd accepted or already finalized, signing the checkpoint it rebuilds', async () => {
+      arkFinalizeTx.mockClear()
+      await expect(finalizePendingRefund(pendingCtx(ourCheckpointId), receiveLegScript(), LOCKUP_SCRIPT)).resolves.toBe(
+        ARK_TXID,
+      )
+
+      const [arkTxid, checkpointsB64] = arkFinalizeTx.mock.calls[0]!
+      expect(arkTxid).toBe(ARK_TXID)
+      const checkpoint = Transaction.fromPSBT(base64.decode(checkpointsB64[0]!))
+      expect(checkpoint.id).toBe(ourCheckpointId)
+      expect(signerKeys(checkpoint)).toContain(hex.encode(RECEIVER))
+    })
+
+    it('leaves a lockup alone when its spend is not our refund', async () => {
+      arkFinalizeTx.mockClear()
+      await expect(
+        finalizePendingRefund(pendingCtx('c'.repeat(64)), receiveLegScript(), LOCKUP_SCRIPT),
+      ).resolves.toBeNull()
+      expect(arkFinalizeTx).not.toHaveBeenCalled()
+    })
   })
 })
 

@@ -636,15 +636,17 @@ export const claimSwapScript = async (
 }
 
 /**
- * Finalize OUR claim that arkd accepted and never finalized, which leaves the lockup spent with no output.
- * Null unless every spent output went into one ark tx through our claim leaf: only that leaf rebuilds
+ * Finalize OUR spend that arkd accepted and never finalized, which leaves the lockup spent with no output;
+ * arkd answers finalizeTx on a tx it already finalized, as a one-shot submit does, with success.
+ * Null unless every spent output went into one ark tx through `leaf`: only that leaf rebuilds
  * the checkpoint txid arkd names as the spender, and it needs our signature.
  */
-export const finalizePendingClaim = async (
+const finalizePendingSpend = async (
   ctx: ArkadeContext,
-  script: ClaimableScript,
+  leaf: TapLeafScript,
+  tapTree: Uint8Array,
   pkScriptHex: string,
-  preimage: Uint8Array,
+  signer: Pick<ArkadeContext['identity'], 'sign'>,
 ): Promise<string | null> => {
   const spent: VirtualCoin[] = []
   for await (const batch of vtxoPages(ctx.wallet.indexerProvider, { scripts: [pkScriptHex] })) {
@@ -654,22 +656,32 @@ export const finalizePendingClaim = async (
   const [arkTxid] = arkTxids
   if (spent.length === 0 || arkTxids.size !== 1 || !arkTxid) return null
   const { checkpoints } = buildOffchainTx(
-    spent.map(({ txid, vout, value }) => ({
-      txid,
-      vout,
-      value,
-      tapLeafScript: script.claim(),
-      tapTree: script.encode(),
-    })),
+    spent.map(({ txid, vout, value }) => ({ txid, vout, value, tapLeafScript: leaf, tapTree })),
     [{ script: hex.decode(pkScriptHex), amount: BigInt(spent.reduce((sum, vtxo) => sum + vtxo.value, 0)) }],
     ctx.wallet.serverUnrollScript,
   )
   if (checkpoints.some((checkpoint, i) => checkpoint.id !== spent[i]!.spentBy)) return null
-  const signer = preimageSigner(ctx.identity, preimage)
   const signed = await Promise.all(checkpoints.map(async (c) => base64.encode((await signer.sign(c, [0])).toPSBT())))
   await ctx.wallet.arkProvider.finalizeTx(arkTxid, signed)
   return arkTxid
 }
+
+/** {@link finalizePendingSpend} through the claim leaf. */
+export const finalizePendingClaim = (
+  ctx: ArkadeContext,
+  script: ClaimableScript,
+  pkScriptHex: string,
+  preimage: Uint8Array,
+): Promise<string | null> =>
+  finalizePendingSpend(ctx, script.claim(), script.encode(), pkScriptHex, preimageSigner(ctx.identity, preimage))
+
+/** {@link finalizePendingSpend} through the `refundWithoutReceiver` leaf. */
+export const finalizePendingRefund = (
+  ctx: ArkadeContext,
+  script: CovenantSwapScript,
+  pkScriptHex: string,
+): Promise<string | null> =>
+  finalizePendingSpend(ctx, script.refundWithoutReceiver(), script.encode(), pkScriptHex, ctx.identity)
 
 /** Raw witness encoding of an empty stack: varint item count 0. */
 export const EMPTY_RAW_WITNESS = Uint8Array.from([0x00])

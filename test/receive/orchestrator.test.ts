@@ -2031,6 +2031,20 @@ describe('ReceiveSwapService.tick — refund path', () => {
     expect(arkade.state.refundCalls).toBe(0)
   })
 
+  it('records our own refund as refunded when the lockup is gone because its response never reached us', async () => {
+    const funded = await armAndFund()
+    const row0 = await store.get(funded.id)
+    now = row0.refundLocktime
+    arkade.state.outputs = []
+    arkade.state.claimPreimage = null
+    arkade.ops.finalizePendingRefund = async () => 'pending-refund-ark-txid'
+
+    const row = await service.tick(funded.id)
+    expect(row.state).toBe('refunded')
+    expect(row.refundArkTxid).toBe('pending-refund-ark-txid')
+    expect(arkade.state.refundCalls).toBe(0)
+  })
+
   it('still escalates to stuck when the claim never becomes readable, however many ticks it takes', async () => {
     const funded = await armAndFund()
     const row0 = await store.get(funded.id)
