@@ -2839,3 +2839,32 @@ describe('the CLTV headroom note at the armed edge', () => {
     for (const secret of [hex.encode(P), paymentHash, invoice]) expect(detail).not.toContain(secret)
   })
 })
+
+describe('ReceiveSwapService.refundNow', () => {
+  const quoted = async () => {
+    const outcome = await service.quote(quoteRequest())
+    if (!outcome.accepted) throw new Error(`expected acceptance, got ${outcome.reason}`)
+    return outcome.swap
+  }
+
+  it('refuses on a resolved row rather than refunding a stray output and restarting its grace', async () => {
+    const swap = await quoted()
+    await store.transition(swap.id, 'quoted', 'refused')
+    arkade.state.outputs = [{ txid: 'stray', vout: 0, value: 5_000 }]
+
+    await expect(service.refundNow(swap.id)).rejects.toThrow(/refused/)
+    expect(arkade.state.refundCalls).toBe(0)
+    expect((await store.get(swap.id)).refundArkTxid).toBeNull()
+  })
+
+  it('still refunds the solver’s own lockup on a stuck row', async () => {
+    const swap = await quoted()
+    await store.transition(swap.id, 'quoted', 'armed')
+    await store.transition(swap.id, 'armed', 'funded')
+    await store.transition(swap.id, 'funded', 'stuck')
+    arkade.state.outputs = [{ txid: 'lk', vout: 0, value: 5_000 }]
+
+    await expect(service.refundNow(swap.id)).resolves.toBe('refund-ark-txid')
+    expect(arkade.state.refundCalls).toBe(1)
+  })
+})

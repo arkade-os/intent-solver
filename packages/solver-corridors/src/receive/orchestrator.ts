@@ -60,7 +60,7 @@ import type { OnchainBackend } from '@arkade-os/solver-core/ports/onchain.js'
 import { FundNotSubmittedError } from './fundLockup.js'
 import type { CovclaimdClient } from './covclaimd.js'
 import type { LightningBackend } from '@arkade-os/solver-core/ports/lightning.js'
-import type { ReceiveSwapRow, ReceiveSwapStore } from '../db/receiveSwaps.js'
+import { EXPOSED, type ReceiveSwapRow, type ReceiveSwapStore } from '../db/receiveSwaps.js'
 import type { SendSwapRow } from '../db/swaps.js'
 import { GiveUp, json, log, messageOf, nowSeconds, poll } from '@arkade-os/solver-core/util/poll.js'
 import { sweep } from '@arkade-os/solver-core/util/sweep.js'
@@ -1333,6 +1333,13 @@ export class ReceiveSwapService {
   async refundNow(id: string): Promise<string | null> {
     const { store, arkade } = this.deps
     const row = await store.get(id)
+    // Only where the lockup can be open and unresolved — EXPOSED or stuck. Elsewhere a refund
+    // spends nothing it should, and the patch below would just restart the grace clock.
+    if (!EXPOSED.includes(row.state) && row.state !== 'stuck') {
+      throw new Error(
+        `swap ${id} is ${row.state}: nothing to refund here — the solver's lockup is open only while funded/claimed/refunding or stuck`,
+      )
+    }
     const outputs = await arkade.findLockups(row.pkScript)
     if (outputs.length === 0) return null
     const txid = await arkade.refund(receiveCovenantRowFor(row), outputs)
