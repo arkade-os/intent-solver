@@ -167,6 +167,14 @@ describe('balance report', () => {
     )
   })
 
+  it('calls a source with no readable figure unreadable, never empty', async () => {
+    const text = formatBalanceReport(
+      await read({ sources: [source('BTC rail', async () => sats(['channel out', null, 'lnd timed out']))] }),
+    )
+    expect(text).toContain('*BTC rail*: unreadable\n   ↳ channel out: lnd timed out')
+    expect(text).not.toContain('nothing held')
+  })
+
   it('leaves out a quiet figure while it is zero, and puts a unit label after its number', async () => {
     const balance = (pending: string): FundBalance => ({
       unit: 'sats',

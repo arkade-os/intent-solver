@@ -50,6 +50,8 @@ export const createNotifier = (options: NotifierOptions): Notifier => {
   const maxQueue = options.maxQueue ?? DEFAULT_MAX_QUEUE
   const baseDelayMs = options.baseDelayMs ?? DEFAULT_BASE_DELAY_MS
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
+  // Markup characters in a name would break the bold span around it.
+  const tag = options.label?.replace(/[*_`]/g, '')
 
   const queue: string[] = []
   const stats: NotifyStats = { sent: 0, failed: 0, dropped: 0 }
@@ -106,7 +108,7 @@ export const createNotifier = (options: NotifierOptions): Notifier => {
         queue.shift()
         stats.dropped += 1
       }
-      queue.push(options.label ? `*[${options.label}]* ${text}` : text)
+      queue.push(limitNotification(tag ? `*[${tag}]* ${text}` : text))
       schedule()
     },
     stats: () => ({ ...stats }),

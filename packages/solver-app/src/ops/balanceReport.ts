@@ -98,9 +98,11 @@ const sourceLines = (label: string, balance: FundBalance): string[] => {
     (f): f is FundFigure & { amount: string } => f.amount !== null && !(f.quietWhenZero && Number(f.amount) === 0),
   )
   const unit = balance.unit === 'sats' ? '' : ` (${balance.unit})`
+  const unread = balance.figures.filter((f) => f.amount === null)
+  const empty = unread.length > 0 ? 'unreadable' : 'nothing held'
   return [
-    `*${label}*${unit}: ${shown.map((f) => figure(balance.unit, f)).join(' · ') || 'nothing held'}`,
-    ...balance.figures.filter((f) => f.amount === null).map((f) => `   ↳ ${f.label}: ${f.note ?? 'unread'}`),
+    `*${label}*${unit}: ${shown.map((f) => figure(balance.unit, f)).join(' · ') || empty}`,
+    ...unread.map((f) => `   ↳ ${f.label}: ${f.note ?? 'unread'}`),
   ]
 }
 

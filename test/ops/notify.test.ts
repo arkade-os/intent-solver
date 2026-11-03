@@ -48,6 +48,15 @@ describe('createNotifier', () => {
     expect(sink.sent).toEqual(['*[ln-solver]* ✅ *Swap fulfilled*'])
   })
 
+  it('keeps a tagged message under the cap, and the name from breaking its bold markup', async () => {
+    const sink = recordingSink()
+    const notifier = createNotifier({ sinks: [sink], sleep: noSleep, label: `ln_*solver\`${'x'.repeat(120)}` })
+    notifier.post('y'.repeat(4000))
+    await notifier.flush()
+    expect(sink.sent[0]!.length).toBeLessThanOrEqual(4000)
+    expect(sink.sent[0]).toMatch(/^\*\[lnsolverx+\]\* y/)
+  })
+
   // The constraint the feature is written against: a hung sink must not stall
   // the caller.
   it('RETURNS BEFORE the sink is called, so a hung webhook cannot block a swap', () => {
