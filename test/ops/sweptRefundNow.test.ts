@@ -40,11 +40,16 @@ const servicesWith = (state: string) => {
   const noteFundings = vi.fn(async () => {})
   const services = {
     arkade: {},
-    config: { emulatorUrl: 'http://emulator' },
+    ln: { getSendHtlcState: async () => null },
+    config: { emulatorUrl: 'http://emulator', lnBackend: 'lnd' },
     store: {
       get: async () => ({
         id: 'swap-1',
         state,
+        paymentHash: 'ab'.repeat(32),
+        paymentId: null,
+        paymentBackend: null,
+        paymentWallet: null,
         refundPkScript: hex.encode(Uint8Array.from([0x51, 0x20, ...new Uint8Array(32).fill(5)])),
         emulatorPubkey: 'ff'.repeat(33),
       }),

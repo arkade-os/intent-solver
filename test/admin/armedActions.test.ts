@@ -82,6 +82,13 @@ describe('detailDialog — arming the unwind actions', () => {
     expect(block).toMatch(/'arkade:BTC->onchain:BTC' \? 'onchain-refund-now'/)
     expect(block).toMatch(/'arkade:BTC->onchain:BTC' \? 'reclaim-l1-htlc'/)
   })
+
+  it('offers the onchain claim beside its refund, so a paid-out stuck row has the safe answer too', () => {
+    // onchain-refund-now is the DOUBLE-PAYOUT on a stuck row the client already
+    // claimed; onchain-claim-now is its safe counterpart. Arming only the refund
+    // leaves that answer reachable solely from the CLI.
+    expect(armingBlock()).toMatch(/'arkade:BTC->onchain:BTC' \? 'onchain-claim-now'/)
+  })
 })
 
 describe('the phase vocabulary this relies on', () => {
