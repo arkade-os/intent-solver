@@ -11,6 +11,7 @@
  * the CLI and exit the consumer's process.
  */
 
+import { rearmPendingClaims } from './claims.js'
 import { TickErrorTracker } from './tickErrors.js'
 import type { OnchainSendBackend } from '@arkade-os/solver-core/ports/onchain.js'
 import type { CorridorSet, CorridorReaderSet } from '@arkade-os/solver-core/core/corridor.js'
@@ -1101,6 +1102,8 @@ export const createServices = async (
           ` pricing the worst surviving hint at ${worstRouteHintCltvBlocks} blocks`,
       )
     }
+    const rearmed = await rearmPendingClaims(store)
+    if (rearmed.length > 0) log(`re-armed the claim of stuck swap(s) ${rearmed.join(', ')}`)
   }
 
   // The solver's own destination for reclaimed onchain HTLC funds — an address

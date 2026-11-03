@@ -3,7 +3,7 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { hex } from '@scure/base'
 import { NON_TERMINAL, SwapStore, type QuoteRecord } from '@arkade-os/solver-corridors/db/swaps.js'
 import { OnchainSendSwapStore } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
-import { claimNow, onchainClaimNow } from '@arkade-os/solver-app/ops/claims.js'
+import { claimNow, onchainClaimNow, rearmPendingClaims } from '@arkade-os/solver-app/ops/claims.js'
 import { parkVia } from '@arkade-os/solver-core/core/corridor.js'
 import type { SendHtlcState } from '@arkade-os/solver-core/ports/lightning.js'
 
@@ -80,6 +80,38 @@ describe('claimNow', () => {
 
     expect(outcome).toEqual({ state: 'claiming' })
     expect((await store.get('swap-1')).preimage).toBe(PREIMAGE)
+  })
+
+  it('reuses the preimage a row stuck mid-claim already carries, as a coupled send has no backend payment', async () => {
+    await store.insertQuote(quote())
+    await store.transition('swap-1', 'quoted', 'funded')
+    await store.transition('swap-1', 'funded', 'claiming', { preimage: PREIMAGE })
+    await store.fail('swap-1', 'claiming', 'lockup holds 0 < amount 500 while claiming; no claim txid recorded')
+
+    const outcome = await claimNow(services(), 'swap-1')
+
+    expect(outcome).toEqual({ state: 'claiming' })
+    expect((await store.get('swap-1')).preimage).toBe(PREIMAGE)
+  })
+
+  it('re-arms, at boot, only rows parked with a preimage because the lockup read spent mid-claim', async () => {
+    await store.insertQuote(quote())
+    await store.transition('swap-1', 'quoted', 'funded')
+    await store.transition('swap-1', 'funded', 'claiming', { preimage: PREIMAGE })
+    await store.fail('swap-1', 'claiming', 'lockup holds 0 < amount 500 while claiming; no claim txid recorded')
+    await store.insertQuote({
+      ...quote(),
+      id: 'swap-2',
+      paymentHash: 'ef'.repeat(32),
+      pkScript: '5120' + 'cd'.repeat(32),
+    })
+    await store.transition('swap-2', 'quoted', 'funded')
+    await store.transition('swap-2', 'funded', 'paying')
+    await store.fail('swap-2', 'paying', 'lightning payment failed terminally')
+
+    expect(await rearmPendingClaims(store)).toEqual(['swap-1'])
+    expect((await store.get('swap-1')).state).toBe('claiming')
+    expect((await store.get('swap-2')).state).toBe('stuck')
   })
 
   it('refuses when neither the operator nor the backend can supply one', async () => {

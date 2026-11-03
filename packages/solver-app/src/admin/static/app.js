@@ -298,11 +298,19 @@ const stateWord = (state, raw) => {
   return h(`span.state${state === 'stuck' ? ' state-stuck' : ''}`, state, gloss ? h('span.faint', ` (${gloss})`) : null)
 }
 
+const sweepFailure = (row) => {
+  const what = row.state === 'claiming' ? 'preimage held; claim tx failing' : 'tick failing'
+  return h('div.at-risk', `${what} ×${row.failing.count}: ${row.failing.message}`)
+}
+
 /** In a table the gloss stays only where the word alone misleads; a finished row keeps it on hover. */
-const stateCell = (row) =>
-  row.phase === 'open' || row.phase === 'exposed' || row.state === 'stuck'
-    ? stateWord(row.state)
-    : h('span.state', { title: stateRead(row.state) }, row.state)
+const stateCell = (row) => {
+  const word =
+    row.phase === 'open' || row.phase === 'exposed' || row.state === 'stuck'
+      ? stateWord(row.state)
+      : h('span.state', { title: stateRead(row.state) }, row.state)
+  return row.failing ? h('span', word, sweepFailure(row)) : word
+}
 
 /**
  * What the last `read-payment` on THIS swap concluded, and what it licenses.
@@ -3355,6 +3363,7 @@ const detailDialog = () => {
         `created ${ago(d.swap.createdAt)} ago · updated ${ago(d.swap.updatedAt)} ago`,
       ),
       d.swap.failureReason ? h('p.banner', d.swap.failureReason) : null,
+      d.swap.failing ? sweepFailure(d.swap) : null,
       // `stuck` beside a pushed refund reads as an unresolved loss. It is not:
       // the two facts are about different people. `stuck` says an operator
       // should look at WHY the payment died; `refund_outcome` says the client's

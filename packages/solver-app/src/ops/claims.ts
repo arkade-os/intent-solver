@@ -44,7 +44,8 @@ export const claimNow = async (services: Services, id: string, preimageHex?: str
     throw new Error(`swap ${id} is ${row.state}, not stuck; only a stuck row is recovered by hand`)
   }
 
-  const preimage = preimageHex ?? (await requireLn(services.ln).getSendHtlcState?.(row.paymentHash))?.preimage
+  const preimage =
+    preimageHex ?? row.preimage ?? (await requireLn(services.ln).getSendHtlcState?.(row.paymentHash))?.preimage
   if (!preimage) {
     throw new Error(
       `swap ${id} has no preimage: none was given and the backend holds none for ${row.paymentHash}. ` +
@@ -63,6 +64,21 @@ export const claimNow = async (services: Services, id: string, preimageHex?: str
     throw new Error(`swap ${id} moved out of stuck while being recovered; re-read it before trying again`)
   }
   return { state: 'claiming' }
+}
+
+/**
+ * At boot, back onto the claim path: rows parked because their lockup read spent mid-claim, which is
+ * also what an arkd-accepted, never-finalized claim of ours looks like. The claim tick finalizes that
+ * one and parks any other spend again.
+ */
+export const rearmPendingClaims = async (store: Pick<Services['store'], 'findByStates' | 'transition'>) => {
+  const rearmed: string[] = []
+  for (const row of await store.findByStates(['stuck'])) {
+    if (!row.failureReason?.includes('while claiming; no claim txid recorded')) continue
+    if (!row.preimage || !preimageMatchesHash(row.preimage, row.paymentHash)) continue
+    if (await store.transition(row.id, 'stuck', 'claiming', {})) rearmed.push(row.id)
+  }
+  return rearmed
 }
 
 // {@link claimNow} for the onchain leg; the row stuck mid-claim so the preimage is already on it. Refusing

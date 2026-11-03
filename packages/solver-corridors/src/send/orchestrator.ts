@@ -1826,6 +1826,9 @@ export class SendSwapService {
           `swap ${row.id}: lockup holds ${held} < ${row.amountSats} while claiming but no spend is provable (${evidence})`,
         )
       }
+      // A throw keeps the row claiming, so the sweep retries a finalize arkd refused.
+      const pending = evidence === 'spent' ? await arkade.finalizePendingClaim?.(row, row.preimage) : null
+      if (pending) return store.transition(row.id, 'claiming', 'claimed', { claim_ark_txid: pending })
       await store.fail(
         row.id,
         'claiming',
