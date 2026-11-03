@@ -30,6 +30,12 @@ const corridor = (stem: string, extra: Record<string, string> = {}) => ({
   ...Object.fromEntries(Object.entries(extra).map(([suffix, value]) => [`${stem}_${suffix}`, value])),
 })
 
+const FIXED_BTC = {
+  'arkade:BTC->lightning:BTC': {},
+  'lightning:BTC->arkade:BTC': {},
+  'arkade:BTC->onchain:BTC': {},
+}
+
 /** Every setting the solver reads, each set to a value it accepts. */
 const FULL_ENV: Record<string, string> = {
   SWAP_NETWORK: 'regtest',
@@ -164,7 +170,10 @@ describe('envToDocument — what it writes', () => {
   })
 
   it('omits what is unset, and what is set but blank', () => {
-    expect(envToDocument({ SWAP_NETWORK: 'regtest', RELAY_URL: '  ' }, [])).toEqual({ network: 'regtest' })
+    expect(envToDocument({ SWAP_NETWORK: 'regtest', RELAY_URL: '  ' }, [])).toEqual({
+      network: 'regtest',
+      corridors: FIXED_BTC,
+    })
   })
 })
 
@@ -173,12 +182,14 @@ describe('envToDocument — the old direction names, against the stored rows', (
 
   it('reads _BUY as the client giving BTC when BTC is the base', () => {
     expect(envToDocument(env, [{ base: null, quote: USDA }]).corridors).toEqual({
+      ...FIXED_BTC,
       'arkade:BTC->USDA': { enabled: false },
     })
   })
 
   it('reads _BUY as the client giving the asset when the asset is the base', () => {
     expect(envToDocument(env, [{ base: USDA, quote: null }]).corridors).toEqual({
+      ...FIXED_BTC,
       'USDA->arkade:BTC': { enabled: false },
     })
   })
@@ -230,7 +241,7 @@ describe('exportConfig', () => {
       ASSET_USDA_BUY_ENABLED: 'false',
     })
     const doc = JSON.parse(printed)
-    expect(doc.corridors).toEqual({ 'arkade:BTC->USDA': { enabled: false } })
+    expect(doc.corridors).toEqual({ ...FIXED_BTC, 'arkade:BTC->USDA': { enabled: false } })
     expect(loadedFrom(doc).network).toBe('mutinynet')
   })
 

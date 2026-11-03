@@ -3198,6 +3198,7 @@ const ACTION_LABELS = {
   'refund-now': 'Refund',
   'claim-now': 'Claim',
   'onchain-refund-now': 'Refund on L1',
+  'onchain-claim-now': 'Claim on L1',
   'reclaim-l1-htlc': 'Reclaim L1 HTLC',
   'park-swap': 'Park',
   'fund-withdraw': 'Send',
@@ -3327,6 +3328,7 @@ const detailDialog = () => {
         // answers to the SAME question, and `read payment` is what picks.
         d.swap.corridor === 'arkade:BTC->lightning:BTC' ? 'claim-now' : null,
         d.swap.corridor === 'arkade:BTC->onchain:BTC' ? 'onchain-refund-now' : null,
+        d.swap.corridor === 'arkade:BTC->onchain:BTC' ? 'onchain-claim-now' : null,
         d.swap.corridor === 'arkade:BTC->onchain:BTC' ? 'reclaim-l1-htlc' : null,
         // Every corridor: a row that cannot progress is not a Lightning-only
         // problem, and this is the only thing that stops the sweep re-driving it.

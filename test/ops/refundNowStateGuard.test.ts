@@ -32,17 +32,26 @@ const { EXPOSED } = await import('@arkade-os/solver-corridors/db/swaps.js')
 
 const SPENDABLE = [{ txid: 'a'.repeat(64), vout: 0, value: 1976 }]
 
-const servicesWith = (state: string) => {
+/** No htlc committed against the hash: `never-submitted`, the safe verdict. */
+const UNPAID_LN = { getSendHtlcState: async () => null }
+const PAID_LN = { getSendHtlcState: async () => ({ status: 'settled', preimage: 'cc'.repeat(32) }) }
+
+const servicesWith = (state: string, ln: unknown = UNPAID_LN) => {
   const patch = vi.fn(async () => {})
   const transition = vi.fn(async () => true)
   const noteFundings = vi.fn(async () => {})
   const services = {
     arkade: {},
-    config: { emulatorUrl: 'http://emulator' },
+    ln,
+    config: { emulatorUrl: 'http://emulator', lnBackend: 'lnd' },
     store: {
       get: async () => ({
         id: 'swap-1',
         state,
+        paymentHash: 'ab'.repeat(32),
+        paymentId: null,
+        paymentBackend: null,
+        paymentWallet: null,
         refundPkScript: hex.encode(Uint8Array.from([0x51, 0x20, ...new Uint8Array(32).fill(5)])),
         emulatorPubkey: 'ff'.repeat(33),
       }),
@@ -76,9 +85,20 @@ describe('refundNow refuses a swap the solver may already have paid out', () => 
     })
   }
 
-  it('still refunds a stuck row — the override exists for exactly this', async () => {
+  it('still refunds a stuck row the backend never paid — the override exists for exactly this', async () => {
     const { services } = servicesWith('stuck')
     expect(await refundNow(services as never, 'swap-1')).toEqual({ txid: 'offchain-txid' })
     expect(refundSwapScript).toHaveBeenCalledOnce()
+  })
+
+  // `stuck` conflates paid and unpaid (a returned commitment lands here too), so
+  // the row state alone cannot gate the refund — the payment itself must.
+  it('refuses a stuck row the backend says was actually paid', async () => {
+    const { services, patch, transition } = servicesWith('stuck', PAID_LN)
+    await expect(refundNow(services as never, 'swap-1')).rejects.toThrow(/verdict|twice|do not refund/i)
+    expect(refundSwapScript).not.toHaveBeenCalled()
+    expect(refundSweptSwapScript).not.toHaveBeenCalled()
+    expect(patch).not.toHaveBeenCalled()
+    expect(transition).not.toHaveBeenCalled()
   })
 })

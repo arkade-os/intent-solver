@@ -37,6 +37,7 @@ import {
   balanceOf,
   evmChainReady,
   evmRpc,
+  pinAnvilClock,
   fundWithWeth,
   installContracts,
   sendFrom,
@@ -113,6 +114,9 @@ beforeAll(async () => {
   // Earlier refund cases advance Anvil time; this file needs honest wall-clock cutoff checks.
   await rpc('anvil_reset', [])
   await rpc('anvil_setAutomine', [true])
+  await pinAnvilClock(rpc)
+  await rpc('evm_setNextBlockTimestamp', [Math.floor(Date.now() / 1000)])
+  await rpc('anvil_mine', [1])
   const fixture = (name: string) =>
     readFileSync(fileURLToPath(new URL(`fixtures/${name}.runtime.hex`, import.meta.url)), 'utf8')
   await installContracts(rpc, fixture('erc20swap'), fixture('weth9'))

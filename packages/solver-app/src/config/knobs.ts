@@ -242,6 +242,13 @@ export const documentToKnobs = (doc: SolverDocument): Flattened => {
       pathOf.set(corridorKnob(stem, field), jsonPath(['corridors', pair, field]))
   }
 
+  // The fixed BTC corridors are opt-in in the document: a deployment serving only assets or EVM
+  // leaves them out. The legacy knob layer still defaults an unset value to on, so the
+  // environment exporter writes these three explicitly.
+  for (const { pair, envStem } of ALL_DESCRIPTORS) {
+    set(corridorKnob(envStem, 'enabled'), jsonPath(['corridors', pair, 'enabled']), false)
+  }
+
   for (const [pair, terms] of Object.entries(doc.corridors ?? {})) {
     const here = jsonPath(['corridors', pair])
     const corridor = stems.get(pair)
@@ -253,6 +260,7 @@ export const documentToKnobs = (doc: SolverDocument): Flattened => {
           : `${here}: ${unknown} is neither a BTC rail nor an asset in assets`,
       )
     }
+    set(corridorKnob(corridor.stem, 'enabled'), jsonPath(['corridors', pair, 'enabled']), terms.enabled ?? true)
     for (const [field, value] of Object.entries(terms)) {
       if (!CORRIDOR_FIELDS[corridor.family].includes(field)) {
         throw new Error(

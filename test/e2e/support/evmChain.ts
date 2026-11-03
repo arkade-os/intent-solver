@@ -37,6 +37,12 @@ export const evmRpcUrl = (): string => process.env.EVM_E2E_RPC_URL ?? 'http://lo
 
 export type EvmRpc = (method: string, params: readonly unknown[]) => Promise<unknown>
 
+// Anvil >= 1.9 stamps each block after its parent, so a burst runs the chain
+// clock ahead of wall time; a zero interval keeps one timestamp.
+export const pinAnvilClock = async (rpc: EvmRpc): Promise<void> => {
+  await rpc('anvil_setBlockTimestampInterval', [0])
+}
+
 export const evmRpc =
   (url = evmRpcUrl()): EvmRpc =>
   async (method, params) => {

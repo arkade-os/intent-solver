@@ -6,6 +6,7 @@
 
 import { outcomeOfTransition, formatSats } from '@arkade-os/solver-core/core/businessEvent.js'
 import type { CorridorStates } from '@arkade-os/solver-core/core/businessEvent.js'
+import { within } from './guardedRead.js'
 
 export interface Sampled<T> {
   value: T
@@ -20,6 +21,8 @@ export interface BalanceReading {
 
 export interface BalanceSampler {
   current(): BalanceReading | null
+  /** Start a read after any older sample finishes, so it observes a completed transition. */
+  refresh(): Promise<boolean>
 }
 
 export interface BalanceSamplerOptions {
@@ -33,12 +36,18 @@ export interface BalanceSamplerOptions {
 export const createBalanceSampler = (options: BalanceSamplerOptions): BalanceSampler & { sample(): Promise<void> } => {
   let reading: BalanceReading | null = null
   // `getBalance()` has no deadline, so a caller that does not await must not stack reads behind a hung one.
-  let inFlight: Promise<void> | null = null
-  const readSide = async <T>(read: (() => Promise<T>) | undefined, label: string): Promise<T | undefined> => {
+  let inFlight: Promise<boolean> | null = null
+  let refreshAfter: Promise<boolean> | null = null
+  const readSide = async <T>(
+    read: (() => Promise<T>) | undefined,
+    label: string,
+    onFailure: () => void,
+  ): Promise<T | undefined> => {
     if (!read) return undefined
     try {
       return await read()
     } catch (error) {
+      onFailure()
       const message = error instanceof Error ? error.message : String(error)
       options.onError?.(new Error(`${label} balance: ${message}`, { cause: error }))
       return undefined
@@ -47,24 +56,40 @@ export const createBalanceSampler = (options: BalanceSamplerOptions): BalanceSam
   // `undefined` from a configured side means the read failed: keep the previous sample.
   const remember = <T>(previous: Sampled<T> | null, next: T | undefined, at: number): Sampled<T> | null =>
     next === undefined ? previous : { value: next, at }
-  const read = async () => {
+  const read = async (): Promise<boolean> => {
+    let failed = false
     try {
       const at = options.now()
       const [arkade, lightning] = await Promise.all([
-        readSide(options.readArkadeAvailableSats, 'arkade'),
-        readSide(options.readLightning, 'lightning'),
+        readSide(options.readArkadeAvailableSats, 'arkade', () => {
+          failed = true
+        }),
+        readSide(options.readLightning, 'lightning', () => {
+          failed = true
+        }),
       ])
       reading = {
         arkade: remember(reading?.arkade ?? null, arkade, at),
         lightning: options.readLightning ? remember(reading?.lightning ?? null, lightning, at) : null,
       }
+      return !failed
     } finally {
       inFlight = null
     }
   }
   return {
     current: () => reading,
-    sample: () => (inFlight ??= read()),
+    sample: () => (inFlight ??= read()).then(() => {}),
+    refresh: () => {
+      if (refreshAfter) return refreshAfter
+      const turn = (inFlight ? inFlight.catch(() => false) : Promise.resolve(false)).then(() => {
+        const result = (inFlight ??= read())
+        refreshAfter = null
+        return result
+      })
+      refreshAfter = turn
+      return turn
+    },
   }
 }
 
@@ -94,6 +119,7 @@ export const btcSwapSize = (amountSats: number, payoutSats: number | null): stri
 
 // Samples come from a timer, so an age is only worth a word once it outlives a few ticks.
 const STALE_SAMPLE_SECONDS = 120
+const BALANCE_REFRESH_TIMEOUT_MS = 10_000
 
 const message = (
   options: SwapOutcomeReporterOptions,
@@ -101,6 +127,7 @@ const message = (
   outcome: 'fulfilled' | 'failed',
   size: string | null,
   reading: BalanceReading | null,
+  refreshed: boolean,
 ): string => {
   const { corridor, lightning: hasLightning, now } = options
   const status = outcome === 'fulfilled' ? '✅ *Swap fulfilled*' : '🚨 *Swap STUCK*'
@@ -125,6 +152,7 @@ const message = (
   }
   const oldest = Math.max(0, ...ages)
   if (oldest > STALE_SAMPLE_SECONDS) balances.push(`balances ${oldest}s old`)
+  if (!refreshed) balances.push('balances not refreshed')
   return [`${status} · ${corridor.replace('->', ' → ')} · ${size ?? 'amount unread'}`, balances.join(' · ')].join('\n')
 }
 
@@ -140,19 +168,29 @@ export const createSwapOutcomeReporter = (
     // `refused` never funded. Anything but `stuck` is not a pager.
     if (outcome === 'failed' && to !== 'stuck') return
 
-    const reading = balances.current()
     // DEFERRED, not merely un-awaited: an async body runs synchronously to its
     // first `await`, which would put a database call on the settlement path.
     queueMicrotask(() => {
       void (async () => {
         try {
+          let refreshed = true
+          const balancesRead = within(() => balances.refresh(), BALANCE_REFRESH_TIMEOUT_MS)().then(
+            (fresh) => {
+              refreshed = fresh
+            },
+            (error) => {
+              refreshed = false
+              onError?.(error)
+            },
+          )
           let size: string | null = null
           try {
             size = await terms(id)
           } catch (error) {
             onError?.(error)
           }
-          post(message(options, id, outcome, size, reading))
+          await balancesRead
+          post(message(options, id, outcome, size, balances.current(), refreshed))
         } catch (error) {
           onError?.(error)
         }

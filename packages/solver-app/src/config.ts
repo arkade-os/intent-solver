@@ -219,7 +219,7 @@ export interface Config {
   onchainFeeRateRefreshMs: number
   onchainFeeRateStaleMs: number
   /**
-   * Which corridors this deployment quotes. All three by default.
+   * Which corridors this deployment quotes. The legacy knob layer defaults the three BTC corridors on.
    *
    * A disabled corridor is never constructed in `createServices`, so its pair
    * is refused as unsupported at the ingress by name — the answer a solver
@@ -627,13 +627,13 @@ const BUILT_IN_LN_BACKENDS = ['lnd', 'fake'] as const
 /**
  * Which BTC rail to talk to, or null on a deployment that needs none.
  *
- * REQUIRED whenever any BTC corridor is enabled, which is the default — all three
- * take their Lightning and their onchain leg from this one value, so `servesBtc`
- * is the whole exemption: a solver serving only EVM or asset flow states that by
- * disabling the three, and is not then asked for a Lightning node it has no use
- * for. There is deliberately no default rail. One would mean a deployment that
- * forgot the variable silently coming up on whichever vendor this file happened
- * to name, holding the operator's money.
+ * REQUIRED whenever any BTC corridor is enabled. All three take their Lightning
+ * and their onchain leg from this one value, so `servesBtc` is the whole
+ * exemption: the document makes the three opt-in, and a solver serving only EVM
+ * or asset flow leaves them out rather than being asked for a Lightning node it
+ * has no use for. There is deliberately no default rail. One would mean a
+ * deployment that forgot the value silently coming up on whichever vendor this
+ * file happened to name, holding the operator's money.
  *
  * An unrecognised value THROWS rather than falling through to anything: a typo
  * that resolved to a working backend is the failure this function exists to
@@ -649,9 +649,11 @@ const lnBackendFromEnv = (env: Knobs, servesBtc: boolean): string | null => {
   const raw = env.LN_BACKEND?.trim()
   if (!raw) {
     if (!servesBtc) return null
+    const corridorEnables = ALL_DESCRIPTORS.map(({ envStem }) => `${envStem}_ENABLED`).join(', ')
     throw new Error(
       `LN_BACKEND must be set to one of ${accepted.join(', ')}: every BTC corridor takes both its legs from ` +
-        `it. Only a deployment with all three disabled (<STEM>_ENABLED=false) may leave it unset.`,
+        `it. Only a deployment with all three BTC corridors disabled may leave it unset; set each of ` +
+        `${corridorEnables} to false.`,
     )
   }
   const match = accepted.find((backend) => backend === raw)
