@@ -28,7 +28,7 @@ import { arkadeFundableSats, arkadeFundingOwed } from './pool.js'
 import { RestEmulatorProvider } from '@arkade-os/sdk'
 import { hex } from '@scure/base'
 import { Address, OutScript } from '@scure/btc-signer'
-import { corridorSetFromDeps, readerSetFromDeps } from './corridorSet.js'
+import { corridorSetFromDeps, readerSetFromDeps, servedCovenantVersions } from './corridorSet.js'
 import type { Config } from '../config.js'
 import type { PricingStrategy } from '@arkade-os/solver-core/core/pricing.js'
 import { onchainCorridorPricing, onchainFeeRateSampler } from './onchainPricing.js'
@@ -1479,7 +1479,7 @@ export const createServices = async (
       evmCorridors: livePolicy.evmCorridors,
       assetRfqService,
       assetRfqStore,
-      rfqCovenantVersions: new Set(livePolicy.rfqCovenantVersions),
+      rfqCovenantVersions: servedCovenantVersions(livePolicy.rfqCovenantVersions, extraCorridors),
       railUp: rail?.probe ? () => railWatch?.up() ?? false : undefined,
     }
     return {

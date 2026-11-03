@@ -42,6 +42,12 @@ out of scope for this spec — the Lightning legs use RFQ permanently.
   implementation speaks `v: 1`. `v: 2` makes two breaking changes: amounts
   are strings only (§ 2.1), and pairs and topics use CAIP-19 identifiers
   (§ 2.2).
+- **Covenant versions** are a separate axis: which settlement covenant a pair's
+  quote derives to. A client MAY name the ones it can derive
+  (`covenant_versions`, § 4.1). A request that names none gets the pair's
+  baseline covenant, the one every client predating the field derives, so a
+  solver rolling out a new covenant never hands it to a client that did not
+  ask for it.
 
 ## 2. Corridors, assets, pairs
 
@@ -473,6 +479,18 @@ one.
   invoice amount is authoritative, `amount_side` MUST be `"to"`, and `amount`
   MAY be omitted (if present it MUST equal the invoice amount, else
   `unsupported_payload`).
+- `covenant_versions` — OPTIONAL. 1 to 16 distinct identifiers, most preferred
+  first, each matching `[A-Za-z0-9][A-Za-z0-9._:-]{0,127}`: a name such as
+  `asset-swap-v2`, or a content hash as hex or as `sha256:` followed by hex or
+  unpadded base64url. These are the settlement covenants this client can
+  derive for `pair`.
+  The solver quotes the first one it serves and names it in the quote's
+  `covenant_version`; serving none, it refuses `unsupported_payload` with
+  `error_code: "covenant_version_unsupported"` (§ 10). Omitted, the solver
+  quotes the pair's baseline covenant and the quote carries no
+  `covenant_version`, byte for byte what a client predating the field
+  receives. A solver predating the field refuses it as an unknown field, so a
+  client that can also derive the baseline retries without it.
 
 ### 4.2 `rfq_quote`
 
@@ -519,6 +537,9 @@ one.
 - `valid_until` — § 5.
 - `refund_locktime` — HTLC-class quotes only (absent for atomic class): the
   absolute unix-seconds time the client's refund path opens.
+- `covenant_version` — only when the request named `covenant_versions`: the
+  covenant this quote's settlement contract derives from. The quoted address
+  is still the commitment; derive that covenant and compare as before.
 - The top-level fields `solver_pubkey`, `valid_until`, `from_amount`,
   `to_amount` and `refund_locktime` are **binding fields**. HTLC send quotes
   also bind `profile.refund_without_receiver_delay`: the exact BIP68 delay the
@@ -978,11 +999,11 @@ A NINTH leaf, **timelocked non-interactive refund** (below), is additional to
 the original eight and changes the tree — and therefore `lockup_address` —
 for every quote once a solver has deployed it. It is NOT a per-quote choice
 the client requests or declines: whether a given quote carries it is fixed by
-the solver's own build, and NOTHING on the wire names it — no
-`rfq_request`/`rfq_quote` field says whether this particular quote's covenant
-includes it.
+the solver's own build, and nothing on the wire names it unless the client
+asks. A request naming `covenant_versions` (§ 4.1) gets the quote's
+`covenant_version`, and `lightning-send-v2` is the nine-leaf tree.
 
-**The rule this leaves a client with:** derive BOTH the eight- and nine-leaf
+**The rule this leaves a client that names no version:** derive BOTH the eight- and nine-leaf
 shapes, and accept whichever one matches `quote.profile.lockup_address`;
 refuse only if NEITHER does. This is still compare-only and adds no trust —
 both shapes pin the refund to the client's own `refund_address` (that is what
@@ -1811,6 +1832,7 @@ fixed by the code; `unit`, when present, is `blocks`, `characters` or `sats`.
 | `error_code`                   | client action                                                                                         |
 | ------------------------------ | ----------------------------------------------------------------------------------------------------- |
 | `amount_side_unsupported`      | use the amount side required by this profile                                                          |
+| `covenant_version_unsupported` | list a covenant version this solver serves for the pair (§ 4.1), or use another solver                |
 | `exact_out_unsupported`        | request exact-in terms for this pair (the EVM corridors; the Arkade asset corridor serves both sides) |
 | `invalid_amount`               | correct the amount's encoding or value                                                                |
 | `invalid_payout_address`       | provide a payout address valid for the requested corridor                                             |

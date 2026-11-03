@@ -32,11 +32,7 @@ import type { AdPublishMode } from '@arkade-os/solver-transport/relay/adPublishe
 import { parseSentryDsn, type SentryOptions } from './ops/sentry.js'
 import { loadEvmChainConfig, type EvmChainConfig } from '@arkade-os/solver-rails-evm/evm/config.js'
 import { OFFER_COVENANT_VERSIONS, type OfferCovenantVersion } from '@arkade-os/solver-core/core/offerCovenant.js'
-import {
-  RFQ_COVENANT_VERSION_ID,
-  RFQ_COVENANT_VERSIONS,
-  type RfqCovenantVersion,
-} from '@arkade-os/solver-core/core/rfqCovenant.js'
+import { RFQ_COVENANT_VERSION_ID, type RfqCovenantVersion } from '@arkade-os/solver-core/core/rfqCovenant.js'
 
 /** The network a deployment that sets nothing runs as. */
 const DEFAULT_NETWORK = 'regtest'
@@ -109,7 +105,7 @@ const covenantVersionsFromEnv = (
   knownVersions: readonly string[],
   fallback: readonly string[],
 ): readonly string[] => {
-  if (raw === undefined) return fallback
+  if (!raw?.trim()) return fallback
   const entries = raw.split(',').map((entry) => entry.trim())
   const known = new Set<string>(knownVersions)
   const unknown = entries.filter((entry) => !known.has(entry))
@@ -125,8 +121,8 @@ const covenantVersionsFromEnv = (
   return entries
 }
 
-const rfqCovenantVersionsFromEnv = (raw: string | undefined): readonly RfqCovenantVersion[] => {
-  if (raw === undefined) return RFQ_COVENANT_VERSIONS
+const rfqCovenantVersionsFromEnv = (raw: string | undefined): readonly RfqCovenantVersion[] | null => {
+  if (!raw?.trim()) return null
   const entries = raw.split(',').map((entry) => entry.trim())
   const invalid = entries.filter((entry) => !RFQ_COVENANT_VERSION_ID.test(entry))
   if (invalid.length > 0) {
@@ -303,8 +299,11 @@ export interface Config {
    * version it speaks, and the host refuses its quote path when that string is
    * absent. Adding a method or a new contract revision adds a name here; it
    * does not add another config shape.
+   *
+   * Null is unset: this build's defaults, plus each injected corridor's own
+   * version, so a consumer corridor keeps quoting where nothing was configured.
    */
-  rfqCovenantVersions: readonly RfqCovenantVersion[]
+  rfqCovenantVersions: readonly RfqCovenantVersion[] | null
   /**
    * `OFFER_CHARGE_CARRIER`. Off by default: the MAKER prices this path and the
    * card has no field to tell them the carrier exists, so charging would refuse

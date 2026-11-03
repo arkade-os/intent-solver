@@ -14,7 +14,7 @@ export const RFQ_ASSET_SWAP_V2 = 'asset-swap-v2'
 export const RFQ_EVM_SEND_V1 = 'evm-send-v1'
 export const RFQ_EVM_RECEIVE_V1 = 'evm-receive-v1'
 
-/** Every covenant version this build can serve on an RFQ method. */
+/** The versions this build serves when `rfq.covenantVersions` is unset. */
 export const RFQ_COVENANT_VERSIONS = [
   RFQ_LIGHTNING_SEND_V2,
   RFQ_LIGHTNING_RECEIVE_V2,
@@ -32,3 +32,7 @@ export const RFQ_COVENANT_VERSIONS = [
 export const RFQ_COVENANT_VERSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 
 export type RfqCovenantVersion = string
+
+/** Whether a version is served: the operator's list when one is set (non-null), else this build's defaults. */
+export const rfqCovenantEnabled = (configured: readonly string[] | null, version: string): boolean =>
+  (configured ?? (RFQ_COVENANT_VERSIONS as readonly string[])).includes(version)

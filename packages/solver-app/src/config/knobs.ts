@@ -59,18 +59,8 @@ export const PATHS: readonly Row[] = [
   ['limits.approvalThresholdSats', 'APPROVAL_THRESHOLD_SATS'],
   ['offers.minFillAmount', 'OFFER_MIN_FILL_AMOUNT'],
   ['offers.maxFillAmount', 'OFFER_MAX_FILL_AMOUNT'],
-  [
-    'offers.covenantVersions',
-    'OFFER_COVENANT_VERSIONS',
-    (versions) => (Array.isArray(versions) ? versions.join(',') : String(versions)),
-    covenantVersions,
-  ],
-  [
-    'rfq.covenantVersions',
-    'RFQ_COVENANT_VERSIONS',
-    (versions) => (Array.isArray(versions) ? versions.join(',') : String(versions)),
-    covenantVersions,
-  ],
+  ['offers.covenantVersions', 'OFFER_COVENANT_VERSIONS', undefined, covenantVersions],
+  ['rfq.covenantVersions', 'RFQ_COVENANT_VERSIONS', undefined, covenantVersions],
   ['offers.chargeCarrier', 'OFFER_CHARGE_CARRIER'],
   ['offers.carrierPricing', 'ASSET_CARRIER_PRICING'],
   ['offers.quoteValiditySeconds', 'ASSET_QUOTE_VALIDITY_SECONDS'],
@@ -96,12 +86,7 @@ export const PATHS: readonly Row[] = [
   ['notify.telegramChatId', 'TELEGRAM_CHAT_ID'],
   ['notify.slackWebhookUrl', 'SLACK_WEBHOOK_URL'],
   ['notify.balanceReportIntervalMinutes', 'BALANCE_REPORT_INTERVAL_MINUTES'],
-  [
-    'diagnostics.latency',
-    'SOLVER_LATENCY_DIAGNOSTICS',
-    (on) => (on ? '1' : '0'),
-    (raw) => (raw === '1' ? true : raw === '0' ? false : raw),
-  ],
+  ['diagnostics.latency', 'SOLVER_LATENCY_DIAGNOSTICS', (on) => (on ? '1' : '0')],
 ]
 
 export const EVM_FIELDS: Readonly<Record<string, string>> = {

@@ -40,11 +40,10 @@ export interface CorridorDescriptor<State extends string = string> {
    */
   readonly envStem: string
   /**
-   * The settlement covenant/program this corridor speaks.
-   *
-   * Required so a new RFQ method cannot be added without answering which
-   * covenant version it serves. `createCorridorSet` gates this against
-   * `rfq.covenantVersions` before a request reaches `quote`.
+   * The settlement covenant this corridor quotes: the BASELINE every request
+   * naming no `covenant_versions` gets, which is what any client predating
+   * negotiation derives. Changing it breaks those clients; a newer covenant must
+   * be opt-in per request instead.
    */
   readonly covenantVersion: RfqCovenantVersion
   /** Which rail's balance funds this corridor's payout — the destination leg. */

@@ -17,7 +17,7 @@ export type OfferCovenantVersion = string
 export const OFFER_COVENANT_VERSION_LATEST: OfferCovenantVersion = OFFER_COVENANT_V2
 
 export interface OfferCovenantShape {
-  exitDelay?: unknown
+  exitDelay?: object
 }
 
 export const offerCovenantVersionOf = (offer: OfferCovenantShape): OfferCovenantVersion =>

@@ -9,7 +9,12 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import * as sdk from '@arkade-os/solver-app/index.js'
-import { corridorSetFromDeps, readerSetFromDeps, type FlatCorridorDeps } from '@arkade-os/solver-app/ops/corridorSet.js'
+import {
+  corridorSetFromDeps,
+  readerSetFromDeps,
+  servedCovenantVersions,
+  type FlatCorridorDeps,
+} from '@arkade-os/solver-app/ops/corridorSet.js'
 import { descriptorFor } from '@arkade-os/solver-corridors/corridors/index.js'
 import type { Corridor, CorridorDescriptor } from '@arkade-os/solver-app/index.js'
 
@@ -74,6 +79,16 @@ describe('a consumer corridor joins the shipped registry', () => {
     )
   })
 
+  it('keeps quoting where rfq.covenantVersions is unset, and is gated once the operator lists versions', async () => {
+    const extra = [corridorFor('arkade:BTC->example:BTC', 'EXAMPLE')]
+    const quoteWith = (configured: readonly string[] | null) =>
+      corridorSetFromDeps({ ...bareDeps, rfqCovenantVersions: servedCovenantVersions(configured, extra) }, extra)
+        .get('arkade:BTC->example:BTC')!
+        .quote({ v: 1, type: 'rfq_request', rfq_id: 'a'.repeat(64) })
+    expect((await quoteWith(null)).detail).toBeUndefined()
+    expect((await quoteWith(['lightning-send-v2'])).detail).toContain('example-v1')
+  })
+
   it('cannot shadow a built-in env stem either', () => {
     // A duplicate stem darkens a corridor the operator did not name, because
     // `<STEM>_ENABLED=false` would hit both.
@@ -96,5 +111,6 @@ describe('createServices exposes the extension point', () => {
     expect(servicesSource).toContain('const extraCorridors = opts?.corridors ?? []')
     expect(servicesSource).toContain('corridorSetFromDeps({ ...shared, assetRfqMarkets: serving }, extraCorridors)')
     expect(servicesSource).toContain('readerSetFromDeps({ ...shared, assetRfqMarkets: readable }, extraCorridors)')
+    expect(servicesSource).toContain('servedCovenantVersions(livePolicy.rfqCovenantVersions, extraCorridors)')
   })
 })

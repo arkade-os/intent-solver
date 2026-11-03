@@ -17,6 +17,7 @@ import {
 } from '@arkade-os/solver-core/core/corridor.js'
 import type { EvmCorridorPolicy } from '@arkade-os/solver-core/core/evmCorridorConfig.js'
 import { extractRfqId, rfqRefusalPayload } from '@arkade-os/solver-core/core/rfqProtocol.js'
+import { RFQ_COVENANT_VERSIONS } from '@arkade-os/solver-core/core/rfqCovenant.js'
 import {
   lightningSendCorridor,
   lightningReceiveCorridor,
@@ -97,6 +98,13 @@ export interface FlatCorridorDeps {
   /** Covenant versions this deployment serves. Absent leaves the gate off for hand-built sets. */
   rfqCovenantVersions?: ReadonlySet<string>
 }
+
+/** `rfq.covenantVersions` as served; unset adds each injected corridor's own version to this build's defaults. */
+export const servedCovenantVersions = (
+  configured: readonly string[] | null,
+  extra: readonly Corridor[],
+): ReadonlySet<string> =>
+  new Set(configured ?? [...RFQ_COVENANT_VERSIONS, ...extra.map((corridor) => corridor.descriptor.covenantVersion)])
 
 /**
  * One gate rather than each quote's own LND read: the onchain legs make none before the client has funded, so

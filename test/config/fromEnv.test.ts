@@ -147,6 +147,16 @@ describe('envToDocument round-trips', () => {
     const doc = envToDocument(MINIMAL_ENV, [])
     expect(withoutDocumentFields(loadedFrom(doc))).toEqual(withoutDocumentFields(configFromKnobs(MINIMAL_ENV)))
   })
+
+  it.each([{ SOLVER_LATENCY_DIAGNOSTICS: 'false' }, { OFFER_COVENANT_VERSIONS: ' ', RFQ_COVENANT_VERSIONS: ' ' }])(
+    'a value the reader treats as off or unset: %j',
+    (extra) => {
+      const env = { ...MINIMAL_ENV, ...extra }
+      expect(withoutDocumentFields(loadedFrom(envToDocument(env, [])))).toEqual(
+        withoutDocumentFields(configFromKnobs(env)),
+      )
+    },
+  )
 })
 
 describe('envToDocument — what it writes', () => {

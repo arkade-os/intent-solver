@@ -12,7 +12,7 @@
 import type { CorridorDescriptor } from './corridorDescriptor.js'
 import type { PageOptions } from './page.js'
 import type { CorridorLedger, LedgerWindow } from '../analytics/economics.js'
-import { extractRfqId, rfqRefusalPayload } from './rfqProtocol.js'
+import { extractRfqId, RFQ_COVENANT_VERSIONS_FIELD, rfqRefusalPayload } from './rfqProtocol.js'
 
 /** What a corridor hands back from an RFQ. Mirrors `ingress/rfq.ts`'s outcome. */
 export interface CorridorRfqOutcome {
@@ -279,12 +279,7 @@ export interface CorridorSet extends Iterable<Corridor> {
 }
 
 export interface CorridorSetOptions {
-  /**
-   * Covenant versions this deployment serves.
-   *
-   * Absent means the caller is not applying an RFQ-version policy (tests and
-   * hand-built sets). The shipped composition root always supplies it.
-   */
+  /** Covenant versions this deployment serves. Absent serves every corridor's own version. */
   readonly supportedCovenantVersions?: ReadonlySet<string>
 }
 
@@ -315,13 +310,11 @@ export interface CorridorReaderSet extends Iterable<CorridorReader> {
  */
 export const createCorridorSet = (corridors: readonly Corridor[], options: CorridorSetOptions = {}): CorridorSet => {
   const supported = options.supportedCovenantVersions
-  const gate = (list: readonly Corridor[]): readonly Corridor[] =>
-    supported === undefined ? list : list.map((corridor) => whileCovenantEnabled(corridor, supported))
   let byPair = new Map<string, Corridor>()
   const index = (list: readonly Corridor[]): void => {
     const next = new Map<string, Corridor>()
     const stems = new Map<string, string>()
-    for (const corridor of gate(list)) {
+    for (const corridor of list.map((each) => negotiatingCovenant(each, supported))) {
       const { pair, envStem } = corridor.descriptor
       if (next.has(pair)) throw new Error(`duplicate corridor pair: ${pair}`)
       const claimed = stems.get(envStem)
@@ -343,20 +336,59 @@ export const createCorridorSet = (corridors: readonly Corridor[], options: Corri
 }
 
 /**
- * The host-side version gate. A corridor whose covenant this deployment does
- * not serve stays readable and sweepable — only its QUOTE path is refused.
+ * Covenant negotiation (docs/rfq-protocol.md § 4.1), gating only the quote path. A request without
+ * `covenant_versions` predates negotiation: it reaches the corridor untouched and its quote stays
+ * byte-identical. The field is stripped before the corridor's strict schema and echoed only if asked.
  */
-const whileCovenantEnabled = (corridor: Corridor, supported: ReadonlySet<string>): Corridor => {
-  const version = corridor.descriptor.covenantVersion
-  if (supported.has(version)) return corridor
-  return {
-    ...corridor,
-    quote: async (payload) => ({
-      kind: 'refused',
-      payload: rfqRefusalPayload(extractRfqId(payload), 'unsupported_pair'),
-      detail: `${corridor.descriptor.pair} speaks covenant ${version}, which rfq.covenantVersions disables`,
-    }),
+const negotiatingCovenant = (corridor: Corridor, supported: ReadonlySet<string> | undefined): Corridor => {
+  const { pair, covenantVersion: version } = corridor.descriptor
+  const served = supported === undefined || supported.has(version)
+  const quote: Corridor['quote'] = async (payload, options) => {
+    const rfqId = extractRfqId(payload)
+    const asked = typeof payload === 'object' && payload !== null && 'covenant_versions' in payload
+    if (!asked) {
+      if (served) return corridor.quote(payload, options)
+      return {
+        kind: 'refused',
+        payload: rfqRefusalPayload(rfqId, 'unsupported_pair'),
+        detail: `${pair} speaks covenant ${version}, which rfq.covenantVersions disables`,
+      }
+    }
+    const { covenant_versions: listed, ...rest } = payload as Record<string, unknown>
+    const parsed = RFQ_COVENANT_VERSIONS_FIELD.safeParse(listed)
+    if (!parsed.success) {
+      return {
+        kind: 'invalid',
+        payload: rfqRefusalPayload(rfqId, 'unsupported_payload'),
+        detail: 'covenant_versions is malformed',
+      }
+    }
+    if (!served || !parsed.data.includes(version)) {
+      return {
+        kind: 'refused',
+        payload: rfqRefusalPayload(rfqId, 'unsupported_payload', {
+          error_code: 'covenant_version_unsupported',
+          field: 'covenant_versions',
+        }),
+        detail: served
+          ? `${pair} speaks covenant ${version}, which covenant_versions does not list`
+          : `${pair} speaks covenant ${version}, which rfq.covenantVersions disables`,
+      }
+    }
+    const outcome = await corridor.quote(rest, options)
+    return outcome.kind === 'quote'
+      ? { ...outcome, payload: { ...outcome.payload, covenant_version: version } }
+      : outcome
   }
+  // Not `{ ...corridor, quote }`: a spread drops a class-based consumer corridor's prototype methods,
+  // and binding to the original keeps its `#private` fields reachable.
+  return new Proxy(corridor, {
+    get: (target, prop) => {
+      if (prop === 'quote') return quote
+      const value: unknown = Reflect.get(target, prop)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
 }
 
 /**

@@ -7,6 +7,7 @@ import {
   RFQ_LIGHTNING_RECEIVE_V2,
   RFQ_LIGHTNING_SEND_V2,
   RFQ_ONCHAIN_SEND_V2,
+  rfqCovenantEnabled,
 } from '@arkade-os/solver-core/core/rfqCovenant.js'
 
 describe('RFQ covenant versions', () => {
@@ -31,5 +32,11 @@ describe('RFQ covenant versions', () => {
       'evm-send-v1',
       'evm-receive-v1',
     ])
+  })
+
+  it('serves the build defaults while unset, and only the operator list once set', () => {
+    expect(rfqCovenantEnabled(null, RFQ_ASSET_SWAP_V2)).toBe(true)
+    expect(rfqCovenantEnabled(null, 'custom-v1')).toBe(false)
+    expect(rfqCovenantEnabled(['custom-v1'], RFQ_ASSET_SWAP_V2)).toBe(false)
   })
 })

@@ -14,7 +14,7 @@ import { publishStateOf } from '../publishState.js'
 import type { AdminDeps } from '../server.js'
 import { assetCardMarketsFromPolicy } from '../../ops/assetRfqMarkets.js'
 import { descriptorFor } from '@arkade-os/solver-corridors/corridors/index.js'
-import { RFQ_ASSET_SWAP_V2 } from '@arkade-os/solver-core/core/rfqCovenant.js'
+import { RFQ_ASSET_SWAP_V2, rfqCovenantEnabled } from '@arkade-os/solver-core/core/rfqCovenant.js'
 
 /** `RELAY_URL` then `SOLVER_CARD_RELAYS`. */
 export const advertisedRelays = (relayUrl: string | null, extra: readonly string[]): string[] =>
@@ -46,7 +46,9 @@ const assetMarketsOf = (source: CardSource) =>
       offerMarkets: source.liveOfferMarkets,
       // BOOT: `AssetOfferService` reads these off constructor deps. `rfqMarkets` below is LIVE by contrast.
       offerBounds: { min: source.bootPolicy.offerMinFillAmount, max: source.bootPolicy.offerMaxFillAmount },
-      rfqMarkets: source.bootPolicy.rfqCovenantVersions.includes(RFQ_ASSET_SWAP_V2) ? source.assetRfqMarkets : [],
+      rfqMarkets: rfqCovenantEnabled(source.bootPolicy.rfqCovenantVersions, RFQ_ASSET_SWAP_V2)
+        ? source.assetRfqMarkets
+        : [],
       chargesDeliveredCarrier: source.bootPolicy.offerChargesDeliveredCarrier,
     }),
     source.config.network,
@@ -56,12 +58,12 @@ export const cardOmissions = (source: CardSource): string[] => [
   ...CORRIDORS.filter(
     (corridor) =>
       source.bootPolicy.corridorEnabled[corridor] &&
-      !source.bootPolicy.rfqCovenantVersions.includes(descriptorFor(corridor).covenantVersion),
+      !rfqCovenantEnabled(source.bootPolicy.rfqCovenantVersions, descriptorFor(corridor).covenantVersion),
   ).map(
     (corridor) =>
       `${corridor} is enabled but omitted: covenant ${descriptorFor(corridor).covenantVersion} is not in rfq.covenantVersions`,
   ),
-  ...(source.bootPolicy.rfqCovenantVersions.includes(RFQ_ASSET_SWAP_V2)
+  ...(rfqCovenantEnabled(source.bootPolicy.rfqCovenantVersions, RFQ_ASSET_SWAP_V2)
     ? []
     : ['asset RFQ markets are omitted: covenant asset-swap-v2 is not in rfq.covenantVersions']),
   // LIVE unlike the corridor map: `rebuild` builds the corridor set from `livePolicy.evmCorridors`.
@@ -97,7 +99,7 @@ export const deploymentCard = async (
     CORRIDORS.filter(
       (corridor) =>
         bootPolicy.corridorEnabled[corridor] &&
-        bootPolicy.rfqCovenantVersions.includes(descriptorFor(corridor).covenantVersion),
+        rfqCovenantEnabled(bootPolicy.rfqCovenantVersions, descriptorFor(corridor).covenantVersion),
     ).map((corridor) => [
       corridor,
       { limits: bootPolicy.corridorLimits[corridor], fee: bootPolicy.corridorFees[corridor] },

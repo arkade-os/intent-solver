@@ -955,22 +955,24 @@ describe('OFFER_MARKETS', () => {
     expect(configFromKnobs(process.env).offerCovenantVersions).toEqual(['offer-v2'])
   })
 
-  it.each(['', 'offer-v1,offer-v3', 'offer-v2,offer-v2', '1,2'])('refuses the covenant version list %j', (value) => {
-    process.env.OFFER_COVENANT_VERSIONS = value
-    expect(() => configFromKnobs(process.env)).toThrow(/OFFER_COVENANT_VERSIONS/)
+  it('reads a blank list as unset, like every other knob', () => {
+    process.env.OFFER_COVENANT_VERSIONS = ' '
+    expect(configFromKnobs(process.env).offerCovenantVersions).toEqual(['offer-v1', 'offer-v2'])
   })
+
+  it.each(['offer-v1,offer-v3', 'offer-v2,offer-v2', '1,2', 'offer-v1,'])(
+    'refuses the covenant version list %j',
+    (value) => {
+      process.env.OFFER_COVENANT_VERSIONS = value
+      expect(() => configFromKnobs(process.env)).toThrow(/OFFER_COVENANT_VERSIONS/)
+    },
+  )
 })
 
 describe('RFQ_COVENANT_VERSIONS', () => {
-  it('accepts every shipped RFQ method version by default', () => {
-    expect(configFromKnobs(process.env).rfqCovenantVersions).toEqual([
-      'lightning-send-v2',
-      'lightning-receive-v2',
-      'onchain-send-v2',
-      'asset-swap-v2',
-      'evm-send-v1',
-      'evm-receive-v1',
-    ])
+  it.each([undefined, ' '])('leaves %j unset, so the build defaults and injected corridors apply', (value) => {
+    if (value !== undefined) process.env.RFQ_COVENANT_VERSIONS = value
+    expect(configFromKnobs(process.env).rfqCovenantVersions).toBeNull()
   })
 
   it('reads the RFQ covenant versions the operator enables', () => {
@@ -983,7 +985,7 @@ describe('RFQ_COVENANT_VERSIONS', () => {
     expect(configFromKnobs(process.env).rfqCovenantVersions).toEqual(['my-method-v9', 'sha256:' + 'ab'.repeat(32)])
   })
 
-  it.each(['', 'bad version', 'asset-swap-v2,asset-swap-v2', 'asset-swap-v2,,evm-send-v1'])(
+  it.each(['bad version', 'asset-swap-v2,asset-swap-v2', 'asset-swap-v2,,evm-send-v1'])(
     'refuses the RFQ covenant version list %j',
     (value) => {
       process.env.RFQ_COVENANT_VERSIONS = value
