@@ -69,6 +69,11 @@ export const signAndSubmitOneShot = async (params: {
 
   if (params.verifyServerSignatures) {
     const server = hex.encode(toXOnly(params.verifyServerSignatures.serverPubkey, 'server key'))
+    if (!response.finalArkTx) {
+      throw new ServerResponseMismatchError(
+        'submitTx: server returned no final ark tx to verify its signatures against',
+      )
+    }
     const finalArkTx = Transaction.fromPSBT(base64.decode(response.finalArkTx))
     for (let i = 0; i < arkTx.inputsLength; i++) assertServerSigned(finalArkTx, arkTx, i, server)
     for (const { server: returned, local } of matched) assertServerSigned(returned, local, 0, server)

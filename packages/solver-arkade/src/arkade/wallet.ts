@@ -923,5 +923,6 @@ export const refundWithoutReceiverSwapScript = async (
       ...(assetPacket ? [Extension.create([assetPacket]).txOut()] : []),
     ],
     serverUnrollScript: ctx.wallet.serverUnrollScript,
+    verifyServerSignatures: { serverPubkey: script.vhtlcOptions.server },
   })
 }

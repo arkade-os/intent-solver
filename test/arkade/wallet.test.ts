@@ -249,7 +249,8 @@ describe('refundWithoutReceiverSwapScript', () => {
 
   const arkSubmitTx = vi.fn(async (arkTxB64: string, checkpointsB64: string[]) => ({
     arkTxid: Transaction.fromPSBT(base64.decode(arkTxB64)).id,
-    signedCheckpointTxs: checkpointsB64,
+    finalArkTx: await cosign(arkTxB64),
+    signedCheckpointTxs: await Promise.all(checkpointsB64.map(cosign)),
   }))
   const arkFinalizeTx = vi.fn(async (_arkTxid: string, _checkpointsB64: string[]) => undefined)
   const arkCtx = (): ArkadeContext =>
@@ -319,6 +320,7 @@ describe('refundWithoutReceiverSwapScript', () => {
       forged.updateOutput(0, { script: RECEIVER_PAYOUT }, true)
       return {
         arkTxid: Transaction.fromPSBT(base64.decode(arkTxB64)).id,
+        finalArkTx: await cosign(arkTxB64),
         signedCheckpointTxs: [checkpointsB64[0]!, base64.encode(forged.toPSBT())],
       }
     })
@@ -327,6 +329,20 @@ describe('refundWithoutReceiverSwapScript', () => {
       /does not match any submitted checkpoint/,
     )
     expect(sign).toHaveBeenCalledTimes(1 + funded.length)
+    expect(arkFinalizeTx).not.toHaveBeenCalled()
+  })
+
+  it('refuses an ark tx the server did not countersign and finalizes nothing', async () => {
+    arkFinalizeTx.mockClear()
+    arkSubmitTx.mockImplementationOnce(async (arkTxB64, checkpointsB64) => ({
+      arkTxid: Transaction.fromPSBT(base64.decode(arkTxB64)).id,
+      finalArkTx: arkTxB64,
+      signedCheckpointTxs: await Promise.all(checkpointsB64.map(cosign)),
+    }))
+
+    await expect(refundWithoutReceiverSwapScript(arkCtx(), receiveLegScript(), FUNDED, DEST)).rejects.toBeInstanceOf(
+      ServerResponseMismatchError,
+    )
     expect(arkFinalizeTx).not.toHaveBeenCalled()
   })
 
@@ -347,6 +363,7 @@ describe('refundWithoutReceiverSwapScript', () => {
     const funded = [FUNDED[0]!, { ...FUNDED[0]!, vout: 1 }]
     arkSubmitTx.mockImplementationOnce(async (arkTxB64, checkpointsB64) => ({
       arkTxid: Transaction.fromPSBT(base64.decode(arkTxB64)).id,
+      finalArkTx: await cosign(arkTxB64),
       signedCheckpointTxs: await Promise.all([...checkpointsB64].reverse().map(rebuiltCheckpoint)),
     }))
 
@@ -547,6 +564,13 @@ describe('claimSwapScript', () => {
       'another ark txid',
       async (arkTx, checkpoints) => ({ ...(await honestServer(arkTx, checkpoints)), arkTxid: 'b'.repeat(64) }),
     ],
+    [
+      'no final ark tx',
+      async (arkTx, checkpoints) =>
+        ({ ...(await honestServer(arkTx, checkpoints)), finalArkTx: undefined }) as unknown as Awaited<
+          ReturnType<typeof honestServer>
+        >,
+    ],
   ])('refuses %s and finalizes nothing', async (_, respond) => {
     finalizeTx.mockClear()
     await expect(
@@ -648,7 +672,8 @@ describe('refunding an asset-carrying lockup', () => {
 
   const arkSubmitTx = vi.fn(async (arkTxB64: string, checkpointsB64: string[]) => ({
     arkTxid: Transaction.fromPSBT(base64.decode(arkTxB64)).id,
-    signedCheckpointTxs: checkpointsB64,
+    finalArkTx: await cosign(arkTxB64),
+    signedCheckpointTxs: await Promise.all(checkpointsB64.map(cosign)),
   }))
   const arkCtx = (): ArkadeContext =>
     ({
