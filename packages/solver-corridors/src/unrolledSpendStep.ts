@@ -122,18 +122,35 @@ export const settleUnrolledClaims = async <S extends string>(
  * row that predates `lockup_outpoints`, which has no set to check against.
  */
 export const lockupLeftover = async (
-  arkade: Pick<ArkadeOps, 'findLockupOutpoints'>,
-  row: { pkScript: string; lockupOutpoints: string | null },
+  arkade: Pick<ArkadeOps, 'findLockupOutpoints' | 'findClaimPreimage'>,
+  row: { pkScript: string; paymentHash: string; lockupOutpoints: string | null },
   claimedNow: readonly { txid: string; vout: number }[],
   claims: UnrolledClaims | null,
 ): Promise<string[]> => {
   if (row.lockupOutpoints === null || !arkade.findLockupOutpoints) return []
   const adopted = JSON.parse(row.lockupOutpoints) as AdoptedOutput[]
+  const outpoints = await arkade.findLockupOutpoints(row.pkScript)
+  const claimedOffchain = new Set(claimedNow.map(outpointKey))
   return uncollected(adopted, {
-    outpoints: await arkade.findLockupOutpoints(row.pkScript),
-    claimedOffchain: new Set(claimedNow.map(outpointKey)),
+    outpoints,
+    claimedOffchain,
     claimedOnL1: new Set(claims?.confirmed ?? []),
+    spentByUs: await spentByUs(arkade, row.paymentHash, outpoints, claimedOffchain),
   }).map(outpointKey)
+}
+
+/** Spent offchain outputs a spend reveals our preimage for. No `findClaimPreimage`: trust every spend as before. */
+const spentByUs = async (
+  arkade: Pick<ArkadeOps, 'findClaimPreimage'>,
+  paymentHashHex: string,
+  outpoints: readonly { txid: string; vout: number; spent: boolean; unrolled: boolean }[],
+  claimedOffchain: ReadonlySet<string>,
+): Promise<Set<string>> => {
+  const candidates = outpoints.filter((o) => o.spent && !o.unrolled && !claimedOffchain.has(outpointKey(o)))
+  if (!arkade.findClaimPreimage) return new Set(candidates.map(outpointKey))
+  const ours = new Set<string>()
+  for (const o of candidates) if (await arkade.findClaimPreimage([o], paymentHashHex)) ours.add(outpointKey(o))
+  return ours
 }
 
 /** Never `claimed` while an adopted output is out: retried until the refund deadline, then parked. */
