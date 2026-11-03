@@ -63,7 +63,8 @@ export const cardOmissions = (source: CardSource): string[] => [
     (corridor) =>
       `${corridor} is enabled but omitted: covenant ${descriptorFor(corridor).covenantVersion} is not in rfq.covenantVersions`,
   ),
-  ...(rfqCovenantEnabled(source.bootPolicy.rfqCovenantVersions, RFQ_ASSET_SWAP_V2)
+  ...(source.assetRfqMarkets.length === 0 ||
+  rfqCovenantEnabled(source.bootPolicy.rfqCovenantVersions, RFQ_ASSET_SWAP_V2)
     ? []
     : ['asset RFQ markets are omitted: covenant asset-swap-v2 is not in rfq.covenantVersions']),
   // LIVE unlike the corridor map: `rebuild` builds the corridor set from `livePolicy.evmCorridors`.

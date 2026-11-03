@@ -308,13 +308,16 @@ export interface CorridorReaderSet extends Iterable<CorridorReader> {
  * IS the dispatch, and an unknown pair is a routine client request to refuse
  * rather than a build fault.
  */
+const negotiated = new WeakSet<Corridor>()
+
 export const createCorridorSet = (corridors: readonly Corridor[], options: CorridorSetOptions = {}): CorridorSet => {
   const supported = options.supportedCovenantVersions
   let byPair = new Map<string, Corridor>()
   const index = (list: readonly Corridor[]): void => {
     const next = new Map<string, Corridor>()
     const stems = new Map<string, string>()
-    for (const corridor of list.map((each) => negotiatingCovenant(each, supported))) {
+    // `rebuild` replaces with corridors another set already negotiated under the newer policy.
+    for (const corridor of list.map((each) => (negotiated.has(each) ? each : negotiatingCovenant(each, supported)))) {
       const { pair, envStem } = corridor.descriptor
       if (next.has(pair)) throw new Error(`duplicate corridor pair: ${pair}`)
       const claimed = stems.get(envStem)
@@ -380,16 +383,23 @@ const negotiatingCovenant = (corridor: Corridor, supported: ReadonlySet<string> 
       ? { ...outcome, payload: { ...outcome.payload, covenant_version: version } }
       : outcome
   }
-  // Not `{ ...corridor, quote }`: a spread drops a class-based consumer corridor's prototype methods,
-  // and binding to the original keeps its `#private` fields reachable.
-  return new Proxy(corridor, {
+  const wrapped = withQuote(corridor, quote)
+  negotiated.add(wrapped)
+  return wrapped
+}
+
+/**
+ * `corridor` with its quote path replaced. Not `{ ...corridor, quote }`: a spread drops a class-based
+ * corridor's prototype methods, and binding to the original keeps its `#private` fields reachable.
+ */
+export const withQuote = (corridor: Corridor, quote: Corridor['quote']): Corridor =>
+  new Proxy(corridor, {
     get: (target, prop) => {
       if (prop === 'quote') return quote
       const value: unknown = Reflect.get(target, prop)
       return typeof value === 'function' ? value.bind(target) : value
     },
   })
-}
 
 /**
  * The same indexing for readers, which is every corridor with a store.

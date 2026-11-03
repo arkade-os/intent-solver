@@ -660,4 +660,11 @@ describe('deploymentCard', () => {
     expect(lightning?.max_quote_amount).toBe('0')
     expect(cardOmissions(source).join(' ')).toContain('lightning-send-v2')
   })
+
+  it('reports omitted asset RFQ markets only when there are some to omit', () => {
+    const notes = (assetRfqMarkets: unknown[]) =>
+      cardOmissions(sourceOf(makeDeps({ rfqCovenantVersions: ['lightning-send-v2'], assetRfqMarkets }))).join(' ')
+    expect(notes([])).not.toContain('asset RFQ markets')
+    expect(notes([{ symbol: 'ASSET' }])).toContain('asset RFQ markets are omitted')
+  })
 })

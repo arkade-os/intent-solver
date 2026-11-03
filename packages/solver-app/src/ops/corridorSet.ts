@@ -10,6 +10,7 @@
 import {
   createCorridorReaderSet,
   createCorridorSet,
+  withQuote,
   type Corridor,
   type CorridorReader,
   type CorridorReaderSet,
@@ -113,17 +114,15 @@ export const servedCovenantVersions = (
 const whileRailUp = (corridor: Corridor, railUp: (() => boolean) | undefined): Corridor =>
   railUp === undefined
     ? corridor
-    : {
-        ...corridor,
-        quote: async (payload, options) =>
-          railUp()
-            ? corridor.quote(payload, options)
-            : {
-                kind: 'refused',
-                payload: rfqRefusalPayload(extractRfqId(payload), 'pricing_unavailable'),
-                detail: 'LND unreachable',
-              },
-      }
+    : withQuote(corridor, async (payload, options) =>
+        railUp()
+          ? corridor.quote(payload, options)
+          : {
+              kind: 'refused',
+              payload: rfqRefusalPayload(extractRfqId(payload), 'pricing_unavailable'),
+              detail: 'LND unreachable',
+            },
+      )
 
 /** The same deps, narrowed to what a READER uses. Its extra entries come from
  * swap rows, which know a pair and no pricing: `AssetRfqMarket` here would make

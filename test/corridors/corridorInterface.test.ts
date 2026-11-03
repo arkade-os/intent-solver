@@ -172,6 +172,15 @@ describe('covenant negotiation', () => {
     })
   })
 
+  it('keeps the policy a rebuilt set negotiated under when it replaces the serve list', async () => {
+    const rebuilt = createCorridorSet([stub('a->b', 'A', 'example-v1')], {
+      supportedCovenantVersions: new Set(['example-v1']),
+    })
+    const live = createCorridorSet([], { supportedCovenantVersions: new Set(['other-v1']) })
+    live.replace([...rebuilt])
+    expect((await live.get('a->b')!.quote(RFQ)).detail).toBeUndefined()
+  })
+
   it('keeps the echoed version through the ingress wire contract', async () => {
     const { corridor } = quoting()
     const outcome = await respondToRfqRequest(createCorridorSet([corridor]), {
