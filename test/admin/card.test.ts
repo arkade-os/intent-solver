@@ -240,6 +240,24 @@ describe('GET /api/card', () => {
     expect(body.cardOmitted).toEqual([])
     const asset = body.card!.markets.find((m) => quoteId(m) === `arkade:mutinynet/asset:${ASSET}`)!
     expect(asset).toMatchObject({ fee_flat: '1000000', min_quote_amount: '0', max_quote_amount: '0' })
+
+    const withoutCovenant = async (market: typeof configured) =>
+      (
+        await getCard(
+          makeDeps({
+            assetMarkets: [market],
+            assetRfqMarkets: [{ ...market, symbol: 'ASSET', sellBase: { min: 0n, max: 0n } }],
+            rfqCovenantVersions: RFQ_COVENANT_VERSIONS.filter((version) => version !== 'asset-swap-v2'),
+          }),
+        )
+      ).body
+    const off = await withoutCovenant(configured)
+    expect(off.card!.markets.some((m) => quoteId(m) === `arkade:mutinynet/asset:${ASSET}`)).toBe(false)
+    expect(off.cardOmitted).toEqual([
+      'asset RFQ markets are omitted: covenant asset-swap-v2 is not in rfq.covenantVersions',
+    ])
+    const faulty = await withoutCovenant({ ...configured, baseDecimals: 6 })
+    expect(faulty.cardOmitted.join(' ')).toContain('the BTC leg is 8 decimals (sats), got 6')
   })
 
   /**

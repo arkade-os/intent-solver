@@ -39,16 +39,17 @@ export type CardSource = Pick<
 > & { arkade: { identity: Pick<Services['arkade']['identity'], 'signMessage'> } }
 
 /** ENABLED already — `assetMarketPolicy` drops a pause. */
-const assetMarketsOf = (source: CardSource) =>
+const assetMarketsOf = (
+  source: CardSource,
+  rfqServed = rfqCovenantEnabled(source.bootPolicy.rfqCovenantVersions, RFQ_ASSET_SWAP_V2),
+) =>
   publishableAssetMarkets(
     assetCardMarketsFromPolicy({
       pricing: source.assetMarkets,
       offerMarkets: source.liveOfferMarkets,
       // BOOT: `AssetOfferService` reads these off constructor deps. `rfqMarkets` below is LIVE by contrast.
       offerBounds: { min: source.bootPolicy.offerMinFillAmount, max: source.bootPolicy.offerMaxFillAmount },
-      rfqMarkets: rfqCovenantEnabled(source.bootPolicy.rfqCovenantVersions, RFQ_ASSET_SWAP_V2)
-        ? source.assetRfqMarkets
-        : [],
+      rfqMarkets: rfqServed ? source.assetRfqMarkets : [],
       chargesDeliveredCarrier: source.bootPolicy.offerChargesDeliveredCarrier,
     }),
     source.config.network,
@@ -71,7 +72,8 @@ export const cardOmissions = (source: CardSource): string[] => [
   ...unpublishableCorridors(
     source.policy.evmCorridors.filter((corridor) => corridor.enabled).map((corridor) => corridor.corridor),
   ),
-  ...assetMarketsOf(source).omitted,
+  // As if asset-swap-v2 were on, so a market's own fault still shows beside the covenant note above.
+  ...assetMarketsOf(source, true).omitted,
 ]
 
 /**
