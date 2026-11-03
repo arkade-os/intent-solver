@@ -36,7 +36,7 @@ export interface SwapSummary {
 }
 
 const MAX_REASONS = 5
-const MAX_REASON_CHARS = 80
+const MAX_REASON_CHARS = 120
 
 const count = (ledger: CorridorLedger): Omit<CorridorCount, 'since'> => {
   const c: Omit<CorridorCount, 'since'> = {
@@ -144,14 +144,14 @@ export const formatSwapSummary = (s: SwapSummary): string[] => {
     if (parts.length === 0 && !c.truncated) continue
     const window = c.since === s.since ? '' : ` (since ${stamp(c.since)})`
     const partial = c.truncated ? ' (partial: row cap reached)' : ''
-    lines.push(`${c.corridor.replace('->', ' → ')}: ${parts.join(' · ') || 'none counted'}${window}${partial}`)
+    lines.push(`• ${c.corridor.replace('->', ' → ')}: ${parts.join(' · ') || 'none counted'}${window}${partial}`)
     if (c.failed === 0) continue
     const ranked = [...c.reasons].sort((a, b) => b[1] - a[1])
     const shown = ranked.slice(0, MAX_REASONS).map(([reason, n]) => `${n}× ${shorten(reason)}`)
     if (ranked.length > MAX_REASONS) shown.push(`+${ranked.length - MAX_REASONS} more`)
-    lines.push(`  failed: ${shown.join(' · ')}`)
+    lines.push(...shown.map((reason) => `   ↳ ${reason}`))
   }
-  for (const u of s.unreadable) lines.push(`${u.corridor}: unreadable (${u.error}), retried next report`)
-  if (s.unmeasured.length > 0) lines.push(`not counted (no ledger): ${s.unmeasured.join(', ')}`)
+  for (const u of s.unreadable) lines.push(`• ${u.corridor}: unreadable (${u.error}), retried next report`)
+  if (s.unmeasured.length > 0) lines.push(`• not counted (no ledger): ${s.unmeasured.join(', ')}`)
   return lines.length === 0 ? [`${header}: none finished`] : [header, ...lines]
 }

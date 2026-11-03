@@ -40,6 +40,14 @@ describe('createNotifier', () => {
     expect(b.sent).toEqual(['a swap was fulfilled'])
   })
 
+  it('names the solver at the head of every message when it has a name', async () => {
+    const sink = recordingSink()
+    const notifier = createNotifier({ sinks: [sink], sleep: noSleep, label: 'ln-solver' })
+    notifier.post('✅ *Swap fulfilled*')
+    await notifier.flush()
+    expect(sink.sent).toEqual(['*[ln-solver]* ✅ *Swap fulfilled*'])
+  })
+
   // The constraint the feature is written against: a hung sink must not stall
   // the caller.
   it('RETURNS BEFORE the sink is called, so a hung webhook cannot block a swap', () => {

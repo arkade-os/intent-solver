@@ -24,6 +24,8 @@ export interface Notifier {
 
 export interface NotifierOptions {
   sinks: readonly NotifySink[]
+  /** Heads every message, so several solvers can share one channel. */
+  label?: string
   attempts?: number
   maxQueue?: number
   baseDelayMs?: number
@@ -104,7 +106,7 @@ export const createNotifier = (options: NotifierOptions): Notifier => {
         queue.shift()
         stats.dropped += 1
       }
-      queue.push(text)
+      queue.push(options.label ? `*[${options.label}]* ${text}` : text)
       schedule()
     },
     stats: () => ({ ...stats }),

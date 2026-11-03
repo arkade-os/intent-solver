@@ -61,7 +61,7 @@ describe('balance report', () => {
     )
     expect(text).toContain('arkade:spent: -10 base units (10 → 0)')
     expect(text).toContain('arkade:added: +25 base units (0 → 25)')
-    expect(text).toContain('*arkade float* (sats)')
+    expect(text).toContain('*arkade float*: available')
   })
 
   it('includes negative and zero BTC deltas without inventing a delta on the first report', async () => {
@@ -117,8 +117,8 @@ describe('balance report', () => {
     expect(text).toBe(
       [
         '📊 *Balance report* · mutinynet',
-        '*arkade float* (sats): available 1,234,567 · total 1,300,000',
-        '*BTC rail* (sats): channel out 2,000,000 · onchain confirmed 300,000',
+        '*arkade float*: available 1,234,567 · total 1,300,000',
+        '*BTC rail*: channel out 2,000,000 · onchain confirmed 300,000',
         '*arkade assets* (base units): USDA 1250000000 · bbbbbbbb…bbbb 42',
         '*committed to live swaps*: 150,000 sats',
       ].join('\n'),
@@ -140,7 +140,7 @@ describe('balance report', () => {
       }),
     )
     expect(text).toContain('BTC rail: unreadable (node unreachable)')
-    expect(text).toContain('*arkade float* (sats): available 5')
+    expect(text).toContain('*arkade float*: available 5')
     expect(text).toContain('arkade assets: unreadable (indexer down)')
   })
 
@@ -161,8 +161,25 @@ describe('balance report', () => {
       }),
     )
     expect(text).toContain(
-      '*BTC rail* (sats): channel out 700 · channel in: lnd timed out · pools: ONE pool. · x: unread',
+      ['*BTC rail*: channel out 700', '   ↳ channel in: lnd timed out', '   ↳ pools: ONE pool.', '   ↳ x: unread'].join(
+        '\n',
+      ),
     )
+  })
+
+  it('leaves out a quiet figure while it is zero, and puts a unit label after its number', async () => {
+    const balance = (pending: string): FundBalance => ({
+      unit: 'sats',
+      figures: [
+        { label: 'channel out', amount: '0' },
+        { label: 'onchain unconfirmed', amount: pending, quietWhenZero: true },
+        { label: 'fee rate (sat/vB)', amount: '1' },
+      ],
+    })
+    const at = async (pending: string) =>
+      formatBalanceReport(await read({ sources: [source('BTC rail', async () => balance(pending))] }))
+    expect(await at('0')).toContain('*BTC rail*: channel out 0 · fee rate 1 sat/vB\n')
+    expect(await at('2500')).toContain('*BTC rail*: channel out 0 · onchain unconfirmed 2,500 · fee rate 1 sat/vB\n')
   })
 
   // A hung read would otherwise hold the report forever, and every later one behind it.
@@ -178,7 +195,7 @@ describe('balance report', () => {
       }),
     )
     expect(text).toContain('BTC rail: unreadable (no answer within 10ms)')
-    expect(text).toContain('*arkade float* (sats): available 5')
+    expect(text).toContain('*arkade float*: available 5')
     expect(text).toContain('committed to live swaps: unreadable (no answer within 10ms)')
   })
 
@@ -212,7 +229,7 @@ describe('balance report', () => {
     const [back] = await retry
     expect(slow).toHaveBeenCalledTimes(1)
     expect(formatSourceRecovered('bitcoin', back!.label, back!.balance.value!)).toBe(
-      '✅ *RECOVERED* · bitcoin · lightning rail readable again\n*lightning rail* (sats): channel out 5,000',
+      '✅ *RECOVERED* · bitcoin · lightning rail readable again\n*lightning rail*: channel out 5,000',
     )
   })
 
@@ -273,7 +290,7 @@ describe('balance report', () => {
         },
       }),
     )
-    expect(text).toContain('*arkade float* (sats): available 1,234,567')
+    expect(text).toContain('*arkade float*: available 1,234,567')
     expect(text).toContain('swaps: unreadable (db locked)')
   })
 

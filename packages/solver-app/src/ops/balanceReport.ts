@@ -84,17 +84,30 @@ const amountOf = (unit: string, amount: string): string => {
   return unit === 'sats' && Number.isSafeInteger(sats) ? formatSats(sats) : amount
 }
 
-// A null amount is a failed read or a caveat like a shared pool, so its note IS the content.
-const figure = (unit: string, f: FundFigure): string =>
-  f.amount === null ? `${f.label}: ${f.note ?? 'unread'}` : `${f.label} ${amountOf(unit, f.amount)}`
+// 'fee rate (sat/vB)' reads as 'fee rate 1 sat/vB' once the number is in.
+const figure = (unit: string, f: FundFigure & { amount: string }): string => {
+  const [, base, suffix] = /^(.*) \((.+)\)$/.exec(f.label) ?? [, f.label, null]
+  return `${base} ${amountOf(unit, f.amount)}${suffix ? ` ${suffix}` : ''}`
+}
 
 const unreadable = (label: string, error: string): string => `${label}: unreadable (${error})`
 
-const sourceLine = (label: string, balance: FundBalance): string =>
-  `*${label}* (${balance.unit}): ${balance.figures.map((f) => figure(balance.unit, f)).join(' · ')}`
+// A null amount is a failed read or a caveat like a shared pool, so its note IS the content: own line.
+const sourceLines = (label: string, balance: FundBalance): string[] => {
+  const shown = balance.figures.filter(
+    (f): f is FundFigure & { amount: string } => f.amount !== null && !(f.quietWhenZero && Number(f.amount) === 0),
+  )
+  const unit = balance.unit === 'sats' ? '' : ` (${balance.unit})`
+  return [
+    `*${label}*${unit}: ${shown.map((f) => figure(balance.unit, f)).join(' · ') || 'nothing held'}`,
+    ...balance.figures.filter((f) => f.amount === null).map((f) => `   ↳ ${f.label}: ${f.note ?? 'unread'}`),
+  ]
+}
 
 export const formatSourceRecovered = (network: string, label: string, balance: FundBalance): string =>
-  limitNotification(`✅ *RECOVERED* · ${network} · ${label} readable again\n${sourceLine(label, balance)}`)
+  limitNotification(
+    [`✅ *RECOVERED* · ${network} · ${label} readable again`, ...sourceLines(label, balance)].join('\n'),
+  )
 
 export const formatBalanceReport = (report: BalanceReport): string => {
   const lines = [`📊 *Balance report* · ${report.network}`]
@@ -120,7 +133,7 @@ export const formatBalanceReport = (report: BalanceReport): string => {
     }
   }
   for (const { label, balance } of report.sources) {
-    lines.push(balance.error !== null ? unreadable(label, balance.error) : sourceLine(label, balance.value))
+    lines.push(...(balance.error !== null ? [unreadable(label, balance.error)] : sourceLines(label, balance.value)))
   }
   const { assets, committedSats } = report
   if (assets.error !== null) lines.push(unreadable('arkade assets', assets.error))

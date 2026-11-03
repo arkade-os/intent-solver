@@ -71,7 +71,7 @@ const railBalance = async (services: Services): Promise<FundBalance> => {
       figure('channel out', lightning.value?.availableSats, lightning.error),
       figure('channel in', lightning.value?.incomingSats, lightning.error),
       figure('onchain confirmed', chain.value?.confirmedSats, chain.error),
-      figure('onchain unconfirmed', chain.value?.unconfirmedSats, chain.error),
+      { ...figure('onchain unconfirmed', chain.value?.unconfirmedSats, chain.error), quietWhenZero: true },
       // Not a balance, and deliberately here anyway: it is the difference
       // between a withdrawal that confirms and one that sits, and it is read off
       // the same backend in the same round trip.

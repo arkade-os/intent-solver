@@ -70,21 +70,23 @@ export const ARKADE_FUND_SOURCE_ID = 'arkade'
  */
 const arkadeBalance = async (services: Services): Promise<FundBalance> => {
   const balance = await services.arkade.wallet.getBalance()
-  const figure = (label: string, amount: number, note?: string) => ({
+  const figure = (label: string, amount: number, note?: string, quietWhenZero = false) => ({
     label,
     amount: String(amount),
     ...(note === undefined ? {} : { note }),
+    ...(quietWhenZero ? { quietWhenZero } : {}),
   })
   return {
     unit: 'sats',
     figures: [
       figure('available', balance.available, 'What can fund a swap now.'),
-      figure('boarding confirmed', balance.boarding.confirmed, 'Arrived on L1; not a VTXO until settled.'),
-      figure('boarding unconfirmed', balance.boarding.unconfirmed),
+      figure('boarding confirmed', balance.boarding.confirmed, 'Arrived on L1; not a VTXO until settled.', true),
+      figure('boarding unconfirmed', balance.boarding.unconfirmed, undefined, true),
       figure(
         'recoverable',
         balance.recoverable,
         'Swept by the server. Reads as balance and funds nothing until float-lifecycle recovers it.',
+        true,
       ),
       figure('total', balance.total),
     ],
