@@ -661,7 +661,29 @@ const finalizePendingSpend = async (
     ctx.wallet.serverUnrollScript,
   )
   if (checkpoints.some((checkpoint, i) => checkpoint.id !== spent[i]!.spentBy)) return null
-  const signed = await Promise.all(checkpoints.map(async (c) => base64.encode((await signer.sign(c, [0])).toPSBT())))
+  // finalizeTx replaces arkd's stored signatures with the ones sent, so the server's must ride along. Only
+  // its signatures are taken from the indexer's copy: what we sign is the checkpoint we rebuilt.
+  const stored = new Map<string, Transaction>()
+  for await (const batch of virtualTxPages(
+    ctx.wallet.indexerProvider,
+    checkpoints.map((c) => c.id),
+  )) {
+    for (const raw of batch) {
+      const tx = Transaction.fromPSBT(base64.decode(raw))
+      stored.set(tx.id, tx)
+    }
+  }
+  const ours = hex.encode(await ctx.identity.xOnlyPublicKey())
+  const signed = await Promise.all(
+    checkpoints.map(async (checkpoint) => {
+      const theirs = stored.get(checkpoint.id)
+      if (!theirs) throw new Error(`pending spend ${arkTxid}: the indexer served no checkpoint ${checkpoint.id}`)
+      const tx = await signer.sign(checkpoint, [0])
+      const serverSigs = (theirs.getInput(0).tapScriptSig ?? []).filter(([key]) => hex.encode(key.pubKey) !== ours)
+      tx.updateInput(0, { tapScriptSig: [...(tx.getInput(0).tapScriptSig ?? []), ...serverSigs] })
+      return base64.encode(tx.toPSBT())
+    }),
+  )
   await ctx.wallet.arkProvider.finalizeTx(arkTxid, signed)
   return arkTxid
 }

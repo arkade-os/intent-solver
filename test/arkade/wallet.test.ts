@@ -395,18 +395,21 @@ describe('refundWithoutReceiverSwapScript', () => {
   describe('finalizePendingRefund', () => {
     const ARK_TXID = 'a'.repeat(64)
     const LOCKUP_SCRIPT = hex.encode(receiveLegScript().pkScript)
-    const ourCheckpointId = buildOffchainTx(
-      [
-        {
-          ...FUNDED[0]!,
-          tapLeafScript: receiveLegScript().refundWithoutReceiver(),
-          tapTree: receiveLegScript().encode(),
-        },
-      ],
-      [{ script: DEST, amount: 50_000n }],
-      serverUnrollScript,
-    ).checkpoints[0]!.id
-    const pendingCtx = (spentBy: string): ArkadeContext =>
+    const rebuilt = () =>
+      buildOffchainTx(
+        [
+          {
+            ...FUNDED[0]!,
+            tapLeafScript: receiveLegScript().refundWithoutReceiver(),
+            tapTree: receiveLegScript().encode(),
+          },
+        ],
+        [{ script: DEST, amount: 50_000n }],
+        serverUnrollScript,
+      ).checkpoints[0]!
+    const ourCheckpointId = rebuilt().id
+    const serverKey = SingleKey.fromPrivateKey(new Uint8Array(32).fill(3))
+    const pendingCtx = (spentBy: string, served: string[] = []): ArkadeContext =>
       ({
         identity: receiverIdentity,
         wallet: {
@@ -414,21 +417,23 @@ describe('refundWithoutReceiverSwapScript', () => {
           arkProvider: { finalizeTx: arkFinalizeTx },
           indexerProvider: {
             getVtxos: vi.fn(async () => ({ vtxos: [{ ...FUNDED[0]!, isSpent: true, spentBy, arkTxId: ARK_TXID }] })),
+            getVirtualTxs: vi.fn(async () => ({ txs: served })),
           },
         },
       }) as unknown as ArkadeContext
 
-    it('finalizes our refund arkd accepted or already finalized, signing the checkpoint it rebuilds', async () => {
+    it("finalizes our refund arkd accepted, carrying the server's stored signature beside ours", async () => {
       arkFinalizeTx.mockClear()
-      await expect(finalizePendingRefund(pendingCtx(ourCheckpointId), receiveLegScript(), LOCKUP_SCRIPT)).resolves.toBe(
-        ARK_TXID,
-      )
+      const stored = base64.encode((await serverKey.sign(rebuilt())).toPSBT())
+      await expect(
+        finalizePendingRefund(pendingCtx(ourCheckpointId, [stored]), receiveLegScript(), LOCKUP_SCRIPT),
+      ).resolves.toBe(ARK_TXID)
 
       const [arkTxid, checkpointsB64] = arkFinalizeTx.mock.calls[0]!
       expect(arkTxid).toBe(ARK_TXID)
       const checkpoint = Transaction.fromPSBT(base64.decode(checkpointsB64[0]!))
       expect(checkpoint.id).toBe(ourCheckpointId)
-      expect(signerKeys(checkpoint)).toContain(hex.encode(RECEIVER))
+      expect(signerKeys(checkpoint)).toEqual(expect.arrayContaining([hex.encode(RECEIVER), hex.encode(SERVER)]))
     })
 
     it('leaves a lockup alone when its spend is not our refund', async () => {
@@ -655,13 +660,16 @@ describe('finalizePendingClaim', () => {
   const PREIMAGE = new Uint8Array(32).fill(7)
   const ARK_TXID = 'a'.repeat(64)
   const LOCKUP_SCRIPT = hex.encode(baseScript().pkScript)
-  const ourCheckpointId = buildOffchainTx(
-    [{ ...FUNDED[0]!, tapLeafScript: baseScript().claim(), tapTree: baseScript().encode() }],
-    [{ script: DEST, amount: 50_000n }],
-    serverUnrollScript,
-  ).checkpoints[0]!.id
+  const rebuilt = () =>
+    buildOffchainTx(
+      [{ ...FUNDED[0]!, tapLeafScript: baseScript().claim(), tapTree: baseScript().encode() }],
+      [{ script: DEST, amount: 50_000n }],
+      serverUnrollScript,
+    ).checkpoints[0]!
+  const ourCheckpointId = rebuilt().id
+  const serverKey = SingleKey.fromPrivateKey(new Uint8Array(32).fill(3))
   const finalizeTx = vi.fn(async (_arkTxid: string, _checkpointsB64: string[]) => undefined)
-  const pendingCtx = (spentBy: string): ArkadeContext =>
+  const pendingCtx = (spentBy: string, served: string[] = []): ArkadeContext =>
     ({
       identity: receiverIdentity,
       wallet: {
@@ -671,14 +679,16 @@ describe('finalizePendingClaim', () => {
           getVtxos: vi.fn(async () => ({
             vtxos: [{ ...FUNDED[0]!, isSpent: true, spentBy, arkTxId: ARK_TXID }],
           })),
+          getVirtualTxs: vi.fn(async () => ({ txs: served })),
         },
       },
     }) as unknown as ArkadeContext
 
-  it('finalizes the claim arkd accepted, signing the checkpoint it rebuilds', async () => {
+  it("finalizes the claim arkd accepted, carrying the server's stored signature beside ours", async () => {
     finalizeTx.mockClear()
+    const stored = base64.encode((await serverKey.sign(rebuilt())).toPSBT())
     await expect(
-      finalizePendingClaim(pendingCtx(ourCheckpointId), baseScript(), LOCKUP_SCRIPT, PREIMAGE),
+      finalizePendingClaim(pendingCtx(ourCheckpointId, [stored]), baseScript(), LOCKUP_SCRIPT, PREIMAGE),
     ).resolves.toBe(ARK_TXID)
 
     const [arkTxid, checkpointsB64] = finalizeTx.mock.calls[0]!
@@ -686,7 +696,16 @@ describe('finalizePendingClaim', () => {
     const checkpoint = Transaction.fromPSBT(base64.decode(checkpointsB64[0]!))
     expect(checkpoint.id).toBe(ourCheckpointId)
     expect(getArkPsbtFields(checkpoint, 0, ConditionWitness)).toEqual([[PREIMAGE]])
-    expect(checkpoint.getInput(0).tapScriptSig?.map(([sig]) => hex.encode(sig.pubKey))).toContain(hex.encode(RECEIVER))
+    const keys = checkpoint.getInput(0).tapScriptSig?.map(([sig]) => hex.encode(sig.pubKey))
+    expect(keys).toEqual(expect.arrayContaining([hex.encode(RECEIVER), hex.encode(SERVER)]))
+  })
+
+  it("finalizes nothing until the indexer serves the server's checkpoint", async () => {
+    finalizeTx.mockClear()
+    await expect(
+      finalizePendingClaim(pendingCtx(ourCheckpointId), baseScript(), LOCKUP_SCRIPT, PREIMAGE),
+    ).rejects.toThrow(/served no checkpoint/)
+    expect(finalizeTx).not.toHaveBeenCalled()
   })
 
   it('leaves a lockup alone when its spend is not our claim', async () => {
