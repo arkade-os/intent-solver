@@ -25,6 +25,7 @@ import {
   RestArkProvider,
   RestEmulatorProvider,
   setArkPsbtField,
+  signAndSubmitOffchainTx,
   Transaction,
   Wallet,
   type Recipient,
@@ -46,7 +47,6 @@ import { ensureDatabaseDir } from '@arkade-os/solver-core/util/sqlite.js'
 import type { CovenantSwapScript } from './covenant.js'
 import { virtualTxPages, vtxoPages } from './indexerPaging.js'
 import { SharedSyncIndexerProvider, TimedArkProvider, TimedIndexerProvider } from './latencyProviders.js'
-import { signAndSubmitOneShot } from './oneShotSubmit.js'
 import { createReservationLedger, type ReservationLedger } from './reservations.js'
 
 /** What {@link claimSwapScript} spends; CovenantSwapScript satisfies it. */
@@ -614,7 +614,7 @@ export const claimSwapScript = async (
   const inputs = spendable(funded, 'claim')
   // Anyone can add an asset to a lockup; without its packet arkd refuses the claim, after we already paid.
   const assetPacket = refundAssetPacket(inputs, 'aggregate')
-  return signAndSubmitOneShot({
+  return signAndSubmitOffchainTx({
     // Signs every checkpoint before submit, so each carries the preimage arkd v0.9.24+ demands there.
     identity: preimageSigner(ctx.identity, preimage),
     provider: ctx.wallet.arkProvider,
@@ -920,7 +920,7 @@ export const refundWithoutReceiverSwapScript = async (
   if (funded.length === 0) throw new Error('nothing to refund: no funded outputs')
   const inputs = spendable(funded, 'refund')
   const assetPacket = refundAssetPacket(inputs, 'aggregate')
-  return signAndSubmitOneShot({
+  return signAndSubmitOffchainTx({
     identity: ctx.identity,
     provider: ctx.wallet.arkProvider,
     inputs: inputs.map((output) => ({
