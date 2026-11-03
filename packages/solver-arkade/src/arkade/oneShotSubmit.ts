@@ -24,6 +24,7 @@ import {
 import { base64, hex } from '@scure/base'
 import { tapLeafHash } from '@scure/btc-signer/payment.js'
 
+// Input 0 only: buildOffchainTx gives every checkpoint exactly one input, the VTXO it spends.
 const sigEntries = (checkpoint: Transaction): string[] =>
   (checkpoint.getInput(0).tapScriptSig ?? []).map(
     ([{ pubKey, leafHash }, sig]) => hex.encode(pubKey) + hex.encode(leafHash) + hex.encode(sig),
@@ -73,6 +74,7 @@ export const signAndSubmitOneShot = async (params: {
     for (const { server: returned, local } of matched) assertServerSigned(returned, local, 0, server)
   }
 
+  // matchServerCheckpoints pairs each returned copy with one of `checkpoints`, so every `local.id` is a key.
   const ours = new Map(checkpoints.map((c, i) => [c.id, signed[i]!]))
   if (matched.every(({ server, local }) => carriesSigs(server, ours.get(local.id)!))) return response.arkTxid
 
