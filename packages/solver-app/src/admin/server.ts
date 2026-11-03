@@ -84,14 +84,15 @@ const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
 
 // Host values a state-changing request may carry — the DNS-rebinding line the same-site
 // check cannot draw (a rebinding fetch is same-origin, Origin host == request host, so only
-// the Host still names the attacker's domain). Empty (inert) when no admin port runs.
+// the Host still names the attacker's domain). Empty (inert) when no admin port runs or no host
+// is declared: the pin is opt-in, so a console behind a proxy is never locked out by default.
 export const adminHostAllowlist = (config?: {
   adminHost?: string
   adminPort?: number | null
   adminAllowedHosts?: readonly string[]
 }): Set<string> => {
   const port = config?.adminPort
-  if (port === null || port === undefined) return new Set()
+  if (port === null || port === undefined || !config?.adminAllowedHosts?.length) return new Set()
   const hosts = new Set<string>()
   for (const host of ['localhost', '127.0.0.1', '[::1]', config?.adminHost]) {
     if (host) hosts.add(`${host}:${port}`.toLowerCase())
