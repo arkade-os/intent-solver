@@ -62,7 +62,6 @@ const post = async (method, params) => {
   return json.result
 }
 
-// Same clock pin as `pinAnvilClock` in test/e2e/support/evmChain.ts.
 const pinAnvilClock = async () => {
   await post('anvil_setBlockTimestampInterval', [0])
 }
