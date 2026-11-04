@@ -54,7 +54,7 @@ describe('resolveDraftPolicy', () => {
   })
 
   it('refuses a key the console may not write', () => {
-    const resolved = resolveDraftPolicy(baseConfig, { ARK_SERVER_URL: 'http://evil.test' })
+    const resolved = resolveDraftPolicy(baseConfig, { ARKADE_OPERATOR_URL: 'http://evil.test' })
     expect(resolved).toMatchObject({ ok: false })
   })
 

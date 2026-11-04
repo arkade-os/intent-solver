@@ -193,7 +193,7 @@ const settingsConfig = (over: Record<string, unknown> = {}) =>
     relayProtocol: 'nostr',
     openRfqMaxBidsPerMinute: 30,
     emulatorUrl: 'http://emulator.test',
-    arkade: { arkServerUrl: 'http://ark.test', databasePath: '.data/ark.sqlite' },
+    arkade: { operatorUrl: 'http://arkade.test', databasePath: '.data/ark.sqlite' },
     maxExposedSats: 300_000,
     lockupTimeoutSeconds: 600,
     sendHintScidDenylist: new Set<string>(),

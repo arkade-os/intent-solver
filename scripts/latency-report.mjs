@@ -22,7 +22,7 @@
  *
  * Run:
  *   SOLVER_CONFIG=solver.json node scripts/latency-report.mjs
- *   SOLVER_CONFIG=solver.json node scripts/latency-report.mjs --since 2026-08-01 --corridor ln-ark
+ *   SOLVER_CONFIG=solver.json node scripts/latency-report.mjs --since 2026-08-01 --corridor ln-arkade
  */
 
 import { existsSync } from 'node:fs'
@@ -46,9 +46,9 @@ if (Number.isNaN(since)) {
 }
 
 const CORRIDORS = [
-  { key: 'ark-ln', corridor: 'arkade:BTC->lightning:BTC', store: 'send', table: 'send_swap_event' },
-  { key: 'ln-ark', corridor: 'lightning:BTC->arkade:BTC', store: 'receive', table: 'receive_swap_event' },
-  { key: 'ark-l1', corridor: 'arkade:BTC->onchain:BTC', store: 'onchainSend', table: 'send_onchain_swap_event' },
+  { key: 'arkade-ln', corridor: 'arkade:BTC->lightning:BTC', store: 'send', table: 'send_swap_event' },
+  { key: 'ln-arkade', corridor: 'lightning:BTC->arkade:BTC', store: 'receive', table: 'receive_swap_event' },
+  { key: 'arkade-l1', corridor: 'arkade:BTC->onchain:BTC', store: 'onchainSend', table: 'send_onchain_swap_event' },
 ]
 
 const only = arg('corridor')

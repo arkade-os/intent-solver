@@ -38,7 +38,7 @@ const config = (over: Partial<Config> = {}): Config =>
     // throwing on a fixture that only cares about one knob.
     network: 'regtest',
     lnBackend: 'lnd',
-    arkade: { arkServerUrl: 'http://localhost:7070' },
+    arkade: { operatorUrl: 'http://localhost:7070' },
     emulatorUrl: 'http://localhost:7073',
     swapDbPath: '/tmp/swaps.sqlite',
     sweepConcurrency: 4,

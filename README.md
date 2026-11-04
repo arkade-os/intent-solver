@@ -610,7 +610,7 @@ environment variables.
 | Var                                                 | Default            | Used by                                                                                                                                                        |
 | --------------------------------------------------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `PAYEE_MNEMONIC`                                    | none               | `cli invoice` on a non-`fake` backend — stands in for an arbitrary Lightning recipient                                                                         |
-| `E2E_ENV_FILE`                                      | `.env.regtest.lnd` | `test/e2e` and the regtest scripts, which still read their settings from this env file. Note its `ARK_DB_PATH` is a **different wallet** from `.env.regtest`'s |
+| `E2E_ENV_FILE`                                      | `.env.regtest.lnd` | `test/e2e` and the regtest scripts, which still read their settings from this env file. Note its `WALLET_DB_PATH` is a **different wallet** from `.env.regtest`'s |
 | `MOCK_RELAY_PORT`, `PROBE_WAIT_MS`, `SOLVER_PUBKEY` | —                  | `scripts/mock-relay.mjs`, `scripts/probe-relay.mjs`                                                                                                            |
 
 ### Amounts (`packages/solver-core/src/core/networks.ts`, `packages/solver-core/src/core/limits.ts`)

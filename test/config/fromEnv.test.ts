@@ -11,7 +11,7 @@ import {
   healthPathNote,
   migrationHint,
 } from '@arkade-os/solver-app/config/fromEnv.js'
-import { SECRET_KNOBS } from '@arkade-os/solver-app/config/knobs.js'
+import { legacyEnvName, PATHS, SECRET_KNOBS } from '@arkade-os/solver-app/config/knobs.js'
 import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
 import { resolveLimits } from '@arkade-os/solver-core/core/limits.js'
 import { DEFAULT_SERVING } from '@arkade-os/solver-core/core/assetMarketConfig.js'
@@ -135,15 +135,24 @@ const withoutDocumentFields = ({ configPaths: _paths, lightningRailBlock: _block
 
 const loadedFrom = (doc: unknown) => loadConfig({ env: { SOLVER_CONFIG_JSON: JSON.stringify(doc) } })
 
+/** An old environment under the setting ids `configFromKnobs` reads. */
+const asKnobs = (env: Record<string, string>) =>
+  Object.fromEntries(
+    Object.entries(env).map(([name, value]) => [
+      PATHS.find(([, knob]) => legacyEnvName(knob) === name)?.[1] ?? name,
+      value,
+    ]),
+  )
+
 describe('envToDocument round-trips', () => {
   it('every setting the environment can carry', () => {
     const doc = envToDocument(FULL_ENV, [])
-    expect(withoutDocumentFields(loadedFrom(doc))).toEqual(withoutDocumentFields(configFromKnobs(FULL_ENV)))
+    expect(withoutDocumentFields(loadedFrom(doc))).toEqual(withoutDocumentFields(configFromKnobs(asKnobs(FULL_ENV))))
   })
 
   it('a minimal mutinynet environment', () => {
     const doc = envToDocument(MINIMAL_ENV, [])
-    expect(withoutDocumentFields(loadedFrom(doc))).toEqual(withoutDocumentFields(configFromKnobs(MINIMAL_ENV)))
+    expect(withoutDocumentFields(loadedFrom(doc))).toEqual(withoutDocumentFields(configFromKnobs(asKnobs(MINIMAL_ENV))))
   })
 })
 
