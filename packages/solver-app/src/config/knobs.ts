@@ -75,7 +75,7 @@ export const PATHS: readonly Row[] = [
   ['relay.cardRelays', 'SOLVER_CARD_RELAYS'],
   ['storage.dir', 'DB_DIR'],
   ['storage.swapDb', 'SWAP_DB_PATH'],
-  ['storage.arkadeDb', 'ARKADE_DB_PATH'],
+  ['storage.walletDb', 'ARKADE_DB_PATH'],
   ['http.host', 'HOST'],
   ['http.port', 'PORT'],
   ['admin.host', 'ADMIN_HOST'],
