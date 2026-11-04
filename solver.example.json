@@ -128,7 +128,7 @@
   "storage": {
     "dir": ".data",
     "swapDb": ".data/swaps.sqlite",
-    "arkadeDb": ".data/ark.sqlite"
+    "walletDb": ".data/ark.sqlite"
   },
   "http": {
     "host": "127.0.0.1",
