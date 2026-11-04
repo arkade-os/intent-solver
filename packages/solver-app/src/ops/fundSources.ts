@@ -63,7 +63,7 @@ export interface FundFigure {
   amount: string | null
   /** Why it could not be read, or a caveat that has to travel with the number. */
   note?: string
-  /** Routine at zero (pending, unconfirmed, swept), so the chat report omits it then. */
+  /** Routine at zero (pending, unconfirmed, swept), so the chat report omits it then. If every readable figure is quiet zero, the report says `nothing held`. */
   quietWhenZero?: boolean
 }
 
