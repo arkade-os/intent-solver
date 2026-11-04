@@ -13,7 +13,7 @@
  * imports the `better-sqlite3` native binding — so importing a store here would
  * pull a native module into every caller of `loadConfig()`, including tests
  * that touch no database. `test/corridors/registry.test.ts` guards that
- * property and the remaining LN duplication.
+ * property: every descriptor now sources `live`/`exposed` from its machine.
  */
 import { createCorridorRegistry, type CorridorDescriptor } from '@arkade-os/solver-core/core/corridorDescriptor.js'
 import { LN_SEND } from './lnSend.js'
