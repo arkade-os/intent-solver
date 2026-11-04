@@ -50,6 +50,7 @@ import { askApprovalFor, type ApprovalCheck } from '@arkade-os/solver-core/core/
 import { createSerialiser, type Serialiser } from '@arkade-os/solver-core/util/serialise.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
+import { OfferNotSubmittedError } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { assetRfqPairFor } from '../wire/assetRfqPayloads.js'
 import { AssetRfqSwapStore, type AssetRfqSwapRow } from '../db/assetRfqSwaps.js'
 
@@ -461,6 +462,13 @@ export class AssetRfqSwapService {
       // investigation.
       if (filled) await this.recordFillMark(row)
     } catch (error) {
+      // The one shape that is NOT ambiguous: raised above the call that submits,
+      // so the row goes back to `funded` for a later tick. No counter — `validUntil`
+      // already bounds the retrying — and no fill mark, because nothing filled.
+      if (error instanceof OfferNotSubmittedError) {
+        await this.deps.store.revertUnsubmitted(row.id)
+        return
+      }
       // `filling` fails to `stuck`, never to something retryable: the spend may
       // already have been submitted, and only a human can tell which.
       this.deps.onError?.(row.id, error)

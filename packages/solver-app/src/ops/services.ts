@@ -881,6 +881,8 @@ export const createServices = async (
         settle: offerSettleFor({ ctx: arkade, emulatorUrl: config.emulatorUrl }),
         approvalGate: gateFor('arkade offer fill'),
         onError: (id, error) => log(`offer ${id} failed:`, error instanceof Error ? error.message : String(error)),
+        // Not a failure either: nothing was submitted, so the row waits a sweep.
+        onDeferred: (id, error) => log(`offer ${id} deferred:`, error instanceof Error ? error.message : String(error)),
         // Refusals are NOT errors, so they never reached `onError` above. The log
         // line alone is invisible to an operator in a browser, so the console's
         // tail is fed from the same handler.

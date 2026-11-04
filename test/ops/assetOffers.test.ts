@@ -8,7 +8,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { AssetOfferService, parseAssetMarkets, type AssetOfferDeps } from '@arkade-os/solver-app/ops/assetOffers.js'
+import {
+  AssetOfferService,
+  parseAssetMarkets,
+  MAX_FILL_DEFERRALS,
+  type AssetOfferDeps,
+} from '@arkade-os/solver-app/ops/assetOffers.js'
+import { OfferNotSubmittedError } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { approvalGateFor } from '@arkade-os/solver-app/ops/approvals.js'
 import type { SwapApprovalRequest } from '@arkade-os/solver-app/admin/db.js'
 import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
@@ -454,6 +460,114 @@ describe('tickAll', () => {
     await service.consider(found)
     expect(await service.tickAll()).toBe(0)
     expect(await store.findById('fill-1')).toMatchObject({ state: 'fillable' })
+  })
+})
+
+describe('tickAll defers a fill the float cannot fund yet', () => {
+  const pinned = async (over: Partial<AssetOfferDeps> = {}) => {
+    let busy = true
+    let submitted = 0
+    const settle = vi.fn(async () => {
+      if (busy) throw new OfferNotSubmittedError('no spendable coins to pay the maker 1000 sats')
+      submitted += 1
+      return '0xfill'
+    })
+    const errors: { id: string; error: unknown }[] = []
+    const deferred: { id: string; error: unknown }[] = []
+    const built = await build({
+      settle,
+      onError: (id, error) => void errors.push({ id, error }),
+      onDeferred: (id, error) => void deferred.push({ id, error }),
+      ...over,
+    })
+    await built.service.consider(found)
+    return {
+      ...built,
+      settle,
+      errors,
+      deferred,
+      freeTheFloat: () => void (busy = false),
+      submissions: () => submitted,
+    }
+  }
+
+  it('walks the row back to fillable without reporting it stuck', async () => {
+    const { store, service, settle, errors } = await pinned()
+    expect(await service.tickAll()).toBe(0)
+    expect(settle).toHaveBeenCalledTimes(1)
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'fillable', fillTxid: null, failureReason: null })
+    expect(errors).toEqual([])
+  })
+
+  it('fills it on a later sweep, submitting exactly once in total', async () => {
+    const { store, service, settle, freeTheFloat, submissions } = await pinned()
+    await service.tickAll()
+    await service.tickAll()
+    freeTheFloat()
+    expect(await service.tickAll()).toBe(1)
+    expect(settle).toHaveBeenCalledTimes(3)
+    expect(submissions()).toBe(1)
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'filled', fillTxid: '0xfill' })
+  })
+
+  it('reports the first deferral once, not every sweep', async () => {
+    const { service, deferred } = await pinned()
+    await service.tickAll()
+    await service.tickAll()
+    await service.tickAll()
+    expect(deferred).toHaveLength(1)
+    expect(deferred[0]).toMatchObject({ id: 'fill-1', error: expect.any(OfferNotSubmittedError) })
+  })
+
+  it('escalates to stuck once the retry budget runs out', async () => {
+    const { store, service, settle, errors } = await pinned()
+    for (let sweep = 0; sweep < MAX_FILL_DEFERRALS; sweep += 1) await service.tickAll()
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'fillable' })
+
+    expect(await service.tickAll()).toBe(0)
+    const row = await store.findById('fill-1')
+    expect(row).toMatchObject({ state: 'stuck', fillTxid: null })
+    expect(row!.failureReason).toMatch(/retries exhausted/)
+    expect(settle).toHaveBeenCalledTimes(MAX_FILL_DEFERRALS + 1)
+    expect(errors).toHaveLength(1)
+  })
+
+  it('budgets each row on its own, so one exhausting does not spend another`s', async () => {
+    const { store, service } = await pinned()
+    for (let sweep = 0; sweep < MAX_FILL_DEFERRALS; sweep += 1) await service.tickAll()
+    await service.consider({ ...found, txid: 'b'.repeat(64) })
+    await service.tickAll()
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'stuck' })
+    expect(await store.findById('fill-2')).toMatchObject({ state: 'fillable' })
+  })
+
+  it('gates on the TYPE, not the message — a plain error reading the same way still sticks', async () => {
+    const { store, service } = await build({
+      settle: async () => {
+        throw new Error('no spendable coins to pay the maker 1000 sats')
+      },
+      onError: () => {},
+    })
+    await service.consider(found)
+    expect(await service.tickAll()).toBe(0)
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'stuck' })
+  })
+
+  it('leaves the row alone when another worker moved it inside the settle', async () => {
+    const { store, service } = await build({
+      settle: async (row) => {
+        await store.transition(row.id, 'filling', 'stuck', { failure_reason: 'another worker' })
+        throw new OfferNotSubmittedError('no spendable coins to pay the maker 1000 sats')
+      },
+      onDeferred: () => {},
+    })
+    await service.consider(found)
+    expect(await service.tickAll()).toBe(0)
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'stuck', failureReason: 'another worker' })
+  })
+
+  it('is WIRED to the log on the shipped daemon', () => {
+    expect(servicesSource).toMatch(/onDeferred:\s*\([^)]*\)\s*=>\s*log\(`offer \$\{\w+\} deferred/)
   })
 })
 

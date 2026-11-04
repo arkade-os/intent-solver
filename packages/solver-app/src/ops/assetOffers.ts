@@ -39,6 +39,7 @@ import { askApprovalFor, type ApprovalCheck } from '@arkade-os/solver-core/core/
 import type { FetchPrice } from '@arkade-os/solver-core/price/feed.js'
 import { createSerialiser, type Serialiser } from '@arkade-os/solver-core/util/serialise.js'
 import { offerFillInputFrom } from '@arkade-os/solver-arkade/arkade/offerFill.js'
+import { OfferNotSubmittedError } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { offerFromFundingTx } from '@arkade-os/solver-arkade/arkade/offerPacket.js'
 import { offerDepositFrom, type OfferOutputView } from '@arkade-os/solver-arkade/arkade/offerDeposit.js'
 import { offerInventoryFrom, type SpendableBalance } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
@@ -128,6 +129,12 @@ export interface AssetOfferDeps {
   approvalGate?: ApprovalCheck
   onError?: (id: string, error: unknown) => void
   /**
+   * A fill put back for a later sweep because the float was pinned or short.
+   * FIRST deferral of a row only: one line per 3 s sweep would bury the
+   * escalation that follows if it never clears.
+   */
+  onDeferred?: (id: string, error: unknown) => void
+  /**
    * Every offer this service DECLINES. `onError` reports a throw; a refusal is
    * not one, and used to leave no trace at all — `consider` returned the reason
    * and `consumeOfferTxs` discarded it. `detail` names the bounds in force and
@@ -137,6 +144,13 @@ export interface AssetOfferDeps {
   onRefused?: (outpoint: string, reason: OfferFillRefusal, detail: string) => void
   newId?: () => string
 }
+
+/**
+ * How many sweeps a fill may wait for the float before it needs a human — about
+ * two minutes at `FULL_SWEEP_MS`, long enough to outlast the renewal or funding
+ * that pinned the coins. Also bounds the event rows one fill can write.
+ */
+export const MAX_FILL_DEFERRALS = 40
 
 interface AppliedBounds {
   readonly min: bigint
@@ -173,6 +187,8 @@ export class AssetOfferService {
   private markets: readonly AssetMarket[]
   private pricing: readonly AssetMarketPricing[] | undefined
   private readonly serialise: Serialiser = createSerialiser()
+  /** Deferrals per row, pruned to the live set each sweep so it cannot grow. */
+  private readonly deferrals = new Map<string, number>()
 
   constructor(private readonly deps: AssetOfferDeps) {
     this.newId = deps.newId ?? (() => crypto.randomUUID())
@@ -368,7 +384,10 @@ export class AssetOfferService {
   private async tickAllInner(): Promise<number> {
     if (!this.deps.settle) return 0
     let filled = 0
-    for (const row of await this.deps.store.listNonTerminal()) {
+    const rows = await this.deps.store.listNonTerminal()
+    const live = new Set(rows.map((row) => row.id))
+    for (const id of this.deferrals.keys()) if (!live.has(id)) this.deferrals.delete(id)
+    for (const row of rows) {
       if (row.state !== 'fillable') continue
       // BEFORE the CAS: `fillable` has an edge to `refused` and `filling` has
       // none, which is also the honest shape — nothing is submitted yet.
@@ -388,10 +407,24 @@ export class AssetOfferService {
         await this.deps.store.transition(row.id, 'filling', 'filled', { fill_txid: txid })
         filled += 1
       } catch (error) {
+        // The ONE retryable shape, and only because `fulfillOffer` raises it
+        // above the call that submits. A later sweep re-runs every gate and the CAS.
+        const deferrals = (this.deferrals.get(row.id) ?? 0) + 1
+        if (error instanceof OfferNotSubmittedError && deferrals <= MAX_FILL_DEFERRALS) {
+          this.deferrals.set(row.id, deferrals)
+          if (deferrals === 1) this.deps.onDeferred?.(row.id, error)
+          await this.deps.store.revertUnsubmitted(row.id)
+          continue
+        }
         // `filling` fails to `stuck`, not `refused`: something may have been
         // submitted, and only a human can tell which.
         this.deps.onError?.(row.id, error)
-        await this.deps.store.fail(row.id, 'filling', error instanceof Error ? error.message : String(error))
+        const reason = error instanceof Error ? error.message : String(error)
+        await this.deps.store.fail(
+          row.id,
+          'filling',
+          error instanceof OfferNotSubmittedError ? `${reason}; ${MAX_FILL_DEFERRALS} retries exhausted` : reason,
+        )
       }
     }
     return filled

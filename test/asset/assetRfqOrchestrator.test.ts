@@ -17,6 +17,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { approvalGateFor } from '@arkade-os/solver-app/ops/approvals.js'
 import type { SwapApprovalRequest } from '@arkade-os/solver-app/admin/db.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
+import { OfferNotSubmittedError } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { IMPLIED_PRICE_HEADROOM } from '@arkade-os/solver-core/core/assetRfq.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 import {
@@ -452,6 +453,95 @@ describe('tick — driving a negotiation', () => {
     await store.fail('swap-1', 'quoted', 'declined')
     await service.tick('swap-1')
     expect((await store.get('swap-1')).state).toBe('refused')
+  })
+})
+
+describe('a fill the float cannot fund yet', () => {
+  const busy = () => new OfferNotSubmittedError('no spendable coins to pay the maker 1000 sats')
+
+  const funded = async (over: Partial<AssetRfqDeps> = {}) => {
+    const built = await harness({ depositAt: async () => deposit(), ...over })
+    await built.service.quote(request())
+    await built.service.tick('swap-1')
+    return built
+  }
+
+  it('walks the row back to funded rather than parking it stuck', async () => {
+    const errors: unknown[] = []
+    const { service, store } = await funded({
+      settle: async () => {
+        throw busy()
+      },
+      onError: (_id, error) => void errors.push(error),
+    })
+    await service.tick('swap-1')
+    expect(await store.get('swap-1')).toMatchObject({ state: 'funded', fillTxid: null, failureReason: null })
+    expect(errors).toEqual([])
+  })
+
+  it('fills it on a later tick, submitting exactly once', async () => {
+    let pinned = true
+    const settled: string[] = []
+    const { service, store } = await funded({
+      settle: async (row) => {
+        if (pinned) throw busy()
+        settled.push(row.id)
+        return 'fa'.repeat(32)
+      },
+    })
+    await service.tick('swap-1')
+    pinned = false
+    await service.tick('swap-1')
+    expect(settled).toEqual(['swap-1'])
+    expect(await store.get('swap-1')).toMatchObject({ state: 'filled', fillTxid: 'fa'.repeat(32) })
+  })
+
+  it('stops retrying at valid_until, ending refused', async () => {
+    const { service, store, tick } = await funded({
+      settle: async () => {
+        throw busy()
+      },
+    })
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).state).toBe('funded')
+    tick(1_031)
+    await service.tick('swap-1')
+    expect(await store.get('swap-1')).toMatchObject({ state: 'refused' })
+  })
+
+  it('does not mark a deferral against the market', async () => {
+    const { service, store } = await funded({
+      settle: async () => {
+        throw busy()
+      },
+    })
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).fillPriceMantissa).toBeNull()
+  })
+
+  it('gates on the TYPE, not the message — a plain error reading the same way still sticks', async () => {
+    const { service, store } = await funded({
+      settle: async () => {
+        throw new Error('no spendable coins to pay the maker 1000 sats')
+      },
+    })
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).state).toBe('stuck')
+  })
+
+  it('leaves the row alone when another worker moved it inside the settle', async () => {
+    let moved: (() => Promise<void>) | null = null
+    const built = await funded({
+      settle: async () => {
+        await moved?.()
+        throw busy()
+      },
+    })
+    moved = async () => {
+      await built.store.transition('swap-1', 'filling', 'stuck', { failure_reason: 'another worker' })
+    }
+    await built.service.tick('swap-1')
+    expect(await built.store.get('swap-1')).toMatchObject({ state: 'stuck', failureReason: 'another worker' })
   })
 })
 
