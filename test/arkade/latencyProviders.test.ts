@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RestArkProvider, RestIndexerProvider } from '@arkade-os/sdk'
 import {
   SharedSyncIndexerProvider,
-  TimedOperatorProvider,
+  TimedArkadeProvider,
   TimedIndexerProvider,
   sendPhaseTimings,
   withProviderTimingScope,
@@ -42,7 +42,7 @@ describe('latency providers', () => {
     const failure = new Error('submission response lost')
     vi.spyOn(RestArkProvider.prototype, 'submitTx').mockRejectedValue(failure)
     const output = vi.spyOn(console, 'log').mockImplementation(() => {})
-    const provider = new TimedOperatorProvider('http://localhost')
+    const provider = new TimedArkadeProvider('http://localhost')
 
     setLatencyDiagnostics(true)
     await expect(
@@ -60,7 +60,7 @@ describe('latency providers', () => {
     })
     vi.spyOn(RestArkProvider.prototype, 'finalizeTx').mockResolvedValue(undefined)
     const output = vi.spyOn(console, 'log').mockImplementation(() => {})
-    const provider = new TimedOperatorProvider('http://localhost')
+    const provider = new TimedArkadeProvider('http://localhost')
     const scope = { fundRef: 'swap-ref' }
     setLatencyDiagnostics(true)
 

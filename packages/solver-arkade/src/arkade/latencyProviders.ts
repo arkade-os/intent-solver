@@ -100,7 +100,7 @@ export class TimedIndexerProvider extends SharedSyncIndexerProvider {
   }
 }
 
-export class TimedOperatorProvider extends RestArkProvider {
+export class TimedArkadeProvider extends RestArkProvider {
   override async submitTx(...args: Parameters<RestArkProvider['submitTx']>) {
     const scope = timingScope.getStore()
     if (scope) scope.submitStarted = performance.now()

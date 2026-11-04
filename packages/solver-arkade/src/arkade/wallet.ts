@@ -46,7 +46,7 @@ import { latencyDiagnosticsEnabled } from '@arkade-os/solver-core/util/diagnosti
 import { ensureDatabaseDir } from '@arkade-os/solver-core/util/sqlite.js'
 import type { CovenantSwapScript } from './covenant.js'
 import { virtualTxPages, vtxoPages } from './indexerPaging.js'
-import { SharedSyncIndexerProvider, TimedOperatorProvider, TimedIndexerProvider } from './latencyProviders.js'
+import { SharedSyncIndexerProvider, TimedArkadeProvider, TimedIndexerProvider } from './latencyProviders.js'
 import { createReservationLedger, type ReservationLedger } from './reservations.js'
 
 /** What {@link claimSwapScript} spends; CovenantSwapScript satisfies it. */
@@ -255,7 +255,7 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
   const wallet = await Wallet.create({
     identity,
     arkProvider: latencyDiagnostics
-      ? new TimedOperatorProvider(config.operatorUrl)
+      ? new TimedArkadeProvider(config.operatorUrl)
       : new RestArkProvider(config.operatorUrl),
     // The SDK's own default is a plain `RestIndexerProvider` at this same URL.
     indexerProvider: latencyDiagnostics
