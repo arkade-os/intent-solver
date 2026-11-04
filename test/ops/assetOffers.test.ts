@@ -439,6 +439,22 @@ describe('tickAll', () => {
     expect(await store.findById('fill-1')).toMatchObject({ state: 'filled', fillTxid: '0xfill' })
   })
 
+  it('hands the settle a latch for its own row, and leaves the row latched', async () => {
+    let atSettle: Record<string, unknown> = {}
+    const { store, service } = await build({
+      settle: async (row, options) => {
+        const before = await store.findById(row.id)
+        atSettle = { state: before?.state, phase: before?.fillPhase }
+        expect(await options?.markSubmitting?.()).toBe(true)
+        return '0xfill'
+      },
+    })
+    await service.consider(found)
+    expect(await service.tickAll()).toBe(1)
+    expect(atSettle).toEqual({ state: 'filling', phase: 'selecting' })
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'filled', fillPhase: 'submitting' })
+  })
+
   it('leaves a failed submission stuck, never refused', async () => {
     // `filling` means something may have been submitted; only a human can tell.
     const errors: unknown[] = []

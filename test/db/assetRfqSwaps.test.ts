@@ -13,6 +13,7 @@
 
 import { describe, it, expect } from 'vitest'
 import { AssetRfqSwapStore, type AssetRfqQuoteRecord } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
+import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 
 const ASSET_A = `${'aa'.repeat(32)}0100`
 const ASSET_B = `${'bb'.repeat(32)}0100`
@@ -181,14 +182,35 @@ describe('revertUnsubmitted — the one exception to that edge', () => {
     const store = await open()
     await store.insertQuote(quote())
     await store.transition('swap-1', 'quoted', 'funded')
-    await store.transition('swap-1', 'funded', 'filling')
+    await store.transition('swap-1', 'funded', 'filling', { fill_phase: 'selecting' })
     return store
   }
 
-  it('walks a row whose fill submitted nothing back to funded', async () => {
+  it('walks a row whose fill submitted nothing back to funded, and clears the phase', async () => {
     const store = await filling()
     expect(await store.revertUnsubmitted('swap-1')).toBe(true)
-    expect((await store.get('swap-1')).state).toBe('funded')
+    expect(await store.get('swap-1')).toMatchObject({ state: 'funded', fillPhase: null })
+    await store.close()
+  })
+
+  it('refuses a row whose attempt reached the submission, leaving it filling', async () => {
+    const store = await filling()
+    const stale = await store.get('swap-1')
+    expect(await store.markSubmitting('swap-1')).toBe(true)
+    expect(stale.fillPhase).toBe('selecting')
+    expect(await store.revertUnsubmitted('swap-1')).toBe(false)
+    expect(await store.get('swap-1')).toMatchObject({ state: 'filling', fillPhase: 'submitting' })
+    await store.close()
+  })
+
+  it('refuses a filling row with no phase at all, which an older version left', async () => {
+    const store = await open()
+    await store.insertQuote(quote())
+    await store.transition('swap-1', 'quoted', 'funded')
+    await store.transition('swap-1', 'funded', 'filling')
+    expect((await store.get('swap-1')).fillPhase).toBeNull()
+    expect(await store.revertUnsubmitted('swap-1')).toBe(false)
+    expect((await store.get('swap-1')).state).toBe('filling')
     await store.close()
   })
 
@@ -235,6 +257,89 @@ describe('revertUnsubmitted — the one exception to that edge', () => {
     await store.revertUnsubmitted('swap-1')
     expect(seen).toEqual(['filling->funded'])
     await store.close()
+  })
+})
+
+describe('the fill phase', () => {
+  const claimed = async () => {
+    const store = await open()
+    await store.insertQuote(quote())
+    await store.transition('swap-1', 'quoted', 'funded')
+    await store.transition('swap-1', 'funded', 'filling', { fill_phase: 'selecting' })
+    return store
+  }
+
+  it('stamps selecting on the claim, before anything is selected or sent', async () => {
+    const store = await claimed()
+    expect(await store.get('swap-1')).toMatchObject({ state: 'filling', fillPhase: 'selecting' })
+    await store.close()
+  })
+
+  it('latches a claimed row, and is not a transition', async () => {
+    const store = await claimed()
+    const announced: string[] = []
+    store.onTransition = (event) => void announced.push(`${event.from}->${event.to}`)
+    expect(await store.markSubmitting('swap-1')).toBe(true)
+    expect(await store.get('swap-1')).toMatchObject({ state: 'filling', fillPhase: 'submitting' })
+    expect(announced).toEqual([])
+    expect((await store.history('swap-1')).map((e) => e.to)).toEqual(['quoted', 'funded', 'filling'])
+    await store.close()
+  })
+
+  it('lets only one attempt latch a claim — the model`s NoLatch', async () => {
+    const store = await claimed()
+    await store.revertUnsubmitted('swap-1')
+    await store.transition('swap-1', 'funded', 'filling', { fill_phase: 'selecting' })
+    expect(await store.markSubmitting('swap-1')).toBe(true)
+    expect(await store.markSubmitting('swap-1')).toBe(false)
+    await store.close()
+  })
+
+  it.each(['quoted', 'funded', 'filled', 'refused', 'stuck'] as const)('refuses to latch a %s row', async (state) => {
+    const store = await open()
+    await store.insertQuote(quote())
+    if (state === 'funded') await store.transition('swap-1', 'quoted', 'funded')
+    if (state === 'refused') await store.fail('swap-1', 'quoted', 'declined')
+    if (state === 'filled' || state === 'stuck') {
+      await store.transition('swap-1', 'quoted', 'funded')
+      await store.transition('swap-1', 'funded', 'filling', { fill_phase: 'selecting' })
+      await store.transition('swap-1', 'filling', state)
+    }
+    expect(await store.markSubmitting('swap-1')).toBe(false)
+    expect((await store.get('swap-1')).state).toBe(state)
+    await store.close()
+  })
+
+  it('refuses to latch a filling row with no phase, which an older version left', async () => {
+    const store = await open()
+    await store.insertQuote(quote())
+    await store.transition('swap-1', 'quoted', 'funded')
+    await store.transition('swap-1', 'funded', 'filling')
+    expect(await store.markSubmitting('swap-1')).toBe(false)
+    expect((await store.get('swap-1')).fillPhase).toBeNull()
+    await store.close()
+  })
+
+  it('adds the column to a database that predates it, leaving existing rows NULL', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    await driver.exec(`CREATE TABLE asset_rfq_swap (
+      id TEXT PRIMARY KEY, state TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+      rfq_id TEXT NOT NULL, pair TEXT NOT NULL, from_asset_id TEXT, from_amount TEXT NOT NULL,
+      to_asset_id TEXT, to_amount TEXT NOT NULL, maker_pk_script TEXT NOT NULL, maker_public_key TEXT NOT NULL,
+      offer_pk_script TEXT NOT NULL, offer_address TEXT NOT NULL, solver_pubkey TEXT NOT NULL,
+      valid_until INTEGER NOT NULL, deposit_txid TEXT, deposit_vout INTEGER, fill_txid TEXT, failure_reason TEXT
+    )`)
+    await driver.run(
+      `INSERT INTO asset_rfq_swap (id, state, created_at, updated_at, rfq_id, pair, from_amount, to_amount,
+         maker_pk_script, maker_public_key, offer_pk_script, offer_address, solver_pubkey, valid_until)
+       VALUES ('old', 'filling', 1, 1, 'r', 'p', '1', '2', 'c', 'd', 'e', 'a', 'f', 2000)`,
+    )
+
+    const legacy = await AssetRfqSwapStore.open(driver, () => 1_000)
+    expect(await legacy.get('old')).toMatchObject({ state: 'filling', fillPhase: null })
+    await expect(AssetRfqSwapStore.open(driver, () => 1_000)).resolves.toBeInstanceOf(AssetRfqSwapStore)
+    expect((await legacy.get('old')).fillPhase).toBeNull()
+    await legacy.close()
   })
 })
 

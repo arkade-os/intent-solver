@@ -230,6 +230,76 @@ describe('the asset packet fulfillOffer submits', () => {
     expect(racing.reservations.reserved().size).toBe(0)
   })
 
+  it('latches the row once, and before anything reaches the emulator', async () => {
+    state.arkTx = undefined
+    const at = deposit([{ assetId: ASSET_B, amount: 900n }])
+    const submittedAtLatch: (string | undefined)[] = []
+    const markSubmitting = vi.fn(async () => {
+      submittedAtLatch.push(state.arkTx)
+      return true
+    })
+
+    await fulfillOffer(
+      ctx([fundingCoin(80_000)]),
+      'http://emulator.test',
+      offerFor({ offerAsset: asset.AssetId.fromString(ASSET_B) }),
+      at,
+      { markSubmitting },
+    )
+
+    expect(markSubmitting).toHaveBeenCalledTimes(1)
+    expect(submittedAtLatch).toEqual([undefined])
+    expect(state.arkTx).toBeDefined()
+  })
+
+  it('submits nothing when the latch is lost, and says so retryably', async () => {
+    state.arkTx = undefined
+    const at = deposit([{ assetId: ASSET_B, amount: 900n }])
+    const spending = ctx([fundingCoin(80_000)])
+
+    const outcome = await fulfillOffer(
+      spending,
+      'http://emulator.test',
+      offerFor({ offerAsset: asset.AssetId.fromString(ASSET_B) }),
+      at,
+      { markSubmitting: async () => false },
+    ).then(
+      () => null,
+      (error: unknown) => error,
+    )
+
+    expect(outcome).toBeInstanceOf(OfferNotSubmittedError)
+    expect(state.arkTx).toBeUndefined()
+    expect(spending.reservations.reserved().size).toBe(0)
+  })
+
+  it('leaves a FAILED latch write untyped — a broken database is not a clean refusal', async () => {
+    state.arkTx = undefined
+    const at = deposit([{ assetId: ASSET_B, amount: 900n }])
+    const spending = ctx([fundingCoin(80_000)])
+    const broken = new Error('database is locked')
+
+    const outcome = await fulfillOffer(
+      spending,
+      'http://emulator.test',
+      offerFor({ offerAsset: asset.AssetId.fromString(ASSET_B) }),
+      at,
+      {
+        markSubmitting: async () => {
+          throw broken
+        },
+      },
+    ).then(
+      () => null,
+      (error: unknown) => error,
+    )
+
+    expect(outcome).toBe(broken)
+    expect(outcome).not.toBeInstanceOf(OfferNotSubmittedError)
+    expect(state.arkTx).toBeUndefined()
+    expect(spending.reservations.reserved().size).toBe(0)
+  })
+
   it('leaves a rejection from the submission itself untyped, so no loop can retry it', async () => {
     state.arkTx = undefined
     const at = deposit([{ assetId: ASSET_B, amount: 900n }])

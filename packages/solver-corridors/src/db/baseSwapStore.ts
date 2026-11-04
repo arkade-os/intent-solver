@@ -77,6 +77,15 @@ export const assertColumns = (columns: string[], allowed: ReadonlySet<string>, m
 /** A nullable column; `undefined` (a column this database predates) reads as null too. */
 export const text = (value: unknown): string | null => (value === null || value === undefined ? null : String(value))
 
+/**
+ * How far an attempt holding a mid-fill row has got. `selecting` — it holds the
+ * row and has submitted NOTHING, so a sweep may walk it back. `submitting` — the
+ * fill may have reached arkd. NULL means the claim predates this column and
+ * escalates like `submitting`: a version that could not record the difference
+ * may still have submitted.
+ */
+export type FillPhase = 'selecting' | 'submitting'
+
 export const numberOrNull = (value: unknown): number | null =>
   value === null || value === undefined ? null : Number(value)
 

@@ -50,7 +50,7 @@ import { askApprovalFor, type ApprovalCheck } from '@arkade-os/solver-core/core/
 import { createSerialiser, type Serialiser } from '@arkade-os/solver-core/util/serialise.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
-import { OfferNotSubmittedError } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
+import { OfferNotSubmittedError, type FulfillOptions } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { assetRfqPairFor } from '../wire/assetRfqPayloads.js'
 import { AssetRfqSwapStore, type AssetRfqSwapRow } from '../db/assetRfqSwaps.js'
 
@@ -133,8 +133,9 @@ export interface AssetRfqDeps {
   /** Spendable balance per asset id — `available`, never `total`. */
   balance: () => Promise<ReadonlyMap<AssetLeg, bigint>>
   fetchPrice: (feedUrl: string, pricePath: string) => Promise<Price>
-  /** Spend the deposit through `fulfill`, paying the client. Returns the txid. */
-  settle: (row: AssetRfqSwapRow) => Promise<string>
+  /** Spend the deposit through `fulfill`, paying the client. Returns the txid.
+   * `options.markSubmitting` gates the submission. @see FulfillOptions */
+  settle: (row: AssetRfqSwapRow, options?: FulfillOptions) => Promise<string>
   /** The large-swap approval gate. Absent means no gate. @see ops/approvals.ts */
   approvalGate?: ApprovalCheck
   onError?: (id: string, error: unknown) => void
@@ -451,10 +452,13 @@ export class AssetRfqSwapService {
     // submission leaves a row that says something may be in flight, rather than
     // one that still reads fillable and would be submitted twice.
     // Carrying the outpoint the decision was made ABOUT: the settle spends the RECORDED one.
-    const seen = deposit ? { deposit_txid: deposit.txid, deposit_vout: deposit.vout } : undefined
-    if (!(await this.deps.store.transition(row.id, 'funded', 'filling', seen))) return
+    // `selecting`: nothing is sent yet, which is what makes a walk-back sound.
+    const seen = deposit ? { deposit_txid: deposit.txid, deposit_vout: deposit.vout } : {}
+    if (!(await this.deps.store.transition(row.id, 'funded', 'filling', { ...seen, fill_phase: 'selecting' }))) return
     try {
-      const txid = await this.deps.settle(await this.deps.store.get(row.id))
+      const txid = await this.deps.settle(await this.deps.store.get(row.id), {
+        markSubmitting: () => this.deps.store.markSubmitting(row.id),
+      })
       const filled = await this.deps.store.transition(row.id, 'filling', 'filled', { fill_txid: txid })
       // AFTER the transition, never before. A feed read between `settle` and
       // this CAS would widen the window in which a crash leaves a submitted fill

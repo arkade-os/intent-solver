@@ -436,6 +436,23 @@ describe('tick — driving a negotiation', () => {
     expect((await store.get('swap-1')).failureReason).toMatch(/emulator refused/)
   })
 
+  it('hands the settle a latch for its own row, and leaves the row latched', async () => {
+    let atSettle: Record<string, unknown> = {}
+    const { service, store } = await harness({
+      depositAt: async () => deposit(),
+      settle: async (row, options) => {
+        atSettle = { state: row.state, phase: row.fillPhase }
+        expect(await options?.markSubmitting?.()).toBe(true)
+        return 'fa'.repeat(32)
+      },
+    })
+    await service.quote(request())
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+    expect(atSettle).toEqual({ state: 'filling', phase: 'selecting' })
+    expect(await store.get('swap-1')).toMatchObject({ state: 'filled', fillPhase: 'submitting' })
+  })
+
   it('escalates a row found still filling to stuck rather than resubmitting', async () => {
     // A crash between submitting and recording leaves `filling`. Whether the
     // spend landed is not knowable from here, and guessing either way risks

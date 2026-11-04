@@ -111,6 +111,17 @@ describe('offerSettleFor — the fill it submits', () => {
     expect(deposit).toEqual({ txid: txidOf(raw), vout: 0, value: DEPOSIT_SATS, assetAmount: 900n })
   })
 
+  it('forwards the submission latch, which is what keeps a walk-back sound', async () => {
+    const published = offer()
+    const raw = fundingTx(published)
+    const { settle, fulfill } = build(raw)
+    const options = { markSubmitting: async () => true }
+
+    await settle(intentFor(published, raw), options)
+
+    expect((fulfill.mock.calls[0]! as unknown as unknown[])[4]).toBe(options)
+  })
+
   it('carries no asset amount when the deposit is sats', async () => {
     // `assetAmount` is what vin 0 is DECLARED to hold. A BTC deposit holds no
     // asset, and declaring one would describe an input that does not exist.
