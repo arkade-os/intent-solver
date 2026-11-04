@@ -176,7 +176,7 @@ describe('a registered rail reads its own block of the config document', () => {
     rails: {
       arkade: {
         mnemonic: 'test mnemonic, never a real one',
-        serverUrl: 'http://localhost:7070',
+        operatorUrl: 'http://localhost:7070',
         emulatorUrl: 'http://localhost:7073',
       },
       lightning,

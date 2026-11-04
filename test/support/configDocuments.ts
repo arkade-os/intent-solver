@@ -6,7 +6,7 @@ export const FULL_DOCUMENT = {
   rails: {
     arkade: {
       mnemonic: 'test mnemonic, never a real one',
-      serverUrl: 'http://localhost:7070',
+      operatorUrl: 'http://localhost:7070',
       emulatorUrl: 'http://localhost:7073',
       esploraUrl: 'http://localhost:3000/api',
       unilateralExitDelay: 260096,
@@ -95,7 +95,7 @@ export const FULL_DOCUMENT = {
     adPublish: 'off',
     cardRelays: ['wss://second.example'],
   },
-  storage: { dir: '.data', swapDb: '.data/swaps.sqlite', arkDb: '.data/ark.sqlite' },
+  storage: { dir: '.data', swapDb: '.data/swaps.sqlite', arkadeDb: '.data/ark.sqlite' },
   http: { host: '127.0.0.1', port: 8787 },
   admin: { host: '127.0.0.1', port: 8788, restartEnabled: false },
   sentry: { dsn: 'https://key@o0.ingest.sentry.io/0', environment: 'regtest', release: '1.0.0' },

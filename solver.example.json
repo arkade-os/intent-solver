@@ -5,7 +5,7 @@
   "rails": {
     "arkade": {
       "mnemonic": "<12 or 24 words: this wallet holds the float>",
-      "serverUrl": "https://arkade.computer",
+      "operatorUrl": "https://arkade.computer",
       "emulatorUrl": "https://emulator.example.com",
       "esploraUrl": "https://mempool.arkade.sh/api",
       "unilateralExitDelay": 260096,
@@ -128,7 +128,7 @@
   "storage": {
     "dir": ".data",
     "swapDb": ".data/swaps.sqlite",
-    "arkDb": ".data/ark.sqlite"
+    "arkadeDb": ".data/ark.sqlite"
   },
   "http": {
     "host": "127.0.0.1",
