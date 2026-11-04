@@ -889,6 +889,20 @@ const sendHintScidDenylistFromEnv = (env: Knobs): ReadonlySet<string> => {
   return new Set(entries)
 }
 
+const MAX_SOLVER_NAME_CHARS = 64
+
+const solverNameFromEnv = (env: Knobs): string | null => {
+  const name = env.SOLVER_NAME?.trim()
+  if (!name) return null
+  if (name.length > MAX_SOLVER_NAME_CHARS) {
+    throw new Error(`SOLVER_NAME must be at most ${MAX_SOLVER_NAME_CHARS} characters, got ${name.length}`)
+  }
+  if (/[\p{Cc}*_`~]/u.test(name)) {
+    throw new Error('SOLVER_NAME must not contain Slack formatting characters (*, _, `, ~) or line breaks')
+  }
+  return name
+}
+
 export const configFromKnobs = (env: Knobs): Config => {
   const raw = env.SWAP_NETWORK ?? DEFAULT_NETWORK
   if (!isSwapNetwork(raw)) {
@@ -1054,7 +1068,7 @@ export const configFromKnobs = (env: Knobs): Config => {
     // the VOLUME that declares it — rather than baked into an app default.
     relayHealthPath: env.RELAY_HEALTH_PATH?.trim() || '.data/relay-health',
     sentry: sentryOptionsFromKnobs(env),
-    solverName: env.SOLVER_NAME?.trim() || null,
+    solverName: solverNameFromEnv(env),
     cardRelays: (env.SOLVER_CARD_RELAYS ?? '')
       .split(',')
       .map((relay) => relay.trim())

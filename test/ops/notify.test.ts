@@ -48,13 +48,15 @@ describe('createNotifier', () => {
     expect(sink.sent).toEqual(['*[ln-solver]* ✅ *Swap fulfilled*'])
   })
 
-  it('keeps a tagged message under the cap, and the name from breaking its bold markup', async () => {
+  it('keeps a tagged message under the cap without dropping the event body', async () => {
     const sink = recordingSink()
-    const notifier = createNotifier({ sinks: [sink], sleep: noSleep, label: `ln_*solver\`${'x'.repeat(120)}` })
+    const label = 'ln-solver'.repeat(7)
+    const notifier = createNotifier({ sinks: [sink], sleep: noSleep, label })
     notifier.post('y'.repeat(4000))
     await notifier.flush()
     expect(sink.sent[0]!.length).toBeLessThanOrEqual(4000)
-    expect(sink.sent[0]).toMatch(/^\*\[lnsolverx+\]\* y/)
+    expect(sink.sent[0]).toContain('y'.repeat(3000))
+    expect(sink.sent[0]).toMatch(new RegExp(`^\\*\\[${label}\\]\\* y`))
   })
 
   // The constraint the feature is written against: a hung sink must not stall
