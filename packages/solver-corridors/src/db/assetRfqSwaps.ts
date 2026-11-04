@@ -21,7 +21,8 @@
  * - `quoted`   terms issued; awaiting the client's deposit until `valid_until`
  * - `funded`   a deposit matching the quoted terms is at the offer's script;
  *              NOTHING submitted, and no solver capital is committed yet
- * - `filling`  `fulfill` submitted — the one EXPOSED state
+ * - `filling`  `fulfill` submitted — the one EXPOSED state. One refusal happens
+ *              above the submission; @see AssetRfqSwapStore.revertUnsubmitted
  * - `filled`   the fill landed; the client is paid and the deposit is ours
  * - `refused`  declined, or the quote lapsed unfunded; no exposure ever existed
  * - `stuck`    `fulfill` failed or its outcome is unknown; needs a human
@@ -39,6 +40,7 @@ import { betterSqliteDriver, type SqlDriver } from './driver.js'
 import { BaseSwapStore, addColumns, numberOrNull, type RawRow, type StoreShape } from './baseSwapStore.js'
 import { pageQuery, takePage, type PageOptions, type PageRawFields } from '@arkade-os/solver-core/core/page.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { announceTransition } from '@arkade-os/solver-core/core/businessEvent.js'
 import { clampLedgerLimit, type LedgerWindow } from '@arkade-os/solver-core/analytics/economics.js'
 
 export type AssetRfqSwapState = 'quoted' | 'funded' | 'filling' | 'filled' | 'refused' | 'stuck'
@@ -65,7 +67,8 @@ const LEGAL_EDGES: Record<AssetRfqSwapState, readonly AssetRfqSwapState[]> = {
   funded: ['filling', 'refused'],
   // No edge back to `funded`. Once `fulfill` is submitted its outcome is either
   // known or unknown, and "unknown" is `stuck` — never a retry, which is how a
-  // solver double-spends its own float.
+  // solver double-spends its own float. `revertUnsubmitted` is the one exception
+  // and stays OFF the graph for the reason stated there.
   filling: ['filled', 'stuck'],
   filled: [],
   refused: [],
@@ -462,6 +465,25 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
     const raw = await this.driver.all<Raw & PageRawFields>(sql, params)
     const { page, nextCursor } = takePage(raw, limit)
     return { rows: page.map(toRow), nextCursor }
+  }
+
+  /**
+   * The ONE edge back out of `filling`, and sound only for its one caller: a fill
+   * refused with `OfferNotSubmittedError`, raised above the call that submits.
+   * Compare-and-swap, so a row another worker moved on is left alone. Deliberately
+   * absent from `LEGAL_EDGES`, so the generic `filling -> funded` keeps throwing —
+   * an edge cannot say "only when nothing was sent", so this is reached by name.
+   */
+  async revertUnsubmitted(id: string): Promise<boolean> {
+    const result = await this.driver.run(
+      `UPDATE asset_rfq_swap SET state = 'funded', updated_at = ? WHERE id = ? AND state = 'filling'`,
+      [this.now(), id],
+    )
+    if (result.changes === 1) {
+      await this.recordEvent(id, 'filling', 'funded', null)
+      announceTransition(this.onTransition, id, 'filling', 'funded')
+    }
+    return result.changes === 1
   }
 
   override async fail(id: string, from: AssetRfqSwapState, reason: string): Promise<void> {

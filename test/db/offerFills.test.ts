@@ -167,6 +167,62 @@ describe('OfferFillStore: the lifecycle', () => {
   })
 })
 
+describe('OfferFillStore: the one edge back out of filling', () => {
+  const eventsOf = async (id: string): Promise<string[]> => {
+    const rows = await store.driver.all<{ to_state: string }>(
+      `SELECT to_state FROM offer_fill_event WHERE fill_id = ? ORDER BY id`,
+      [id],
+    )
+    return rows.map((row) => row.to_state)
+  }
+
+  it('walks a row that submitted nothing back to fillable', async () => {
+    const row = await store.insertIntent(baseIntent)
+    await store.transition(row.id, 'fillable', 'filling')
+    expect(await store.revertUnsubmitted(row.id)).toBe(true)
+    expect((await store.findById(row.id))?.state).toBe('fillable')
+  })
+
+  it('records the walk-back as its own event', async () => {
+    const row = await store.insertIntent(baseIntent)
+    await store.transition(row.id, 'fillable', 'filling')
+    await store.revertUnsubmitted(row.id)
+    expect(await eventsOf(row.id)).toEqual(['fillable', 'filling', 'fillable'])
+  })
+
+  it.each<[OfferFillState, readonly OfferFillState[]]>([
+    ['fillable', []],
+    ['filled', ['filling', 'filled']],
+    ['lost', ['lost']],
+    ['refused', ['refused']],
+    ['stuck', ['filling', 'stuck']],
+  ])('is a no-op from %s, so a lost race changes nothing', async (state, path) => {
+    const row = await store.insertIntent(baseIntent)
+    let from: OfferFillState = 'fillable'
+    for (const to of path) {
+      await store.transition(row.id, from, to)
+      from = to
+    }
+    expect(await store.revertUnsubmitted(row.id)).toBe(false)
+    expect((await store.findById(row.id))?.state).toBe(state)
+  })
+
+  it('leaves the generic transition refusing the same edge', async () => {
+    const row = await store.insertIntent(baseIntent)
+    await store.transition(row.id, 'fillable', 'filling')
+    await expect(store.transition(row.id, 'filling', 'fillable')).rejects.toThrow(/illegal transition/)
+  })
+
+  it('announces the walk-back the way every other transition is announced', async () => {
+    const seen: string[] = []
+    store.onTransition = (event) => void seen.push(`${event.id} ${event.from}->${event.to}`)
+    const row = await store.insertIntent(baseIntent)
+    await store.transition(row.id, 'fillable', 'filling')
+    await store.revertUnsubmitted(row.id)
+    expect(seen).toEqual([`${row.id} fillable->filling`, `${row.id} filling->fillable`])
+  })
+})
+
 describe('OfferFillStore: queries', () => {
   it('listNonTerminal() returns exactly the states a tick must resolve', async () => {
     const fillable = await store.insertIntent(baseIntent)

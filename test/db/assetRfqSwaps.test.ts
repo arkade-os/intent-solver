@@ -176,6 +176,63 @@ describe('transition — single-writer CAS over a closed edge set', () => {
   )
 })
 
+describe('revertUnsubmitted — the one exception to that edge', () => {
+  const filling = async () => {
+    const store = await open()
+    await store.insertQuote(quote())
+    await store.transition('swap-1', 'quoted', 'funded')
+    await store.transition('swap-1', 'funded', 'filling')
+    return store
+  }
+
+  it('walks a row whose fill submitted nothing back to funded', async () => {
+    const store = await filling()
+    expect(await store.revertUnsubmitted('swap-1')).toBe(true)
+    expect((await store.get('swap-1')).state).toBe('funded')
+    await store.close()
+  })
+
+  it('records the walk-back as its own event', async () => {
+    const store = await filling()
+    await store.revertUnsubmitted('swap-1')
+    expect((await store.history('swap-1')).map((e) => e.to)).toEqual(['quoted', 'funded', 'filling', 'funded'])
+    await store.close()
+  })
+
+  it.each(['quoted', 'funded', 'filled', 'refused', 'stuck'] as const)(
+    'is a no-op from %s, so a lost race changes nothing',
+    async (state) => {
+      const store = await open()
+      await store.insertQuote(quote())
+      if (state === 'funded') await store.transition('swap-1', 'quoted', 'funded')
+      if (state === 'refused') await store.fail('swap-1', 'quoted', 'declined')
+      if (state === 'filled' || state === 'stuck') {
+        await store.transition('swap-1', 'quoted', 'funded')
+        await store.transition('swap-1', 'funded', 'filling')
+        await store.transition('swap-1', 'filling', state)
+      }
+      expect(await store.revertUnsubmitted('swap-1')).toBe(false)
+      expect((await store.get('swap-1')).state).toBe(state)
+      await store.close()
+    },
+  )
+
+  it('leaves the generic transition refusing the same edge', async () => {
+    const store = await filling()
+    await expect(store.transition('swap-1', 'filling', 'funded')).rejects.toThrow(/illegal transition/)
+    await store.close()
+  })
+
+  it('announces the walk-back the way every other transition is announced', async () => {
+    const store = await filling()
+    const seen: string[] = []
+    store.onTransition = (event) => void seen.push(`${event.from}->${event.to}`)
+    await store.revertUnsubmitted('swap-1')
+    expect(seen).toEqual(['filling->funded'])
+    await store.close()
+  })
+})
+
 describe('fail — routed by exposure, which is what an operator acts on', () => {
   it('sends an unfunded quote to refused, because nothing was ever at stake', async () => {
     const store = await open()

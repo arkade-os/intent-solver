@@ -23,7 +23,8 @@
  * Lifecycle, forward-only:
  *
  * - `fillable`  we decided to fill and recorded the intent; NOTHING submitted
- * - `filling`   `fulfill` submitted; the spend is not yet observed
+ * - `filling`   `fulfill` submitted; the spend is not yet observed. One refusal
+ *               happens above the submission; @see OfferFillStore.revertUnsubmitted
  * - `filled`    the spend confirmed and `classifySpend` read it as a fill
  * - `lost`      the offer output was spent by someone else, or cancelled by its
  *               funder — either way it is gone and this service committed
@@ -50,6 +51,8 @@ const LEGAL_EDGES: Record<OfferFillState, readonly OfferFillState[]> = {
   // `lost` from `fillable` too: an offer can be filled by another solver or
   // cancelled by its funder between the decision and the submission.
   fillable: ['filling', 'refused', 'lost'],
+  // Never `fillable`: everything that reached `filling` may have spent. The one
+  // exception, `revertUnsubmitted`, stays off the graph for the reason stated there.
   filling: ['filled', 'lost', 'stuck'],
   filled: [],
   lost: [],
@@ -305,6 +308,25 @@ export class OfferFillStore {
     if (result.changes === 1) {
       await this.recordEvent(id, from, to, null)
       announceTransition(this.onTransition, id, from, to)
+    }
+    return result.changes === 1
+  }
+
+  /**
+   * The ONE edge back out of `filling`, and sound only for its one caller: a fill
+   * refused with `OfferNotSubmittedError`, raised above the call that submits.
+   * Compare-and-swap, so a row another worker moved on is left alone. Deliberately
+   * absent from `LEGAL_EDGES`, so the generic `filling -> fillable` keeps throwing —
+   * an edge cannot say "only when nothing was sent", so this is reached by name.
+   */
+  async revertUnsubmitted(id: string): Promise<boolean> {
+    const result = await this.driver.run(
+      `UPDATE offer_fill SET state = 'fillable', updated_at = ? WHERE id = ? AND state = 'filling'`,
+      [this.now(), id],
+    )
+    if (result.changes === 1) {
+      await this.recordEvent(id, 'filling', 'fillable', null)
+      announceTransition(this.onTransition, id, 'filling', 'fillable')
     }
     return result.changes === 1
   }
