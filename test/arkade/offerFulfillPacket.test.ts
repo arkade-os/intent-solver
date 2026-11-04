@@ -16,6 +16,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { base64, hex } from '@scure/base'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { fulfillOffer } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
+import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 
 const state = vi.hoisted(() => ({
@@ -86,6 +87,7 @@ const ctx = (spendable: unknown[]): ArkadeContext =>
     },
     identity,
     arkServerUrl: 'http://ark',
+    reservations: createReservationLedger(),
   }) as unknown as ArkadeContext
 
 let minted = 0
