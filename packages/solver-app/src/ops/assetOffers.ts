@@ -389,6 +389,8 @@ export class AssetOfferService {
     const rows = await this.deps.store.listNonTerminal()
     const live = new Set(rows.map((row) => row.id))
     for (const id of this.deferrals.keys()) if (!live.has(id)) this.deferrals.delete(id)
+    // Serialised ticks, so a `filling` row here is no attempt of ours: a restart left it.
+    for (const row of rows) if (row.state === 'filling') await this.recoverFilling(row)
     for (const row of rows) {
       if (row.state !== 'fillable') continue
       // BEFORE the CAS: `fillable` has an edge to `refused` and `filling` has
@@ -432,6 +434,20 @@ export class AssetOfferService {
       }
     }
     return filled
+  }
+
+  /**
+   * A row left `filling` by a process that is gone. Only `selecting` walks back;
+   * `submitting` and NULL may both have reached arkd. @see FillPhase
+   */
+  private async recoverFilling(row: OfferFillRow): Promise<void> {
+    if (row.fillPhase === 'selecting') {
+      await this.deps.store.revertUnsubmitted(row.id)
+      return
+    }
+    const error = new Error('fill outcome unknown after restart; check the offer address')
+    this.deps.onError?.(row.id, error)
+    await this.deps.store.fail(row.id, 'filling', error.message)
   }
 
   async close(): Promise<void> {

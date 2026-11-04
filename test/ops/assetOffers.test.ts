@@ -479,6 +479,40 @@ describe('tickAll', () => {
   })
 })
 
+describe('tickAll recovers a row a restart left filling', () => {
+  const crashed = async (phase: 'selecting' | 'submitting' | null) => {
+    const settle = vi.fn(async () => '0xfill')
+    const errors: { id: string; error: unknown }[] = []
+    const built = await build({ settle, onError: (id, error) => void errors.push({ id, error }) })
+    await built.service.consider(found)
+    // What a crash between the claim and the walk-back leaves; NULL predates the column.
+    await built.store.transition('fill-1', 'fillable', 'filling', phase === null ? {} : { fill_phase: phase })
+    return { ...built, settle, errors }
+  }
+
+  it('walks a selecting row back, then fills it on the next sweep exactly once', async () => {
+    const { store, service, settle, errors } = await crashed('selecting')
+    expect(await service.tickAll()).toBe(0)
+    expect(settle).not.toHaveBeenCalled()
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'fillable', fillPhase: null })
+
+    expect(await service.tickAll()).toBe(1)
+    expect(settle).toHaveBeenCalledTimes(1)
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'filled', fillTxid: '0xfill' })
+    expect(errors).toEqual([])
+  })
+
+  it.each(['submitting', null] as const)('parks a %s row stuck — its fill may have landed', async (phase) => {
+    const { store, service, settle, errors } = await crashed(phase)
+    expect(await service.tickAll()).toBe(0)
+    expect(settle).not.toHaveBeenCalled()
+    const row = await store.findById('fill-1')
+    expect(row).toMatchObject({ state: 'stuck', fillTxid: null })
+    expect(row!.failureReason).toMatch(/fill outcome unknown after restart/)
+    expect(errors).toHaveLength(1)
+  })
+})
+
 describe('tickAll defers a fill the float cannot fund yet', () => {
   const pinned = async (over: Partial<AssetOfferDeps> = {}) => {
     let busy = true

@@ -453,6 +453,25 @@ describe('tick — driving a negotiation', () => {
     expect(await store.get('swap-1')).toMatchObject({ state: 'filled', fillPhase: 'submitting' })
   })
 
+  it('walks a row a restart left mid-selection back to funded', async () => {
+    const { service, store, settled } = await harness({ depositAt: async () => deposit() })
+    await service.quote(request())
+    await service.tick('swap-1')
+    await store.transition('swap-1', 'funded', 'filling', { fill_phase: 'selecting' })
+    await service.tick('swap-1')
+    expect(settled).toEqual([])
+    expect(await store.get('swap-1')).toMatchObject({ state: 'funded', fillPhase: null })
+  })
+
+  it('still escalates a row whose attempt reached the submission', async () => {
+    const { service, store } = await harness({ depositAt: async () => deposit() })
+    await service.quote(request())
+    await service.tick('swap-1')
+    await store.transition('swap-1', 'funded', 'filling', { fill_phase: 'submitting' })
+    await service.tick('swap-1')
+    expect(await store.get('swap-1')).toMatchObject({ state: 'stuck' })
+  })
+
   it('escalates a row found still filling to stuck rather than resubmitting', async () => {
     // A crash between submitting and recording leaves `filling`. Whether the
     // spend landed is not knowable from here, and guessing either way risks

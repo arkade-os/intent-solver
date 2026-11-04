@@ -521,15 +521,20 @@ export class AssetRfqSwapService {
   }
 
   /**
-   * A row found still `filling` is one whose submission outcome is unknown —
-   * this process restarted mid-fill.
+   * A row found still `filling` is one this process restarted mid-fill: ticks
+   * are serialised, so no attempt of this process is in flight here.
    *
-   * Escalated to `stuck` rather than resubmitted. Whether the earlier
+   * `selecting` walks back to `funded`; the next tick re-runs § 9's gate over it.
+   * Anything else is escalated to `stuck` rather than resubmitted. Whether the earlier
    * `fulfill` landed is not answerable from here, and guessing "it did not"
    * pays the client twice out of this solver's float. § 8's stuck-over-silence
    * is exactly this case: exposure exists and progress needs a human.
    */
   private async whenFilling(row: AssetRfqSwapRow): Promise<void> {
+    if (row.fillPhase === 'selecting') {
+      await this.deps.store.revertUnsubmitted(row.id)
+      return
+    }
     await this.deps.store.fail(row.id, 'filling', 'fill outcome unknown after restart; check the offer address')
   }
 }
