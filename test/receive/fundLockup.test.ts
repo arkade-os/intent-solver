@@ -157,6 +157,42 @@ describe('fundLockup — what it proves about submission', () => {
     })
   })
 
+  it('never lets two parallel fundings select the same coin', async () => {
+    const reservations = createReservationLedger()
+    let entered = 0
+    let open: () => void = () => {}
+    // Both fundings reach the selection together, so the second can only miss the
+    // first's coin if the pin lands in the same turn as the selection that chose it.
+    const barrier = new Promise<void>((resolve) => (open = resolve))
+    let sendCalls = 0
+    const ctx = {
+      reservations,
+      dustSats: 330n,
+      vtxoMinSats: 330n,
+      wallet: {
+        getSpendableVtxos: async () => {
+          entered += 1
+          if (entered === 2) open()
+          await barrier
+          return [coin(50_000)]
+        },
+        send: async () => {
+          sendCalls += 1
+          return 'ark-txid'
+        },
+      },
+    } as unknown as ArkadeContext
+
+    const results = await Promise.allSettled([fundLockup(ctx, ADDRESS, 50_000), fundLockup(ctx, ADDRESS, 50_000)])
+
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1)
+    const refused = results.filter((r) => r.status === 'rejected')
+    expect(refused).toHaveLength(1)
+    expect((refused[0] as PromiseRejectedResult).reason).toBeInstanceOf(FundNotSubmittedError)
+    expect(sendCalls).toBe(1)
+    expect(reservations.reserved().size).toBe(0)
+  })
+
   it('gives separate funding attempts to the same address distinct timing references', async () => {
     const output = vi.spyOn(console, 'log').mockImplementation(() => {})
     try {
