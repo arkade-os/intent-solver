@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RestArkProvider, RestIndexerProvider } from '@arkade-os/sdk'
 import {
   SharedSyncIndexerProvider,
-  TimedArkProvider,
+  TimedOperatorProvider,
   TimedIndexerProvider,
   sendPhaseTimings,
   withProviderTimingScope,
@@ -42,7 +42,7 @@ describe('latency providers', () => {
     const failure = new Error('submission response lost')
     vi.spyOn(RestArkProvider.prototype, 'submitTx').mockRejectedValue(failure)
     const output = vi.spyOn(console, 'log').mockImplementation(() => {})
-    const provider = new TimedArkProvider('http://localhost')
+    const provider = new TimedOperatorProvider('http://localhost')
 
     setLatencyDiagnostics(true)
     await expect(
@@ -60,7 +60,7 @@ describe('latency providers', () => {
     })
     vi.spyOn(RestArkProvider.prototype, 'finalizeTx').mockResolvedValue(undefined)
     const output = vi.spyOn(console, 'log').mockImplementation(() => {})
-    const provider = new TimedArkProvider('http://localhost')
+    const provider = new TimedOperatorProvider('http://localhost')
     const scope = { fundRef: 'swap-ref' }
     setLatencyDiagnostics(true)
 
@@ -74,7 +74,7 @@ describe('latency providers', () => {
     expect(phases.submitMs).toBeGreaterThanOrEqual(0)
     expect(phases.finalizeMs).toBeGreaterThanOrEqual(0)
     expect(phases.afterFinalizeMs).toBeGreaterThanOrEqual(0)
-    expect(output.mock.calls.some((call) => call.join(' ').includes('ark_finalize_timing'))).toBe(true)
+    expect(output.mock.calls.some((call) => call.join(' ').includes('arkade_finalize_timing'))).toBe(true)
     expect(output.mock.calls.at(-1)?.join(' ')).toContain('"fundRef":"swap-ref"')
   })
 })

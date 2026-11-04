@@ -15,7 +15,7 @@ import { parseAssetRfqTokens } from '../ops/assetRfqMarkets.js'
 import { lightningRailFor } from '../ops/rails.js'
 import { redactMnemonics, SECRET_KEY } from '../ops/sentry.js'
 import { DECIMAL, documentSchema, type SolverDocument } from './document.js'
-import { BTC_FAMILY, CORRIDOR_FIELDS, corridorKnob, EVM_FIELDS, PATHS, SECRET_KNOBS } from './knobs.js'
+import { BTC_FAMILY, CORRIDOR_FIELDS, corridorKnob, EVM_FIELDS, legacyEnvName, PATHS, SECRET_KNOBS } from './knobs.js'
 import { legacyEnvNames, loadConfig, type LoadOptions } from './load.js'
 
 /** The two legs of a stored market row; null is BTC. */
@@ -77,7 +77,7 @@ export const envToDocument = (
   }
 
   for (const [path, knob, encode] of PATHS) {
-    const raw = read(knob)
+    const raw = read(legacyEnvName(knob))
     if (raw === undefined) continue
     const segments = path.split('.')
     setAt(doc, segments, encode ? encode(true) === raw : decodeAt(segments, raw))

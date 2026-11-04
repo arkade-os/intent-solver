@@ -18,7 +18,7 @@ const config = {
   relayProtocol: 'nostr',
   openRfqMaxBidsPerMinute: 30,
   emulatorUrl: 'http://emulator.test',
-  arkade: { arkServerUrl: 'http://ark.test', databasePath: '.data/ark.sqlite' },
+  arkade: { operatorUrl: 'http://arkade.test', databasePath: '.data/ark.sqlite' },
   limits: { minSats: 1_000, maxSats: 100_000 },
   maxExposedSats: 300_000,
   corridorLimits: {
@@ -68,12 +68,12 @@ describe('the editable key set', () => {
     // The console has no authentication of its own, so an editable path knob
     // would let whatever reaches that port relocate the money-critical database.
     for (const key of [
-      'ARK_MNEMONIC',
+      'ARKADE_MNEMONIC',
       'LN_MNEMONIC',
       'SWAP_DB_PATH',
-      'ARK_DB_PATH',
+      'ARKADE_DB_PATH',
       'DB_DIR',
-      'ARK_SERVER_URL',
+      'ARKADE_OPERATOR_URL',
       'LN_BACKEND',
     ]) {
       expect(editableKeys()).not.toContain(key)
@@ -191,7 +191,7 @@ describe('corridor toggles', () => {
 
 describe('non-editable keys', () => {
   it('refuses anything outside the editable set', () => {
-    expect(() => validateOverride(config, 'ARK_MNEMONIC', 'hunter2')).toThrow(/not editable/i)
+    expect(() => validateOverride(config, 'ARKADE_MNEMONIC', 'hunter2')).toThrow(/not editable/i)
     expect(() => validateOverride(config, 'LN_BACKEND', 'lnd')).toThrow(/not editable/i)
   })
 
@@ -259,7 +259,7 @@ describe('describeSettings', () => {
     // question the console has to be able to answer on its own.
     const knobs = describeSettings(config, {})
     expect(knobs.find((k) => k.key === 'SWAP_DB_PATH')?.value).toBe('.data/swaps.sqlite')
-    expect(knobs.find((k) => k.key === 'ARK_DB_PATH')?.value).toBe('.data/ark.sqlite')
+    expect(knobs.find((k) => k.key === 'ARKADE_DB_PATH')?.value).toBe('.data/ark.sqlite')
   })
 })
 

@@ -1,5 +1,5 @@
 /**
- * The asset packet `fulfillOffer` actually submits, read back off the ark tx.
+ * The asset packet `fulfillOffer` actually submits, read back off the Arkade transaction.
  *
  * These assertions used to hold against this repo's own `buildAssetPacket`.
  * That builder is gone — the spend is the SDK's `fillOffer` now — so they hold
@@ -85,7 +85,7 @@ const ctx = (spendable: unknown[]): ArkadeContext =>
       getContractManager: async () => null,
     },
     identity,
-    arkServerUrl: 'http://ark',
+    operatorUrl: 'http://arkade',
   }) as unknown as ArkadeContext
 
 let minted = 0
@@ -136,7 +136,7 @@ const groupIds = (packet: unknown): string[] =>
  * mismatch as two separate failures. Throws rather than dereferencing an absent
  * tx, so "the fill never reached the emulator" says so. */
 const packetGroups = (): string[] => {
-  if (state.arkTx === undefined) throw new Error('no ark tx reached the emulator: the fill did not submit')
+  if (state.arkTx === undefined) throw new Error('no Arkade transaction reached the emulator: the fill did not submit')
   return groupIds(Extension.fromTx(Transaction.fromPSBT(base64.decode(state.arkTx))).getAssetPacket())
 }
 

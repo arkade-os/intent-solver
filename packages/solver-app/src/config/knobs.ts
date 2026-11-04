@@ -1,10 +1,11 @@
 /**
  * The config document, flattened to the setting ids `config.ts` reads.
  *
- * The ids are the environment variable names the solver used before the
+ * The ids are mostly the environment variable names the solver used before the
  * document existed. They stay the internal vocabulary because `config.ts`
  * validates by them and console overrides are stored under them; `pathOf`
- * maps each one back to where an operator wrote it.
+ * maps each one back to where an operator wrote it. `legacyEnvName` holds the
+ * few that no longer match.
  */
 import { ALL_DESCRIPTORS } from '@arkade-os/solver-corridors/corridors/index.js'
 import type { Knobs } from '../config.js'
@@ -20,14 +21,25 @@ export interface Flattened {
 
 type Row = readonly [path: string, knob: string, encode?: (value: unknown) => string]
 
+/** Ids renamed since the old `.env` files were written. Only `config-from-env` and the startup refusal read these. */
+const LEGACY_ENV_NAMES: Readonly<Record<string, string>> = {
+  ARKADE_MNEMONIC: 'ARK_MNEMONIC',
+  ARKADE_OPERATOR_URL: 'ARK_SERVER_URL',
+  ARKADE_ESPLORA_URL: 'ARK_ESPLORA_URL',
+  ARKADE_UNILATERAL_EXIT_DELAY: 'ARK_UNILATERAL_EXIT_DELAY',
+  ARKADE_DB_PATH: 'ARK_DB_PATH',
+}
+
+export const legacyEnvName = (knob: string): string => LEGACY_ENV_NAMES[knob] ?? knob
+
 export const PATHS: readonly Row[] = [
   ['network', 'SWAP_NETWORK'],
   ['name', 'SOLVER_NAME'],
-  ['rails.arkade.mnemonic', 'ARK_MNEMONIC'],
-  ['rails.arkade.operatorUrl', 'ARK_SERVER_URL'],
+  ['rails.arkade.mnemonic', 'ARKADE_MNEMONIC'],
+  ['rails.arkade.operatorUrl', 'ARKADE_OPERATOR_URL'],
   ['rails.arkade.emulatorUrl', 'EMULATOR_URL'],
-  ['rails.arkade.esploraUrl', 'ARK_ESPLORA_URL'],
-  ['rails.arkade.unilateralExitDelay', 'ARK_UNILATERAL_EXIT_DELAY'],
+  ['rails.arkade.esploraUrl', 'ARKADE_ESPLORA_URL'],
+  ['rails.arkade.unilateralExitDelay', 'ARKADE_UNILATERAL_EXIT_DELAY'],
   ['rails.arkade.covclaimdUrl', 'COVCLAIMD_URL'],
   ['rails.arkade.poolAutoMint', 'POOL_AUTO_MINT'],
   ['rails.arkade.contractRetentionDays', 'CONTRACT_RETENTION_DAYS'],
@@ -63,7 +75,7 @@ export const PATHS: readonly Row[] = [
   ['relay.cardRelays', 'SOLVER_CARD_RELAYS'],
   ['storage.dir', 'DB_DIR'],
   ['storage.swapDb', 'SWAP_DB_PATH'],
-  ['storage.arkadeDb', 'ARK_DB_PATH'],
+  ['storage.arkadeDb', 'ARKADE_DB_PATH'],
   ['http.host', 'HOST'],
   ['http.port', 'PORT'],
   ['admin.host', 'ADMIN_HOST'],
@@ -266,7 +278,7 @@ export const documentToKnobs = (doc: SolverDocument): Flattened => {
 
 /** Settings whose value is a credential: an error naming one never repeats what was written. */
 export const SECRET_KNOBS: ReadonlySet<string> = new Set([
-  'ARK_MNEMONIC',
+  'ARKADE_MNEMONIC',
   'LND_CERT',
   'LND_MACAROON',
   'EVM_PRIVATE_KEY',

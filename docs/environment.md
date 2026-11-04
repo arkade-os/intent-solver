@@ -9,7 +9,7 @@ is buildable and testable, and each was a surprise.
 The receive leg's covenant does not live in a program artifact. It is built
 inside the SDK by passing `nonInteractiveClaim: { receiverPkScript,
 emulatorPubkey }` to `VHTLC.Script`, which adds a seventh leaf: the preimage
-condition plus a 2-of-2 of `[arkServer, tweak(emulatorPubkey, enforcePayTo)]`.
+condition plus a 2-of-2 of `[operator, tweak(emulatorPubkey, enforcePayTo)]`.
 
 `enforcePayTo` is the covenant that makes the claim safe to hand to a third
 party — it pins the output script to the receiver's taproot key and requires the
@@ -98,7 +98,7 @@ send, but each is a real edge an operator must know before scaling.
 
 - **The Arkade server's countersigning power is verified, not trusted.** A claim
   needs the server, but the checkpoint PSBTs it returns are txid-matched against
-  the locally built ones before anything is signed (and the returned ark txid must
+  the locally built ones before anything is signed (and the returned Arkade txid must
   equal the submitted transaction's), so a forged response cannot harvest the
   provider's signature or the preimage. Censorship remains the server's only
   leverage — the previous bullet.

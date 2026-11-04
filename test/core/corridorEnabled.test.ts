@@ -25,8 +25,8 @@ import { descriptorFor } from '@arkade-os/solver-corridors/corridors/index.js'
 const STEMS = CORRIDORS.map((c) => descriptorFor(c).envStem)
 const CONFIG_KEYS = [
   'SWAP_NETWORK',
-  'ARK_MNEMONIC',
-  'ARK_SERVER_URL',
+  'ARKADE_MNEMONIC',
+  'ARKADE_OPERATOR_URL',
   'EMULATOR_URL',
   'LN_BACKEND',
   ...STEMS.map((s) => `${s}_ENABLED`),
@@ -34,8 +34,8 @@ const CONFIG_KEYS = [
 
 const BASE_ENV: Record<string, string> = {
   SWAP_NETWORK: 'regtest',
-  ARK_MNEMONIC: 'test mnemonic, never a real one',
-  ARK_SERVER_URL: 'http://localhost:7070',
+  ARKADE_MNEMONIC: 'test mnemonic, never a real one',
+  ARKADE_OPERATOR_URL: 'http://localhost:7070',
   EMULATOR_URL: 'http://localhost:7073',
   // Kept set even where every corridor is disabled below: that is the one
   // combination in which `loadConfig` would ALSO accept no rail, and this file

@@ -22,7 +22,7 @@
 // other parameter of the script is yours, so a wrong or malicious solver can
 // only produce an address you refuse, never an address that traps your sats.
 //
-// Env: ARK_MNEMONIC, ARK_SERVER_URL, EMULATOR_URL (your own view of both
+// Env: ARKADE_MNEMONIC, ARKADE_OPERATOR_URL, EMULATOR_URL (your own view of both
 // services — never taken from the provider), SWAP_NETWORK.
 
 import { createArkadeContext } from '../packages/solver-app/dist/index.js'
@@ -49,7 +49,7 @@ try {
     onEvent: (name, data) => {
       if (name === 'decoded') console.log(`sending ${data.amountSats} sats to payment hash ${data.paymentHash}`)
       if (name === 'verified') console.log(`derivation matches solver's address: ${data.address}`)
-      if (name === 'funded') console.log(`funded ${data.amountSats} sats at own derivation, arkTxid ${data.fundTxid}`)
+      if (name === 'funded') console.log(`funded ${data.amountSats} sats at own derivation, arkadeTxid ${data.fundTxid}`)
     },
   })
 } catch (error) {

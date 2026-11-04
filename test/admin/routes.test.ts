@@ -34,7 +34,7 @@ const fakeServices = (over: Record<string, unknown> = {}) => {
     network: 'regtest',
     lnBackend: 'fake',
     emulatorUrl: 'http://emulator.test',
-    arkade: { arkServerUrl: 'http://ark.test' },
+    arkade: { operatorUrl: 'http://arkade.test' },
     maxExposedSats: 300_000,
     // The global outer bound each corridor is narrowed from. Present on the
     // real Config, so a double without it reads `undefined.maxSats` and 500s

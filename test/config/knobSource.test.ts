@@ -1,12 +1,12 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import { arkDbPath, configFromKnobs, sentryOptionsFromKnobs, swapDbPath } from '@arkade-os/solver-app/config.js'
+import { arkadeDbPath, configFromKnobs, sentryOptionsFromKnobs, swapDbPath } from '@arkade-os/solver-app/config.js'
 import { latencyDiagnosticsEnabled, setLatencyDiagnostics } from '@arkade-os/solver-core/util/diagnostics.js'
 import { createServicesBody } from '../support/createServicesBody.js'
 
 const minimalRegtestKnobs = {
   SWAP_NETWORK: 'regtest',
-  ARK_MNEMONIC: 'test mnemonic, never a real one',
-  ARK_SERVER_URL: 'http://localhost:7070',
+  ARKADE_MNEMONIC: 'test mnemonic, never a real one',
+  ARKADE_OPERATOR_URL: 'http://localhost:7070',
   EMULATOR_URL: 'http://localhost:7073',
   LN_BACKEND: 'fake',
 }
@@ -68,7 +68,7 @@ describe('configFromKnobs', () => {
 
   it('resolves database paths and Sentry from the knobs too', () => {
     expect(swapDbPath({ DB_DIR: '/data' })).toMatch(/^[\\/]data[\\/]swaps\.sqlite$/)
-    expect(arkDbPath({ ARK_DB_PATH: '/w/ark.sqlite' })).toBe('/w/ark.sqlite')
+    expect(arkadeDbPath({ ARKADE_DB_PATH: '/w/ark.sqlite' })).toBe('/w/ark.sqlite')
     expect(sentryOptionsFromKnobs({})).toBeNull()
   })
 })

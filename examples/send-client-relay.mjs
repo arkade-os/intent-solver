@@ -10,7 +10,7 @@
 // on-chain and claims; this client watches the vtxo disappear as its
 // completion signal (an rfq_status_request over the relay also works).
 //
-// Env: this client's own ARK_MNEMONIC / ARK_SERVER_URL / EMULATOR_URL /
+// Env: this client's own ARKADE_MNEMONIC / ARKADE_OPERATOR_URL / EMULATOR_URL /
 // SWAP_NETWORK — its own view of every service, never taken from the solver.
 
 import { hex } from '@scure/base'
@@ -56,7 +56,7 @@ try {
     bolt11,
     onEvent: (name, data) => {
       if (name === 'decoded') console.log(`sending ${data.amountSats} sats, payment hash ${data.paymentHash}`)
-      if (name === 'funded') console.log(`funded ${data.amountSats} sats at own derivation, arkTxid ${data.fundTxid}`)
+      if (name === 'funded') console.log(`funded ${data.amountSats} sats at own derivation, arkadeTxid ${data.fundTxid}`)
     },
   })
 } catch (error) {

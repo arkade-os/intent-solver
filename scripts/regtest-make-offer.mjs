@@ -37,7 +37,7 @@ console.log(
 
 // Deposit sats, want an asset — the direction that needs no asset inventory to
 // publish, so it works on any funded regtest wallet.
-const offer = await createOffer(arkade.wallet, config.arkade.arkServerUrl, {
+const offer = await createOffer(arkade.wallet, config.arkade.operatorUrl, {
   wantAmount,
   wantAsset: asset.AssetId.fromString(wantAssetId),
 })

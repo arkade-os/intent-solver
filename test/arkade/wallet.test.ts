@@ -29,7 +29,7 @@ interface AssetGroupView {
 // refundSwapScript constructs RestEmulatorProvider itself (not injected), so
 // the only way to intercept the submitted PSBTs without changing production
 // code is a module mock — scoped to this file only.
-const submitTx = vi.fn(async (arkTxB64: string, _checkpointsB64: string[]) => ({ signedArkTx: arkTxB64 }))
+const submitTx = vi.fn(async (arkadeTxB64: string, _checkpointsB64: string[]) => ({ signedArkTx: arkadeTxB64 }))
 vi.mock('@arkade-os/sdk', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@arkade-os/sdk')>()
   return {
@@ -207,8 +207,8 @@ describe('refundSwapScript', () => {
       funded,
       DEST,
     )
-    const [arkTxB64] = submitTx.mock.calls[0] as [string, string[]]
-    const arkTx = Transaction.fromPSBT(base64.decode(arkTxB64))
+    const [arkadeTxB64] = submitTx.mock.calls[0] as [string, string[]]
+    const arkTx = Transaction.fromPSBT(base64.decode(arkadeTxB64))
     const fieldsA = getArkPsbtFields(arkTx, 0, PrevArkTxField)
     const fieldsB = getArkPsbtFields(arkTx, 1, PrevArkTxField)
     expect(fieldsA).toHaveLength(1)
@@ -248,16 +248,16 @@ describe('refundWithoutReceiverSwapScript', () => {
       },
     })
 
-  const arkSubmitTx = vi.fn(async (arkTxB64: string, checkpointsB64: string[]) => ({
-    arkTxid: Transaction.fromPSBT(base64.decode(arkTxB64)).id,
-    finalArkTx: await cosign(arkTxB64),
+  const arkadeSubmitTx = vi.fn(async (arkadeTxB64: string, checkpointsB64: string[]) => ({
+    arkTxid: Transaction.fromPSBT(base64.decode(arkadeTxB64)).id,
+    finalArkTx: await cosign(arkadeTxB64),
     signedCheckpointTxs: await Promise.all(checkpointsB64.map(cosign)),
   }))
-  const arkFinalizeTx = vi.fn(async (_arkTxid: string, _checkpointsB64: string[]) => undefined)
-  const arkCtx = (): ArkadeContext =>
+  const arkadeFinalizeTx = vi.fn(async (_arkTxid: string, _checkpointsB64: string[]) => undefined)
+  const arkadeCtx = (): ArkadeContext =>
     ({
       identity: receiverIdentity,
-      wallet: { serverUnrollScript, arkProvider: { submitTx: arkSubmitTx, finalizeTx: arkFinalizeTx } },
+      wallet: { serverUnrollScript, arkProvider: { submitTx: arkadeSubmitTx, finalizeTx: arkadeFinalizeTx } },
     }) as unknown as ArkadeContext
 
   afterEach(() => {
@@ -265,10 +265,10 @@ describe('refundWithoutReceiverSwapScript', () => {
   })
 
   it('spends the refundWithoutReceiver leaf, not the receiver-dependent refund leaf', async () => {
-    arkSubmitTx.mockClear()
-    await refundWithoutReceiverSwapScript(arkCtx(), receiveLegScript(), FUNDED, DEST)
-    const [arkTxB64] = arkSubmitTx.mock.calls[0] as [string, string[]]
-    const leaf = Transaction.fromPSBT(base64.decode(arkTxB64)).getInput(0).tapLeafScript!
+    arkadeSubmitTx.mockClear()
+    await refundWithoutReceiverSwapScript(arkadeCtx(), receiveLegScript(), FUNDED, DEST)
+    const [arkadeTxB64] = arkadeSubmitTx.mock.calls[0] as [string, string[]]
+    const leaf = Transaction.fromPSBT(base64.decode(arkadeTxB64)).getInput(0).tapLeafScript!
     // A PSBT's tapLeafScript entry is `script || leafVersion`, so drop the
     // trailing version byte (0xc0) before comparing against the raw script.
     // This is the assertion that fails if the wiring ever falls back to
@@ -280,100 +280,100 @@ describe('refundWithoutReceiverSwapScript', () => {
 
   it('never contacts the emulator: this leaf carries no covenant to co-sign', async () => {
     submitTx.mockClear()
-    await refundWithoutReceiverSwapScript(arkCtx(), receiveLegScript(), FUNDED, DEST)
+    await refundWithoutReceiverSwapScript(arkadeCtx(), receiveLegScript(), FUNDED, DEST)
     expect(submitTx).not.toHaveBeenCalled()
   })
 
   it('sets the transaction locktime to refundLocktime so the CLTV is enforced', async () => {
-    arkSubmitTx.mockClear()
-    await refundWithoutReceiverSwapScript(arkCtx(), receiveLegScript(), FUNDED, DEST)
-    const [arkTxB64] = arkSubmitTx.mock.calls[0] as [string, string[]]
-    expect(Transaction.fromPSBT(base64.decode(arkTxB64)).lockTime).toBe(REFUND_LOCKTIME)
+    arkadeSubmitTx.mockClear()
+    await refundWithoutReceiverSwapScript(arkadeCtx(), receiveLegScript(), FUNDED, DEST)
+    const [arkadeTxB64] = arkadeSubmitTx.mock.calls[0] as [string, string[]]
+    expect(Transaction.fromPSBT(base64.decode(arkadeTxB64)).lockTime).toBe(REFUND_LOCKTIME)
   })
 
   it.each([
     ['mismatched', 'b'.repeat(64)],
     ['missing', undefined],
-  ] as const)('rejects a %s ark txid before signing returned checkpoints', async (_, arkTxid) => {
-    arkFinalizeTx.mockClear()
+  ] as const)('rejects a %s Arkade txid before signing returned checkpoints', async (_, arkTxid) => {
+    arkadeFinalizeTx.mockClear()
     const sign = vi.spyOn(receiverIdentity, 'sign')
-    arkSubmitTx.mockImplementationOnce(
-      async (_arkTxB64, checkpointsB64) =>
+    arkadeSubmitTx.mockImplementationOnce(
+      async (_arkadeTxB64, checkpointsB64) =>
         ({
           ...(arkTxid === undefined ? {} : { arkTxid }),
           signedCheckpointTxs: checkpointsB64,
-        }) as Awaited<ReturnType<typeof arkSubmitTx>>,
+        }) as Awaited<ReturnType<typeof arkadeSubmitTx>>,
     )
 
-    await expect(refundWithoutReceiverSwapScript(arkCtx(), receiveLegScript(), FUNDED, DEST)).rejects.toThrow(
+    await expect(refundWithoutReceiverSwapScript(arkadeCtx(), receiveLegScript(), FUNDED, DEST)).rejects.toThrow(
       /returned ark txid/,
     )
     expect(sign).toHaveBeenCalledTimes(1 + FUNDED.length)
-    expect(arkFinalizeTx).not.toHaveBeenCalled()
+    expect(arkadeFinalizeTx).not.toHaveBeenCalled()
   })
 
   it('rejects an unknown checkpoint before signing any returned checkpoint', async () => {
-    arkFinalizeTx.mockClear()
+    arkadeFinalizeTx.mockClear()
     const sign = vi.spyOn(receiverIdentity, 'sign')
     const funded = [FUNDED[0]!, { ...FUNDED[0]!, vout: 1 }]
-    arkSubmitTx.mockImplementationOnce(async (arkTxB64, checkpointsB64) => {
+    arkadeSubmitTx.mockImplementationOnce(async (arkadeTxB64, checkpointsB64) => {
       const forged = Transaction.fromPSBT(base64.decode(checkpointsB64[1]!))
       forged.updateOutput(0, { script: RECEIVER_PAYOUT }, true)
       return {
-        arkTxid: Transaction.fromPSBT(base64.decode(arkTxB64)).id,
-        finalArkTx: await cosign(arkTxB64),
+        arkTxid: Transaction.fromPSBT(base64.decode(arkadeTxB64)).id,
+        finalArkTx: await cosign(arkadeTxB64),
         signedCheckpointTxs: [checkpointsB64[0]!, base64.encode(forged.toPSBT())],
       }
     })
 
-    await expect(refundWithoutReceiverSwapScript(arkCtx(), receiveLegScript(), funded, DEST)).rejects.toThrow(
+    await expect(refundWithoutReceiverSwapScript(arkadeCtx(), receiveLegScript(), funded, DEST)).rejects.toThrow(
       /does not match any submitted checkpoint/,
     )
     expect(sign).toHaveBeenCalledTimes(1 + funded.length)
-    expect(arkFinalizeTx).not.toHaveBeenCalled()
+    expect(arkadeFinalizeTx).not.toHaveBeenCalled()
   })
 
-  it('refuses an ark tx the server did not countersign and finalizes nothing', async () => {
-    arkFinalizeTx.mockClear()
-    arkSubmitTx.mockImplementationOnce(async (arkTxB64, checkpointsB64) => ({
-      arkTxid: Transaction.fromPSBT(base64.decode(arkTxB64)).id,
-      finalArkTx: arkTxB64,
+  it('refuses an Arkade transaction the server did not countersign and finalizes nothing', async () => {
+    arkadeFinalizeTx.mockClear()
+    arkadeSubmitTx.mockImplementationOnce(async (arkadeTxB64, checkpointsB64) => ({
+      arkTxid: Transaction.fromPSBT(base64.decode(arkadeTxB64)).id,
+      finalArkTx: arkadeTxB64,
       signedCheckpointTxs: await Promise.all(checkpointsB64.map(cosign)),
     }))
 
-    await expect(refundWithoutReceiverSwapScript(arkCtx(), receiveLegScript(), FUNDED, DEST)).rejects.toBeInstanceOf(
+    await expect(refundWithoutReceiverSwapScript(arkadeCtx(), receiveLegScript(), FUNDED, DEST)).rejects.toBeInstanceOf(
       ServerResponseMismatchError,
     )
-    expect(arkFinalizeTx).not.toHaveBeenCalled()
+    expect(arkadeFinalizeTx).not.toHaveBeenCalled()
   })
 
   it('finalizes within submitTx when arkd keeps our checkpoint signatures', async () => {
-    arkSubmitTx.mockClear()
-    arkFinalizeTx.mockClear()
-    const result = await refundWithoutReceiverSwapScript(arkCtx(), receiveLegScript(), FUNDED, DEST)
+    arkadeSubmitTx.mockClear()
+    arkadeFinalizeTx.mockClear()
+    const result = await refundWithoutReceiverSwapScript(arkadeCtx(), receiveLegScript(), FUNDED, DEST)
 
-    const [arkTxB64, checkpointsB64] = arkSubmitTx.mock.calls[0]!
-    expect(result).toBe(Transaction.fromPSBT(base64.decode(arkTxB64)).id)
+    const [arkadeTxB64, checkpointsB64] = arkadeSubmitTx.mock.calls[0]!
+    expect(result).toBe(Transaction.fromPSBT(base64.decode(arkadeTxB64)).id)
     expect(signerKeys(Transaction.fromPSBT(base64.decode(checkpointsB64[0]!)))).toContain(hex.encode(RECEIVER))
-    expect(arkFinalizeTx).not.toHaveBeenCalled()
+    expect(arkadeFinalizeTx).not.toHaveBeenCalled()
   })
 
   it('finalizes rebuilt checkpoints, carrying our signatures, in the order an arkd without one-shot returned them', async () => {
-    arkSubmitTx.mockClear()
-    arkFinalizeTx.mockClear()
+    arkadeSubmitTx.mockClear()
+    arkadeFinalizeTx.mockClear()
     const funded = [FUNDED[0]!, { ...FUNDED[0]!, vout: 1 }]
-    arkSubmitTx.mockImplementationOnce(async (arkTxB64, checkpointsB64) => ({
-      arkTxid: Transaction.fromPSBT(base64.decode(arkTxB64)).id,
-      finalArkTx: await cosign(arkTxB64),
+    arkadeSubmitTx.mockImplementationOnce(async (arkadeTxB64, checkpointsB64) => ({
+      arkTxid: Transaction.fromPSBT(base64.decode(arkadeTxB64)).id,
+      finalArkTx: await cosign(arkadeTxB64),
       signedCheckpointTxs: await Promise.all([...checkpointsB64].reverse().map(rebuiltCheckpoint)),
     }))
 
-    const result = await refundWithoutReceiverSwapScript(arkCtx(), receiveLegScript(), funded, DEST)
-    const [arkTxB64, checkpointsB64] = arkSubmitTx.mock.calls[0]!
-    const arkTxid = Transaction.fromPSBT(base64.decode(arkTxB64)).id
+    const result = await refundWithoutReceiverSwapScript(arkadeCtx(), receiveLegScript(), funded, DEST)
+    const [arkadeTxB64, checkpointsB64] = arkadeSubmitTx.mock.calls[0]!
+    const arkTxid = Transaction.fromPSBT(base64.decode(arkadeTxB64)).id
     expect(result).toBe(arkTxid)
-    expect(arkFinalizeTx).toHaveBeenCalledOnce()
-    const [finalizedTxid, finalCheckpointsB64] = arkFinalizeTx.mock.calls[0]!
+    expect(arkadeFinalizeTx).toHaveBeenCalledOnce()
+    const [finalizedTxid, finalCheckpointsB64] = arkadeFinalizeTx.mock.calls[0]!
     expect(finalizedTxid).toBe(arkTxid)
     const finalCheckpoints = finalCheckpointsB64.map((encoded) => Transaction.fromPSBT(base64.decode(encoded)))
     expect(finalCheckpoints.map((checkpoint) => checkpoint.id)).toEqual(
@@ -387,13 +387,13 @@ describe('refundWithoutReceiverSwapScript', () => {
   })
 
   it('rejects when there is nothing funded to refund', async () => {
-    await expect(refundWithoutReceiverSwapScript(arkCtx(), receiveLegScript(), [], DEST)).rejects.toThrow(
+    await expect(refundWithoutReceiverSwapScript(arkadeCtx(), receiveLegScript(), [], DEST)).rejects.toThrow(
       /nothing to refund/,
     )
   })
 
   describe('finalizePendingRefund', () => {
-    const ARK_TXID = 'a'.repeat(64)
+    const ARKADE_TXID = 'a'.repeat(64)
     const LOCKUP_SCRIPT = hex.encode(receiveLegScript().pkScript)
     const rebuilt = () =>
       buildOffchainTx(
@@ -414,34 +414,34 @@ describe('refundWithoutReceiverSwapScript', () => {
         identity: receiverIdentity,
         wallet: {
           serverUnrollScript,
-          arkProvider: { finalizeTx: arkFinalizeTx },
+          arkProvider: { finalizeTx: arkadeFinalizeTx },
           indexerProvider: {
-            getVtxos: vi.fn(async () => ({ vtxos: [{ ...FUNDED[0]!, isSpent: true, spentBy, arkTxId: ARK_TXID }] })),
+            getVtxos: vi.fn(async () => ({ vtxos: [{ ...FUNDED[0]!, isSpent: true, spentBy, arkTxId: ARKADE_TXID }] })),
             getVirtualTxs: vi.fn(async () => ({ txs: served })),
           },
         },
       }) as unknown as ArkadeContext
 
     it("finalizes our refund arkd accepted, carrying the server's stored signature beside ours", async () => {
-      arkFinalizeTx.mockClear()
+      arkadeFinalizeTx.mockClear()
       const stored = base64.encode((await serverKey.sign(rebuilt())).toPSBT())
       await expect(
         finalizePendingRefund(pendingCtx(ourCheckpointId, [stored]), receiveLegScript(), LOCKUP_SCRIPT),
-      ).resolves.toBe(ARK_TXID)
+      ).resolves.toBe(ARKADE_TXID)
 
-      const [arkTxid, checkpointsB64] = arkFinalizeTx.mock.calls[0]!
-      expect(arkTxid).toBe(ARK_TXID)
+      const [arkTxid, checkpointsB64] = arkadeFinalizeTx.mock.calls[0]!
+      expect(arkTxid).toBe(ARKADE_TXID)
       const checkpoint = Transaction.fromPSBT(base64.decode(checkpointsB64[0]!))
       expect(checkpoint.id).toBe(ourCheckpointId)
       expect(signerKeys(checkpoint)).toEqual(expect.arrayContaining([hex.encode(RECEIVER), hex.encode(SERVER)]))
     })
 
     it('leaves a lockup alone when its spend is not our refund', async () => {
-      arkFinalizeTx.mockClear()
+      arkadeFinalizeTx.mockClear()
       await expect(
         finalizePendingRefund(pendingCtx('c'.repeat(64)), receiveLegScript(), LOCKUP_SCRIPT),
       ).resolves.toBeNull()
-      expect(arkFinalizeTx).not.toHaveBeenCalled()
+      expect(arkadeFinalizeTx).not.toHaveBeenCalled()
     })
   })
 })
@@ -468,17 +468,17 @@ describe('a lockup sprayed with outputs anyone could have paid in', () => {
   ]
   const KEPT_TOTAL = 55_130n
 
-  const arkSubmitTx = vi.fn(async (arkTxB64: string, checkpointsB64: string[]) => ({
-    arkTxid: Transaction.fromPSBT(base64.decode(arkTxB64)).id,
-    finalArkTx: await cosign(arkTxB64),
+  const arkadeSubmitTx = vi.fn(async (arkadeTxB64: string, checkpointsB64: string[]) => ({
+    arkTxid: Transaction.fromPSBT(base64.decode(arkadeTxB64)).id,
+    finalArkTx: await cosign(arkadeTxB64),
     signedCheckpointTxs: await Promise.all(checkpointsB64.map(cosign)),
   }))
-  const arkCtx = (): ArkadeContext =>
+  const arkadeCtx = (): ArkadeContext =>
     ({
       identity: receiverIdentity,
       wallet: {
         serverUnrollScript,
-        arkProvider: { submitTx: arkSubmitTx, finalizeTx: vi.fn(async () => undefined) },
+        arkProvider: { submitTx: arkadeSubmitTx, finalizeTx: vi.fn(async () => undefined) },
         indexerProvider: { getVirtualTxs: vi.fn(async () => ({ txs: [FUNDING.b64] })) },
       },
     }) as unknown as ArkadeContext
@@ -486,37 +486,37 @@ describe('a lockup sprayed with outputs anyone could have paid in', () => {
   const CLAIM_DEST = baseScript().address('tark', SERVER).encode()
   const PREIMAGE = new Uint8Array(32).fill(7)
 
-  // The ark tx spends the CHECKPOINTS, one per lockup output and in the same
+  // The Arkade transaction spends the CHECKPOINTS, one per lockup output and in the same
   // order, so the outputs actually selected are named there and not on it.
   const spentVouts = (checkpointsB64: string[]): number[] =>
     checkpointsB64.map((encoded) => Transaction.fromPSBT(base64.decode(encoded)).getInput(0).index!)
 
   it('claims at most the cap, taking the most valuable outputs', async () => {
-    arkSubmitTx.mockClear()
-    await claimSwapScript(arkCtx(), baseScript(), SPRAYED, PREIMAGE, CLAIM_DEST)
-    const [arkTxB64, checkpointsB64] = arkSubmitTx.mock.calls[0] as [string, string[]]
+    arkadeSubmitTx.mockClear()
+    await claimSwapScript(arkadeCtx(), baseScript(), SPRAYED, PREIMAGE, CLAIM_DEST)
+    const [arkadeTxB64, checkpointsB64] = arkadeSubmitTx.mock.calls[0] as [string, string[]]
     const vouts = spentVouts(checkpointsB64)
 
     expect(vouts).toHaveLength(MAX_LOCKUP_SPEND_INPUTS)
     expect(vouts).toContain(0)
     expect(Math.min(...vouts.filter((vout) => vout !== 0))).toBe(6)
-    expect(Transaction.fromPSBT(base64.decode(arkTxB64)).getOutput(0).amount).toBe(KEPT_TOTAL)
+    expect(Transaction.fromPSBT(base64.decode(arkadeTxB64)).getOutput(0).amount).toBe(KEPT_TOTAL)
   })
 
   it('refunds without the receiver at most the cap, paying only what it spent', async () => {
-    arkSubmitTx.mockClear()
-    await refundWithoutReceiverSwapScript(arkCtx(), receiveLegScript(), SPRAYED, DEST)
-    const [arkTxB64, checkpointsB64] = arkSubmitTx.mock.calls[0] as [string, string[]]
+    arkadeSubmitTx.mockClear()
+    await refundWithoutReceiverSwapScript(arkadeCtx(), receiveLegScript(), SPRAYED, DEST)
+    const [arkadeTxB64, checkpointsB64] = arkadeSubmitTx.mock.calls[0] as [string, string[]]
 
     expect(spentVouts(checkpointsB64)).toHaveLength(MAX_LOCKUP_SPEND_INPUTS)
-    expect(Transaction.fromPSBT(base64.decode(arkTxB64)).getOutput(0).amount).toBe(KEPT_TOTAL)
+    expect(Transaction.fromPSBT(base64.decode(arkadeTxB64)).getOutput(0).amount).toBe(KEPT_TOTAL)
   })
 
   it('keeps the covenant refund index-aligned over the bounded subset', async () => {
     submitTx.mockClear()
     await refundSwapScript(ctx(), 'http://emulator.test', baseScript(), SPRAYED, DEST)
-    const [arkTxB64, checkpointsB64] = submitTx.mock.calls[0] as [string, string[]]
-    const tx = Transaction.fromPSBT(base64.decode(arkTxB64))
+    const [arkadeTxB64, checkpointsB64] = submitTx.mock.calls[0] as [string, string[]]
+    const tx = Transaction.fromPSBT(base64.decode(arkadeTxB64))
     const vouts = spentVouts(checkpointsB64)
     const paid = Array.from({ length: MAX_LOCKUP_SPEND_INPUTS }, (_, i) => tx.getOutput(i).amount!)
 
@@ -528,24 +528,24 @@ describe('a lockup sprayed with outputs anyone could have paid in', () => {
   })
 
   it('skips an output expiring too soon to be relied on, and refuses when every one is', async () => {
-    arkSubmitTx.mockClear()
+    arkadeSubmitTx.mockClear()
     const expiring = { txid: FUNDING.id, vout: 0, value: 50_000, expiresAt: Math.floor(Date.now() / 1000) + 60 }
     const healthy = { txid: FUNDING.id, vout: 1, value: 1_000 }
 
-    await claimSwapScript(arkCtx(), baseScript(), [expiring, healthy], PREIMAGE, CLAIM_DEST)
-    const [arkTxB64, checkpointsB64] = arkSubmitTx.mock.calls[0] as [string, string[]]
+    await claimSwapScript(arkadeCtx(), baseScript(), [expiring, healthy], PREIMAGE, CLAIM_DEST)
+    const [arkadeTxB64, checkpointsB64] = arkadeSubmitTx.mock.calls[0] as [string, string[]]
     expect(spentVouts(checkpointsB64)).toEqual([1])
-    expect(Transaction.fromPSBT(base64.decode(arkTxB64)).getOutput(0).amount).toBe(1_000n)
+    expect(Transaction.fromPSBT(base64.decode(arkadeTxB64)).getOutput(0).amount).toBe(1_000n)
 
-    await expect(claimSwapScript(arkCtx(), baseScript(), [expiring], PREIMAGE, CLAIM_DEST)).rejects.toThrow(/expir/)
+    await expect(claimSwapScript(arkadeCtx(), baseScript(), [expiring], PREIMAGE, CLAIM_DEST)).rejects.toThrow(/expir/)
   })
 })
 
 const ASSET_A = 'ab'.repeat(32) + '0100'
 const ASSET_B = 'cd'.repeat(32) + '0000'
 
-const packetOn = (arkTxB64: string) => {
-  const tx = Transaction.fromPSBT(base64.decode(arkTxB64))
+const packetOn = (arkadeTxB64: string) => {
+  const tx = Transaction.fromPSBT(base64.decode(arkadeTxB64))
   return Extension.fromTx(tx).getPacketByType(asset.Packet.PACKET_TYPE)
 }
 
@@ -562,9 +562,9 @@ const allocations = (packet: ReturnType<typeof packetOn>) =>
 describe('claimSwapScript', () => {
   const PREIMAGE = new Uint8Array(32).fill(7)
   const DESTINATION = new ArkAddress(SERVER, key(5), 'tark').encode()
-  const honestServer = async (arkTxB64: string, checkpointsB64: string[]) => ({
-    arkTxid: Transaction.fromPSBT(base64.decode(arkTxB64)).id,
-    finalArkTx: await cosign(arkTxB64),
+  const honestServer = async (arkadeTxB64: string, checkpointsB64: string[]) => ({
+    arkTxid: Transaction.fromPSBT(base64.decode(arkadeTxB64)).id,
+    finalArkTx: await cosign(arkadeTxB64),
     signedCheckpointTxs: await Promise.all(checkpointsB64.map(cosign)),
   })
   const finalizeTx = vi.fn(async (_arkTxid: string, _checkpointsB64: string[]) => undefined)
@@ -580,10 +580,10 @@ describe('claimSwapScript', () => {
     const serverSubmit = vi.fn(honestServer)
     const txid = await claimSwapScript(claimCtx(serverSubmit), baseScript(), funded, PREIMAGE, DESTINATION)
 
-    const [arkTxB64, checkpointsB64] = serverSubmit.mock.calls[0]!
-    expect(txid).toBe(Transaction.fromPSBT(base64.decode(arkTxB64)).id)
+    const [arkadeTxB64, checkpointsB64] = serverSubmit.mock.calls[0]!
+    expect(txid).toBe(Transaction.fromPSBT(base64.decode(arkadeTxB64)).id)
     expect(checkpointsB64).toHaveLength(funded.length)
-    for (const tx of [arkTxB64, ...checkpointsB64].map((psbt) => Transaction.fromPSBT(base64.decode(psbt)))) {
+    for (const tx of [arkadeTxB64, ...checkpointsB64].map((psbt) => Transaction.fromPSBT(base64.decode(psbt)))) {
       for (let i = 0; i < tx.inputsLength; i++) {
         expect(getArkPsbtFields(tx, i, ConditionWitness)).toEqual([[PREIMAGE]])
         expect(tx.getInput(i).tapScriptSig?.map(([sig]) => hex.encode(sig.pubKey))).toContain(hex.encode(RECEIVER))
@@ -611,15 +611,15 @@ describe('claimSwapScript', () => {
 
   it.each<[string, typeof honestServer]>([
     [
-      'an ark tx the server did not countersign',
+      'an Arkade transaction the server did not countersign',
       async (arkTx, checkpoints) => ({ ...(await honestServer(arkTx, checkpoints)), finalArkTx: arkTx }),
     ],
     [
-      'another ark txid',
+      'another Arkade txid',
       async (arkTx, checkpoints) => ({ ...(await honestServer(arkTx, checkpoints)), arkTxid: 'b'.repeat(64) }),
     ],
     [
-      'no final ark tx',
+      'no final Arkade transaction',
       async (arkTx, checkpoints) =>
         ({ ...(await honestServer(arkTx, checkpoints)), finalArkTx: undefined }) as unknown as Awaited<
           ReturnType<typeof honestServer>
@@ -648,8 +648,8 @@ describe('claimSwapScript', () => {
     ]
     await claimSwapScript(claimCtx(serverSubmit), baseScript(), carrying, PREIMAGE, DESTINATION)
 
-    const [arkTxB64] = serverSubmit.mock.calls[0]!
-    expect(allocations(packetOn(arkTxB64))).toEqual([
+    const [arkadeTxB64] = serverSubmit.mock.calls[0]!
+    expect(allocations(packetOn(arkadeTxB64))).toEqual([
       { assetId: ASSET_A, vout: 0, amount: 750n },
       { assetId: ASSET_B, vout: 0, amount: 7n },
     ])
@@ -658,7 +658,7 @@ describe('claimSwapScript', () => {
 
 describe('finalizePendingClaim', () => {
   const PREIMAGE = new Uint8Array(32).fill(7)
-  const ARK_TXID = 'a'.repeat(64)
+  const ARKADE_TXID = 'a'.repeat(64)
   const LOCKUP_SCRIPT = hex.encode(baseScript().pkScript)
   const rebuilt = () =>
     buildOffchainTx(
@@ -677,7 +677,7 @@ describe('finalizePendingClaim', () => {
         arkProvider: { finalizeTx },
         indexerProvider: {
           getVtxos: vi.fn(async () => ({
-            vtxos: [{ ...FUNDED[0]!, isSpent: true, spentBy, arkTxId: ARK_TXID }],
+            vtxos: [{ ...FUNDED[0]!, isSpent: true, spentBy, arkTxId: ARKADE_TXID }],
           })),
           getVirtualTxs: vi.fn(async () => ({ txs: served })),
         },
@@ -689,10 +689,10 @@ describe('finalizePendingClaim', () => {
     const stored = base64.encode((await serverKey.sign(rebuilt())).toPSBT())
     await expect(
       finalizePendingClaim(pendingCtx(ourCheckpointId, [stored]), baseScript(), LOCKUP_SCRIPT, PREIMAGE),
-    ).resolves.toBe(ARK_TXID)
+    ).resolves.toBe(ARKADE_TXID)
 
     const [arkTxid, checkpointsB64] = finalizeTx.mock.calls[0]!
-    expect(arkTxid).toBe(ARK_TXID)
+    expect(arkTxid).toBe(ARKADE_TXID)
     const checkpoint = Transaction.fromPSBT(base64.decode(checkpointsB64[0]!))
     expect(checkpoint.id).toBe(ourCheckpointId)
     expect(getArkPsbtFields(checkpoint, 0, ConditionWitness)).toEqual([[PREIMAGE]])
@@ -738,17 +738,17 @@ describe('refunding an asset-carrying lockup', () => {
       asset: asset.AssetId.fromString(ASSET_A),
     })
 
-  const arkSubmitTx = vi.fn(async (arkTxB64: string, checkpointsB64: string[]) => ({
-    arkTxid: Transaction.fromPSBT(base64.decode(arkTxB64)).id,
-    finalArkTx: await cosign(arkTxB64),
+  const arkadeSubmitTx = vi.fn(async (arkadeTxB64: string, checkpointsB64: string[]) => ({
+    arkTxid: Transaction.fromPSBT(base64.decode(arkadeTxB64)).id,
+    finalArkTx: await cosign(arkadeTxB64),
     signedCheckpointTxs: await Promise.all(checkpointsB64.map(cosign)),
   }))
-  const arkCtx = (): ArkadeContext =>
+  const arkadeCtx = (): ArkadeContext =>
     ({
       identity: receiverIdentity,
       wallet: {
         serverUnrollScript,
-        arkProvider: { submitTx: arkSubmitTx, finalizeTx: vi.fn(async () => undefined) },
+        arkProvider: { submitTx: arkadeSubmitTx, finalizeTx: vi.fn(async () => undefined) },
         indexerProvider: {
           getVirtualTxs: vi.fn(async (txids: string[]) => ({ txs: txids.map(() => FUNDING.b64) })),
         },
@@ -756,27 +756,27 @@ describe('refunding an asset-carrying lockup', () => {
     }) as unknown as ArkadeContext
 
   it('routes the whole carried amount to the refund destination', async () => {
-    arkSubmitTx.mockClear()
+    arkadeSubmitTx.mockClear()
     const funded: FundedOutput[] = [{ ...FUNDED[0]!, assets: [{ assetId: ASSET_A, amount: 500n }] }]
-    await refundWithoutReceiverSwapScript(arkCtx(), receiveLegScript(), funded, DEST)
-    const [arkTxB64] = arkSubmitTx.mock.calls[0] as [string, string[]]
-    expect(allocations(packetOn(arkTxB64))).toEqual([{ assetId: ASSET_A, vout: 0, amount: 500n }])
+    await refundWithoutReceiverSwapScript(arkadeCtx(), receiveLegScript(), funded, DEST)
+    const [arkadeTxB64] = arkadeSubmitTx.mock.calls[0] as [string, string[]]
+    expect(allocations(packetOn(arkadeTxB64))).toEqual([{ assetId: ASSET_A, vout: 0, amount: 500n }])
   })
 
   it('sums a lockup funded by more than one payment onto the single aggregate output', async () => {
-    arkSubmitTx.mockClear()
+    arkadeSubmitTx.mockClear()
     const funded: FundedOutput[] = [
       { ...FUNDED[0]!, assets: [{ assetId: ASSET_A, amount: 500n }] },
       { txid: FUNDING.id, vout: 1, value: 1_000, assets: [{ assetId: ASSET_A, amount: 250n }] },
     ]
-    await refundWithoutReceiverSwapScript(arkCtx(), receiveLegScript(), funded, DEST)
-    const [arkTxB64] = arkSubmitTx.mock.calls[0] as [string, string[]]
-    expect(allocations(packetOn(arkTxB64))).toEqual([{ assetId: ASSET_A, vout: 0, amount: 750n }])
+    await refundWithoutReceiverSwapScript(arkadeCtx(), receiveLegScript(), funded, DEST)
+    const [arkadeTxB64] = arkadeSubmitTx.mock.calls[0] as [string, string[]]
+    expect(allocations(packetOn(arkadeTxB64))).toEqual([{ assetId: ASSET_A, vout: 0, amount: 750n }])
   })
 
   it('declares EVERY asset the lockup carries, not only the one it is denominated in', async () => {
     // An undeclared stray is answered with ASSET_NOT_FOUND, taking the refund down.
-    arkSubmitTx.mockClear()
+    arkadeSubmitTx.mockClear()
     const funded: FundedOutput[] = [
       {
         ...FUNDED[0]!,
@@ -786,9 +786,9 @@ describe('refunding an asset-carrying lockup', () => {
         ],
       },
     ]
-    await refundWithoutReceiverSwapScript(arkCtx(), receiveLegScript(), funded, DEST)
-    const [arkTxB64] = arkSubmitTx.mock.calls[0] as [string, string[]]
-    expect(allocations(packetOn(arkTxB64))).toEqual(
+    await refundWithoutReceiverSwapScript(arkadeCtx(), receiveLegScript(), funded, DEST)
+    const [arkadeTxB64] = arkadeSubmitTx.mock.calls[0] as [string, string[]]
+    expect(allocations(packetOn(arkadeTxB64))).toEqual(
       expect.arrayContaining([
         { assetId: ASSET_A, vout: 0, amount: 500n },
         { assetId: ASSET_B, vout: 0, amount: 7n },
@@ -797,10 +797,10 @@ describe('refunding an asset-carrying lockup', () => {
   })
 
   it('attaches no packet at all when the lockup carries no asset', async () => {
-    arkSubmitTx.mockClear()
-    await refundWithoutReceiverSwapScript(arkCtx(), receiveLegScript(), FUNDED, DEST)
-    const [arkTxB64] = arkSubmitTx.mock.calls[0] as [string, string[]]
-    expect(() => Extension.fromTx(Transaction.fromPSBT(base64.decode(arkTxB64)))).toThrow()
+    arkadeSubmitTx.mockClear()
+    await refundWithoutReceiverSwapScript(arkadeCtx(), receiveLegScript(), FUNDED, DEST)
+    const [arkadeTxB64] = arkadeSubmitTx.mock.calls[0] as [string, string[]]
+    expect(() => Extension.fromTx(Transaction.fromPSBT(base64.decode(arkadeTxB64)))).toThrow()
   })
 
   it('keeps the covenant refund index-aligned: input i’s asset lands on output i', async () => {
@@ -811,8 +811,8 @@ describe('refunding an asset-carrying lockup', () => {
       { txid: FUNDING.id, vout: 1, value: 30_000, assets: [{ assetId: ASSET_A, amount: 250n }] },
     ]
     await refundSwapScript(ctx(), 'http://emulator.test', script, funded, DEST)
-    const [arkTxB64] = submitTx.mock.calls[0] as [string, string[]]
-    expect(allocations(packetOn(arkTxB64))).toEqual([
+    const [arkadeTxB64] = submitTx.mock.calls[0] as [string, string[]]
+    expect(allocations(packetOn(arkadeTxB64))).toEqual([
       { assetId: ASSET_A, vout: 0, amount: 500n },
       { assetId: ASSET_A, vout: 1, amount: 250n },
     ])
@@ -835,8 +835,8 @@ describe('refunding an asset-carrying lockup', () => {
     for (const [funded, vout] of arrangements) {
       submitTx.mockClear()
       await refundSwapScript(ctx(), 'http://emulator.test', receiveLegScript(), funded, DEST)
-      const [arkTxB64] = submitTx.mock.calls[0] as [string, string[]]
-      expect(allocations(packetOn(arkTxB64))).toEqual([{ assetId: ASSET_A, vout, amount: 500n }])
+      const [arkadeTxB64] = submitTx.mock.calls[0] as [string, string[]]
+      expect(allocations(packetOn(arkadeTxB64))).toEqual([{ assetId: ASSET_A, vout, amount: 500n }])
     }
   })
 

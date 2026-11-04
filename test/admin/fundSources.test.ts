@@ -693,7 +693,7 @@ describe('withdrawing from the rail — the checks that run before the backend i
 describe('withdrawing from the arkade float — both rails out, routed by the destination', () => {
   // REAL addresses: the withdraw path decodes the destination to pick its
   // route, so a placeholder would exercise the refusal, never the spend.
-  const TARK_ADDRESS = new ArkAddress(new Uint8Array(32).fill(2), new Uint8Array(32).fill(3), 'tark').encode()
+  const TESTNET_ARKADE_ADDRESS = new ArkAddress(new Uint8Array(32).fill(2), new Uint8Array(32).fill(3), 'tark').encode()
 
   const coin = (fill: number, value: number, over: Record<string, unknown> = {}) => ({
     txid: fill.toString(16).padStart(2, '0').repeat(32),
@@ -723,10 +723,10 @@ describe('withdrawing from the arkade float — both rails out, routed by the de
   it('pays an Arkade address offchain, exactly the typed amount', async () => {
     const wallet = withdrawingWallet([coin(0x01, 100_000)])
 
-    const result = await withdraw(servicesWith(wallet), { address: TARK_ADDRESS, amount: '50000' })
+    const result = await withdraw(servicesWith(wallet), { address: TESTNET_ARKADE_ADDRESS, amount: '50000' })
 
     expect(wallet.send).toHaveBeenCalledWith({
-      recipients: [{ address: TARK_ADDRESS, amount: 50_000 }],
+      recipients: [{ address: TESTNET_ARKADE_ADDRESS, amount: 50_000 }],
       selectedVtxos: [expect.objectContaining({ value: 100_000 })],
     })
     expect(wallet.settle).not.toHaveBeenCalled()
@@ -810,7 +810,7 @@ describe('withdrawing from the arkade float — both rails out, routed by the de
     const coins = [coin(0x01, 60_000), coin(0x02, 60_000)]
     const wallet = withdrawingWallet(coins)
 
-    await withdraw(servicesWith(wallet), { address: TARK_ADDRESS, amount: '50000' })
+    await withdraw(servicesWith(wallet), { address: TESTNET_ARKADE_ADDRESS, amount: '50000' })
     await withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '50000' })
 
     expect(wallet.send).toHaveBeenCalledWith(expect.objectContaining({ selectedVtxos: coins }))
@@ -828,13 +828,13 @@ describe('withdrawing from the arkade float — both rails out, routed by the de
     const plain = coin(0x02, 60_000)
     const wallet = withdrawingWallet([assetCoin, plain])
 
-    await withdraw(servicesWith(wallet), { address: TARK_ADDRESS, amount: '50000' })
+    await withdraw(servicesWith(wallet), { address: TESTNET_ARKADE_ADDRESS, amount: '50000' })
     await withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '50000' })
 
     expect(wallet.send).toHaveBeenCalledWith(expect.objectContaining({ selectedVtxos: [plain] }))
     expect(wallet.settle.mock.calls[0]![0].inputs).toEqual([plain])
     await expect(
-      withdraw(servicesWith(withdrawingWallet([assetCoin])), { address: TARK_ADDRESS, amount: '1000' }),
+      withdraw(servicesWith(withdrawingWallet([assetCoin])), { address: TESTNET_ARKADE_ADDRESS, amount: '1000' }),
     ).rejects.toThrow(/asset-free coin/)
   })
 
@@ -845,7 +845,7 @@ describe('withdrawing from the arkade float — both rails out, routed by the de
     const free = coin(0x02, 100_000)
     const wallet = withdrawingWallet([pinned, free])
 
-    await withdraw(servicesWith(wallet, reservations), { address: TARK_ADDRESS, amount: '50000' })
+    await withdraw(servicesWith(wallet, reservations), { address: TESTNET_ARKADE_ADDRESS, amount: '50000' })
 
     expect(wallet.send).toHaveBeenCalledWith(expect.objectContaining({ selectedVtxos: [free] }))
     expect([...reservations.reserved()]).toEqual([`${pinned.txid}:0`])
@@ -858,7 +858,7 @@ describe('withdrawing from the arkade float — both rails out, routed by the de
     })
 
     await expect(
-      withdraw(servicesWith(wallet, reservations), { address: TARK_ADDRESS, amount: '50000' }),
+      withdraw(servicesWith(wallet, reservations), { address: TESTNET_ARKADE_ADDRESS, amount: '50000' }),
     ).rejects.toThrow('server unreachable')
     expect(reservations.reserved().size).toBe(0)
   })
@@ -876,7 +876,7 @@ describe('withdrawing from the arkade float — both rails out, routed by the de
   })
 
   it.each([
-    { rail: 'ark', spend: 'send', address: TARK_ADDRESS },
+    { rail: 'ark', spend: 'send', address: TESTNET_ARKADE_ADDRESS },
     { rail: 'onchain', spend: 'settle', address: REGTEST_ADDRESS },
   ])('refuses a $rail spend that settles without a transaction id', async ({ rail, spend, address }) => {
     const reservations = createReservationLedger()
@@ -894,7 +894,7 @@ describe('withdrawing from the arkade float — both rails out, routed by the de
     const wallet = withdrawingWallet([coin(0x01, 100_000)])
 
     await expect(
-      withdraw(servicesWith(wallet, reservations), { address: TARK_ADDRESS, amount: '50000' }),
+      withdraw(servicesWith(wallet, reservations), { address: TESTNET_ARKADE_ADDRESS, amount: '50000' }),
     ).rejects.toThrow(/pinned by a live swap's funding/)
     expect(wallet.send).not.toHaveBeenCalled()
   })
@@ -930,7 +930,7 @@ describe('withdrawing from the arkade float — both rails out, routed by the de
   it('refuses anything that is not exactly a whole positive sat count', async () => {
     const wallet = withdrawingWallet([coin(0x01, 100_000)])
     for (const amount of ['0', '-1', '0.5', 'abc', '1e3', '  ', '9007199254740993', HUGE]) {
-      await expect(withdraw(servicesWith(wallet), { address: TARK_ADDRESS, amount }), amount).rejects.toThrow(
+      await expect(withdraw(servicesWith(wallet), { address: TESTNET_ARKADE_ADDRESS, amount }), amount).rejects.toThrow(
         /whole positive number of sats/i,
       )
     }
@@ -974,7 +974,7 @@ describe('withdrawing from the arkade float — both rails out, routed by the de
 
     const response = await post(
       'fund-withdraw',
-      { source: 'arkade', address: TARK_ADDRESS, amount: '1000', confirm: TARK_ADDRESS },
+      { source: 'arkade', address: TESTNET_ARKADE_ADDRESS, amount: '1000', confirm: TESTNET_ARKADE_ADDRESS },
       servicesWith(wallet),
     )
 

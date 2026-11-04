@@ -19,8 +19,8 @@ import { configFromKnobs } from '@arkade-os/solver-app/config.js'
 
 const BASE_ENV: Record<string, string> = {
   SWAP_NETWORK: 'regtest',
-  ARK_MNEMONIC: 'test mnemonic, never a real one',
-  ARK_SERVER_URL: 'http://localhost:7070',
+  ARKADE_MNEMONIC: 'test mnemonic, never a real one',
+  ARKADE_OPERATOR_URL: 'http://localhost:7070',
   EMULATOR_URL: 'http://localhost:7073',
   LN_BACKEND: 'fake',
 }
