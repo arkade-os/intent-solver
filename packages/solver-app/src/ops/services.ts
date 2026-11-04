@@ -949,6 +949,7 @@ export const createServices = async (
     }),
     approvalGate: gateFor('arkade asset RFQ'),
     onError: (id, error) => log(`asset rfq ${id} failed:`, error instanceof Error ? error.message : String(error)),
+    onDeferred: (id, error) => log(`asset rfq ${id} deferred:`, error instanceof Error ? error.message : String(error)),
   })
 
   // ONE reading, whole house: a narrower one lends out headroom another corridor

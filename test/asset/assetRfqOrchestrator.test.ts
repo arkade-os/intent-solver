@@ -479,6 +479,22 @@ describe('a fill the float cannot fund yet', () => {
     expect(errors).toEqual([])
   })
 
+  it('reports every deferral, so a quote that lapses on a pinned float still names why', async () => {
+    const deferred: string[] = []
+    const { service } = await funded({
+      settle: async () => {
+        throw busy()
+      },
+      onDeferred: (id, error) => void deferred.push(`${id}: ${(error as Error).message}`),
+    })
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+    expect(deferred).toEqual([
+      'swap-1: no spendable coins to pay the maker 1000 sats',
+      'swap-1: no spendable coins to pay the maker 1000 sats',
+    ])
+  })
+
   it('fills it on a later tick, submitting exactly once', async () => {
     let pinned = true
     const settled: string[] = []
