@@ -228,14 +228,23 @@ jobs:
       # two are deliberately different: a pnpm workspace image needs the
       # lockfile, the workspace manifest and every packages/*, so the context
       # has to be the repo root while the file lives with the app it builds.
+      - name: Build image
+        run: >-
+          docker build -f packages/solver-app/Dockerfile
+          --build-arg NODE_VERSION=${{ matrix.node }}
+          -t swap-provider:ci-${{ matrix.node }} .
+
+      # `list` opens the swap database, which loads the native sqlite module.
+      - name: Smoke test image
+        run: docker run --rm -e SOLVER_CONFIG_JSON='{}' swap-provider:ci-${{ matrix.node }} list
+
+      # Steps, not a matrix axis: protection requires `docker (22)`/`docker (24)`.
       - name: Build ARM64 image
         run: >-
           docker buildx build --platform linux/arm64 --load
           -f packages/solver-app/Dockerfile
           --build-arg NODE_VERSION=${{ matrix.node }}
-          -t swap-provider:ci-${{ matrix.node }} .
+          -t swap-provider:ci-${{ matrix.node }}-arm64 .
 
-      # QEMU runs the loaded ARM64 image on the x86 runner. Usage text proves
-      # the compiled output and native sqlite module load in the target image.
       - name: Smoke test ARM64 image
-        run: (docker run --rm swap-provider:ci-${{ matrix.node }} help || true) 2>&1 | grep -q "usage:"
+        run: docker run --rm -e SOLVER_CONFIG_JSON='{}' swap-provider:ci-${{ matrix.node }}-arm64 list
