@@ -41,6 +41,7 @@ loudly under `grep` rather than pointing somewhere plausible and wrong.
 | `OnchainSend.tla` | The L1 HTLC leg and its mempool race. Timing invariants are conditional on the `(A2) Urgent` assumption — read that note before trusting any timing pass. The send-time `refunded` record is FIXED, so `OnchainSend_UnconfirmedRefund.cfg` mutates a guard the code really ships; `OnchainSend_MempoolRace.cfg` is kept as the residual RBF race, which the fix makes loud rather than silent. Funding pre-commits: the signed tx is recorded with a CAS before broadcast, so the shipped cfgs are green with `FundIsIdempotent = FALSE` and the fund lease has a TTL — `OnchainSend_LeaseStrand.cfg` is green. `_RecordNotCas` and `_RefuseRecorded` show the TTL is safe only while every write that can end `funding_onchain` also requires `funding_tx IS NULL`. |
 | `EvmSend.tla` | The planner/shell split and the height-vs-wall margin. F2, F3, F5 and F6 are FIXED, so `EvmSend_BlindScan`, `EvmSend_NoReceipt`, `EvmSend_LockStrand` and `EvmSend_LostRefund` all mutate guards the code really ships. F4, the late lock, is the one still open — `LockLandsPromptly` is an assumption, not a guard, so read the findings before trusting a pass. The shipped watch on a closed row makes a late lock an operator event rather than a silent one; it does not move `NoNetLoss`, and `EvmSend_LateLock.cfg` still fires it. |
 | `EvmReceive.tla` | The mirror corridor: the solver funds against a lock it does not control. The parked `refunding_arkade` with an unspent covenant (F4) is a double loss under a patient client. |
+| `OfferFill.tla` | Not a corridor and not on `SwapCore`: the fill both asset loops share, fillable (or funded) → filling → filled, with the `fill_phase` latch that makes a walk-back out of `filling` safe and the sweep that resolves a crashed attempt. One row, two processes, crashes, and a process still on the version before `fill_phase`. See [OfferFill](#offerfill-the-fill-latch). |
 
 Bugs the models prove in the shipped TypeScript are named F1... per module in
 the module comments (each module numbers its own findings); the ones ranked
@@ -177,3 +178,44 @@ When the TypeScript changes a guard the specs cite, update the model, the
 cfg headers' references, and the checkpoint comment in the same commit. If
 you rename a cited function, `grep` the symbol across `spec/tla/` — that is
 what the anchors are for.
+
+## OfferFill: the fill latch
+
+`fill_phase` marks how far an attempt holding a `filling` row got: `selecting`
+(nothing sent), `submitting` (set by one compare-and-swap right before
+`fillOffer`, after which arkd may have the fill), or NULL (written by a version
+that predates the column). A walk-back and the sweep's recovery move only a
+`selecting` row and clear the phase; anything else is escalated to `stuck`.
+
+```mermaid
+stateDiagram-v2
+    state "filling · selecting" as selecting
+    state "filling · submitting" as submitting
+    state "filling · no phase" as legacy
+    [*] --> ready
+    ready --> selecting: Claim [CAS state = ready]
+    selecting --> submitting: Mark [CAS phase = selecting]
+    selecting --> ready: revertUnsubmitted [CAS phase = selecting, clears it]
+    selecting --> stuck: fail [plain throw, or the budget is spent]
+    submitting --> filled: Finish [after Submit]
+    submitting --> stuck: fail [fillOffer threw] / Recover [crash]
+    legacy --> stuck: Recover [an older version may have sent]
+    ready --> refused: Expire
+    filled --> [*]
+    stuck --> [*]
+    refused --> [*]
+```
+
+`NoDoubleFill` fails if any one of these is removed: the phase condition on the
+latch (`_NoLatch`), the phase condition on the walk-back (`_RevertGuard`),
+clearing the phase on a walk-back while an older process is still running
+(`_RevertReset`, with `_RevertResetControl` green), and escalating rather than
+walking back a phase-less row (`_LegacyReverted`, with `_Upgrade` green).
+`_NoRecovery` is the hole the recovery closes: a process that dies between the
+claim and the walk-back leaves the row `filling` forever (`FillingResolves`).
+`_LateTypedControl` stays green: once the walk-back requires `selecting`, a
+typed refusal raised after the submission finds nothing to move.
+
+The cfgs carry `EXPECTED RESULT` headers that the tla-model skill's `sweep`
+also reads; run them from this directory like any other module, or sweep a
+directory holding only the `OfferFill*` files.
