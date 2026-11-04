@@ -19,7 +19,7 @@
             "mnemonic": {
               "type": "string"
             },
-            "serverUrl": {
+            "operatorUrl": {
               "type": "string"
             },
             "emulatorUrl": {
@@ -364,7 +364,7 @@
         "swapDb": {
           "type": "string"
         },
-        "arkDb": {
+        "arkadeDb": {
           "type": "string"
         }
       },

@@ -309,7 +309,7 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
   if (info.network !== config.expectedArkdNetwork) {
     throw new Error(
       `Arkade server at ${config.arkServerUrl} reports network '${info.network}', ` +
-        `expected '${config.expectedArkdNetwork}' — check rails.arkade.serverUrl / network`,
+        `expected '${config.expectedArkdNetwork}' — check rails.arkade.operatorUrl / network`,
     )
   }
 
