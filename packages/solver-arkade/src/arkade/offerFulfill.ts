@@ -36,6 +36,20 @@ import { offerIsConsistent } from './offerConsistency.js'
  * second copy here diverges silently the day upstream changes it. */
 export { ASSET_CARRIER_SATS }
 
+/**
+ * A fill refusal that provably submitted nothing, so a caller holding the row in
+ * `filling` may walk it back. Raised ONLY at the two coin-selection refusals
+ * below, both above `fillOffer` — the call that builds AND submits. The other
+ * guards here stay plain on purpose: they mean the row disagrees with the chain,
+ * which needs a human. @see FundNotSubmittedError, the same boundary on receive.
+ */
+export class OfferNotSubmittedError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options)
+    this.name = 'OfferNotSubmittedError'
+  }
+}
+
 export interface OfferDepositOutpoint {
   txid: string
   vout: number
@@ -109,13 +123,14 @@ export const fulfillOffer = async (
     }
   } catch (error) {
     const held = free.reduce((total, coin) => total + BigInt(coin.value), 0n)
-    throw new Error(
+    throw new OfferNotSubmittedError(
       `no spendable coins to pay the maker ${wantAmount} ${wantedAssetId ?? 'sats'} (holding ${held} sats): ${
         error instanceof Error ? error.message : String(error)
       }`,
+      { cause: error },
     )
   }
-  if (funding.length === 0) throw new Error(`no spendable coins to pay the maker ${wantAmount} sats`)
+  if (funding.length === 0) throw new OfferNotSubmittedError(`no spendable coins to pay the maker ${wantAmount} sats`)
 
   const release = ctx.reservations.reserve(funding)
   try {
