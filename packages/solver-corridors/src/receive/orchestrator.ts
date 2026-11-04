@@ -1361,8 +1361,9 @@ export class ReceiveSwapService {
     // Only where the lockup can be open and unresolved — EXPOSED or stuck. Elsewhere a refund
     // spends nothing it should, and the patch below would just restart the grace clock.
     if (!EXPOSED.includes(row.state) && row.state !== 'stuck') {
+      const hint = row.state === 'armed' ? ' — let the sweep escalate a lost funding to stuck first, then refund' : ''
       throw new Error(
-        `swap ${id} is ${row.state}: nothing to refund here — the solver's lockup is open only while funded/claimed/refunding or stuck`,
+        `swap ${id} is ${row.state}: nothing to refund here — the solver's lockup is open only while funded/claimed/refunding or stuck${hint}`,
       )
     }
     const outputs = await arkade.findLockups(row.pkScript)
