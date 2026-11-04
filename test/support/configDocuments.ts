@@ -95,7 +95,7 @@ export const FULL_DOCUMENT = {
     adPublish: 'off',
     cardRelays: ['wss://second.example'],
   },
-  storage: { dir: '.data', swapDb: '.data/swaps.sqlite', arkadeDb: '.data/ark.sqlite' },
+  storage: { dir: '.data', swapDb: '.data/swaps.sqlite', walletDb: '.data/ark.sqlite' },
   http: { host: '127.0.0.1', port: 8787 },
   admin: { host: '127.0.0.1', port: 8788, restartEnabled: false },
   sentry: { dsn: 'https://key@o0.ingest.sentry.io/0', environment: 'regtest', release: '1.0.0' },

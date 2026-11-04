@@ -364,7 +364,7 @@
         "swapDb": {
           "type": "string"
         },
-        "arkadeDb": {
+        "walletDb": {
           "type": "string"
         }
       },
