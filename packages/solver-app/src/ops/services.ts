@@ -530,6 +530,7 @@ export const createServices = async (
   const notifySinks = sinksFrom(config.notify, globalThis.fetch as never)
   const notifier = createNotifier({
     sinks: notifySinks,
+    label: config.solverName ?? undefined,
     onDeliveryFailed: (sinkName, error) =>
       log(`notification to ${sinkName} failed:`, error instanceof Error ? error.message : String(error)),
   })

@@ -32,6 +32,22 @@ describe('configFromKnobs', () => {
     expect(config.cardRelays).toEqual(['wss://a', 'wss://b'])
   })
 
+  it.each(['ln*solver', 'ln_solver', 'ln`solver', 'ln~solver', 'ln\nsolver'])(
+    'refuses a solver name Slack would reformat: %j',
+    (solverName) => {
+      expect(() => configFromKnobs({ ...minimalRegtestKnobs, SOLVER_NAME: solverName })).toThrow(
+        /SOLVER_NAME must not contain Slack formatting characters/,
+      )
+    },
+  )
+
+  it('refuses a solver name long enough to crowd out the event body', () => {
+    expect(configFromKnobs({ ...minimalRegtestKnobs, SOLVER_NAME: 'x'.repeat(64) }).solverName).toHaveLength(64)
+    expect(() => configFromKnobs({ ...minimalRegtestKnobs, SOLVER_NAME: 'x'.repeat(65) })).toThrow(
+      /SOLVER_NAME must be at most 64 characters/,
+    )
+  })
+
   it('leaves the name null and the relays empty when unset', () => {
     const config = configFromKnobs(minimalRegtestKnobs)
     expect(config.solverName).toBeNull()
