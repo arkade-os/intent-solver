@@ -654,7 +654,28 @@ export class OnchainSendSwapService {
    * timelock, so once that decision is made there is nothing left to wait for.
    */
   async refundNow(id: string): Promise<string | null> {
-    return this.pushRefund(await this.deps.store.get(id), { sweptToo: true })
+    const row = await this.deps.store.get(id)
+    const preimage = await this.clientClaimPreimage(row)
+    if (preimage) {
+      throw new Error(
+        `swap ${id}: the client already claimed the onchain HTLC, preimage ${hex.encode(preimage)} — ` +
+          'refunding the arkade lockup would pay them twice; claim the lockup with that preimage instead',
+      )
+    }
+    return this.pushRefund(row, { sweptToo: true })
+  }
+
+  /** The client's revealed preimage if they already claimed the onchain HTLC, else null. */
+  private async clientClaimPreimage(row: OnchainSendSwapRow): Promise<Uint8Array | null> {
+    const { onchain } = this.deps
+    if (!row.fundingTxid || row.fundingVout === null) return null
+    const witness = await onchain.findSpendWitness({
+      txid: row.fundingTxid,
+      vout: row.fundingVout,
+      outputScript: hex.decode(row.onchainPkScript),
+    })
+    const preimage = witness ? preimageFromClaimWitness(witness) : null
+    return preimage && paymentHashFromPreimage(preimage) === row.paymentHash ? preimage : null
   }
 
   /**
@@ -1108,6 +1129,9 @@ export class OnchainSendSwapService {
           `swap ${row.id}: lockup holds ${held} < ${row.amountSats} while claiming but no spend is provable (${evidence})`,
         )
       }
+      const pending =
+        evidence === 'spent' ? await arkade.finalizePendingClaim?.(covenantRowFor(row), row.preimage) : null
+      if (pending) return store.transition(row.id, 'claiming', 'claimed', { claim_ark_txid: pending })
       // A spend revealing OUR preimage is our own claim that landed before a crash took the txid.
       // Like the normal path, never `claimed` while an adopted output is still out.
       const outpoints = unwrap(await outpointsP)

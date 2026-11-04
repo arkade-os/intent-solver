@@ -22,9 +22,15 @@ const mutate = (host: string, config: Record<string, unknown>) =>
     }),
   )
 
-const LOOPBACK = { adminHost: '127.0.0.1', adminPort: 8788 }
+const UNPINNED = { adminHost: '127.0.0.1', adminPort: 8788 }
+const LOOPBACK = { ...UNPINNED, adminAllowedHosts: ['solver.example.com'] }
 
 describe('adminHostAllowlist', () => {
+  it('is empty when no hosts are declared, so nothing is pinned', () => {
+    expect(adminHostAllowlist(UNPINNED).size).toBe(0)
+    expect(adminHostAllowlist({ ...UNPINNED, adminAllowedHosts: [] }).size).toBe(0)
+  })
+
   it('pins the bound host and its loopback aliases at the admin port', () => {
     const hosts = adminHostAllowlist(LOOPBACK)
     expect(hosts.has('127.0.0.1:8788')).toBe(true)
@@ -70,6 +76,10 @@ describe('the mutating guard pins the Host header', () => {
     const config = { ...LOOPBACK, adminAllowedHosts: ['solver.example.com:8788'] }
     expect((await mutate('solver.example.com:8788', config)).status).not.toBe(403)
     expect((await mutate('solver.example.com', config)).status).toBe(403)
+  })
+
+  it('admits any Host when no hosts are declared', async () => {
+    expect((await mutate('attacker.com', UNPINNED)).status).not.toBe(403)
   })
 
   it('stays inert when no port is configured, leaving every current caller alone', async () => {

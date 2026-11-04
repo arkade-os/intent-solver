@@ -46,6 +46,8 @@ export interface ArkadeOps {
   lockupSpendEvidence(pkScriptHex: string): Promise<LockupSpendEvidence>
   /** Spend the claim leaf of the script the row describes, revealing the preimage. */
   claim(row: CovenantScriptRow, outputs: FundedOutput[], preimageHex: string): Promise<string>
+  /** Finalize our claim arkd accepted without finalizing; its ark txid, or null when the lockup's spend is not that. */
+  finalizePendingClaim?(row: CovenantScriptRow, preimageHex: string): Promise<string | null>
   /** Push the covenant refund of the script the row describes. Needs no keys of ours. */
   refund(row: CovenantScriptRow, outputs: FundedOutput[]): Promise<string>
   findLockupOutpoints?(
@@ -116,6 +118,8 @@ export interface ReceiveArkadeOps {
   fund(address: string, amountSats: number, stamp?: ClaimPacketStamp): Promise<string>
   /** Push the covenant refund of the script the row describes, back to the solver's own address. Needs no client keys. */
   refund(row: CovenantScriptRow, outputs: readonly FundedOutput[]): Promise<string>
+  /** Finalize our refund arkd accepted or already finalized; its ark txid, or null when the lockup's spend is not that. */
+  finalizePendingRefund?(row: CovenantScriptRow): Promise<string | null>
   /** Read the preimage back out of whichever transaction claimed one of `outpoints`, verified against `paymentHashHex`. */
   findClaimPreimage(
     outpoints: readonly { txid: string; vout: number }[],

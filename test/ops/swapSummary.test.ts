@@ -50,8 +50,9 @@ describe('swap summary', () => {
     ])
     expect(formatSwapSummary(summary)).toEqual([
       '*Swaps* 2025-10-14 06:00 to 12:00 UTC',
-      'arkade:BTC → lightning:BTC: 2 fulfilled · 3 failed · 1 never funded',
-      '  failed: 2× no route · 1× stuck',
+      '• arkade:BTC → lightning:BTC: 2 fulfilled · 3 failed · 1 never funded',
+      '   ↳ 2× no route',
+      '   ↳ 1× stuck',
     ])
   })
 
@@ -69,15 +70,15 @@ describe('swap summary', () => {
     ])
     expect(formatSwapSummary(summary)).toEqual([
       '*Swaps* 2025-10-14 06:00 to 12:00 UTC',
-      'c: 1 fulfilled (partial: row cap reached)',
-      'a: unreadable (db locked), retried next report',
-      'not counted (no ledger): b',
+      '• c: 1 fulfilled (partial: row cap reached)',
+      '• a: unreadable (db locked), retried next report',
+      '• not counted (no ledger): b',
     ])
   })
 
   it('flags a capped read as partial even when nothing in it was counted', async () => {
     const [, line] = formatSwapSummary(await summarise([reader('c', [record('open')], true)]))
-    expect(line).toBe('c: none counted (partial: row cap reached)')
+    expect(line).toBe('• c: none counted (partial: row cap reached)')
   })
 
   it('reads corridors concurrently, so one that never answers does not blank the rest', async () => {
@@ -85,8 +86,8 @@ describe('swap summary', () => {
     const summary = await summarise([hung, reader('ok', [record('done')])], 10)
     expect(formatSwapSummary(summary)).toEqual([
       '*Swaps* 2025-10-14 06:00 to 12:00 UTC',
-      'ok: 1 fulfilled',
-      'hung: unreadable (no answer within 10ms), retried next report',
+      '• ok: 1 fulfilled',
+      '• hung: unreadable (no answer within 10ms), retried next report',
     ])
   })
 
@@ -113,8 +114,8 @@ describe('swap summary', () => {
     expect(windows.flaky!.map((w) => w.since)).toEqual([SINCE, SINCE])
     expect(formatSwapSummary(second)).toEqual([
       '*Swaps* 2025-10-14 06:00 to 13:00 UTC',
-      'ok: 1 fulfilled (since 2025-10-14 12:00)',
-      'flaky: 1 fulfilled',
+      '• ok: 1 fulfilled (since 2025-10-14 12:00)',
+      '• flaky: 1 fulfilled',
     ])
   })
 
@@ -122,11 +123,11 @@ describe('swap summary', () => {
     const reasons = ['a', 'b', 'c', 'd', 'e', 'f', 'g'].flatMap((r, i) =>
       Array.from({ length: 7 - i }, () => record('failed', { failureReason: r })),
     )
-    const [, , line] = formatSwapSummary(await summarise([reader('p', reasons)]))
-    expect(line).toBe('  failed: 7× a · 6× b · 5× c · 4× d · 3× e · +2 more')
-    const emoji = '🙂'.repeat(100)
+    const lines = formatSwapSummary(await summarise([reader('p', reasons)]))
+    expect(lines.slice(2)).toEqual(['7× a', '6× b', '5× c', '4× d', '3× e', '+2 more'].map((r) => `   ↳ ${r}`))
+    const emoji = '🙂'.repeat(150)
     const [, , only] = formatSwapSummary(await summarise([reader('p', [record('failed', { failureReason: emoji })])]))
-    expect(only).toBe(`  failed: 1× ${'🙂'.repeat(79)}…`)
+    expect(only).toBe(`   ↳ 1× ${'🙂'.repeat(119)}…`)
   })
 
   it('does not start a second read for a corridor whose previous one is still running', async () => {

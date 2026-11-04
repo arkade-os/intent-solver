@@ -53,6 +53,12 @@ const detailOf = async (
   history: { at: number; from: string | null; to: string; detail: string | null }[]
 } | null> => (await deps.services.readers.get(corridor)?.detail(id)) ?? null
 
+/** What the sweep keeps failing on for this swap, beside its row: a backed-off error is otherwise only in the log. */
+const withFailing = (deps: AdminDeps) => {
+  const failing = new Map(deps.services.tickErrors.failing.map(({ id, message, count }) => [id, { message, count }]))
+  return (swap: CorridorSwapView) => (failing.has(swap.id) ? { ...swap, failing: failing.get(swap.id) } : swap)
+}
+
 export const registerSwapRoutes = (app: Hono, deps: AdminDeps): void => {
   app.get('/api/swaps', async (c) => {
     const query = c.req.query()
@@ -108,6 +114,7 @@ export const registerSwapRoutes = (app: Hono, deps: AdminDeps): void => {
       .flatMap((page) => page.swaps)
       .filter((swap) => phase === undefined || swap.phase === phase)
       .sort((a, b) => b.createdAt - a.createdAt || b.updatedAt - a.updatedAt)
+      .map(withFailing(deps))
 
     // Per-corridor cursors rather than one merged token: the stores page
     // independently, and a single opaque cursor would have to encode four
@@ -121,6 +128,6 @@ export const registerSwapRoutes = (app: Hono, deps: AdminDeps): void => {
     if (!deps.services.readers.get(corridor)) return c.json({ error: 'unknown_corridor', corridor }, 400)
     const detail = await detailOf(deps, corridor, c.req.param('id'))
     if (!detail) return c.json({ error: 'not_found' }, 404)
-    return c.json(detail)
+    return c.json({ ...detail, swap: withFailing(deps)(detail.swap) })
   })
 }

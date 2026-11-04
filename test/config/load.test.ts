@@ -68,6 +68,22 @@ describe('loadConfig — where the document comes from', () => {
     expect(message).not.toContain('seed words')
   })
 
+  it('refuses a key repeated in one object, naming it, where JSON.parse would keep only the last', () => {
+    const env = {
+      SOLVER_CONFIG_JSON:
+        '{"admin":{"allowedHosts":["solver.example.com"]},"rails":{"arkade":{"mnemonic":"seed words"}},' +
+        '"admin":{"port":8788}}',
+    }
+    const message = errorOf(() => loadConfig({ env }))
+    expect(message).toContain('SOLVER_CONFIG_JSON: key "admin" appears more than once')
+    expect(message).not.toContain('seed words')
+  })
+
+  it('reads the same key in sibling objects as no repeat', () => {
+    const doc = { ...minimalDoc, admin: { port: 8788 }, corridors: { a: { enabled: true }, b: { enabled: false } } }
+    expect(() => loadConfig({ env: inline(doc) })).not.toThrow(/more than once/)
+  })
+
   it('never echoes content when the parser would quote it either', () => {
     expect(errorOf(() => loadConfig({ env: { SOLVER_CONFIG_JSON: 'seed words here' } }))).not.toContain('seed')
   })

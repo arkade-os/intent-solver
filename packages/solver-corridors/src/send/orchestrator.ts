@@ -1347,6 +1347,7 @@ export class SendSwapService {
     // happened — an empty script written up as a broken refund, or worse, a
     // refund that broadcast written up as failed.
     let txid: string
+    let all = false
     try {
       const outputs = await arkade.findLockups(row.pkScript)
       if (outputs.length === 0) {
@@ -1360,6 +1361,7 @@ export class SendSwapService {
         return false
       }
       txid = await arkade.refund(row, outputs)
+      all = boundedSpendInputs(outputs, this.now()).length === outputs.length
     } catch (error) {
       // Recorded on the row: `stuck` is excluded from `findRefundable`, so the
       // operator is the retry, and a bare `refund_outcome` null would read as
@@ -1375,8 +1377,14 @@ export class SendSwapService {
     // is the most dangerous line this column can carry, because `stuck` means a
     // human reads it and acts. The txid goes into the log instead, which is the
     // only other durable place it can go.
+    // Only a full refund earns the one-way `refund_outcome`; a partial one stays refundable for the sweep.
     await store
-      .patch(row.id, { refund_outcome: 'pushed', refund_ark_txid: txid, refund_attempt: 'pushed' })
+      .patch(
+        row.id,
+        all
+          ? { refund_outcome: 'pushed', refund_ark_txid: txid, refund_attempt: 'pushed' }
+          : { refund_ark_txid: txid, refund_attempt: 'pushed' },
+      )
       .catch((error: unknown) => {
         const reason = error instanceof Error ? error.message : String(error)
         this.onTickError?.(row.id, new Error(`refund ${txid} broadcast but could not be recorded: ${reason}`))
@@ -1830,6 +1838,9 @@ export class SendSwapService {
           `swap ${row.id}: lockup holds ${held} < ${row.amountSats} while claiming but no spend is provable (${evidence})`,
         )
       }
+      // A throw keeps the row claiming, so the sweep retries a finalize arkd refused.
+      const pending = evidence === 'spent' ? await arkade.finalizePendingClaim?.(row, row.preimage) : null
+      if (pending) return store.transition(row.id, 'claiming', 'claimed', { claim_ark_txid: pending })
       await store.fail(
         row.id,
         'claiming',

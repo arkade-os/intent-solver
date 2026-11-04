@@ -1260,6 +1260,10 @@ export class ReceiveSwapService {
 
     const outputs = await arkade.findLockups(row.pkScript)
     if (outputs.length === 0) {
+      // Our own refund, finalized (one-shot) or accepted before its response reached us. A throw keeps
+      // the row refunding, so the sweep retries a finalize arkd refused.
+      const own = await arkade.finalizePendingRefund?.(receiveCovenantRowFor(row))
+      if (own) return store.transition(row.id, 'refunding', 'refunded', { refund_ark_txid: own })
       // Nothing left to refund and no claim readable either. Two very
       // different things look identical from here, and only TIME separates
       // them (see EMPTY_LOCKUP_GRACE): ordinary lag between these two reads,

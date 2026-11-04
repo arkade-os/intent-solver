@@ -17,6 +17,7 @@ import { findLockups, findSweptLockups, refundSwapScript } from '@arkade-os/solv
 import { refundSweptSwapScript } from '@arkade-os/solver-arkade/arkade/sweptRefund.js'
 import { covenantScriptFromRow } from '@arkade-os/solver-corridors/send/arkadeOps.js'
 import { EXPOSED } from '@arkade-os/solver-corridors/db/swaps.js'
+import { paymentVerdict } from './paymentVerdict.js'
 import type { Services } from './services.js'
 
 /** A pushed refund, or the reason nothing was pushed. */
@@ -46,6 +47,13 @@ export const refundNow = async (services: Services, id: string): Promise<RefundO
   if (EXPOSED.includes(row.state) || row.state === 'claimed') {
     throw new Error(
       `swap ${id} is ${row.state}: the Lightning payout is in flight or done, so refunding the lockup now would pay the client twice — resolve the payment, do not refund`,
+    )
+  }
+  // The row state is only the fast guard; the payment is the authority. @see paymentVerdict.ts
+  const { verdict } = await paymentVerdict(services, row)
+  if (verdict !== 'not-paid-refund-is-safe' && verdict !== 'never-submitted') {
+    throw new Error(
+      `swap ${id}: payment verdict is ${verdict}, so refunding the lockup now could pay the client twice — resolve the payment, do not refund`,
     )
   }
   const script = covenantScriptFromRow(row)

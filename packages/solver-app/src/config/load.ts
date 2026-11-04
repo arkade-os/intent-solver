@@ -27,6 +27,38 @@ export const registerConfigProfile = (profile: NonNullable<LoadOptions['profile'
   registeredProfile = profile
 }
 
+/** The first key one object of `text` repeats, as a dotted path; JSON.parse keeps only the last. */
+const repeatedKey = (text: string): string | null => {
+  const frames: { path: string; keys?: Set<string>; awaitingKey?: boolean }[] = []
+  let lastKey = ''
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (ch === '"') {
+      let end = i + 1
+      while (text[end] !== '"') end += text[end] === '\\' ? 2 : 1
+      const frame = frames.at(-1)
+      if (frame?.keys && frame.awaitingKey) {
+        const key = JSON.parse(text.slice(i, end + 1)) as string
+        lastKey = frame.path ? `${frame.path}.${key}` : key
+        if (frame.keys.has(key)) return lastKey
+        frame.keys.add(key)
+        frame.awaitingKey = false
+      }
+      i = end
+    } else if (ch === '{' || ch === '[') {
+      const top = frames.at(-1)
+      const path = top && !top.keys ? top.path : lastKey
+      frames.push(ch === '{' ? { path, keys: new Set(), awaitingKey: true } : { path })
+    } else if (ch === '}' || ch === ']') {
+      frames.pop()
+    } else if (ch === ',') {
+      const top = frames.at(-1)
+      if (top?.keys) top.awaitingKey = true
+    }
+  }
+  return null
+}
+
 const positionOf = (error: unknown, text: string): string => {
   const message = messageOf(error)
   const at = /position (\d+)/.exec(message)?.[1] ?? (/end of JSON/.test(message) ? String(text.length) : undefined)
@@ -56,12 +88,18 @@ export const readDocument = (env: NodeJS.ProcessEnv): unknown => {
     }
   }
   text = text.replace(/^﻿/, '')
+  let document: unknown
   try {
-    return JSON.parse(text)
+    document = JSON.parse(text)
   } catch (error) {
     // Position only: V8's message can quote the text it failed on, and the text holds the mnemonic.
     throw new Error(`${source}: invalid JSON${positionOf(error, text)}`)
   }
+  const repeated = repeatedKey(text)
+  if (repeated !== null) {
+    throw new Error(`${source}: key "${repeated}" appears more than once; JSON keeps only the last, so merge them`)
+  }
+  return document
 }
 
 /** Set by platforms rather than operators, so refusing them would refuse a deployment for its host. */
