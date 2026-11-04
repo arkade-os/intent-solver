@@ -203,8 +203,13 @@ describe('OfferFillStore: the one edge back out of filling', () => {
       await store.transition(row.id, from, to)
       from = to
     }
+    const before = await eventsOf(row.id)
+    const announced: string[] = []
+    store.onTransition = (event) => void announced.push(`${event.from}->${event.to}`)
     expect(await store.revertUnsubmitted(row.id)).toBe(false)
     expect((await store.findById(row.id))?.state).toBe(state)
+    expect(await eventsOf(row.id)).toEqual(before)
+    expect(announced).toEqual([])
   })
 
   it('leaves the generic transition refusing the same edge', async () => {

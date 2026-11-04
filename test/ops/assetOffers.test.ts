@@ -553,17 +553,19 @@ describe('tickAll defers a fill the float cannot fund yet', () => {
     expect(await store.findById('fill-1')).toMatchObject({ state: 'stuck' })
   })
 
-  it('leaves the row alone when another worker moved it inside the settle', async () => {
+  it('leaves the row alone when another worker moved it inside the settle, and logs no deferral', async () => {
+    const deferred: string[] = []
     const { store, service } = await build({
       settle: async (row) => {
         await store.transition(row.id, 'filling', 'stuck', { failure_reason: 'another worker' })
         throw new OfferNotSubmittedError('no spendable coins to pay the maker 1000 sats')
       },
-      onDeferred: () => {},
+      onDeferred: (id) => void deferred.push(id),
     })
     await service.consider(found)
     expect(await service.tickAll()).toBe(0)
     expect(await store.findById('fill-1')).toMatchObject({ state: 'stuck', failureReason: 'another worker' })
+    expect(deferred).toEqual([])
   })
 
   it('is WIRED to the log on the shipped daemon', () => {

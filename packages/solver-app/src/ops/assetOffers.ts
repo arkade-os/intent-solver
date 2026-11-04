@@ -148,7 +148,8 @@ export interface AssetOfferDeps {
 /**
  * How many sweeps a fill may wait for the float before it needs a human — about
  * two minutes at `FULL_SWEEP_MS`, long enough to outlast the renewal or funding
- * that pinned the coins. Also bounds the event rows one fill can write.
+ * that pinned the coins. Counted in memory, so this bound, and the event rows it
+ * caps, hold per process: a restart starts the count again.
  */
 export const MAX_FILL_DEFERRALS = 40
 
@@ -411,9 +412,10 @@ export class AssetOfferService {
         // above the call that submits. A later sweep re-runs every gate and the CAS.
         const deferrals = (this.deferrals.get(row.id) ?? 0) + 1
         if (error instanceof OfferNotSubmittedError && deferrals <= MAX_FILL_DEFERRALS) {
-          this.deferrals.set(row.id, deferrals)
-          if (deferrals === 1) this.deps.onDeferred?.(row.id, error)
-          await this.deps.store.revertUnsubmitted(row.id)
+          if (await this.deps.store.revertUnsubmitted(row.id)) {
+            this.deferrals.set(row.id, deferrals)
+            if (deferrals === 1) this.deps.onDeferred?.(row.id, error)
+          }
           continue
         }
         // `filling` fails to `stuck`, not `refused`: something may have been

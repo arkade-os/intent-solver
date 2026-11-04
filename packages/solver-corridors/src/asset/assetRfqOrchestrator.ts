@@ -138,7 +138,10 @@ export interface AssetRfqDeps {
   /** The large-swap approval gate. Absent means no gate. @see ops/approvals.ts */
   approvalGate?: ApprovalCheck
   onError?: (id: string, error: unknown) => void
-  /** A fill put back to `funded` because the float was pinned or short. Every one: `validUntil` bounds the count. */
+  /**
+   * A fill put back to `funded` because the float was pinned or short. EVERY
+   * deferral, not only the first: `validUntil` bounds the count.
+   */
   onDeferred?: (id: string, error: unknown) => void
   now?: () => number
   newId?: () => string
@@ -468,8 +471,7 @@ export class AssetRfqSwapService {
       // so the row goes back to `funded` for a later tick. No counter — `validUntil`
       // already bounds the retrying — and no fill mark, because nothing filled.
       if (error instanceof OfferNotSubmittedError) {
-        this.deps.onDeferred?.(row.id, error)
-        await this.deps.store.revertUnsubmitted(row.id)
+        if (await this.deps.store.revertUnsubmitted(row.id)) this.deps.onDeferred?.(row.id, error)
         return
       }
       // `filling` fails to `stuck`, never to something retryable: the spend may

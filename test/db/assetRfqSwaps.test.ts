@@ -211,8 +211,13 @@ describe('revertUnsubmitted — the one exception to that edge', () => {
         await store.transition('swap-1', 'funded', 'filling')
         await store.transition('swap-1', 'filling', state)
       }
+      const before = await store.history('swap-1')
+      const announced: string[] = []
+      store.onTransition = (event) => void announced.push(`${event.from}->${event.to}`)
       expect(await store.revertUnsubmitted('swap-1')).toBe(false)
       expect((await store.get('swap-1')).state).toBe(state)
+      expect(await store.history('swap-1')).toEqual(before)
+      expect(announced).toEqual([])
       await store.close()
     },
   )

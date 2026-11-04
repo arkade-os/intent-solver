@@ -14,6 +14,8 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { approvalGateFor } from '@arkade-os/solver-app/ops/approvals.js'
 import type { SwapApprovalRequest } from '@arkade-os/solver-app/admin/db.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
@@ -545,19 +547,30 @@ describe('a fill the float cannot fund yet', () => {
     expect((await store.get('swap-1')).state).toBe('stuck')
   })
 
-  it('leaves the row alone when another worker moved it inside the settle', async () => {
+  it('leaves the row alone when another worker moved it inside the settle, and logs no deferral', async () => {
     let moved: (() => Promise<void>) | null = null
+    const deferred: string[] = []
     const built = await funded({
       settle: async () => {
         await moved?.()
         throw busy()
       },
+      onDeferred: (id) => void deferred.push(id),
     })
     moved = async () => {
       await built.store.transition('swap-1', 'filling', 'stuck', { failure_reason: 'another worker' })
     }
     await built.service.tick('swap-1')
     expect(await built.store.get('swap-1')).toMatchObject({ state: 'stuck', failureReason: 'another worker' })
+    expect(deferred).toEqual([])
+  })
+
+  it('is WIRED to the log on the shipped daemon', () => {
+    const services = readFileSync(
+      fileURLToPath(new URL('../../packages/solver-app/src/ops/services.ts', import.meta.url)),
+      'utf8',
+    )
+    expect(services).toMatch(/onDeferred:\s*\([^)]*\)\s*=>\s*log\(`asset rfq \$\{\w+\} deferred/)
   })
 })
 
