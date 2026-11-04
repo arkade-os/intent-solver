@@ -22,7 +22,7 @@
 // other parameter of the script is yours, so a wrong or malicious solver can
 // only produce an address you refuse, never an address that traps your sats.
 //
-// Env: ARKADE_MNEMONIC, ARKADE_OPERATOR_URL, EMULATOR_URL (your own view of both
+// Env: WALLET_MNEMONIC, ARKADE_OPERATOR_URL, EMULATOR_URL (your own view of both
 // services — never taken from the provider), SWAP_NETWORK.
 
 import { createArkadeContext } from '../packages/solver-app/dist/index.js'

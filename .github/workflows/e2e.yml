@@ -288,12 +288,12 @@ jobs:
             writeFileSync(process.env.E2E_ENV_FILE, [
               "SWAP_NETWORK=regtest",
               `LN_BACKEND=${process.env.LN_BACKEND}`,
-              `ARKADE_MNEMONIC="${generateMnemonic(wordlist, 128)}"`,
+              `WALLET_MNEMONIC="${generateMnemonic(wordlist, 128)}"`,
               "ARKADE_OPERATOR_URL=http://localhost:7070",
               "EMULATOR_URL=http://localhost:7073",
               "ESPLORA_URL=http://localhost:3000/api",
               ...lnd,
-              "ARKADE_DB_PATH=.data/ark-ci.sqlite",
+              "WALLET_DB_PATH=.data/ark-ci.sqlite",
               "SWAP_DB_PATH=.data/swaps-ci.sqlite",
               "",
             ].join("\n"))

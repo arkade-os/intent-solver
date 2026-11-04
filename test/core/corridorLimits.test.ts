@@ -20,7 +20,7 @@ import { descriptorFor } from '@arkade-os/solver-corridors/corridors/index.js'
 const STEMS = CORRIDORS.map((c) => descriptorFor(c).envStem)
 const CONFIG_KEYS = [
   'SWAP_NETWORK',
-  'ARKADE_MNEMONIC',
+  'WALLET_MNEMONIC',
   'ARKADE_OPERATOR_URL',
   'EMULATOR_URL',
   'LN_BACKEND',
@@ -31,7 +31,7 @@ const CONFIG_KEYS = [
 
 const BASE_ENV: Record<string, string> = {
   SWAP_NETWORK: 'regtest',
-  ARKADE_MNEMONIC: 'test mnemonic, never a real one',
+  WALLET_MNEMONIC: 'test mnemonic, never a real one',
   ARKADE_OPERATOR_URL: 'http://localhost:7070',
   EMULATOR_URL: 'http://localhost:7073',
   // Required: the three corridors are enabled here, and each takes both its legs

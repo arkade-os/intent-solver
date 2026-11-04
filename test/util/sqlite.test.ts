@@ -2,7 +2,7 @@
  * Opening a database into a directory that does not exist yet.
  *
  * The regression this pins down is a first-run one: both `SWAP_DB_PATH` and
- * `ARKADE_DB_PATH` default under `.data/`, better-sqlite3 opens paths rather than
+ * `WALLET_DB_PATH` default under `.data/`, better-sqlite3 opens paths rather than
  * creating them, and so a fresh checkout died on its first command with a
  * `TypeError` from inside a vendor constructor that named neither the path nor
  * the setting. It is the kind of failure that only ever shows up to someone

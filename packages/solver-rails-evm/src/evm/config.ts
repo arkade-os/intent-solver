@@ -59,7 +59,7 @@ export interface EvmChainConfig {
   /**
    * The key that signs this corridor's transactions, 32 bytes.
    *
-   * SEPARATE from `ARKADE_MNEMONIC` on purpose. An Arkade key and an EVM key protect
+   * SEPARATE from `WALLET_MNEMONIC` on purpose. An Arkade key and an EVM key protect
    * different money on different chains, and deriving one from the other would
    * mean an operator rotating either had silently rotated both — including the
    * one holding funds mid-swap.

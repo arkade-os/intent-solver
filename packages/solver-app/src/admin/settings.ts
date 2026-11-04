@@ -392,7 +392,7 @@ export const describeSettings = (
     // directory is not the answer to "which files is this process using" — and
     // a `DB_DIR` that lost to an explicit path would read as though it had won.
     { key: 'SWAP_DB_PATH', value: config.swapDbPath, source: 'config', editable: false },
-    { key: 'ARKADE_DB_PATH', value: config.arkade.databasePath, source: 'config', editable: false },
+    { key: 'WALLET_DB_PATH', value: config.arkade.databasePath, source: 'config', editable: false },
     { key: 'SWEEP_CONCURRENCY', value: config.sweepConcurrency, source: 'config', editable: false },
     // On this page for the same reason `LN_RECEIVE_ACCEPT_UNILATERAL_GAP` is:
     // a WRONG entry here is a fund-risk rather than a lost swap — a real

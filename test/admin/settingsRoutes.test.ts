@@ -220,7 +220,7 @@ describe('PATCH /api/settings', () => {
 
   it('refuses a non-editable key', async () => {
     const { app, setOverrideWithAudit } = build()
-    expect((await patch(app, { key: 'ARKADE_MNEMONIC', value: 'hunter2' })).status).toBe(400)
+    expect((await patch(app, { key: 'WALLET_MNEMONIC', value: 'hunter2' })).status).toBe(400)
     expect(setOverrideWithAudit).not.toHaveBeenCalled()
   })
 

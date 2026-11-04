@@ -23,11 +23,11 @@ type Row = readonly [path: string, knob: string, encode?: (value: unknown) => st
 
 /** Ids renamed since the old `.env` files were written. Only `config-from-env` and the startup refusal read these. */
 const LEGACY_ENV_NAMES: Readonly<Record<string, string>> = {
-  ARKADE_MNEMONIC: 'ARK_MNEMONIC',
+  WALLET_MNEMONIC: 'ARK_MNEMONIC',
   ARKADE_OPERATOR_URL: 'ARK_SERVER_URL',
   ARKADE_ESPLORA_URL: 'ARK_ESPLORA_URL',
   ARKADE_UNILATERAL_EXIT_DELAY: 'ARK_UNILATERAL_EXIT_DELAY',
-  ARKADE_DB_PATH: 'ARK_DB_PATH',
+  WALLET_DB_PATH: 'ARK_DB_PATH',
 }
 
 export const legacyEnvName = (knob: string): string => LEGACY_ENV_NAMES[knob] ?? knob
@@ -35,7 +35,7 @@ export const legacyEnvName = (knob: string): string => LEGACY_ENV_NAMES[knob] ??
 export const PATHS: readonly Row[] = [
   ['network', 'SWAP_NETWORK'],
   ['name', 'SOLVER_NAME'],
-  ['rails.arkade.mnemonic', 'ARKADE_MNEMONIC'],
+  ['rails.arkade.mnemonic', 'WALLET_MNEMONIC'],
   ['rails.arkade.operatorUrl', 'ARKADE_OPERATOR_URL'],
   ['rails.arkade.emulatorUrl', 'EMULATOR_URL'],
   ['rails.arkade.esploraUrl', 'ARKADE_ESPLORA_URL'],
@@ -75,7 +75,7 @@ export const PATHS: readonly Row[] = [
   ['relay.cardRelays', 'SOLVER_CARD_RELAYS'],
   ['storage.dir', 'DB_DIR'],
   ['storage.swapDb', 'SWAP_DB_PATH'],
-  ['storage.walletDb', 'ARKADE_DB_PATH'],
+  ['storage.walletDb', 'WALLET_DB_PATH'],
   ['http.host', 'HOST'],
   ['http.port', 'PORT'],
   ['admin.host', 'ADMIN_HOST'],
@@ -278,7 +278,7 @@ export const documentToKnobs = (doc: SolverDocument): Flattened => {
 
 /** Settings whose value is a credential: an error naming one never repeats what was written. */
 export const SECRET_KNOBS: ReadonlySet<string> = new Set([
-  'ARKADE_MNEMONIC',
+  'WALLET_MNEMONIC',
   'LND_CERT',
   'LND_MACAROON',
   'EVM_PRIVATE_KEY',

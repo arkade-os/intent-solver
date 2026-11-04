@@ -504,7 +504,7 @@ const loadLndConfig = (env: Knobs): LndConfig => ({
  * off the same stem, and the Arkade wallet. Point `DB_DIR` at the volume and every
  * file lands there.
  *
- * Strictly a DEFAULT, never an override: `SWAP_DB_PATH` and `ARKADE_DB_PATH` still win
+ * Strictly a DEFAULT, never an override: `SWAP_DB_PATH` and `WALLET_DB_PATH` still win
  * where set, so an existing deployment keeps opening the exact files it did before.
  *
  * Set-but-empty is unset, and it matters most on the path knobs: better-sqlite3 reads
@@ -519,7 +519,7 @@ const dbDir = (env: Knobs): string => env.DB_DIR?.trim() || '.data'
  *
  * Read-only inspection (`status`, `list`, `timeline`) needs this string and no key
  * material, but {@link loadConfig} validates the whole deployment up front and would
- * demand ARKADE_MNEMONIC first — putting a seed phrase into the environment, shell
+ * demand WALLET_MNEMONIC first — putting a seed phrase into the environment, shell
  * history and crash dumps of a process that never signs anything.
  *
  * `loadConfig` calls this too, so the default cannot drift between them.
@@ -535,7 +535,7 @@ export const swapDbPath = (env: Knobs): string => env.SWAP_DB_PATH?.trim() || jo
  * wallet than the service under test, on any deployment that moved the
  * directory.
  */
-export const arkadeDbPath = (env: Knobs): string => env.ARKADE_DB_PATH?.trim() || join(dbDir(env), 'ark.sqlite')
+export const walletDbPath = (env: Knobs): string => env.WALLET_DB_PATH?.trim() || join(dbDir(env), 'ark.sqlite')
 
 /**
  * Crash reporting, or null when `SENTRY_DSN` is unset.
@@ -1113,9 +1113,9 @@ export const configFromKnobs = (env: Knobs): Config => {
       throw new Error(`COVCLAIMD_URL must use https on mainnet, got "${url.protocol}//${url.host}"`)
     })(),
     arkade: {
-      mnemonic: required(env, 'ARKADE_MNEMONIC'),
+      mnemonic: required(env, 'WALLET_MNEMONIC'),
       operatorUrl: required(env, 'ARKADE_OPERATOR_URL'),
-      databasePath: arkadeDbPath(env),
+      databasePath: walletDbPath(env),
       isMainnet: profile.isMainnet,
       arkadeHrp: profile.arkadeHrp,
       unilateralExitDelayOverride: unilateralExitDelayOverride(env),

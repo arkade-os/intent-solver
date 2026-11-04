@@ -10,7 +10,7 @@
 // on-chain and claims; this client watches the vtxo disappear as its
 // completion signal (an rfq_status_request over the relay also works).
 //
-// Env: this client's own ARKADE_MNEMONIC / ARKADE_OPERATOR_URL / EMULATOR_URL /
+// Env: this client's own WALLET_MNEMONIC / ARKADE_OPERATOR_URL / EMULATOR_URL /
 // SWAP_NETWORK — its own view of every service, never taken from the solver.
 
 import { hex } from '@scure/base'

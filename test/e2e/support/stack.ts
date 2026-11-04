@@ -16,7 +16,7 @@
  *  - **Swap stores go to a fresh temp directory**, never the configured
  *    `SWAP_DB_PATH`. A test run must not deposit rows in the operator's own
  *    swap database, and a per-run store means a rerun is never confused by a
- *    previous run's rows. The ARKADE WALLET database (`ARKADE_DB_PATH`) is used
+ *    previous run's rows. The ARKADE WALLET database (`WALLET_DB_PATH`) is used
  *    as configured, because that one is the wallet's own vtxo state — a temp
  *    copy would be an empty, unfunded wallet.
  *  - **Wallets are initialised sequentially**, for the reason `createServices`
@@ -30,7 +30,7 @@ import { join } from 'node:path'
 import { RestEmulatorProvider } from '@arkade-os/sdk'
 import { base64 } from '@scure/base'
 import { createArkadeContext, type ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
-import { arkadeDbPath } from '@arkade-os/solver-app/config.js'
+import { walletDbPath } from '@arkade-os/solver-app/config.js'
 import { resolveLimits, type Limits } from '@arkade-os/solver-core/core/limits.js'
 import { NETWORKS, isSwapNetwork, type NetworkProfile, type SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
 import { ONCHAIN_SECONDS_PER_BLOCK } from '@arkade-os/solver-core/core/onchainSend.js'
@@ -114,11 +114,11 @@ export const openArkade = async (): Promise<E2eArkade> => {
   const network = e2eNetwork()
   const profile = NETWORKS[network]
   const ctx = await createArkadeContext({
-    mnemonic: required('ARKADE_MNEMONIC'),
+    mnemonic: required('WALLET_MNEMONIC'),
     operatorUrl: required('ARKADE_OPERATOR_URL'),
     // The service's own resolution, not a copy of it: this suite is only
     // meaningful against the same wallet database the service opens.
-    databasePath: arkadeDbPath(process.env),
+    databasePath: walletDbPath(process.env),
     isMainnet: profile.isMainnet,
     arkadeHrp: profile.arkadeHrp,
     expectedArkdNetwork: profile.arkdNetwork,

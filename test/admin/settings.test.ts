@@ -68,10 +68,10 @@ describe('the editable key set', () => {
     // The console has no authentication of its own, so an editable path knob
     // would let whatever reaches that port relocate the money-critical database.
     for (const key of [
-      'ARKADE_MNEMONIC',
+      'WALLET_MNEMONIC',
       'LN_MNEMONIC',
       'SWAP_DB_PATH',
-      'ARKADE_DB_PATH',
+      'WALLET_DB_PATH',
       'DB_DIR',
       'ARKADE_OPERATOR_URL',
       'LN_BACKEND',
@@ -191,7 +191,7 @@ describe('corridor toggles', () => {
 
 describe('non-editable keys', () => {
   it('refuses anything outside the editable set', () => {
-    expect(() => validateOverride(config, 'ARKADE_MNEMONIC', 'hunter2')).toThrow(/not editable/i)
+    expect(() => validateOverride(config, 'WALLET_MNEMONIC', 'hunter2')).toThrow(/not editable/i)
     expect(() => validateOverride(config, 'LN_BACKEND', 'lnd')).toThrow(/not editable/i)
   })
 
@@ -259,7 +259,7 @@ describe('describeSettings', () => {
     // question the console has to be able to answer on its own.
     const knobs = describeSettings(config, {})
     expect(knobs.find((k) => k.key === 'SWAP_DB_PATH')?.value).toBe('.data/swaps.sqlite')
-    expect(knobs.find((k) => k.key === 'ARKADE_DB_PATH')?.value).toBe('.data/ark.sqlite')
+    expect(knobs.find((k) => k.key === 'WALLET_DB_PATH')?.value).toBe('.data/ark.sqlite')
   })
 })
 

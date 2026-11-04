@@ -1,6 +1,6 @@
 import { RestEmulatorProvider } from '@arkade-os/sdk'
 import { createArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
-import { arkadeDbPath } from '@arkade-os/solver-app/config.js'
+import { walletDbPath } from '@arkade-os/solver-app/config.js'
 import { resolveLimits } from '@arkade-os/solver-core/core/limits.js'
 import { NETWORKS } from '@arkade-os/solver-core/core/networks.js'
 import { esploraUrl, loadE2eEnv } from './preflight.js'
@@ -13,14 +13,14 @@ export const openRebalanceArkade = async (
   const network = e2eNetwork()
   if (network !== 'regtest') throw new Error('rebalance e2e requires regtest')
   const profile = NETWORKS[network]
-  const mnemonic = options.mnemonic ?? process.env.ARKADE_MNEMONIC
+  const mnemonic = options.mnemonic ?? process.env.WALLET_MNEMONIC
   const operatorUrl = process.env.ARKADE_OPERATOR_URL
   const emulatorUrl = process.env.EMULATOR_URL
   if (!mnemonic || !operatorUrl || !emulatorUrl) throw new Error('rebalance e2e requires wallet and stack settings')
   const ctx = await createArkadeContext({
     mnemonic,
     operatorUrl,
-    databasePath: options.databasePath ?? arkadeDbPath(process.env),
+    databasePath: options.databasePath ?? walletDbPath(process.env),
     isMainnet: false,
     arkadeHrp: profile.arkadeHrp,
     expectedArkdNetwork: profile.arkdNetwork,

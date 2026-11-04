@@ -59,7 +59,7 @@ registerLightningRail(RAIL, injected)
 /** The minimum `loadConfig` needs, plus the rail under test. */
 const BASE_ENV: Record<string, string> = {
   SWAP_NETWORK: 'regtest',
-  ARKADE_MNEMONIC: 'test mnemonic, never a real one',
+  WALLET_MNEMONIC: 'test mnemonic, never a real one',
   ARKADE_OPERATOR_URL: 'http://localhost:7070',
   // The old spellings, for the migration tests below.
   ARK_MNEMONIC: 'test mnemonic, never a real one',

@@ -21,7 +21,7 @@
 # onchain leg"):
 #   - the arkade-regtest stack up WITH the boltz profile (arkd :7070,
 #     emulator :7073, boltz-lnd, bitcoin, miner, esplora :3000)
-#   - .env.regtest.lnd filled in (ARKADE_MNEMONIC, LND_SOCKET, LND_CERT_PATH /
+#   - .env.regtest.lnd filled in (WALLET_MNEMONIC, LND_SOCKET, LND_CERT_PATH /
 #     LND_MACAROON_PATH pointing at the extracted boltz-lnd cert/macaroon)
 #   - the provider's Arkade wallet funded (scripts/regtest-fund.mjs)
 #   - pnpm build has run

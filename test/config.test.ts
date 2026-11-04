@@ -92,7 +92,7 @@ const CONFIG_KEYS = [
   // Listed for the same reason `EVM_TOKENS` is: a leaked `LN_SEND_ENABLED=false`
   // would silently exempt every later test from needing a rail at all.
   ...CORRIDOR_ENABLED_KEYS,
-  'ARKADE_MNEMONIC',
+  'WALLET_MNEMONIC',
   'ARKADE_OPERATOR_URL',
   'EMULATOR_URL',
   'COVCLAIMD_URL',
@@ -103,7 +103,7 @@ const CONFIG_KEYS = [
   'NOSTR_AD_PUBLISH',
   'DB_DIR',
   'SWAP_DB_PATH',
-  'ARKADE_DB_PATH',
+  'WALLET_DB_PATH',
   'FAKE_LN_STATE_PATH',
   'POOL_AUTO_MINT',
   'CONTRACT_RETENTION_DAYS',
@@ -136,7 +136,7 @@ const CONFIG_KEYS = [
  */
 const BASE_ENV: Record<string, string> = {
   SWAP_NETWORK: 'regtest',
-  ARKADE_MNEMONIC: 'test mnemonic, never a real one',
+  WALLET_MNEMONIC: 'test mnemonic, never a real one',
   ARKADE_OPERATOR_URL: 'http://localhost:7070',
   EMULATOR_URL: 'http://localhost:7073',
   LN_BACKEND: TEST_RAIL,
@@ -476,7 +476,7 @@ describe('loadConfig — DB_DIR', () => {
     // opening an empty swap database and reporting nothing wrong.
     process.env.DB_DIR = '/somewhere/else'
     process.env.SWAP_DB_PATH = '/data/swaps.sqlite'
-    process.env.ARKADE_DB_PATH = '/data/ark.sqlite'
+    process.env.WALLET_DB_PATH = '/data/ark.sqlite'
     const config = configFromKnobs(process.env)
     expect(config.swapDbPath).toBe('/data/swaps.sqlite')
     expect(config.arkade.databasePath).toBe('/data/ark.sqlite')
@@ -484,7 +484,7 @@ describe('loadConfig — DB_DIR', () => {
 
   it('lets the two paths disagree with each other, as they always could', () => {
     process.env.DB_DIR = '/data'
-    process.env.ARKADE_DB_PATH = '/wallets/ark.sqlite'
+    process.env.WALLET_DB_PATH = '/wallets/ark.sqlite'
     const config = configFromKnobs(process.env)
     // Verbatim, not joined: an explicit path is passed through untouched.
     expect(config.arkade.databasePath).toBe('/wallets/ark.sqlite')

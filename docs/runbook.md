@@ -352,7 +352,7 @@ are deployment-specific):
     "producers": [{ "binding": "DRIVE_QUEUE", "queue": "swap-drive" }],
     "consumers": [{ "queue": "swap-drive", "max_retries": 10 }],
   },
-  // secrets via `wrangler secret put`: ARKADE_MNEMONIC, ...
+  // secrets via `wrangler secret put`: WALLET_MNEMONIC, ...
 }
 ```
 
@@ -1478,7 +1478,7 @@ hard way. The numbers below are the smallest legal values, not arbitrary ones.
 Three more things that cost time if forgotten:
 
 - **The e2e suite uses a DIFFERENT wallet from the `cli` walkthroughs.** It
-  defaults to `E2E_ENV_FILE=.env.regtest.lnd`, whose `ARKADE_DB_PATH` is
+  defaults to `E2E_ENV_FILE=.env.regtest.lnd`, whose `WALLET_DB_PATH` is
   `.data/ark-regtest-lnd.sqlite` — not `.env.regtest`'s. Funding one does not
   fund the other.
 - **A stack rebuild regenerates boltz-lnd's TLS cert and macaroon.** The
@@ -1526,7 +1526,7 @@ COVCLAIMD_IMAGE=ghcr.io/arkade-os/covclaimd:v0.0.1-rc.5 \
 node regtest.mjs start --clean
 
 # 2. this repo
-cp .env.regtest.example .env.regtest       # fill ARKADE_MNEMONIC with any bip39 phrase
+cp .env.regtest.example .env.regtest       # fill WALLET_MNEMONIC with any bip39 phrase
 pnpm install && pnpm build
 
 # 3. fund the provider's Arkade wallet (boarding -> faucet -> settle)
@@ -1590,7 +1590,7 @@ docker cp boltz-lnd:/root/.lnd/data/chain/bitcoin/regtest/admin.macaroon ../inte
 
 # 3. this repo
 cd ../intent-solver
-cp .env.regtest.lnd.example .env.regtest.lnd    # fill ARKADE_MNEMONIC with any bip39 phrase
+cp .env.regtest.lnd.example .env.regtest.lnd    # fill WALLET_MNEMONIC with any bip39 phrase
 pnpm install && pnpm build
 
 # 4. fund the provider's Arkade wallet (boarding -> faucet -> settle), same as the fake walkthrough
@@ -1744,7 +1744,7 @@ covers separately — see "covclaimd" below.
   Everything Arkade-side is real in all three.
 - **Swap stores go to a temp directory**, never the configured `SWAP_DB_PATH`,
   so a run leaves no rows in an operator's own database. The Arkade wallet
-  database (`ARKADE_DB_PATH`) is used as configured — it is the wallet.
+  database (`WALLET_DB_PATH`) is used as configured — it is the wallet.
 - **The receive corridors are the highest-value tests here.** They are the only
   place the solver learns `P` by reading it back out of a real covclaimd claim
   (`findClaimPreimage`), which rests on Ark's `ConditionWitness` PSBT field

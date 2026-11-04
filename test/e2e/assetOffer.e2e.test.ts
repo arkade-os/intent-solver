@@ -398,7 +398,7 @@ describe('e2e arkade offers — what OFFER_MARKETS actually builds', () => {
     }
   })
 
-  // Its own `SWAP_DB_PATH`/`ARKADE_DB_PATH`, sharing no handle with the wallet this
+  // Its own `SWAP_DB_PATH`/`WALLET_DB_PATH`, sharing no handle with the wallet this
   // suite already holds open. A fresh path has no suffixed sibling, so
   // `resolveDbLayout` is consolidated and this IS the admin store boot reads.
   const boot = async (offerMarkets: string | undefined) => {
@@ -423,7 +423,7 @@ describe('e2e arkade offers — what OFFER_MARKETS actually builds', () => {
     await admin.close()
 
     setEnv('SWAP_DB_PATH', swapDbPath)
-    setEnv('ARKADE_DB_PATH', join(dir, `ark-${randomBytes(6).toString('hex')}.sqlite`))
+    setEnv('WALLET_DB_PATH', join(dir, `ark-${randomBytes(6).toString('hex')}.sqlite`))
     setEnv('OFFER_MARKETS', offerMarkets)
     setEnv('OFFER_MIN_FILL_AMOUNT', '1')
     setEnv('OFFER_MAX_FILL_AMOUNT', '1000000000000')
