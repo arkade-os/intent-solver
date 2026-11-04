@@ -76,12 +76,12 @@ const identity = { xOnlyPublicKey: async () => takerKey, sign: async (tx: unknow
 
 /** Only what `fulfillOffer` and the SDK client below it reach for. `spendable`
  * is what the gate would have handed back, which is the half this repo keeps. */
-const ctx = (spendable: unknown[]): ArkadeContext =>
+const ctx = (spendable: unknown[], read: () => Promise<unknown[]> = async () => spendable): ArkadeContext =>
   ({
     wallet: {
       identity,
       arkServerPublicKey: SERVER_KEY,
-      getSpendableVtxos: async () => spendable,
+      getSpendableVtxos: read,
       getAddress: async () => new ArkAddress(SERVER_KEY, hex.decode('22'.repeat(32)), 'tark').encode(),
       getContractManager: async () => null,
     },
@@ -199,5 +199,32 @@ describe('the asset packet fulfillOffer submits', () => {
     )
 
     expect(packetGroups()).toEqual([ASSET_B])
+  })
+
+  it('submits once, and refuses the other fill, when two race for one coin', async () => {
+    state.arkTx = undefined
+    const at = deposit([{ assetId: ASSET_B, amount: 900n }])
+    const coins = [fundingCoin(80_000)]
+    let entered = 0
+    let open: () => void = () => {}
+    const barrier = new Promise<void>((resolve) => (open = resolve))
+    // Both read the float before either pins it, so the second sees the first's coin only if the pin lands in that turn.
+    const racing = ctx(coins, async () => {
+      entered += 1
+      if (entered === 2) open()
+      await barrier
+      return coins
+    })
+    const offer = offerFor({ offerAsset: asset.AssetId.fromString(ASSET_B) })
+
+    const results = await Promise.allSettled([
+      fulfillOffer(racing, 'http://emulator.test', offer, at),
+      fulfillOffer(racing, 'http://emulator.test', offer, at),
+    ])
+
+    const refusals = results.flatMap((result) => (result.status === 'rejected' ? [String(result.reason)] : []))
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
+    expect(refusals).toEqual([expect.stringMatching(/no spendable coins/)])
+    expect(racing.reservations.reserved().size).toBe(0)
   })
 })

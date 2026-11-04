@@ -117,6 +117,7 @@ describe('fulfillOffer refuses before it spends', () => {
     const reserve = vi.fn((_: readonly unknown[]) => release)
     const reservations = { reserve, reserved: () => new Set<string>() }
     const spending = ctx({ getSpendableVtxos: async () => [coin] }, { reservations })
+    // The stub offer cannot be encoded, so the fill throws inside the try and the release comes from the finally.
     await refusalOf(fulfillOffer(spending, 'http://emulator.test', offerWith({ swapPkScript: honest }), deposit))
     expect(reserve).toHaveBeenCalledTimes(1)
     expect(reserve).toHaveBeenCalledWith([expect.objectContaining({ txid: coin.txid, vout: coin.vout })])
