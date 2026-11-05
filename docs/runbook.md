@@ -190,13 +190,19 @@ and backend (including the LND socket).
 Console withdrawals from Arkade are journaled before sending. Checkpoints wait
 while a send or its source debit is uncertain, and send a withdrawal balance
 check notice with the journal ID, destination and transaction reference. A
-withdrawal is labeled accounted for only after the wallet history shows its
-settled outgoing transaction and the Arkade debit is observed. The notice does
-not prove destination receipt. If a withdrawal overlaps an ambiguous rebalance,
-BTC classification stays paused and reminders call for manual reconciliation;
-asset checks continue. An additional unexplained BTC decrease can still raise
-`POSSIBLE LOSS` once attribution is resolved. Earlier alerts are not
-retroactively reclassified by this journal.
+withdrawal is labeled accounted for only after settled outgoing wallet history
+matches its transaction and exact debit, followed by an Arkade balance read
+that shows the source debit. The notice does not prove destination receipt.
+If a withdrawal and rebalance have indistinguishable source debits, BTC
+classification stays paused until the rebalance is terminal and each funding
+transaction has a distinct settled outgoing wallet-history match for its
+actual debit and a checkpoint captured the rebalance's debit basis. A
+rebalance that completed between checkpoints may lack that basis even when
+funding history later appears. The authorized debit is a maximum, not proof
+of what was spent. If evidence is missing, reminders call for manual
+reconciliation; asset checks continue. An additional unexplained BTC decrease
+can still raise `POSSIBLE LOSS` once attribution is
+resolved. Earlier alerts are not retroactively reclassified by this journal.
 
 A `sending` or `uncertain` withdrawal with no transaction reference needs an
 operator check. The notice repeats every 30 minutes and BTC classification
@@ -210,6 +216,39 @@ scope and a `sending` or `uncertain` state. Mark it `failed` only with positive
 evidence that nothing was sent. Absence from a delayed index is not that
 evidence. Restart and check the next checkpoint; keep a record of the evidence
 used for the correction.
+
+An overlapping rebalance can remain deferred after its journal row becomes
+terminal. A withdrawal journal edit alone does not resolve the rebalance's
+source debit or fee allowance. For one overlapping rebalance and withdrawal
+whose funding history or debit basis is missing:
+
+1. Stop the solver and back up both the admin and rebalance databases. Find
+   the latest `complete = 1` row for the current `scope` in
+   `balance_checkpoint`. Preserve its `snapshot`, the matching
+   `operator_withdrawal` row and the `rebalance_transfer.data` row.
+2. Inspect `snapshot.operatorWithdrawals`: `pending`, `rebalanceIds`,
+   `rebalanceReservedSats`, `rebalanceAllowanceBasis`,
+   `observedSourceDropSats`, `comparisonTotalSats`, `deferred`, and
+   `rebalanceAttributionAmbiguous`. Inspect `snapshot.rebalance`:
+   `pending`, `feeAllowanceUsedSats`, and `comparisonTotalSats`.
+3. Independently establish the rebalance's actual source debit from its
+   `fundingTxid` and wallet or chain records, its destination credit or
+   refund, the withdrawal's exact debit and destination, and a fresh Arkade
+   balance. Account for any other activity in the checkpoint interval. The
+   raw drop must cover the proven transfers; retain any unexplained
+   remainder as a possible loss. `debitSats` is an authorized maximum, not
+   the actual debit.
+4. If the evidence is complete, have a DBA reconcile those linked snapshot
+   fields in one recorded operation, including the rebalance's actual debit
+   basis, reserved source drop, fee allowance, and the withdrawal comparison
+   and deferral state. Preserve the raw balance and all unrelated alerts.
+   Never clear `rebalanceAttributionAmbiguous` alone or infer a debit from
+   an aggregate balance drop. Restart and verify the next checkpoint and any
+   remaining `POSSIBLE LOSS` notice.
+
+If any transaction cannot be proven, leave BTC classification deferred and
+escalate for manual accounting. Escalate multi-transfer or manual-override
+overlap rather than applying this single-transfer procedure.
 
 Each decrease is then followed against its own before amount. The first later
 complete checkpoint where that asset is back at or above it emits `RECOVERED`,
