@@ -12,8 +12,9 @@ CREATE TABLE IF NOT EXISTS rebalance_transfer (
   debit_sats TEXT NOT NULL,
   data TEXT NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_rebalance_active_source
-  ON rebalance_transfer ((1)) WHERE state IN (${ACTIVE});
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rebalance_critical_source
+  ON rebalance_transfer ((1)) WHERE state IN ('submitting', 'needs_reconciliation');
+DROP INDEX IF EXISTS idx_rebalance_active_source;
 CREATE INDEX IF NOT EXISTS idx_rebalance_charged ON rebalance_transfer (charged_at);
 CREATE INDEX IF NOT EXISTS idx_rebalance_history ON rebalance_transfer (created_at DESC, id DESC);
 CREATE TABLE IF NOT EXISTS rebalance_clock (
@@ -74,6 +75,9 @@ const encode = (row: RebalanceTransfer): string =>
       ? {}
       : { receivingFeeAllowanceSats: decimal(row.receivingFeeAllowanceSats, 'receivingFeeAllowanceSats') }),
     ...(row.creditedSats === undefined ? {} : { creditedSats: decimal(row.creditedSats, 'creditedSats') }),
+    ...(row.sourceInputsClearedAt === undefined
+      ? {}
+      : { sourceInputsClearedAt: safeInteger(row.sourceInputsClearedAt, 'sourceInputsClearedAt') }),
     deposit: {
       ...row.deposit,
       amountSats: decimal(row.deposit.amountSats, 'deposit.amountSats'),
@@ -94,6 +98,9 @@ const decode = (data: string): RebalanceTransfer => {
       ? {}
       : { receivingFeeAllowanceSats: amount(row.receivingFeeAllowanceSats, 'receivingFeeAllowanceSats') }),
     ...(row.creditedSats === undefined ? {} : { creditedSats: amount(row.creditedSats, 'creditedSats') }),
+    ...(row.sourceInputsClearedAt === undefined
+      ? {}
+      : { sourceInputsClearedAt: safeInteger(row.sourceInputsClearedAt, 'sourceInputsClearedAt') }),
     deposit: {
       ...row.deposit,
       amountSats: amount(row.deposit.amountSats, 'deposit.amountSats'),
@@ -186,6 +193,13 @@ export class RebalanceStore {
       `SELECT data FROM rebalance_transfer WHERE state IN (${ACTIVE})`,
     )
     return rows.map((row) => decode(row.data))
+  }
+
+  async protectedTerminalInputs(): Promise<RebalanceTransfer[]> {
+    const rows = await this.driver.all<{ data: string }>(
+      "SELECT data FROM rebalance_transfer WHERE charged_at IS NOT NULL AND state IN ('completed', 'refunded')",
+    )
+    return rows.map((row) => decode(row.data)).filter((row) => row.sourceInputsClearedAt === undefined)
   }
 
   async checkpointTransfers(since: number): Promise<RebalanceTransfer[]> {

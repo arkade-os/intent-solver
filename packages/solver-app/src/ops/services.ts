@@ -1725,6 +1725,9 @@ export const createServices = async (
         policy: rebalancePolicy,
         savePolicy: async (next) => adminStore.setOverride('REBALANCE_POLICY', JSON.stringify(next)),
         postNotice: active ? (text) => notifier.post(text) : undefined,
+        overlapCheckpoint: active
+          ? () => adminStore.latestCompleteBalanceCheckpoint(balanceCheckpointScope(services))
+          : undefined,
       },
       active ? 'active' : 'passive',
     )

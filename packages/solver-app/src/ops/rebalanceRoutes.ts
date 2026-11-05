@@ -477,6 +477,27 @@ export const createArkadeRebalanceSource = async (
       }
     },
 
+    pinPendingInputs(row) {
+      if (
+        row.inputs.length === 0 ||
+        row.inputs.some((input) => !validTxid(input.txid) || !Number.isSafeInteger(input.vout) || input.vout < 0)
+      )
+        throw new Error('pending rebalance has no valid source inputs to protect')
+      return reservations.reserve(row.inputs)
+    },
+
+    async inputsAbsent(rows) {
+      const available = new Set((await snapshot()).map((coin) => outpointKey(coin.txid, coin.vout)))
+      return new Set(
+        rows
+          .filter(
+            (row) =>
+              row.inputs.length > 0 && row.inputs.every((input) => !available.has(outpointKey(input.txid, input.vout))),
+          )
+          .map((row) => row.id),
+      )
+    },
+
     async submit(row) {
       if (!held.has(row.id)) throw new Error('source inputs must be reserved before submission')
       const selected = exactInputs(row, await snapshot())
@@ -514,11 +535,13 @@ export const createArkadeRebalanceSource = async (
         if (!services.onchain) return { state: 'unknown' }
         const evidence = await inputEvidence(row)
         const outputs = (await services.onchain.findOutputs({ address: row.deposit.destination })).filter(
-          (output) => output.valueSats === row.deposit.amountSats && validTxid(output.txid),
+          (output) =>
+            output.valueSats === row.deposit.amountSats &&
+            validTxid(output.txid) &&
+            (!row.fundingTxid || output.txid === row.fundingTxid),
         )
         if (outputs.length !== 1) return { state: 'unknown' }
         const txid = outputs[0]!.txid
-        if (row.fundingTxid && row.fundingTxid !== txid) return { state: 'unknown' }
         if (!evidence.length || evidence.some((coin) => !coin || coin.settledBy !== txid)) return { state: 'unknown' }
         return { state: 'submitted', fundingTxid: txid }
       }

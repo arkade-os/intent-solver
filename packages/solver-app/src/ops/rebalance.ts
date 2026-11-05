@@ -14,6 +14,7 @@ import type {
   RebalanceTransfer,
 } from '@arkade-os/solver-core/ports/rebalance.js'
 import type { RebalanceStore, TransferCursor } from './rebalanceStore.js'
+import { rebalanceOverlapReady, type BalanceCheckpoint } from './balanceCheckpoints.js'
 
 export interface RebalanceSource {
   quote(
@@ -28,6 +29,8 @@ export interface RebalanceSource {
     routeData?: Record<string, unknown>
   }>
   reserve(row: RebalanceTransfer, policy: RebalancePolicy, restoring?: boolean): Promise<() => void>
+  pinPendingInputs(row: RebalanceTransfer): () => void
+  inputsAbsent(rows: readonly RebalanceTransfer[]): Promise<ReadonlySet<string>>
   submit(row: RebalanceTransfer): Promise<string>
   reconcile(row: RebalanceTransfer): Promise<{ state: 'unknown' | 'submitted' | 'refunded'; fundingTxid?: string }>
   close?(): Promise<void>
@@ -41,6 +44,7 @@ interface RebalanceDeps {
   savePolicy(policy: RebalancePolicy): Promise<void>
   now?: () => number
   postNotice?: (text: string) => void
+  overlapCheckpoint?: () => Promise<BalanceCheckpoint | undefined>
 }
 
 const revision = (policy: RebalancePolicy): string =>
@@ -71,6 +75,7 @@ const skippedReason = (error: unknown): string => {
 export class RebalanceService {
   private readonly serialise = createSerialiser()
   private readonly holds = new Map<string, () => void>()
+  private readonly terminalPins = new Map<string, RebalanceTransfer>()
   private currentPolicy: RebalancePolicy
   private stopped = false
   private ticking?: Promise<void>
@@ -107,7 +112,16 @@ export class RebalanceService {
           `⚠️ *Rebalance needs checking*\n${transferLine(row)}\nThe process stopped while sending. The source payment may be in flight; no new refill will start until it is reconciled.`,
         )
       }
-      if (!row.fundingTxid) service.holds.set(row.id, await deps.source.reserve(row, service.currentPolicy, true))
+      service.holds.set(
+        row.id,
+        row.fundingTxid
+          ? deps.source.pinPendingInputs(row)
+          : await deps.source.reserve(row, service.currentPolicy, true),
+      )
+    }
+    for (const row of await deps.store.protectedTerminalInputs()) {
+      service.holds.set(row.id, deps.source.pinPendingInputs(row))
+      service.terminalPins.set(row.id, row)
     }
     return service
   }
@@ -176,8 +190,49 @@ export class RebalanceService {
     requestKey: string
     kind?: DepositKind
     receivingFeeAllowanceSats?: number
+    overridePendingIds?: string[]
   }): Promise<RebalanceTransfer> {
     return this.serialise(() => this.makeQuote(params, 'manual'))
+  }
+
+  private async checkAdmission(origin: RebalanceTransfer['origin'], overridePendingIds?: string[]): Promise<void> {
+    if (
+      overridePendingIds !== undefined &&
+      (overridePendingIds.length !== 1 ||
+        typeof overridePendingIds[0] !== 'string' ||
+        !overridePendingIds[0] ||
+        overridePendingIds[0].length > 128)
+    )
+      throw new Error('Select exactly one pending transfer to override.')
+    const checkpoint = await this.deps.overlapCheckpoint?.()
+    if (checkpoint?.rebalance?.attributionDeferred && (origin !== 'manual' || !overridePendingIds))
+      throw new Error(
+        'Balance attribution is still catching up after an overlapping transfer. Wait for a fresh checkpoint.',
+      )
+    const active = await this.deps.store.active()
+    if (active.length === 0) {
+      if (overridePendingIds) throw new Error('The transfer being overridden has changed. Review a fresh quote.')
+      return
+    }
+    if (origin !== 'manual' || !overridePendingIds)
+      throw new Error('Another transfer is still in progress. Check its status or explicitly review one more transfer.')
+    const prior = active[0]
+    if (
+      active.length !== 1 ||
+      !prior ||
+      prior.id !== overridePendingIds[0] ||
+      prior.state !== 'pending' ||
+      !this.holds.has(prior.id) ||
+      !prior.fundingTxid ||
+      !/^[0-9a-f]{64}$/i.test(prior.fundingTxid)
+    )
+      throw new Error('The pending transfer changed or needs reconciliation. Review its status before trying again.')
+    if (
+      !checkpoint ||
+      checkpoint.finishedAt < this.now() - 180 ||
+      !rebalanceOverlapReady(checkpoint, overridePendingIds)
+    )
+      throw new Error('Wait for a fresh balance checkpoint to observe the first transfer before overriding it.')
   }
 
   private async makeQuote(
@@ -187,6 +242,7 @@ export class RebalanceService {
       requestKey: string
       kind?: DepositKind
       receivingFeeAllowanceSats?: number
+      overridePendingIds?: string[]
     },
     origin: 'manual' | 'automatic',
   ): Promise<RebalanceTransfer> {
@@ -208,11 +264,13 @@ export class RebalanceService {
         (existing.receivingFeeAllowanceSats !== undefined &&
           existing.receivingFeeAllowanceSats !== receivingFeeAllowanceSats) ||
         (receivingFeeAllowanceSats !== undefined && existing.deposit.feeSats > receivingFeeAllowanceSats) ||
-        (params.kind && existing.deposit.kind !== params.kind)
+        (params.kind && existing.deposit.kind !== params.kind) ||
+        JSON.stringify(existing.overridePendingIds ?? []) !== JSON.stringify(params.overridePendingIds ?? [])
       )
         throw new Error('request key already belongs to a different transfer')
       return existing
     }
+    await this.checkAdmission(origin, params.overridePendingIds)
     const policy = this.currentPolicy
     if (
       origin === 'automatic' &&
@@ -268,6 +326,7 @@ export class RebalanceService {
           id: randomUUID(),
           requestKey: params.requestKey,
           origin,
+          ...(params.overridePendingIds ? { overridePendingIds: [...params.overridePendingIds] } : {}),
           ...(receivingFeeAllowanceSats === undefined ? {} : { receivingFeeAllowanceSats }),
           poolId: pool.id,
           netSats: params.amountSats,
@@ -293,11 +352,11 @@ export class RebalanceService {
     return selected
   }
 
-  async submit(id: string): Promise<RebalanceTransfer> {
-    return this.serialise(() => this.send(id))
+  async submit(id: string, overridePendingIds?: string[]): Promise<RebalanceTransfer> {
+    return this.serialise(() => this.send(id, overridePendingIds))
   }
 
-  private async send(id: string): Promise<RebalanceTransfer> {
+  private async send(id: string, overridePendingIds?: string[]): Promise<RebalanceTransfer> {
     const row = await this.deps.store.get(id)
     if (!row) throw new Error('rebalance quote not found')
     if (row.state !== 'quoted') return row
@@ -305,7 +364,9 @@ export class RebalanceService {
     if (row.expiresAt <= this.now()) throw new Error('rebalance quote expired; request another preview')
     if (row.origin !== 'manual' && row.policyRevision !== revision(this.currentPolicy))
       throw new Error('policy changed; request another preview')
-    if ((await this.deps.store.active()).length) throw new Error('an active rebalance transfer must resolve first')
+    if (JSON.stringify(row.overridePendingIds ?? []) !== JSON.stringify(overridePendingIds ?? []))
+      throw new Error('The pending-transfer override changed. Review a fresh quote.')
+    await this.checkAdmission(row.origin, row.overridePendingIds)
     if (row.origin !== 'manual') {
       checkRebalanceFees(this.currentPolicy, row.netSats, row.debitSats)
       if (row.debitSats + (await this.deps.store.rollingDebit(this.now())) > this.currentPolicy.dailyDebitSats)
@@ -323,7 +384,7 @@ export class RebalanceService {
     }
     this.holds.set(row.id, release)
     this.notice(
-      `⏳ *Rebalance starting*\n${transferLine(row)}\nSubmitting an Arkade payment authorized up to ${sats(row.debitSats)} sats. The destination credit may arrive later; at least ${sats(row.netSats)} sats are expected.`,
+      `⏳ *Rebalance starting*\n${transferLine(row)}\nSubmitting an Arkade payment authorized up to ${sats(row.debitSats)} sats. The destination credit may arrive later; at least ${sats(row.netSats)} sats are expected.${row.overridePendingIds?.length ? `\nAnother transfer (${row.overridePendingIds[0]}) is pending. BTC loss and recovery notices will wait until both transfers resolve.` : ''}`,
     )
     try {
       const txid = await this.deps.source.submit(row)
@@ -333,7 +394,7 @@ export class RebalanceService {
       row.state = 'pending'
       row.updatedAt = this.now()
       await this.deps.store.save(row)
-      this.release(row.id)
+      this.holdPending(row)
       this.notice(
         `⏳ *Rebalance submitted*\n${transferLine(row)}\n${row.deposit.kind === 'onchain' ? 'Bitcoin transaction' : 'Arkade funding transaction'}: ${row.fundingTxid}\nWaiting for at least ${sats(row.netSats)} sats to become spendable at the destination. ${row.deposit.kind === 'onchain' ? 'Bitcoin confirmation and deposit claiming may take time.' : 'The destination invoice must settle.'}`,
       )
@@ -365,10 +426,40 @@ export class RebalanceService {
     this.holds.delete(id)
   }
 
+  private holdPending(row: RebalanceTransfer): void {
+    const pin = this.deps.source.pinPendingInputs(row)
+    const previous = this.holds.get(row.id)
+    this.holds.set(row.id, pin)
+    previous?.()
+  }
+
+  private async clearTerminalPins(): Promise<void> {
+    if (this.terminalPins.size === 0) return
+    let absent: ReadonlySet<string>
+    try {
+      absent = await this.deps.source.inputsAbsent([...this.terminalPins.values()])
+    } catch {
+      return
+    }
+    for (const row of this.terminalPins.values()) {
+      if (!this.holds.has(row.id)) throw new Error('terminal rebalance inputs lost their source protection')
+      if (!absent.has(row.id)) continue
+      try {
+        row.sourceInputsClearedAt = this.now()
+        await this.deps.store.save(row)
+        this.release(row.id)
+        this.terminalPins.delete(row.id)
+      } catch {
+        // Keep the source pins until a later fresh wallet read proves the inputs gone.
+      }
+    }
+  }
+
   tick(): Promise<void> {
     if (this.ticking) return this.ticking
     this.ticking = this.serialise(async () => {
       if (this.stopped) return
+      await this.clearTerminalPins()
       if (!this.currentPolicy.enabled && !(await this.deps.store.active()).length && !this.deps.backend.maintain) {
         this.evaluation = { at: this.now(), reason: 'automatic rebalancing disabled' }
         return
@@ -393,8 +484,9 @@ export class RebalanceService {
             row.state = 'completed'
             row.creditedSats = creditedSats
             delete row.error
-            await this.deps.store.save({ ...row, updatedAt: this.now() })
-            this.release(row.id)
+            row.updatedAt = this.now()
+            await this.deps.store.save(row)
+            this.terminalPins.set(row.id, row)
             this.notice(
               `✅ *Rebalance credited*\n${transferLine(row)}\n${sats(creditedSats)} sats are now spendable at the destination. The authorized Arkade debit was up to ${sats(row.debitSats)} sats; the final source debit is not recorded separately.`,
             )
@@ -416,15 +508,16 @@ export class RebalanceService {
             row.state = 'pending'
             if (!receiptError) delete row.error
             await this.deps.store.save({ ...row, updatedAt: this.now() })
-            this.release(row.id)
+            this.holdPending(row)
             if (previousState !== 'pending')
               this.notice(
                 `⏳ *Rebalance found*\n${transferLine(row)}\nThe Arkade payment was found. Waiting for the destination credit to become spendable.`,
               )
           } else if (observed.state === 'refunded') {
             row.state = 'refunded'
-            await this.deps.store.save({ ...row, updatedAt: this.now() })
-            this.release(row.id)
+            row.updatedAt = this.now()
+            await this.deps.store.save(row)
+            this.terminalPins.set(row.id, row)
             this.notice(
               `↩️ *Rebalance refunded*\n${transferLine(row)}\nThe source refund was observed in Arkade; the destination was not credited. Fees may still apply.`,
             )
@@ -435,6 +528,7 @@ export class RebalanceService {
           await this.deps.store.save({ ...row, updatedAt: this.now() })
         }
       }
+      await this.clearTerminalPins()
       const policy = this.currentPolicy
       this.evaluation = { at: this.now(), reason: 'automatic rebalancing disabled' }
       try {

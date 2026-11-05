@@ -43,6 +43,7 @@ const transferState = {
   cancelled: ['Cancelled', 'quiet', 'Cancelled before sending.'],
 }
 const inProgressStates = new Set(['quoted', 'submitting', 'pending', 'needs_reconciliation'])
+const blockingStates = new Set(['submitting', 'pending', 'needs_reconciliation'])
 
 export class RebalancePanel {
   constructor(api, redraw, explorers = () => null) {
@@ -56,6 +57,8 @@ export class RebalancePanel {
     this.draft = { poolId: '', amount: '', kind: '', receivingFeeAllowanceSats: '1000' }
     this.policy = null
     this.requestKey = null
+    /** @type {string[] | null} */
+    this.overridePendingIds = null
     this.historyCache = []
     this.historyVisibleCount = 10
     this.historyNextCursor = undefined
@@ -72,6 +75,11 @@ export class RebalancePanel {
       const currentIds = new Set((fresh.transfers ?? []).map((row) => row.id))
       this.historyCache = this.historyRows().filter((row) => !inProgressStates.has(row.state) || currentIds.has(row.id))
       this.data = fresh
+      const currentOverride = this.pendingOverrideIds()
+      if (this.overridePendingIds && !this.sameIds(this.overridePendingIds, currentOverride)) {
+        this.overridePendingIds = null
+      }
+      if (this.quote?.state === 'quoted' && !this.quoteMatchesCurrent(this.quote)) this.invalidateQuote()
       if (this.historyNextCursor === undefined || (!this.historyPageFetched && this.historyNextCursor === null))
         this.historyNextCursor = fresh.transfersNextCursor ?? null
       if (!this.policy) this.policy = structuredClone(this.data.policy)
@@ -87,6 +95,32 @@ export class RebalancePanel {
     for (const row of this.data?.transfers ?? []) rows.set(row.id, row)
     const time = (row) => (Number.isSafeInteger(row.createdAt) ? row.createdAt : 0)
     return [...rows.values()].sort((a, b) => time(b) - time(a) || b.id.localeCompare(a.id))
+  }
+
+  activeTransfers() {
+    return (this.data?.transfers ?? []).filter((row) => blockingStates.has(row.state))
+  }
+
+  pendingOverrideIds() {
+    const active = this.activeTransfers()
+    if (
+      active.length !== 1 ||
+      active[0].state !== 'pending' ||
+      typeof active[0].fundingTxid !== 'string' ||
+      !active[0].fundingTxid
+    )
+      return null
+    return [active[0].id].sort()
+  }
+
+  sameIds(a, b) {
+    return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((id, index) => id === b[index])
+  }
+
+  quoteMatchesCurrent(quote) {
+    const ids = Array.isArray(quote.overridePendingIds) ? quote.overridePendingIds : []
+    if (!ids.length) return this.activeTransfers().length === 0
+    return this.sameIds(ids, this.overridePendingIds) && this.sameIds(ids, this.pendingOverrideIds())
   }
 
   async loadOlder() {
@@ -166,6 +200,9 @@ export class RebalancePanel {
       receivingFeeAllowanceSats: this.draft.receivingFeeAllowanceSats,
       requestKey: this.requestKey,
       ...(this.draft.kind ? { kind: this.draft.kind } : {}),
+      ...(this.sameIds(this.overridePendingIds, this.pendingOverrideIds())
+        ? { overridePendingIds: this.overridePendingIds }
+        : {}),
     }
   }
 
@@ -214,6 +251,9 @@ export class RebalancePanel {
         h('p.muted', this.error ? 'Rebalancing unavailable. Refresh to retry.' : 'Loading liquidity…'),
       )
     const pools = this.data.pools
+    const active = this.activeTransfers()
+    const pendingOverrideIds = this.pendingOverrideIds()
+    const overrideSelected = this.sameIds(this.overridePendingIds, pendingOverrideIds)
     children.push(
       h(
         'div.wallet-pools',
@@ -271,9 +311,59 @@ export class RebalancePanel {
           'p.muted',
           'The destination fee allowance covers receiving or claim fees. Any unused allowance is credited to the destination.',
         ),
+        active.length
+          ? h(
+              'fieldset.wallet-fieldset',
+              h('legend', 'Another transfer is in progress'),
+              pendingOverrideIds
+                ? h(
+                    'p',
+                    'Transfer ',
+                    h('a', { href: `#wallet-transfer-${pendingOverrideIds[0]}` }, short(pendingOverrideIds[0])),
+                    ' is on its way. Review its status in transfer history.',
+                  )
+                : h(
+                    'p',
+                    active.length > 1
+                      ? 'Two transfers are already in progress. Wait for one to finish before starting another.'
+                      : active[0].state === 'pending'
+                        ? 'This transfer has no recorded funding transaction yet. Check its status before starting another.'
+                        : 'This transfer is still being prepared or needs checking. Review its status before starting another.',
+                  ),
+              pendingOverrideIds
+                ? h(
+                    'label.wallet-toggle',
+                    h('input', {
+                      type: 'checkbox',
+                      checked: overrideSelected,
+                      disabled: this.busy,
+                      onchange: (e) => {
+                        this.overridePendingIds = e.target.checked ? pendingOverrideIds : null
+                        this.invalidateQuote()
+                        this.redraw()
+                      },
+                    }),
+                    'Start another transfer while this one is pending',
+                  )
+                : null,
+              pendingOverrideIds
+                ? h(
+                    'p.muted',
+                    'The new quote uses available Arkade coins and needs its own fee review. BTC loss and recovery alerts may wait until both transfers finish. Afterward, differences within the reviewed fee limits need a manual check.',
+                  )
+                : null,
+            )
+          : null,
         h(
           'div.wallet-actions',
-          button('Review quote', () => this.act('quote', this.quoteBody())),
+          h(
+            'button.act',
+            {
+              disabled: this.busy || (active.length > 0 && !overrideSelected),
+              onclick: () => this.act('quote', this.quoteBody()),
+            },
+            'Review quote',
+          ),
         ),
       ),
     )
@@ -286,6 +376,7 @@ export class RebalancePanel {
         ? Math.max(0, Math.ceil(quote.expiresAt - Date.now() / 1000))
         : 0
       const expired = remaining === 0
+      const approved = this.quoteMatchesCurrent(quote)
       if (!expired) {
         this.quoteTimer = setTimeout(() => this.redraw(), Math.min(1000, quote.expiresAt * 1000 - Date.now()))
         this.quoteTimer.unref?.()
@@ -316,6 +407,16 @@ export class RebalancePanel {
             'p',
             'No funds have been sent. Send authorizes this quote’s maximum debit; the destination may receive more than the minimum.',
           ),
+          Array.isArray(quote.overridePendingIds) && quote.overridePendingIds.length
+            ? h(
+                'p.notice',
+                'This quote starts another transfer while ',
+                quote.overridePendingIds.map((id, index) =>
+                  h('span', index ? ', ' : '', h('a', { href: `#wallet-transfer-${id}` }, short(id))),
+                ),
+                ' is still pending. BTC loss and recovery alerts may wait until both transfers finish. Differences within the reviewed fee limits may need a manual check afterward.',
+              )
+            : null,
           h(
             'p.muted',
             expired
@@ -327,10 +428,16 @@ export class RebalancePanel {
             h(
               'button.act',
               {
-                disabled: this.busy || expired,
+                disabled: this.busy || expired || !approved,
                 onclick: () => {
-                  if (quote.expiresAt <= Date.now() / 1000) return this.redraw()
-                  return this.act('submit', { id: quote.id, confirm: quote.id })
+                  if (quote.expiresAt <= Date.now() / 1000 || !this.quoteMatchesCurrent(quote)) return this.redraw()
+                  return this.act('submit', {
+                    id: quote.id,
+                    confirm: quote.id,
+                    ...(Array.isArray(quote.overridePendingIds) && quote.overridePendingIds.length
+                      ? { overridePendingIds: quote.overridePendingIds }
+                      : {}),
+                  })
                 },
               },
               'Send',
@@ -393,6 +500,7 @@ export class RebalancePanel {
       else if (t.state === 'refunded') moments.push(`refund confirmed ${time(t.updatedAt)}`)
       return h(
         'li.wallet-transfer',
+        { id: `wallet-transfer-${t.id}` },
         h(
           'div.wallet-transfer-heading',
           h(
@@ -401,7 +509,11 @@ export class RebalancePanel {
             h('span.wallet-transfer-arrow', '→'),
             h('strong', destination),
           ),
-          h(`span.phase${phase ? `.${phase}` : ''}`, label),
+          h(
+            'div.wallet-transfer-badges',
+            h('span.wallet-transfer-origin', t.origin === 'automatic' ? 'Automatic' : 'Manual'),
+            h(`span.phase${phase ? `.${phase}` : ''}`, label),
+          ),
         ),
         h(
           'p.wallet-transfer-meta',

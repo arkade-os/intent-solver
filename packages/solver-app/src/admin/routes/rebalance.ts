@@ -18,6 +18,18 @@ const refusalMessage = (error: unknown, fallback: string): string => {
     return 'Available Arkade funds cannot cover this transfer and outstanding payouts. Try a smaller amount.'
   if (/active rebalance transfer/i.test(message))
     return 'Another transfer is still in progress. Check its status before starting a new transfer.'
+  if (
+    new Set([
+      'Select exactly one pending transfer to override.',
+      'Balance attribution is still catching up after an overlapping transfer. Wait for a fresh checkpoint.',
+      'The transfer being overridden has changed. Review a fresh quote.',
+      'Another transfer is still in progress. Check its status or explicitly review one more transfer.',
+      'The pending transfer changed or needs reconciliation. Review its status before trying again.',
+      'Wait for a fresh balance checkpoint to observe the first transfer before overriding it.',
+      'The pending-transfer override changed. Review a fresh quote.',
+    ]).has(message)
+  )
+    return message
   if (/quote expired|policy changed|source debit changed|source input no longer spendable/i.test(message))
     return 'This quote is no longer valid. Review a fresh quote before sending.'
   if (/source inputs are reserved/i.test(message))
@@ -54,6 +66,7 @@ export const transferSummary = (t: RebalanceTransfer) => ({
   creditedSats: t.creditedSats,
   ...(whole(t.chargedAt) ? { chargedAt: t.chargedAt } : {}),
   ...(txid(t.fundingTxid) ? { fundingTxid: t.fundingTxid } : {}),
+  ...(t.overridePendingIds?.length ? { overridePendingIds: [...t.overridePendingIds] } : {}),
   inputs: (t.inputs ?? [])
     .filter((input) => txid(input.txid) && whole(input.vout))
     .map(({ txid, vout }) => ({ txid, vout })),
@@ -112,9 +125,20 @@ export const registerRebalanceRoutes = (app: Hono, deps: AdminDeps): void => {
           action === 'policy'
             ? ['policy', 'confirm']
             : action === 'quote'
-              ? ['poolId', 'amount', 'requestKey', 'kind', 'receivingFeeAllowanceSats']
-              : ['id', 'confirm']
+              ? ['poolId', 'amount', 'requestKey', 'kind', 'receivingFeeAllowanceSats', 'overridePendingIds']
+              : action === 'submit'
+                ? ['id', 'confirm', 'overridePendingIds']
+                : ['id', 'confirm']
         if (Object.keys(b).some((key) => !allowed.includes(key))) throw new Error('unexpected request field')
+        const overridePendingIds = b.overridePendingIds
+        if (
+          overridePendingIds !== undefined &&
+          (!Array.isArray(overridePendingIds) ||
+            overridePendingIds.length !== 1 ||
+            typeof overridePendingIds[0] !== 'string' ||
+            !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(overridePendingIds[0]))
+        )
+          throw new Error('Select exactly one pending transfer to override.')
         if (action === 'policy' && b.confirm !== 'REBALANCE') throw new Error('confirmation required')
         if (action === 'submit' || action === 'cancel') {
           if (typeof b.id !== 'string' || !b.id || b.confirm !== b.id)
@@ -148,18 +172,22 @@ export const registerRebalanceRoutes = (app: Hono, deps: AdminDeps): void => {
             amountSats: parseWholeSats(b.amount),
             requestKey: b.requestKey,
             kind: b.kind as 'onchain' | 'lightning' | undefined,
+            ...(overridePendingIds ? { overridePendingIds: overridePendingIds as string[] } : {}),
             ...(receivingFeeAllowanceSats === undefined ? {} : { receivingFeeAllowanceSats }),
           }
           params = JSON.stringify({
             poolId: quoteParams.poolId,
             amountSats: quoteParams.amountSats,
             kind: quoteParams.kind,
+            ...(overridePendingIds ? { overridePendingIds } : {}),
             ...(receivingFeeAllowanceSats === undefined ? {} : { receivingFeeAllowanceSats }),
           })
           result = transferSummary(await service.quote(quoteParams))
           target = result.id
         } else if (action === 'policy') {
           result = await service.setPolicy(b.policy)
+        } else if (action === 'submit') {
+          result = transferSummary(await service.submit(target!, overridePendingIds as string[] | undefined))
         } else {
           result = transferSummary(await service[action](target!))
         }

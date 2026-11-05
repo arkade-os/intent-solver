@@ -88,6 +88,37 @@ describe('rebalance administration', () => {
     expect(service.quote).toHaveBeenCalledWith(expect.objectContaining({ amountSats: 100 }))
     expect(JSON.stringify(recordAction.mock.calls)).not.toMatch(/private-destination|secret|routeData/)
   })
+  it('passes only an explicit pending transfer ID through quote and submit', async () => {
+    const { post, service } = setup()
+    const pendingId = '22222222-2222-4222-8222-222222222222'
+    service.quote.mockResolvedValue({ ...transfer, overridePendingIds: [pendingId] })
+    const quote = await post('quote', {
+      poolId: 'rail:shared',
+      amount: '100',
+      requestKey: '11111111-1111-4111-8111-111111111111',
+      overridePendingIds: [pendingId],
+    })
+    expect(quote.status).toBe(200)
+    expect(service.quote).toHaveBeenCalledWith(expect.objectContaining({ overridePendingIds: [pendingId] }))
+    expect(((await quote.json()) as { result: { overridePendingIds?: string[] } }).result.overridePendingIds).toEqual([
+      pendingId,
+    ])
+    const submit = await post('submit', { id: 'q1', confirm: 'q1', overridePendingIds: [pendingId] })
+    expect(submit.status).toBe(200)
+    expect(service.submit).toHaveBeenCalledWith('q1', [pendingId])
+    for (const invalid of [[], [pendingId, pendingId], ['bad'], 'bad']) {
+      expect(
+        (
+          await post('quote', {
+            poolId: 'rail:shared',
+            amount: '100',
+            requestKey: '11111111-1111-4111-8111-111111111111',
+            overridePendingIds: invalid,
+          })
+        ).status,
+      ).toBe(400)
+    }
+  })
   it('returns safe transfer evidence for the history and quote review', async () => {
     const { app, service } = setup()
     const fundingTxid = 'ab'.repeat(32)

@@ -15,6 +15,7 @@ import {
   formatCheckpointDeferral,
   formatCheckpointRecovery,
   formatCheckpointWarning,
+  rebalanceOverlapReady,
 } from '@arkade-os/solver-app/ops/balanceCheckpoints.js'
 import { createNotifier } from '@arkade-os/solver-app/ops/notify.js'
 import { schnorr } from '@noble/curves/secp256k1.js'
@@ -110,6 +111,25 @@ const rebalanceFixture = async (path?: string) => {
     return result
   }
   return { ...f, sample, store, transfer, save: () => store.save(transfer) }
+}
+
+const overlapFixture = async (path?: string) => {
+  const f = await rebalanceFixture(path)
+  await f.sample()
+  await f.store.create(f.transfer)
+  f.arkade.total -= 500
+  const first = await f.sample()
+  const second: RebalanceTransfer & { overridePendingIds: string[] } = {
+    ...f.transfer,
+    id: 'rebalance-2',
+    requestKey: 'rebalance-2',
+    origin: 'manual',
+    chargedAt: Math.floor(Date.now() / 1000),
+    updatedAt: Math.floor(Date.now() / 1000),
+    overridePendingIds: [f.transfer.id],
+  }
+  vi.spyOn(f.store, 'checkpointTransfers').mockImplementation(async () => [f.transfer, second])
+  return { ...f, first, second }
 }
 
 afterEach(async () => {
@@ -653,6 +673,241 @@ describe('rebalance balance accounting', () => {
     expect(next.previousId).toBe(sent.id)
     expect(next.rebalance?.pending[0]?.remainingSats).toBe('500')
     expect(next.decreases).toEqual([])
+  })
+
+  it('requires an observed source debit before permitting an overlap', async () => {
+    const f = await rebalanceFixture()
+    const baseline = await f.sample()
+    expect(rebalanceOverlapReady(baseline, [f.transfer.id])).toBe(false)
+    await f.store.create(f.transfer)
+    const unobserved = await f.sample()
+    expect(rebalanceOverlapReady(unobserved, [f.transfer.id])).toBe(false)
+    f.arkade.total -= 500
+    const observed = await f.sample()
+    expect(rebalanceOverlapReady(observed, [f.transfer.id])).toBe(true)
+    expect(rebalanceOverlapReady(observed, ['unknown'])).toBe(false)
+    const deferred = {
+      anchorCheckpointId: observed.id,
+      anchorComparisonTotalSats: observed.rebalance!.comparisonTotalSats,
+      since: observed.finishedAt,
+      transferIds: [f.transfer.id],
+    }
+    const withDeferral = { ...observed, rebalance: { ...observed.rebalance!, attributionDeferred: deferred } }
+    expect(rebalanceOverlapReady(withDeferral, [f.transfer.id])).toBe(true)
+    expect(rebalanceOverlapReady(withDeferral, ['unknown'])).toBe(false)
+    expect(
+      rebalanceOverlapReady(
+        {
+          ...withDeferral,
+          rebalance: { ...withDeferral.rebalance, attributionDeferred: { ...deferred, overrideId: 'other' } },
+        },
+        [f.transfer.id],
+      ),
+    ).toBe(false)
+    expect(
+      rebalanceOverlapReady({ ...observed, rebalance: { ...observed.rebalance!, accountingVersion: undefined } }, [
+        f.transfer.id,
+      ]),
+    ).toBe(false)
+  })
+
+  it('defers BTC attribution when the first credit and second debit net in one sample', async () => {
+    const f = await overlapFixture()
+    expect(rebalanceOverlapReady(f.first, [f.transfer.id])).toBe(true)
+    f.onchain.confirmedSats += 498
+    f.arkade.total -= 500
+    const overlapping = await f.sample()
+    expect(overlapping.totalSats).toBe('5898')
+    expect(overlapping.rebalance?.comparisonTotalSats).toBe('6400')
+    expect(overlapping.rebalance?.attributionDeferred?.transferIds).toEqual([f.transfer.id, f.second.id])
+    expect(overlapping.decreases).toEqual([])
+    expect(overlapping.recovered).toEqual([])
+    expect(rebalanceOverlapReady(overlapping, [f.transfer.id])).toBe(false)
+    f.transfer.state = 'completed'
+    f.transfer.creditedSats = 498
+    expect((await f.sample()).rebalance?.attributionDeferred).toBeDefined()
+    f.onchain.confirmedSats += 498
+    f.second.state = 'completed'
+    f.second.creditedSats = 498
+    const settled = await f.sample()
+    expect(settled.rebalance?.attributionDeferred).toBeUndefined()
+    expect(settled.rebalance?.uncertainFeeAllowanceSats).toBe('4')
+    expect(settled.decreases).toEqual([])
+    expect(formatCheckpointWarning(settled, 'regtest')).toBeNull()
+  })
+
+  it('reminds operators while overlapping transfers remain unsettled', async () => {
+    const f = await overlapFixture()
+    f.arkade.total -= 500
+    const initial = await f.sample()
+    expect(formatCheckpointDeferral(initial, 'regtest')).toContain('BTC BALANCE CHECK DEFERRED')
+    vi.setSystemTime(Date.now() + 30 * 60 * 1_000)
+    const reminder = await f.sample()
+    expect(formatCheckpointDeferral(reminder, 'regtest')).toContain('BTC BALANCE CHECK STILL DEFERRED')
+    expect(formatCheckpointDeferral(reminder, 'regtest')).toContain('rebalance-1, rebalance-2')
+    expect(formatCheckpointWarning(reminder, 'regtest')).toBeNull()
+  })
+
+  it('defers when the second destination credits before the first', async () => {
+    const f = await overlapFixture()
+    f.arkade.total -= 500
+    f.onchain.confirmedSats += 498
+    f.second.state = 'completed'
+    f.second.creditedSats = 498
+    const secondFirst = await f.sample()
+    expect(secondFirst.rebalance?.attributionDeferred).toBeDefined()
+    expect(secondFirst.decreases).toEqual([])
+    f.onchain.confirmedSats += 498
+    f.transfer.state = 'completed'
+    f.transfer.creditedSats = 498
+    const settled = await f.sample()
+    expect(settled.rebalance?.attributionDeferred).toBeUndefined()
+    expect(settled.decreases).toEqual([])
+  })
+
+  it('takes another fresh sample when both transfers settle before the first overlap checkpoint', async () => {
+    const f = await overlapFixture()
+    f.arkade.total -= 500
+    f.onchain.confirmedSats += 996
+    f.transfer.state = 'completed'
+    f.transfer.creditedSats = 498
+    f.second.state = 'completed'
+    f.second.creditedSats = 498
+    const first = await f.sample()
+    expect(first.rebalance?.attributionDeferred).toBeDefined()
+    expect(first.decreases).toEqual([])
+    const fresh = await f.sample()
+    expect(fresh.rebalance?.attributionDeferred).toBeUndefined()
+    expect(fresh.decreases).toEqual([])
+  })
+
+  it('promotes an already deferred single transfer when a previously approved override charges', async () => {
+    const f = await overlapFixture()
+    delete f.second.chargedAt
+    f.lightning.availableSats -= 25
+    const loss = await f.sample()
+    f.onchain.confirmedSats += 10
+    const singleDeferred = await f.sample()
+    expect(singleDeferred.rebalance?.attributionDeferred?.heldBtcDecreaseIds).toEqual([loss.id])
+    f.second.chargedAt = Math.floor(Date.now() / 1000)
+    f.arkade.total -= 500
+    const overlapping = await f.sample()
+    expect(overlapping.rebalance?.attributionDeferred).toMatchObject({
+      anchorCheckpointId: singleDeferred.rebalance?.attributionDeferred?.anchorCheckpointId,
+      overrideId: f.second.id,
+      heldBtcDecreaseIds: [loss.id],
+    })
+    expect(formatCheckpointDeferral(overlapping, 'regtest')).toContain('BTC BALANCE CHECK STILL DEFERRED')
+    expect(overlapping.decreases).toEqual([])
+    f.onchain.confirmedSats += 996
+    f.transfer.state = 'completed'
+    f.transfer.creditedSats = 498
+    f.second.state = 'completed'
+    f.second.creditedSats = 498
+    const settled = await f.sample()
+    expect(settled.rebalance?.attributionDeferred).toBeUndefined()
+    expect(formatCheckpointWarning(settled, 'regtest')).toContain('15 sats')
+    expect(settled.recovered).toEqual([])
+  })
+
+  it('loads a terminal first transfer by ID from a persisted older deferred cursor', async () => {
+    const f = await overlapFixture()
+    const { id, ...entry } = f.first
+    await f.services.adminStore.recordBalanceCheckpoint({
+      ...entry,
+      previousId: id,
+      rebalance: {
+        ...f.first.rebalance!,
+        pending: [],
+        attributionDeferred: {
+          anchorCheckpointId: id,
+          anchorComparisonTotalSats: f.first.rebalance!.comparisonTotalSats,
+          since: f.first.finishedAt + 1,
+          transferIds: [f.transfer.id],
+        },
+      },
+    })
+    f.transfer.state = 'completed'
+    f.transfer.creditedSats = 498
+    await f.save()
+    f.arkade.total -= 500
+    f.onchain.confirmedSats += 498
+    vi.mocked(f.store.checkpointTransfers).mockResolvedValue([f.second])
+    const get = vi.spyOn(f.store, 'get')
+    const promoted = await f.sample()
+    expect(get).toHaveBeenCalledWith(f.transfer.id)
+    expect(promoted.errors.rebalance).toBeUndefined()
+    expect(promoted.totalSats).not.toBeNull()
+    expect(promoted.rebalance?.attributionDeferred).toMatchObject({
+      anchorCheckpointId: id,
+      transferIds: [f.transfer.id, f.second.id],
+      overrideId: f.second.id,
+    })
+    expect(promoted.decreases).toEqual([])
+  })
+
+  it('does not falsely recover an older loss using the override fee upper bound', async () => {
+    const f = await overlapFixture()
+    delete f.second.chargedAt
+    f.onchain.confirmedSats -= 25
+    const loss = await f.sample()
+    expect(loss.decreases[0]?.decrease).toBe('25')
+    expect(formatCheckpointWarning(await f.sample(), 'regtest')).toContain('unexplained decrease')
+    f.second.chargedAt = Math.floor(Date.now() / 1000)
+    f.second.feeSats = 60
+    f.second.netSats = 440
+    f.second.deposit = { ...f.second.deposit, netSats: 440, feeSats: 60 }
+    f.arkade.total -= 450
+    f.onchain.confirmedSats += 498
+    const deferred = await f.sample()
+    expect(deferred.rebalance?.attributionDeferred).toBeDefined()
+    f.transfer.state = 'completed'
+    f.transfer.creditedSats = 498
+    f.second.state = 'completed'
+    f.second.creditedSats = 440
+    f.onchain.confirmedSats += 440
+    const settled = await f.sample()
+    expect(settled.rebalance?.uncertainFeeAllowanceSats).toBe('62')
+    expect(BigInt(settled.rebalance!.comparisonTotalSats)).toBeGreaterThan(6_400n)
+    expect(settled.recovered).toEqual([])
+    expect(settled.unrecovered).toContainEqual({ checkpointId: loss.id, asset: 'BTC', before: '6400' })
+    f.lightning.availableSats -= 60
+    const laterLoss = await f.sample()
+    expect(laterLoss.decreases.some((row) => row.asset === 'BTC')).toBe(true)
+  })
+
+  it('persists overlap deferral across a checkpoint-store restart while assets still alert', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'solver-overlap-checkpoints-'))
+    directories.push(directory)
+    const path = join(directory, 'admin.sqlite')
+    const f = await overlapFixture(path)
+    f.arkade.total -= 500
+    const deferred = await f.sample()
+    expect(deferred.rebalance?.attributionDeferred).toBeDefined()
+    await f.services.adminStore.close()
+    const restarted = await fixture(path)
+    restarted.services.rebalanceStore = f.store
+    restarted.arkade.total = f.arkade.total
+    restarted.arkade.assets[0]!.amount -= 5n
+    const next = await restarted.sample()
+    expect(next.rebalance?.attributionDeferred?.anchorCheckpointId).toBe(f.first.id)
+    expect(next.decreases.map((row) => row.asset)).toEqual([`arkade:${f.arkade.assets[0]!.assetId}`])
+    expect(next.decreases[0]?.decrease).toBe('5')
+    expect(next.decreases.some((row) => row.asset === 'BTC')).toBe(false)
+  })
+
+  it('does not mistake a source refund plus second debit for an unexplained loss', async () => {
+    const f = await overlapFixture()
+    f.transfer.state = 'refunded'
+    f.arkade.total += 500
+    f.arkade.total -= 500
+    expect((await f.sample()).rebalance?.attributionDeferred).toBeDefined()
+    f.second.state = 'completed'
+    f.second.creditedSats = 498
+    f.onchain.confirmedSats += 498
+    const settled = await f.sample()
+    expect(settled.rebalance?.attributionDeferred).toBeUndefined()
+    expect(settled.decreases).toEqual([])
   })
 })
 

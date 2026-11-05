@@ -42,8 +42,18 @@ An unsubmitted quote can be cancelled from transfer history.
 
 Submission retries for the same transfer do not create another source spend.
 After a timeout, inspect the existing transfer before preparing another one.
-The journal permits only one active transfer across the source wallet, whether
-the request was manual or automatic.
+Automatic refills wait for any active transfer. A manual transfer may override
+one earlier transfer only after it is pending with a known funding transaction
+and a fresh checkpoint has observed its source debit. A deferred BTC comparison
+can still allow this exact pending-transfer override; it blocks new serial
+transfers until the comparison resolves. Select the explicit
+override, review a new quote and its fees, then Send. The backend rechecks the
+same pending transfer ID before spending and keeps its source coins reserved
+through recovery. A second override waits until one transfer finishes.
+During an overlap, BTC loss and recovery notices wait until both transfers
+settle and balances refresh; raw balances and asset checks continue. The
+reviewed fee limits bound what the checkpoint can attribute after settlement,
+so small BTC differences within that allowance may need manual inspection.
 
 ## Configure automatic refills
 

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { RebalanceService, type RebalanceSource } from '../../packages/solver-app/src/ops/rebalance.js'
 import { RebalanceStore, parseTransferCursor } from '../../packages/solver-app/src/ops/rebalanceStore.js'
 import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
+import type { BalanceCheckpoint } from '../../packages/solver-app/src/ops/balanceCheckpoints.js'
 import type {
   RebalancePolicy,
   RebalancePool,
@@ -26,8 +27,11 @@ const setup = async () => {
   const store = await RebalanceStore.open(driver)
   let now = 1000
   let balance = 0
+  let sourceInputsVisible = true
+  let checkpoint: BalanceCheckpoint | undefined
   const submit = vi.fn(async () => 'ab'.repeat(32))
   const release = vi.fn()
+  const pinRelease = vi.fn()
   const postNotice = vi.fn<(text: string) => void>()
   const pool: RebalancePool = {
     id: 'rail:onchain',
@@ -43,6 +47,7 @@ const setup = async () => {
     policy,
     savePolicy: vi.fn(async () => {}),
     now: () => now,
+    overlapCheckpoint: vi.fn(async () => checkpoint),
     postNotice,
     source: {
       quote: vi.fn(async (deposit: RebalanceDeposit) => ({
@@ -52,6 +57,10 @@ const setup = async () => {
         expiresAt: now + 60,
       })),
       reserve: vi.fn(async () => release),
+      pinPendingInputs: vi.fn(() => pinRelease),
+      inputsAbsent: vi.fn(async (rows: readonly RebalanceTransfer[]) =>
+        sourceInputsVisible ? new Set<string>() : new Set(rows.map((row) => row.id)),
+      ),
       submit,
       reconcile: vi.fn<RebalanceSource['reconcile']>(async () => ({ state: 'unknown' })),
     },
@@ -64,13 +73,48 @@ const setup = async () => {
     store,
     submit,
     release,
+    pinRelease,
     postNotice,
     pool,
     advance: () => {
       now += 400
     },
+    observeDebit: (id: string) => {
+      checkpoint = {
+        id: 1,
+        scope: 'test',
+        startedAt: now,
+        finishedAt: now,
+        arkade: { totalSats: '1000', assets: {} },
+        lightningSats: null,
+        onchain: null,
+        totalSats: '1000',
+        errors: {},
+        previousId: null,
+        decreases: [],
+        rebalance: {
+          accountingVersion: 2,
+          comparisonTotalSats: '6010',
+          feeAllowanceUsedSats: '0',
+          seenIds: [id],
+          pending: [{ id, chargedAt: now, debitObserved: true, observedDebitSats: '5010', remainingSats: '5010' }],
+        },
+      }
+    },
+    deferAttribution: () => {
+      if (!checkpoint?.rebalance) throw new Error('checkpoint missing')
+      checkpoint.rebalance.attributionDeferred = {
+        anchorCheckpointId: checkpoint.id,
+        anchorComparisonTotalSats: '6010',
+        since: now,
+        transferIds: checkpoint.rebalance.pending.map((row) => row.id),
+      }
+    },
     credit: () => {
       balance = 5000
+    },
+    clearSourceInputs: () => {
+      sourceInputsVisible = false
     },
   }
 }
@@ -154,10 +198,17 @@ describe('backend rebalancing', () => {
             throw new Error('backend unavailable')
           }
         f.deps.source.reconcile.mockResolvedValue({ state: 'refunded' })
+        await f.service.setPolicy({ ...policy, enabled: false })
+        f.advance()
         await f.service.tick()
         expect(f.deps.source.reconcile).toHaveBeenCalledTimes(1)
         expect((await f.store.get(q.id))?.state).toBe('refunded')
+        expect(f.release).not.toHaveBeenCalled()
+        f.clearSourceInputs()
+        f.advance()
+        await f.service.tick()
         expect(f.release).toHaveBeenCalledTimes(1)
+        expect((await f.store.get(q.id))?.updatedAt).toBe(1400)
       } finally {
         await f.driver.close()
       }
@@ -623,8 +674,140 @@ describe('backend rebalancing', () => {
       const a = await f.service.quote({ poolId: 'rail:onchain', amountSats: 5000, requestKey: 'a' })
       const b = await f.service.quote({ poolId: 'rail:onchain', amountSats: 5000, requestKey: 'b' })
       await f.service.submit(a.id)
-      await expect(f.service.submit(b.id)).rejects.toThrow(/active/)
+      await expect(f.service.submit(b.id)).rejects.toThrow(/Another transfer/)
       expect(f.submit).toHaveBeenCalledTimes(1)
+    } finally {
+      await f.driver.close()
+    }
+  })
+
+  it('requires an observed debit and exact manual confirmation before one overlapping send', async () => {
+    const f = await setup()
+    try {
+      const first = await f.service.quote({ poolId: 'rail:onchain', amountSats: 5000, requestKey: 'first' })
+      await f.service.submit(first.id)
+      const second = { poolId: 'rail:onchain', amountSats: 5000, requestKey: 'second', overridePendingIds: [first.id] }
+      await expect(f.service.quote(second)).rejects.toThrow(/balance checkpoint/)
+      expect(f.deps.source.quote).toHaveBeenCalledTimes(1)
+      f.observeDebit(first.id)
+      f.advance()
+      await expect(f.service.quote(second)).rejects.toThrow(/fresh balance checkpoint/)
+      f.observeDebit(first.id)
+      await expect(f.service.quote({ ...second, overridePendingIds: ['other'] })).rejects.toThrow(
+        /pending transfer changed/,
+      )
+      const quote = await f.service.quote(second)
+      expect(quote.overridePendingIds).toEqual([first.id])
+      await expect(f.service.submit(quote.id)).rejects.toThrow(/override changed/)
+      expect((await f.store.get(quote.id))?.state).toBe('quoted')
+      expect((await f.service.submit(quote.id, [first.id])).state).toBe('pending')
+      expect(f.submit).toHaveBeenCalledTimes(2)
+      expect(f.deps.source.pinPendingInputs).toHaveBeenCalledTimes(2)
+      expect(f.postNotice.mock.calls.at(-2)?.[0]).toContain('BTC loss and recovery notices will wait')
+      await expect(
+        f.service.quote({
+          poolId: 'rail:onchain',
+          amountSats: 5000,
+          requestKey: 'third',
+          overridePendingIds: [first.id],
+        }),
+      ).rejects.toThrow(/pending transfer changed/)
+    } finally {
+      await f.driver.close()
+    }
+  })
+
+  it('rejects stale override approval and pauses new quotes during deferred attribution', async () => {
+    const f = await setup()
+    try {
+      const first = await f.service.quote({ poolId: 'rail:onchain', amountSats: 5000, requestKey: 'first' })
+      await f.service.submit(first.id)
+      f.observeDebit(first.id)
+      const second = await f.service.quote({
+        poolId: 'rail:onchain',
+        amountSats: 5000,
+        requestKey: 'second',
+        overridePendingIds: [first.id],
+      })
+      await f.store.save({ ...(await f.store.get(first.id))!, state: 'completed', creditedSats: 5000 })
+      await expect(f.service.submit(second.id, [first.id])).rejects.toThrow(/overridden has changed/)
+      f.deferAttribution()
+      await expect(f.service.quote({ poolId: 'rail:onchain', amountSats: 5000, requestKey: 'later' })).rejects.toThrow(
+        /Balance attribution/,
+      )
+    } finally {
+      await f.driver.close()
+    }
+  })
+
+  it('allows an explicit override of the same pending transfer during deferred attribution', async () => {
+    const f = await setup()
+    try {
+      const first = await f.service.quote({ poolId: 'rail:onchain', amountSats: 5000, requestKey: 'first' })
+      await f.service.submit(first.id)
+      f.observeDebit(first.id)
+      f.deferAttribution()
+      await expect(
+        f.service.quote({ poolId: 'rail:onchain', amountSats: 5000, requestKey: 'unreviewed' }),
+      ).rejects.toThrow(/Balance attribution/)
+      const quote = await f.service.quote({
+        poolId: 'rail:onchain',
+        amountSats: 5000,
+        requestKey: 'reviewed',
+        overridePendingIds: [first.id],
+      })
+      expect(quote.overridePendingIds).toEqual([first.id])
+      expect((await f.service.submit(quote.id, [first.id])).state).toBe('pending')
+      expect(f.submit).toHaveBeenCalledTimes(2)
+      expect(f.deps.source.pinPendingInputs).toHaveBeenCalledTimes(2)
+    } finally {
+      await f.driver.close()
+    }
+  })
+
+  it('keeps a passive process from overriding without the provider input pins', async () => {
+    const f = await setup()
+    try {
+      const first = await f.service.quote({ poolId: 'rail:onchain', amountSats: 5000, requestKey: 'first' })
+      await f.service.submit(first.id)
+      f.observeDebit(first.id)
+      const passive = await RebalanceService.create(f.deps, 'passive')
+      await expect(
+        passive.quote({
+          poolId: 'rail:onchain',
+          amountSats: 5000,
+          requestKey: 'second',
+          overridePendingIds: [first.id],
+        }),
+      ).rejects.toThrow(/needs reconciliation/)
+      expect(f.submit).toHaveBeenCalledTimes(1)
+    } finally {
+      await f.driver.close()
+    }
+  })
+
+  it('retains terminal source pins through immediate credit until a later wallet read proves inputs gone', async () => {
+    const f = await setup()
+    try {
+      const quote = await f.service.quote({ poolId: 'rail:onchain', amountSats: 5000, requestKey: 'fast-credit' })
+      await f.service.submit(quote.id)
+      f.credit()
+      f.advance()
+      await f.service.tick()
+      expect((await f.store.get(quote.id))?.state).toBe('completed')
+      expect((await f.store.get(quote.id))?.sourceInputsClearedAt).toBeUndefined()
+      expect(f.pinRelease).not.toHaveBeenCalled()
+      expect((await f.store.protectedTerminalInputs()).map((row) => row.id)).toEqual([quote.id])
+      f.deps.source.inputsAbsent.mockRejectedValueOnce(new Error('wallet unavailable'))
+      await f.service.tick()
+      expect(f.pinRelease).not.toHaveBeenCalled()
+      f.clearSourceInputs()
+      f.advance()
+      await f.service.tick()
+      expect((await f.store.get(quote.id))?.sourceInputsClearedAt).toBe(1800)
+      expect((await f.store.get(quote.id))?.updatedAt).toBe(1400)
+      expect(f.pinRelease).toHaveBeenCalledTimes(1)
+      expect(await f.store.protectedTerminalInputs()).toEqual([])
     } finally {
       await f.driver.close()
     }
@@ -687,6 +870,60 @@ describe('only the live daemon recovers rebalance state — a one-shot build is 
       expect((await f.store.get('rb-1'))?.state).toBe('needs_reconciliation')
       expect(f.deps.source.reserve).toHaveBeenCalledTimes(1)
       expect(f.postNotice.mock.calls[0]?.[0]).toContain('Rebalance needs checking')
+    } finally {
+      await f.driver.close()
+    }
+  })
+
+  it('restores only the source input pins for a known pending spend', async () => {
+    const f = await setup()
+    try {
+      const pending = {
+        ...submittingRow(),
+        state: 'pending' as const,
+        chargedAt: 1000,
+        fundingTxid: 'ab'.repeat(32),
+        inputs: [{ txid: '01'.repeat(32), vout: 0, value: 5010 }],
+      }
+      await f.store.create(pending)
+      f.deps.source.reserve.mockClear()
+      f.deps.source.pinPendingInputs.mockClear()
+      const recovered = await RebalanceService.create(f.deps)
+      expect(f.deps.source.pinPendingInputs).toHaveBeenCalledWith(pending)
+      expect(f.deps.source.reserve).not.toHaveBeenCalled()
+      await recovered.close()
+    } finally {
+      await f.driver.close()
+    }
+  })
+
+  it('restores a completed transfer pin before new quotes when the source index still lists its inputs', async () => {
+    const f = await setup()
+    try {
+      const completed = {
+        ...submittingRow(),
+        state: 'completed' as const,
+        chargedAt: 1000,
+        fundingTxid: 'ab'.repeat(32),
+        creditedSats: 5000,
+        inputs: [{ txid: '01'.repeat(32), vout: 0, value: 5010 }],
+      }
+      await f.store.create(completed)
+      f.deps.policy = { ...policy, enabled: false }
+      f.deps.source.pinPendingInputs.mockClear()
+      f.deps.source.reserve.mockClear()
+      const protectedRows = vi.spyOn(f.store, 'protectedTerminalInputs')
+      const recovered = await RebalanceService.create(f.deps)
+      expect(f.deps.source.pinPendingInputs).toHaveBeenCalledWith(completed)
+      expect(f.deps.source.reserve).not.toHaveBeenCalled()
+      expect(protectedRows).toHaveBeenCalledTimes(1)
+      await recovered.tick()
+      expect((await f.store.get(completed.id))?.sourceInputsClearedAt).toBeUndefined()
+      f.clearSourceInputs()
+      await recovered.tick()
+      expect((await f.store.get(completed.id))?.sourceInputsClearedAt).toBe(1000)
+      expect(f.pinRelease).toHaveBeenCalledTimes(1)
+      expect(protectedRows).toHaveBeenCalledTimes(1)
     } finally {
       await f.driver.close()
     }
