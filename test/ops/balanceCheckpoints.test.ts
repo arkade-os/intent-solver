@@ -166,6 +166,62 @@ describe('rebalance balance accounting', () => {
     expect(settled.decreases).toEqual([])
   })
 
+  it('reminds operators when a new transfer extends deferred BTC attribution', async () => {
+    const f = await rebalanceFixture()
+    await f.sample()
+    await f.store.create(f.transfer)
+    f.arkade.total -= 500
+    await f.sample()
+    f.onchain.confirmedSats += 400
+    const first = await f.sample()
+    expect(formatCheckpointDeferral(first, 'regtest')).toContain('BTC BALANCE CHECK DEFERRED')
+    f.onchain.confirmedSats += 498
+    f.transfer.state = 'completed'
+    f.transfer.creditedSats = 498
+    await f.save()
+    const terminal = await f.sample()
+    expect(terminal.rebalance?.pending).toEqual([])
+    expect(terminal.rebalance?.attributionDeferred).toBeDefined()
+    const second = {
+      ...f.transfer,
+      id: 'rebalance-2',
+      requestKey: 'rebalance-2',
+      state: 'pending' as const,
+      chargedAt: Math.floor(Date.now() / 1000),
+      creditedSats: undefined,
+      inputs: [{ txid: 'cd'.repeat(32), vout: 0, value: 500 }],
+    }
+    await f.store.create(second)
+    f.arkade.total -= 500
+    const chained = await f.sample()
+    expect(chained.rebalance?.attributionDeferred?.transferIds).toEqual(['rebalance-1', 'rebalance-2'])
+    expect(formatCheckpointDeferral(chained, 'regtest')).toContain('BTC BALANCE CHECK STILL DEFERRED')
+    expect(formatCheckpointDeferral(chained, 'regtest')).toContain('rebalance-1, rebalance-2')
+    expect(formatCheckpointDeferral(chained, 'regtest')).toContain('raw difference: -102 sats')
+    expect(formatCheckpointDeferral(chained, 'regtest')).toContain('loss is unconfirmed')
+    expect(formatCheckpointDeferral(await f.sample(), 'regtest')).toBeNull()
+    expect(formatCheckpointWarning(chained, 'regtest')).toBeNull()
+  })
+
+  it('repeats an actionable deferral reminder every thirty minutes', async () => {
+    const f = await rebalanceFixture()
+    await f.sample()
+    await f.store.create(f.transfer)
+    f.arkade.total -= 500
+    await f.sample()
+    f.onchain.confirmedSats += 400
+    await f.sample()
+    vi.setSystemTime(Date.now() + 30 * 60 * 1_000)
+    const firstReminder = await f.sample()
+    expect(formatCheckpointDeferral(firstReminder, 'regtest')).toContain('BTC BALANCE CHECK STILL DEFERRED')
+    expect(formatCheckpointDeferral(firstReminder, 'regtest')).toContain('comparison baseline:')
+    expect(formatCheckpointDeferral(await f.sample(), 'regtest')).toBeNull()
+    vi.setSystemTime(Date.now() + 30 * 60 * 1_000)
+    const nextReminder = await f.sample()
+    expect(formatCheckpointDeferral(nextReminder, 'regtest')).toContain('BTC BALANCE CHECK STILL DEFERRED')
+    expect(formatCheckpointWarning(nextReminder, 'regtest')).toBeNull()
+  })
+
   it('keeps an older BTC warning open and still reports asset losses while attribution is deferred', async () => {
     const f = await rebalanceFixture()
     await f.sample()
