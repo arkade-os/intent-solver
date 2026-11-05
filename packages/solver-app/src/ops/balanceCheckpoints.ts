@@ -188,6 +188,9 @@ const levelOf = (checkpoint: BalanceCheckpoint, asset: string): string =>
 // A decrease is alerted only once the next checkpoint still shows it: a claim landing a few
 // seconds after its payment, or two rails read a moment apart, is back by then.
 export const formatCheckpointWarning = (checkpoint: BalanceCheckpoint, network: string): string | null => {
+  const hasTrackedWithdrawals =
+    (checkpoint.operatorWithdrawals?.seenIds.length ?? 0) > 0 ||
+    (checkpoint.operatorWithdrawals?.pending.length ?? 0) > 0
   const delayed = new Set([
     ...(checkpoint.rebalance?.delayedBtcWarningIds ?? []),
     ...(checkpoint.operatorWithdrawals?.delayedBtcWarningIds ?? []),
@@ -212,14 +215,17 @@ export const formatCheckpointWarning = (checkpoint: BalanceCheckpoint, network: 
             ? 'BTC loss and recovery notices are deferred while transfer attribution is uncertain; asset changes are still reported.'
             : checkpoint.rebalance
               ? `Known rebalances and their allowed fees are accounted for. Other fees and ${checkpoint.operatorWithdrawals ? 'untracked withdrawals' : 'withdrawals'} may explain this decrease. A RECOVERED follow-up is sent if it clears.`
-              : checkpoint.operatorWithdrawals
-                ? 'Tracked operator withdrawals are accounted for. Other fees or untracked withdrawals may explain this decrease. A RECOVERED follow-up is sent if the balance comes back.'
+              : hasTrackedWithdrawals
+                ? 'Journaled operator withdrawals are tracked separately. Other fees or untracked withdrawals may explain this decrease. A RECOVERED follow-up is sent if the balance comes back.'
                 : 'Fees, withdrawals and funds in flight are not reconciled. A RECOVERED follow-up is sent if the balance comes back.',
         ].join('\n'),
       )
 }
 
 export const formatCheckpointRecovery = (checkpoint: BalanceCheckpoint, network: string): string | null => {
+  const hasTrackedWithdrawals =
+    (checkpoint.operatorWithdrawals?.seenIds.length ?? 0) > 0 ||
+    (checkpoint.operatorWithdrawals?.pending.length ?? 0) > 0
   // A decrease back by the next checkpoint was never alerted.
   const delayed = new Set([
     ...(checkpoint.rebalance?.delayedBtcWarningIds ?? []),
@@ -245,8 +251,8 @@ export const formatCheckpointRecovery = (checkpoint: BalanceCheckpoint, network:
             ? 'BTC loss and recovery notices are deferred while transfer attribution is uncertain; asset changes are still reported.'
             : checkpoint.rebalance
               ? 'The unexplained decrease has cleared after accounting for known rebalances and their allowed fees.'
-              : checkpoint.operatorWithdrawals
-                ? 'The balance has returned; tracked operator withdrawals were accounted for, but the earlier decrease is not fully explained.'
+              : hasTrackedWithdrawals
+                ? 'The balance has returned. Journaled operator withdrawals were tracked separately; this does not prove what caused the earlier decrease.'
                 : 'The balance is back to its level before the drop; the cause is not reconciled.',
         ].join('\n'),
       )

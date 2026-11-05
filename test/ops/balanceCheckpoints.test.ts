@@ -213,7 +213,13 @@ describe('operator withdrawal balance accounting', () => {
     f.arkade.total -= 535
     const drop = await f.sample()
     expect(drop.decreases).toEqual([expect.objectContaining({ asset: 'BTC', decrease: '25' })])
-    expect(formatCheckpointWarning(await f.sample(), 'regtest')).toContain('25 sats')
+    const warning = formatCheckpointWarning(await f.sample(), 'regtest')
+    expect(warning).toContain('25 sats')
+    expect(warning).toContain('Journaled operator withdrawals are tracked separately.')
+    f.arkade.total += 25
+    expect(formatCheckpointRecovery(await f.sample(), 'regtest')).toContain(
+      'Journaled operator withdrawals were tracked separately',
+    )
   })
 
   it('waits for the source debit after send success and preserves pending attribution across restart', async () => {
@@ -1917,7 +1923,7 @@ describe('balance checkpoints', () => {
       [
         `⚠️ *POSSIBLE LOSS* · regtest · checkpoint #${held.id}`,
         `BTC: -15 sats (6,400 → 6,385) since checkpoint #${loss.id}`,
-        'Tracked operator withdrawals are accounted for. Other fees or untracked withdrawals may explain this decrease. A RECOVERED follow-up is sent if the balance comes back.',
+        'Fees, withdrawals and funds in flight are not reconciled. A RECOVERED follow-up is sent if the balance comes back.',
       ].join('\n'),
     )
     const large = formatCheckpointWarning(
@@ -1959,7 +1965,7 @@ describe('balance checkpoints', () => {
       [
         `✅ *RECOVERED* · regtest · checkpoint #${back.id}`,
         `BTC: 0 sats (6,400 → 6,400) since before the drop at checkpoint #${drop.id}`,
-        'The balance has returned; tracked operator withdrawals were accounted for, but the earlier decrease is not fully explained.',
+        'The balance is back to its level before the drop; the cause is not reconciled.',
       ].join('\n'),
     ])
   })
