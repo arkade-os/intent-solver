@@ -23,6 +23,7 @@ export interface BalanceCheckpoint {
   recovered?: (FollowedDecrease & { after: string })[]
   unrecovered?: FollowedDecrease[]
   rebalance?: {
+    accountingVersion?: 2
     comparisonTotalSats: string
     feeAllowanceUsedSats: string
     seenIds: string[]
@@ -33,6 +34,16 @@ export interface BalanceCheckpoint {
       observedDebitSats: string
       remainingSats: string
     }[]
+    attributionDeferred?: {
+      anchorCheckpointId: number
+      anchorComparisonTotalSats: string
+      since: number
+      transferIds: string[]
+      lastReminderAt?: number
+      heldBtcDecreaseIds?: number[]
+      heldBtcWarnings?: FollowedDecrease[]
+    }
+    delayedBtcWarningIds?: number[]
   }
 }
 
@@ -45,6 +56,7 @@ export interface FollowedDecrease {
 
 // ponytail: oldest dropped past this; a time window instead if late follow-ups turn into noise.
 const UNRECOVERED_LIMIT = 20
+const DEFERRAL_REMINDER_SECONDS = 30 * 60
 
 type CheckpointServices = Pick<
   Services,
@@ -115,7 +127,12 @@ const levelOf = (checkpoint: BalanceCheckpoint, asset: string): string =>
 // A decrease is alerted only once the next checkpoint still shows it: a claim landing a few
 // seconds after its payment, or two rails read a moment apart, is back by then.
 export const formatCheckpointWarning = (checkpoint: BalanceCheckpoint, network: string): string | null => {
-  const held = (checkpoint.unrecovered ?? []).filter(({ checkpointId }) => checkpointId === checkpoint.previousId)
+  const delayed = new Set(checkpoint.rebalance?.delayedBtcWarningIds ?? [])
+  const held = (checkpoint.unrecovered ?? []).filter(
+    ({ checkpointId, asset }) =>
+      (checkpointId === checkpoint.previousId || (asset === 'BTC' && delayed.has(checkpointId))) &&
+      !(asset === 'BTC' && checkpoint.rebalance?.attributionDeferred),
+  )
   return held.length === 0
     ? null
     : limitNotification(
@@ -154,10 +171,40 @@ export const formatCheckpointRecovery = (checkpoint: BalanceCheckpoint, network:
       )
 }
 
+export const formatCheckpointDeferral = (checkpoint: BalanceCheckpoint, network: string): string | null => {
+  const deferred = checkpoint.rebalance?.attributionDeferred
+  if (deferred?.lastReminderAt === checkpoint.startedAt) {
+    const raw = BigInt(checkpoint.totalSats ?? '0')
+    const baseline = BigInt(deferred.anchorComparisonTotalSats)
+    const difference = raw - baseline
+    const ids = deferred.transferIds
+    const transferContext = ids.length <= 3 ? ids.join(', ') : `${ids.slice(-3).join(', ')} (${ids.length} total)`
+    return limitNotification(
+      `⚠️ *BTC BALANCE CHECK STILL DEFERRED* · ${network} · checkpoint #${checkpoint.id}\n` +
+        `Raw BTC: ${raw.toLocaleString('en-US')} sats; ` +
+        `comparison baseline: ${baseline.toLocaleString('en-US')} sats; ` +
+        `raw difference: ${difference > 0n ? '+' : ''}${difference.toLocaleString('en-US')} sats. ` +
+        `This includes funds in flight; loss is unconfirmed. Tracked transfers: ${transferContext}. ` +
+        'Check their destination receipts. BTC loss and RECOVERED notices remain paused until settlement and a fresh balance read.',
+    )
+  }
+  return deferred?.anchorCheckpointId === checkpoint.previousId
+    ? limitNotification(
+        `ℹ️ *BTC BALANCE CHECK DEFERRED* · ${network} · checkpoint #${checkpoint.id}\n` +
+          'A rebalance is in flight and a balance increase cannot yet be tied to its destination credit. ' +
+          'Raw balances and asset checks continue. BTC loss and RECOVERED checks resume after settlement and a fresh balance read.',
+      )
+    : null
+}
+
 export const checkpointNotices =
   (network: string, post: (text: string) => void) =>
   (checkpoint: BalanceCheckpoint): void => {
-    for (const text of [formatCheckpointRecovery(checkpoint, network), formatCheckpointWarning(checkpoint, network)]) {
+    for (const text of [
+      formatCheckpointDeferral(checkpoint, network),
+      formatCheckpointRecovery(checkpoint, network),
+      formatCheckpointWarning(checkpoint, network),
+    ]) {
       if (text) post(text)
     }
   }
@@ -183,6 +230,7 @@ const accountRebalances = (
   totalSats: string,
   arkadeSats: string,
   transfers: RebalanceTransfer[],
+  startedAt: number,
 ): NonNullable<BalanceCheckpoint['rebalance']> => {
   let feeAllowance = BigInt(previous?.rebalance?.feeAllowanceUsedSats ?? '0')
   const pending = (previous?.rebalance?.pending ?? []).map((row) => ({ ...row }))
@@ -193,14 +241,10 @@ const accountRebalances = (
     previous?.totalSats === undefined || previous.totalSats === null
       ? 0n
       : BigInt(totalSats) - BigInt(previous.totalSats)
-  let returned = positive(delta)
   let decrease = positive(-delta)
   let sourceDecrease = previous?.arkade ? positive(BigInt(previous.arkade.totalSats) - BigInt(arkadeSats)) : 0n
-  for (const row of pending) {
-    const recovered = minimum(returned, BigInt(row.remainingSats))
-    row.remainingSats = String(BigInt(row.remainingSats) - recovered)
-    returned -= recovered
-  }
+  const sourceDecreaseBeforeAttribution = sourceDecrease
+  // An aggregate rise cannot prove this transfer's credit; another wallet flow may have arrived first.
   for (const row of transfers) {
     if (row.chargedAt === undefined) continue
     sats(row.chargedAt)
@@ -237,16 +281,54 @@ const accountRebalances = (
   const remaining = pending.filter((held) => {
     const row = byId.get(held.id)!
     if (pendingRebalance(row)) return true
-    feeAllowance += minimum(BigInt(held.remainingSats), completionAllowance(row, BigInt(held.observedDebitSats)))
+    feeAllowance += completionAllowance(row, BigInt(held.observedDebitSats))
     return false
   })
+  const earlierDeferred = previous?.rebalance?.attributionDeferred
+  const legacyUnprovenReturn =
+    previous?.rebalance?.accountingVersion !== 2 &&
+    pending.some(
+      (row) => row.debitObserved && BigInt(row.remainingSats) < BigInt(row.observedDebitSats) && byId.has(row.id),
+    )
+  const ambiguousRise =
+    (remaining.length > 0 && (delta > 0n || sourceDecreaseBeforeAttribution > positive(-delta))) || legacyUnprovenReturn
+  const mayResolve = earlierDeferred && remaining.length === 0 && previous?.rebalance?.pending.length === 0
+  const attributionDeferred = mayResolve
+    ? undefined
+    : earlierDeferred
+      ? {
+          ...earlierDeferred,
+          transferIds: [...new Set([...earlierDeferred.transferIds, ...remaining.map((row) => row.id)])],
+          ...(remaining.some((row) => !earlierDeferred.transferIds.includes(row.id)) ||
+          startedAt - (earlierDeferred.lastReminderAt ?? earlierDeferred.since) >= DEFERRAL_REMINDER_SECONDS
+            ? { lastReminderAt: startedAt }
+            : {}),
+        }
+      : ambiguousRise && previous?.totalSats !== null && previous?.totalSats !== undefined
+        ? {
+            anchorCheckpointId: previous.id,
+            anchorComparisonTotalSats: previous.rebalance?.comparisonTotalSats ?? previous.totalSats,
+            since: previous.finishedAt,
+            transferIds: remaining.map((row) => row.id),
+            heldBtcDecreaseIds: previous.decreases.some(({ asset }) => asset === 'BTC') ? [previous.id] : [],
+            heldBtcWarnings: previous.decreases
+              .filter(({ asset }) => asset === 'BTC')
+              .map(({ asset, before }) => ({ checkpointId: previous.id, asset, before })),
+          }
+        : undefined
+  const comparisonTotalSats = String(
+    BigInt(totalSats) + feeAllowance + remaining.reduce((sum, row) => sum + BigInt(row.remainingSats), 0n),
+  )
   return {
-    comparisonTotalSats: String(
-      BigInt(totalSats) + feeAllowance + remaining.reduce((sum, row) => sum + BigInt(row.remainingSats), 0n),
-    ),
+    accountingVersion: 2,
+    comparisonTotalSats: attributionDeferred?.anchorComparisonTotalSats ?? comparisonTotalSats,
     feeAllowanceUsedSats: String(feeAllowance),
     seenIds: transfers.map((row) => row.id),
     pending: remaining,
+    ...(attributionDeferred ? { attributionDeferred } : {}),
+    ...(mayResolve && earlierDeferred?.heldBtcDecreaseIds?.length
+      ? { delayedBtcWarningIds: earlierDeferred.heldBtcDecreaseIds }
+      : {}),
   }
 }
 
@@ -330,7 +412,7 @@ export const recordBalanceCheckpoint = async (services: CheckpointServices): Pro
     const transfers = await read('rebalance', async () => services.rebalanceStore?.checkpointTransfers(since) ?? [])
     try {
       if (transfers === null) totalSats = null
-      else rebalance = accountRebalances(baseline, totalSats, arkade!.totalSats, transfers)
+      else rebalance = accountRebalances(baseline, totalSats, arkade!.totalSats, transfers, startedAt)
     } catch (error) {
       errors.rebalance = messageOf(error)
       totalSats = null
@@ -343,18 +425,33 @@ export const recordBalanceCheckpoint = async (services: CheckpointServices): Pro
         { scope, totalSats: rebalance?.comparisonTotalSats ?? totalSats, arkade },
       )
     : null
+  const btcDeferred = rebalance?.attributionDeferred !== undefined
   const decreases = (changes ?? [])
-    .filter(({ delta }) => BigInt(delta) < 0n)
+    .filter(({ asset, delta }) => BigInt(delta) < 0n && !(btcDeferred && asset === 'BTC'))
     .map(({ asset, before, after, delta }) => ({ asset, before, after, decrease: String(-BigInt(delta)) }))
   const levels = new Map((changes ?? []).map(({ asset, after }) => [asset, BigInt(after)]))
   const level = (asset: string) => levels.get(asset) ?? 0n
   const followed: FollowedDecrease[] = previous
     ? [
-        ...(previous.unrecovered ?? []),
-        ...previous.decreases.map(({ asset, before }) => ({ checkpointId: previous.id, asset, before })),
+        ...new Map(
+          [
+            ...(previous.unrecovered ?? []),
+            ...(previous.rebalance?.attributionDeferred?.heldBtcWarnings ?? []),
+            ...previous.decreases.map(({ asset, before }) => ({ checkpointId: previous.id, asset, before })),
+          ].map((row) => [`${row.checkpointId}:${row.asset}`, row] as const),
+        ).values(),
       ]
     : []
-  const isBack = ({ asset, before }: FollowedDecrease) => level(asset) >= BigInt(before)
+  const isBack = ({ asset, before }: FollowedDecrease) =>
+    !(btcDeferred && asset === 'BTC') && level(asset) >= BigInt(before)
+  const delayed = new Set(rebalance?.delayedBtcWarningIds ?? [])
+  const heldBtcIds = new Set(
+    rebalance?.attributionDeferred?.heldBtcDecreaseIds ?? rebalance?.delayedBtcWarningIds ?? [],
+  )
+  const stillOpen = followed.filter((row) => !isBack(row))
+  const protectedBtc = stillOpen.filter((row) => row.asset === 'BTC' && heldBtcIds.has(row.checkpointId))
+  const room = Math.max(0, UNRECOVERED_LIMIT - protectedBtc.length)
+  const capped = room ? stillOpen.filter((row) => !protectedBtc.includes(row)).slice(-room) : []
   return services.adminStore.recordBalanceCheckpoint({
     scope,
     startedAt,
@@ -367,8 +464,10 @@ export const recordBalanceCheckpoint = async (services: CheckpointServices): Pro
     errors,
     previousId: previous?.id ?? null,
     decreases,
-    recovered: followed.filter(isBack).map((d) => ({ ...d, after: String(level(d.asset)) })),
-    unrecovered: followed.filter((d) => !isBack(d)).slice(-UNRECOVERED_LIMIT),
+    recovered: followed
+      .filter((d) => isBack(d) && !(d.asset === 'BTC' && delayed.has(d.checkpointId)))
+      .map((d) => ({ ...d, after: String(level(d.asset)) })),
+    unrecovered: [...protectedBtc, ...capped],
   })
 }
 

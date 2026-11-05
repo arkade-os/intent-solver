@@ -12,6 +12,7 @@ import {
   withBalanceCheckpoints,
   checkpointChanges,
   checkpointNotices,
+  formatCheckpointDeferral,
   formatCheckpointRecovery,
   formatCheckpointWarning,
 } from '@arkade-os/solver-app/ops/balanceCheckpoints.js'
@@ -119,6 +120,282 @@ afterEach(async () => {
 })
 
 describe('rebalance balance accounting', () => {
+  it('does not mistake an unrelated credit followed by an Arkade debit for rebalance settlement', async () => {
+    const f = await rebalanceFixture()
+    await f.sample()
+    await f.store.create(f.transfer)
+    f.arkade.total -= 500
+    const sent = await f.sample()
+    expect(sent.rebalance?.pending[0]?.remainingSats).toBe('500')
+    f.onchain.confirmedSats += 400
+    const unrelatedCredit = await f.sample()
+    expect(unrelatedCredit.rebalance?.attributionDeferred).toBeDefined()
+    f.arkade.total -= 400
+    const offsettingDebit = await f.sample()
+    expect(offsettingDebit.decreases).toEqual([])
+    expect(formatCheckpointWarning(await f.sample(), 'regtest')).toBeNull()
+    f.onchain.confirmedSats += 498
+    f.transfer.state = 'completed'
+    f.transfer.creditedSats = 498
+    await f.save()
+    await f.sample()
+    const settled = await f.sample()
+    expect(settled.decreases).toEqual([])
+    expect(settled.rebalance?.attributionDeferred).toBeUndefined()
+    expect(settled.unrecovered).toEqual([])
+  })
+
+  it('defers an unrelated backend rise and Arkade fall in the same checkpoint', async () => {
+    const f = await rebalanceFixture()
+    await f.sample()
+    await f.store.create(f.transfer)
+    f.arkade.total -= 500
+    await f.sample()
+    f.onchain.confirmedSats += 400
+    f.arkade.total -= 400
+    const offset = await f.sample()
+    expect(offset.rebalance?.attributionDeferred).toBeDefined()
+    expect(offset.decreases).toEqual([])
+    f.onchain.confirmedSats += 498
+    f.transfer.state = 'completed'
+    f.transfer.creditedSats = 498
+    await f.save()
+    await f.sample()
+    const settled = await f.sample()
+    expect(settled.rebalance?.attributionDeferred).toBeUndefined()
+    expect(settled.decreases).toEqual([])
+  })
+
+  it('reminds operators when a new transfer extends deferred BTC attribution', async () => {
+    const f = await rebalanceFixture()
+    await f.sample()
+    await f.store.create(f.transfer)
+    f.arkade.total -= 500
+    await f.sample()
+    f.onchain.confirmedSats += 400
+    const first = await f.sample()
+    expect(formatCheckpointDeferral(first, 'regtest')).toContain('BTC BALANCE CHECK DEFERRED')
+    f.onchain.confirmedSats += 498
+    f.transfer.state = 'completed'
+    f.transfer.creditedSats = 498
+    await f.save()
+    const terminal = await f.sample()
+    expect(terminal.rebalance?.pending).toEqual([])
+    expect(terminal.rebalance?.attributionDeferred).toBeDefined()
+    const second = {
+      ...f.transfer,
+      id: 'rebalance-2',
+      requestKey: 'rebalance-2',
+      state: 'pending' as const,
+      chargedAt: Math.floor(Date.now() / 1000),
+      creditedSats: undefined,
+      inputs: [{ txid: 'cd'.repeat(32), vout: 0, value: 500 }],
+    }
+    await f.store.create(second)
+    f.arkade.total -= 500
+    const chained = await f.sample()
+    expect(chained.rebalance?.attributionDeferred?.transferIds).toEqual(['rebalance-1', 'rebalance-2'])
+    expect(formatCheckpointDeferral(chained, 'regtest')).toContain('BTC BALANCE CHECK STILL DEFERRED')
+    expect(formatCheckpointDeferral(chained, 'regtest')).toContain('rebalance-1, rebalance-2')
+    expect(formatCheckpointDeferral(chained, 'regtest')).toContain('raw difference: -102 sats')
+    expect(formatCheckpointDeferral(chained, 'regtest')).toContain('loss is unconfirmed')
+    expect(formatCheckpointDeferral(await f.sample(), 'regtest')).toBeNull()
+    expect(formatCheckpointWarning(chained, 'regtest')).toBeNull()
+  })
+
+  it('repeats an actionable deferral reminder every thirty minutes', async () => {
+    const f = await rebalanceFixture()
+    await f.sample()
+    await f.store.create(f.transfer)
+    f.arkade.total -= 500
+    await f.sample()
+    f.onchain.confirmedSats += 400
+    await f.sample()
+    vi.setSystemTime(Date.now() + 30 * 60 * 1_000)
+    const firstReminder = await f.sample()
+    expect(formatCheckpointDeferral(firstReminder, 'regtest')).toContain('BTC BALANCE CHECK STILL DEFERRED')
+    expect(formatCheckpointDeferral(firstReminder, 'regtest')).toContain('comparison baseline:')
+    expect(formatCheckpointDeferral(await f.sample(), 'regtest')).toBeNull()
+    vi.setSystemTime(Date.now() + 30 * 60 * 1_000)
+    const nextReminder = await f.sample()
+    expect(formatCheckpointDeferral(nextReminder, 'regtest')).toContain('BTC BALANCE CHECK STILL DEFERRED')
+    expect(formatCheckpointWarning(nextReminder, 'regtest')).toBeNull()
+  })
+
+  it('keeps an older BTC warning open and still reports asset losses while attribution is deferred', async () => {
+    const f = await rebalanceFixture()
+    await f.sample()
+    f.onchain.confirmedSats -= 25
+    const priorLoss = await f.sample()
+    expect(formatCheckpointWarning(await f.sample(), 'regtest')).toContain('25 sats')
+    await f.store.create(f.transfer)
+    f.arkade.total -= 500
+    await f.sample()
+    f.onchain.confirmedSats += 400
+    const deferred = await f.sample()
+    expect(formatCheckpointDeferral(deferred, 'regtest')).toContain('BTC BALANCE CHECK DEFERRED')
+    expect(formatCheckpointDeferral(await f.sample(), 'regtest')).toBeNull()
+    f.arkade.assets[0]!.amount -= 1n
+    const assetLoss = await f.sample()
+    expect(assetLoss.decreases.map((change) => change.asset)).toEqual([`arkade:${'aa'.repeat(34)}`])
+    expect(formatCheckpointWarning(await f.sample(), 'regtest')).toContain(`arkade:${'aa'.repeat(34)}`)
+    expect(assetLoss.recovered).toEqual([])
+    expect(assetLoss.unrecovered).toContainEqual({ checkpointId: priorLoss.id, asset: 'BTC', before: '6400' })
+    f.arkade.total -= 400
+    await f.sample()
+    f.onchain.confirmedSats += 498
+    f.transfer.state = 'completed'
+    f.transfer.creditedSats = 498
+    await f.save()
+    await f.sample()
+    const settled = await f.sample()
+    expect(settled.recovered).toEqual([])
+    expect(settled.unrecovered).toContainEqual({ checkpointId: priorLoss.id, asset: 'BTC', before: '6400' })
+  })
+
+  it.each([false, true])('delays an unannounced BTC drop through deferral (restored: %s)', async (restored) => {
+    const f = await rebalanceFixture()
+    await f.sample()
+    await f.store.create(f.transfer)
+    f.arkade.total -= 500
+    await f.sample()
+    f.lightning.availableSats -= 25
+    const loss = await f.sample()
+    f.onchain.confirmedSats += 400
+    const deferred = await f.sample()
+    expect(deferred.rebalance?.attributionDeferred?.heldBtcDecreaseIds).toEqual([loss.id])
+    expect(formatCheckpointWarning(deferred, 'regtest')).toBeNull()
+    f.arkade.total -= 400
+    if (restored) f.lightning.availableSats += 25
+    f.onchain.confirmedSats += 498
+    f.transfer.state = 'completed'
+    f.transfer.creditedSats = 498
+    await f.save()
+    await f.sample()
+    const settled = await f.sample()
+    expect(settled.rebalance?.attributionDeferred).toBeUndefined()
+    if (restored) {
+      expect(formatCheckpointWarning(settled, 'regtest')).toBeNull()
+      expect(formatCheckpointRecovery(settled, 'regtest')).toBeNull()
+      expect(settled.unrecovered).toEqual([])
+    } else {
+      expect(formatCheckpointWarning(settled, 'regtest')).toContain('25 sats')
+      expect(settled.recovered).toEqual([])
+    }
+  })
+
+  it('retains a delayed BTC warning past the asset recovery cap', async () => {
+    const f = await rebalanceFixture()
+    const assets = Array.from({ length: 22 }, (_, index) => ({
+      assetId: (index + 1).toString(16).padStart(2, '0').repeat(34),
+      amount: 1n,
+    }))
+    f.arkade.assets.push(...assets)
+    await f.sample()
+    await f.store.create(f.transfer)
+    f.arkade.total -= 500
+    await f.sample()
+    f.lightning.availableSats -= 25
+    const loss = await f.sample()
+    f.onchain.confirmedSats += 400
+    await f.sample()
+    for (const asset of assets) {
+      f.arkade.assets = f.arkade.assets.filter((row) => row.assetId !== asset.assetId)
+      await f.sample()
+    }
+    const during = await f.sample()
+    expect(during.unrecovered).toContainEqual({ checkpointId: loss.id, asset: 'BTC', before: '6400' })
+    expect(during.unrecovered).toHaveLength(20)
+    f.arkade.total -= 400
+    f.onchain.confirmedSats += 498
+    f.transfer.state = 'completed'
+    f.transfer.creditedSats = 498
+    await f.save()
+    await f.sample()
+    const settled = await f.sample()
+    expect(formatCheckpointWarning(settled, 'regtest')).toContain('25 sats')
+    expect(settled.unrecovered).toContainEqual({ checkpointId: loss.id, asset: 'BTC', before: '6400' })
+  })
+
+  it('reports a real BTC loss after ambiguous rebalance movements settle', async () => {
+    const f = await rebalanceFixture()
+    await f.sample()
+    await f.store.create(f.transfer)
+    f.arkade.total -= 500
+    await f.sample()
+    f.onchain.confirmedSats += 400
+    await f.sample()
+    f.arkade.total -= 400
+    f.lightning.availableSats -= 25
+    expect((await f.sample()).decreases).toEqual([])
+    f.onchain.confirmedSats += 498
+    f.transfer.state = 'completed'
+    f.transfer.creditedSats = 498
+    await f.save()
+    await f.sample()
+    const settled = await f.sample()
+    expect(settled.decreases).toEqual([{ asset: 'BTC', before: '6400', after: '6375', decrease: '25' }])
+    expect(formatCheckpointWarning(await f.sample(), 'regtest')).toContain('25 sats')
+  })
+
+  it('persists deferred attribution across restart and resumes after a refunded transfer', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'solver-rebalance-checkpoints-'))
+    directories.push(directory)
+    const path = join(directory, 'admin.sqlite')
+    const f = await rebalanceFixture(path)
+    await f.sample()
+    await f.store.create(f.transfer)
+    f.arkade.total -= 500
+    await f.sample()
+    f.onchain.confirmedSats += 400
+    const deferred = await f.sample()
+    await f.services.adminStore.close()
+    const restarted = await fixture(path)
+    restarted.services.rebalanceStore = f.store
+    restarted.arkade.total = f.arkade.total
+    restarted.onchain.confirmedSats = f.onchain.confirmedSats
+    restarted.arkade.total -= 400
+    const afterRestart = await restarted.sample()
+    expect(afterRestart.rebalance?.attributionDeferred?.anchorCheckpointId).toBe(deferred.previousId)
+    expect(afterRestart.decreases).toEqual([])
+    restarted.arkade.total += 500
+    f.transfer.state = 'refunded'
+    await f.save()
+    await restarted.sample()
+    const settled = await restarted.sample()
+    expect(settled.rebalance?.attributionDeferred).toBeUndefined()
+    expect(settled.decreases).toEqual([])
+  })
+
+  it('defers a legacy pending hold already reduced without a receipt before the upgrade', async () => {
+    const f = await rebalanceFixture()
+    await f.sample()
+    await f.store.create(f.transfer)
+    f.arkade.total -= 500
+    const sent = await f.sample()
+    expect(sent.rebalance?.accountingVersion).toBe(2)
+    f.onchain.confirmedSats += 400
+    const { id: sentId, ...entry } = sent
+    await f.services.adminStore.recordBalanceCheckpoint({
+      ...entry,
+      previousId: sentId,
+      totalSats: String(BigInt(sent.totalSats!) + 400n),
+      onchain: { ...sent.onchain!, confirmedSats: String(BigInt(sent.onchain!.confirmedSats) + 400n) },
+      rebalance: {
+        comparisonTotalSats: sent.rebalance!.comparisonTotalSats,
+        feeAllowanceUsedSats: sent.rebalance!.feeAllowanceUsedSats,
+        seenIds: sent.rebalance!.seenIds,
+        pending: [{ ...sent.rebalance!.pending[0]!, remainingSats: '100' }],
+      },
+      decreases: [],
+    })
+    const upgraded = await f.sample()
+    expect(upgraded.rebalance?.accountingVersion).toBe(2)
+    expect(upgraded.rebalance?.attributionDeferred).toBeDefined()
+    f.arkade.total -= 400
+    expect((await f.sample()).decreases).toEqual([])
+  })
+
   it.each([-1, 0])(
     'does not reuse an old pending debit when upgrading a legacy baseline (offset %i)',
     async (offset) => {
@@ -152,7 +429,8 @@ describe('rebalance balance accounting', () => {
     expect((await f.sample()).unrecovered).toEqual([])
     f.onchain.confirmedSats += 498
     const creditedBeforeJournal = await f.sample()
-    expect(creditedBeforeJournal.rebalance?.pending[0]?.remainingSats).toBe('2')
+    expect(creditedBeforeJournal.rebalance?.pending[0]?.remainingSats).toBe('500')
+    expect(creditedBeforeJournal.rebalance?.attributionDeferred).toBeDefined()
     f.transfer.state = 'completed'
     f.transfer.creditedSats = 498
     await f.save()
@@ -163,6 +441,7 @@ describe('rebalance balance accounting', () => {
     expect(completed.unrecovered).toEqual([])
     expect(formatCheckpointWarning(completed, 'regtest')).toBeNull()
     expect(checkpointChanges(initial, completed)?.[0]?.delta).toBe('-2')
+    expect((await f.sample()).rebalance?.attributionDeferred).toBeUndefined()
     f.arkade.total -= 1
     expect((await f.sample()).decreases[0]?.decrease).toBe('1')
   })
@@ -223,13 +502,38 @@ describe('rebalance balance accounting', () => {
     await f.store.create(f.transfer)
     f.arkade.total -= 500
     f.onchain.confirmedSats += 500
-    expect((await f.sample()).rebalance?.pending[0]).toMatchObject({
+    const offset = await f.sample()
+    expect(offset.rebalance?.pending[0]).toMatchObject({
       debitObserved: true,
       observedDebitSats: '500',
       remainingSats: '0',
     })
+    expect(offset.rebalance?.attributionDeferred).toBeDefined()
     f.arkade.total -= 5
+    expect((await f.sample()).decreases).toEqual([])
+    f.transfer.state = 'completed'
+    f.transfer.creditedSats = 500
+    await f.save()
+    await f.sample()
     expect((await f.sample()).decreases[0]?.decrease).toBe('5')
+  })
+
+  it('accounts for a proven completion fee when an unrelated credit offset the source debit', async () => {
+    const f = await rebalanceFixture()
+    await f.sample()
+    await f.store.create(f.transfer)
+    f.arkade.total -= 500
+    f.onchain.confirmedSats += 500
+    const offset = await f.sample()
+    expect(offset.rebalance?.pending[0]?.remainingSats).toBe('0')
+    f.transfer.state = 'completed'
+    f.transfer.creditedSats = 498
+    await f.save()
+    await f.sample()
+    const settled = await f.sample()
+    expect(settled.rebalance?.feeAllowanceUsedSats).toBe('2')
+    expect(settled.decreases).toEqual([])
+    expect((await f.sample()).decreases).toEqual([])
   })
 
   it('still alerts an unrelated loss during a pending transfer and does not clear it with the deposit', async () => {
