@@ -685,6 +685,27 @@ describe('operator withdrawal balance accounting', () => {
     expect(accounted.decreases).toEqual([])
   })
 
+  it('keeps BTC deferred when settled wallet history differs from the quoted withdrawal debit', async () => {
+    const f = await withdrawalFixture()
+    await f.sample()
+    await f.create()
+    await f.sent()
+    f.history[0]!.amount = 512
+    f.arkade.total -= 512
+    const pending = await f.sample()
+    expect(pending.operatorWithdrawals?.observedSourceDropSats).toBe('512')
+    expect(pending.operatorWithdrawals?.deferred).toBeDefined()
+    expect(pending.operatorWithdrawals?.explained).toBeUndefined()
+    expect(pending.decreases).toEqual([])
+    const next = await f.sample()
+    expect(formatCheckpointWarning(next, 'regtest')).toBeNull()
+    expect(formatCheckpointRecovery(next, 'regtest')).toBeNull()
+    vi.setSystemTime(Date.now() + 30 * 60 * 1_000)
+    const reminder = await f.sample()
+    expect(reminder.operatorWithdrawals?.deferred).toBeDefined()
+    expect(formatOperatorWithdrawalNotice(reminder, 'regtest')).toContain('Action needed')
+  })
+
   it('samples Arkade balance after the matching withdrawal history sync', async () => {
     const f = await withdrawalFixture()
     f.arkade.total = 2_000

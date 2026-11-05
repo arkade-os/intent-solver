@@ -204,18 +204,26 @@ reconciliation; asset checks continue. An additional unexplained BTC decrease
 can still raise `POSSIBLE LOSS` once attribution is
 resolved. Earlier alerts are not retroactively reclassified by this journal.
 
+If a restart uses a missing or different rebalance store while
+`operatorWithdrawals.rebalanceIds` still names its transfers, the checkpoint
+is incomplete instead of guessing their debits. Restore the matching store
+and configuration, or reconcile the recorded transfers with evidence before
+resuming BTC classification.
+
 A `sending` or `uncertain` withdrawal with no transaction reference needs an
 operator check. The notice repeats every 30 minutes and BTC classification
 remains paused for that scope. Stop the solver and back up the admin SQLite
 database before reconciling. Inspect `operator_withdrawal` by journal ID and
 scope, then compare the destination with the audit/chain record and the wallet's
-outgoing history. If a settled outgoing transaction is verified, set that row
-to `sent`, its `reference` to the matching wallet transaction ID, and its
-`fee_sats` to the verified net debit minus `amount_sats`; update only that ID,
-scope and a `sending` or `uncertain` state. Mark it `failed` only with positive
-evidence that nothing was sent. Absence from a delayed index is not that
-evidence. Restart and check the next checkpoint; keep a record of the evidence
-used for the correction.
+outgoing history. If a settled outgoing transaction is verified, set a
+`sending` or `uncertain` row to `sent`, its `reference` to that transaction ID,
+and its `fee_sats` to the verified net debit minus `amount_sats`. A `sent` row
+whose quoted fee differs from the matched history debit also needs its
+`fee_sats` corrected to that verified difference; one mismatch defers all
+concurrent live withdrawals. Restrict either correction to the matching ID,
+scope and expected state. Mark a row `failed` only with positive evidence that
+nothing was sent. Absence from a delayed index is not that evidence. Restart
+and check the next checkpoint; keep a record of the evidence used.
 
 An overlapping rebalance can remain deferred after its journal row becomes
 terminal. A withdrawal journal edit alone does not resolve the rebalance's
