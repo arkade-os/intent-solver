@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 const source = readFileSync(new URL('../../packages/solver-app/src/admin/static/app.js', import.meta.url), 'utf8')
 const start = source.indexOf('const runAction = ')
 const end = source.indexOf('/** A swap action', start)
+if (start < 0 || end < 0) throw new Error('pool action test could not locate runAction')
 
 const setup = (api: ReturnType<typeof vi.fn>) => {
   const state = {
