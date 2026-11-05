@@ -52,9 +52,9 @@ export interface EvmReceiveServiceDeps {
   store: EvmReceiveSwapStore
   evm: EvmHtlcBackend
   broadcast: EvmBroadcaster
-  /** Fund the Arkade lockup for the client; resolves to the ark txid. */
+  /** Fund the Arkade lockup for the client; resolves to the Arkade txid. */
   fundArkade(row: EvmReceiveSwapRow): Promise<string>
-  /** Refund the solver's own Arkade lockup; resolves to the ark txid. */
+  /** Refund the solver's own Arkade lockup; resolves to the Arkade txid. */
   refundArkade(row: EvmReceiveSwapRow): Promise<string>
   /** Is the solver's Arkade lockup funded and visible? */
   arkadeLockupFunded(row: EvmReceiveSwapRow): Promise<boolean>

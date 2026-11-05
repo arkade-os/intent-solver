@@ -51,6 +51,7 @@ import { capture, unwrap } from '@arkade-os/solver-core/util/capture.js'
 import { createSerialiser, type Serialiser } from '@arkade-os/solver-core/util/serialise.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
+import { OfferNotSubmittedError, type FulfillOptions } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { assetRfqPairFor } from '../wire/assetRfqPayloads.js'
 import { AssetRfqSwapStore, type AssetRfqSwapRow } from '../db/assetRfqSwaps.js'
 
@@ -133,11 +134,17 @@ export interface AssetRfqDeps {
   /** Spendable balance per asset id — `available`, never `total`. */
   balance: () => Promise<ReadonlyMap<AssetLeg, bigint>>
   fetchPrice: (feedUrl: string, pricePath: string) => Promise<Price>
-  /** Spend the deposit through `fulfill`, paying the client. Returns the txid. */
-  settle: (row: AssetRfqSwapRow) => Promise<string>
+  /** Spend the deposit through `fulfill`, paying the client. Returns the txid.
+   * `options.markSubmitting` gates the submission. @see FulfillOptions */
+  settle: (row: AssetRfqSwapRow, options?: FulfillOptions) => Promise<string>
   /** The large-swap approval gate. Absent means no gate. @see ops/approvals.ts */
   approvalGate?: ApprovalCheck
   onError?: (id: string, error: unknown) => void
+  /**
+   * A fill put back to `funded` because the float was pinned or short. EVERY
+   * deferral, not only the first: `validUntil` bounds the count.
+   */
+  onDeferred?: (id: string, error: unknown) => void
   now?: () => number
   newId?: () => string
 }
@@ -450,10 +457,13 @@ export class AssetRfqSwapService {
     // submission leaves a row that says something may be in flight, rather than
     // one that still reads fillable and would be submitted twice.
     // Carrying the outpoint the decision was made ABOUT: the settle spends the RECORDED one.
-    const seen = deposit ? { deposit_txid: deposit.txid, deposit_vout: deposit.vout } : undefined
-    if (!(await this.deps.store.transition(row.id, 'funded', 'filling', seen))) return
+    // `selecting`: nothing is sent yet, which is what makes a walk-back sound.
+    const seen = deposit ? { deposit_txid: deposit.txid, deposit_vout: deposit.vout } : {}
+    if (!(await this.deps.store.transition(row.id, 'funded', 'filling', { ...seen, fill_phase: 'selecting' }))) return
     try {
-      const txid = await this.deps.settle(await this.deps.store.get(row.id))
+      const txid = await this.deps.settle(await this.deps.store.get(row.id), {
+        markSubmitting: () => this.deps.store.markSubmitting(row.id),
+      })
       const filled = await this.deps.store.transition(row.id, 'filling', 'filled', { fill_txid: txid })
       // AFTER the transition, never before. A feed read between `settle` and
       // this CAS would widen the window in which a crash leaves a submitted fill
@@ -466,6 +476,13 @@ export class AssetRfqSwapService {
       // investigation.
       if (filled) await this.recordFillMark(row)
     } catch (error) {
+      // The one shape that is NOT ambiguous: raised above the call that submits,
+      // so the row goes back to `funded` for a later tick. No counter — `validUntil`
+      // already bounds the retrying — and no fill mark, because nothing filled.
+      if (error instanceof OfferNotSubmittedError) {
+        if (await this.deps.store.revertUnsubmitted(row.id)) this.deps.onDeferred?.(row.id, error)
+        return
+      }
       // `filling` fails to `stuck`, never to something retryable: the spend may
       // already have been submitted, and only a human can tell which.
       this.deps.onError?.(row.id, error)
@@ -509,15 +526,20 @@ export class AssetRfqSwapService {
   }
 
   /**
-   * A row found still `filling` is one whose submission outcome is unknown —
-   * this process restarted mid-fill.
+   * A row found still `filling` is one this process restarted mid-fill: ticks
+   * are serialised, so no attempt of this process is in flight here.
    *
-   * Escalated to `stuck` rather than resubmitted. Whether the earlier
+   * `selecting` walks back to `funded`; the next tick re-runs § 9's gate over it.
+   * Anything else is escalated to `stuck` rather than resubmitted. Whether the earlier
    * `fulfill` landed is not answerable from here, and guessing "it did not"
    * pays the client twice out of this solver's float. § 8's stuck-over-silence
    * is exactly this case: exposure exists and progress needs a human.
    */
   private async whenFilling(row: AssetRfqSwapRow): Promise<void> {
+    if (row.fillPhase === 'selecting') {
+      await this.deps.store.revertUnsubmitted(row.id)
+      return
+    }
     await this.deps.store.fail(row.id, 'filling', 'fill outcome unknown after restart; check the offer address')
   }
 }

@@ -80,7 +80,7 @@ export interface EvmSendServiceDeps {
   acceptingQuotes?: () => boolean
   /** Is the client's Arkade lockup funded for the quoted amount? */
   arkadeLockupFunded(row: EvmSendSwapRow): Promise<boolean>
-  /** Claim the Arkade lockup with the revealed preimage; resolves to the ark txid. */
+  /** Claim the Arkade lockup with the revealed preimage; resolves to the Arkade txid. */
   claimArkade(row: EvmSendSwapRow, preimage: string): Promise<string>
   /** The lock as the contract keys it - built from the ROW, never from live config. */
   lockFor(row: EvmSendSwapRow): Erc20SwapLock

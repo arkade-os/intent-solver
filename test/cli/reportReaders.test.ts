@@ -82,7 +82,7 @@ describe('openReportReaders — a live row on a market nothing serves', () => {
   const USDA = '1a'.repeat(34)
   const PAIR = `arkade:BTC->arkade:${USDA}`
   const RFQ_ID = 'a'.repeat(64)
-  const ENV = ['SWAP_NETWORK', 'ARK_MNEMONIC', 'ARK_SERVER_URL', 'EMULATOR_URL', 'LN_BACKEND', 'SWAP_DB_PATH']
+  const ENV = ['SWAP_NETWORK', 'WALLET_MNEMONIC', 'ARKADE_OPERATOR_URL', 'EMULATOR_URL', 'LN_BACKEND', 'SWAP_DB_PATH']
 
   let saved: Record<string, string | undefined> = {}
   let dir: string
@@ -94,8 +94,8 @@ describe('openReportReaders — a live row on a market nothing serves', () => {
     swapDbPath = join(dir, 'swaps.sqlite')
     Object.assign(process.env, {
       SWAP_NETWORK: 'regtest',
-      ARK_MNEMONIC: 'test mnemonic, never a real one',
-      ARK_SERVER_URL: 'http://localhost:7070',
+      WALLET_MNEMONIC: 'test mnemonic, never a real one',
+      ARKADE_OPERATOR_URL: 'http://localhost:7070',
       EMULATOR_URL: 'http://localhost:7073',
       LN_BACKEND: 'fake',
       SWAP_DB_PATH: swapDbPath,

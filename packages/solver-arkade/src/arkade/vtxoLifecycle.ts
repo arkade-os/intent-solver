@@ -39,7 +39,7 @@
  *   `MAX_REFUND_HORIZON` and refuses rather than minting escrow that cannot survive
  *   its own swap.
  *
- *   NOTE: the inheritance step is inferred from the Ark model and from
+ *   NOTE: the inheritance step is inferred from the Arkade model and from
  *   `toBatchExpiry` reading indexer state, not observed. Confirm by funding a lockup
  *   on regtest from a coin of known batch expiry and reading the child's
  *   `virtualStatus.batchExpiry`. If it is wrong the expiry rule is merely

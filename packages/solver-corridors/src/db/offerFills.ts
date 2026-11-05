@@ -23,7 +23,9 @@
  * Lifecycle, forward-only:
  *
  * - `fillable`  we decided to fill and recorded the intent; NOTHING submitted
- * - `filling`   `fulfill` submitted; the spend is not yet observed
+ * - `filling`   an attempt holds the row; `fill_phase` says how far it got (@see
+ *               FillPhase). Only `selecting` may be walked back, by the one
+ *               refusal above the submission; @see OfferFillStore.revertUnsubmitted
  * - `filled`    the spend confirmed and `classifySpend` read it as a fill
  * - `lost`      the offer output was spent by someone else, or cancelled by its
  *               funder — either way it is gone and this service committed
@@ -34,7 +36,7 @@
  */
 
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
-import { assertColumns } from './baseSwapStore.js'
+import { addColumns, assertColumns, text, type FillPhase } from './baseSwapStore.js'
 import { pageQuery, takePage, type PageOptions, type PageRawFields } from '@arkade-os/solver-core/core/page.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { announceTransition, type TransitionHook } from '@arkade-os/solver-core/core/businessEvent.js'
@@ -50,6 +52,8 @@ const LEGAL_EDGES: Record<OfferFillState, readonly OfferFillState[]> = {
   // `lost` from `fillable` too: an offer can be filled by another solver or
   // cancelled by its funder between the decision and the submission.
   fillable: ['filling', 'refused', 'lost'],
+  // Never `fillable`: a `filling` row may have spent, and an edge cannot see the one
+  // phase that provably did not — `revertUnsubmitted`, off the graph for its own reason.
   filling: ['filled', 'lost', 'stuck'],
   filled: [],
   lost: [],
@@ -63,11 +67,13 @@ const LEGAL_EDGES: Record<OfferFillState, readonly OfferFillState[]> = {
  * covenant is derived from those values, so a row that could edit them could
  * describe a contract that was never funded.
  */
-const TRANSITION_COLUMNS = new Set(['fill_txid', 'failure_reason'])
+const TRANSITION_COLUMNS = new Set(['fill_txid', 'failure_reason', 'fill_phase'])
 
 export interface OfferFillRow {
   id: string
   state: OfferFillState
+  /** How far the attempt holding a `filling` row got. @see FillPhase */
+  fillPhase: FillPhase | null
   createdAt: number
   updatedAt: number
   /** The funded offer output this row is about: `txid:vout`, the natural key. */
@@ -115,7 +121,8 @@ const OFFER_FILL_COLUMNS = `
   offer_amount    TEXT NOT NULL,
   fill_txid       TEXT,
   failure_reason  TEXT,
-  rfq_id          TEXT
+  rfq_id          TEXT,
+  fill_phase      TEXT
 `
 
 const SCHEMA = `
@@ -152,6 +159,7 @@ type Raw = Record<string, string | number | null>
 const toRow = (raw: Raw): OfferFillRow => ({
   id: String(raw.id),
   state: String(raw.state) as OfferFillState,
+  fillPhase: text(raw.fill_phase) as FillPhase | null,
   createdAt: Number(raw.created_at),
   updatedAt: Number(raw.updated_at),
   offerTxid: String(raw.offer_txid),
@@ -175,7 +183,13 @@ export class OfferFillStore {
   static async open(driver: SqlDriver | string, now: () => number = nowSeconds): Promise<OfferFillStore> {
     const store = new OfferFillStore(typeof driver === 'string' ? betterSqliteDriver(driver) : driver, now)
     await store.driver.exec(SCHEMA)
+    await store.migrate()
     return store
+  }
+
+  /** Additive: `CREATE TABLE IF NOT EXISTS` never alters an existing table. No backfill. */
+  private async migrate(): Promise<void> {
+    await addColumns(this.driver, 'offer_fill', [['fill_phase', 'TEXT']])
   }
 
   /**
@@ -306,6 +320,42 @@ export class OfferFillStore {
       await this.recordEvent(id, from, to, null)
       announceTransition(this.onTransition, id, from, to)
     }
+    return result.changes === 1
+  }
+
+  /**
+   * The ONE edge back out of `filling`, and sound only for its one caller: a fill
+   * refused with `OfferNotSubmittedError`, raised above the call that submits.
+   * Compare-and-swap on the state AND the phase: the state alone would re-offer a fill
+   * a crashed attempt had latched, and the phase is CLEARED so a claim written
+   * without one cannot inherit it. Deliberately
+   * absent from `LEGAL_EDGES`, so the generic `filling -> fillable` keeps throwing —
+   * an edge cannot say "only when nothing was sent", so this is reached by name.
+   */
+  async revertUnsubmitted(id: string): Promise<boolean> {
+    const result = await this.driver.run(
+      `UPDATE offer_fill SET state = 'fillable', fill_phase = NULL, updated_at = ?
+       WHERE id = ? AND state = 'filling' AND fill_phase = 'selecting'`,
+      [this.now(), id],
+    )
+    if (result.changes === 1) {
+      await this.recordEvent(id, 'filling', 'fillable', null)
+      announceTransition(this.onTransition, id, 'filling', 'fillable')
+    }
+    return result.changes === 1
+  }
+
+  /**
+   * THE LATCH, won immediately before the call that submits: from here on no
+   * recovery may walk this row back, and one attempt per claim wins it. NOT a
+   * transition — the row does not move, so no event row and nothing announced.
+   */
+  async markSubmitting(id: string): Promise<boolean> {
+    const result = await this.driver.run(
+      `UPDATE offer_fill SET fill_phase = 'submitting', updated_at = ?
+       WHERE id = ? AND state = 'filling' AND fill_phase = 'selecting'`,
+      [this.now(), id],
+    )
     return result.changes === 1
   }
 

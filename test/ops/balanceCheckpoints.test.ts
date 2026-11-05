@@ -54,7 +54,7 @@ const fixture = async (path?: string) => {
   const getContractsWithVtxos = vi.fn(async () => lockups)
   const services = {
     adminStore: await openStore(path),
-    config: { network: 'regtest', lnBackend: 'lnd', arkade: { arkServerUrl: 'http://arkade.test' } },
+    config: { network: 'regtest', lnBackend: 'lnd', arkade: { operatorUrl: 'http://arkade.test' } },
     providerPubkey: 'provider',
     arkade: {
       wallet: { getBalance: vi.fn(async () => arkade), getContractManager: async () => ({ getContractsWithVtxos }) },
@@ -322,9 +322,9 @@ describe('balance checkpoints', () => {
     const other = await f.sample()
     f.services.providerPubkey = 'provider'
     const latest = await f.sample()
-    f.services.config.arkade.arkServerUrl = 'http://other-arkade.test'
+    f.services.config.arkade.operatorUrl = 'http://other-arkade.test'
     const otherServer = await f.sample()
-    f.services.config.arkade.arkServerUrl = 'http://arkade.test'
+    f.services.config.arkade.operatorUrl = 'http://arkade.test'
     const app = new Hono()
     registerStatusRoutes(app, { services: f.services } as AdminDeps)
     expect(await (await app.request('/api/balance-checkpoints')).json()).toEqual({
@@ -340,7 +340,7 @@ describe('balance checkpoints', () => {
       scope: other.scope,
       checkpoints: [other],
     })
-    f.services.config.arkade.arkServerUrl = 'http://empty-arkade.test'
+    f.services.config.arkade.operatorUrl = 'http://empty-arkade.test'
     expect(await (await app.request('/api/balance-checkpoints')).json()).toEqual({
       scope: balanceCheckpointScope(f.services),
       checkpoints: [],

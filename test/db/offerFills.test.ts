@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { OfferFillStore, NON_TERMINAL, type OfferFillState } from '@arkade-os/solver-corridors/db/offerFills.js'
+import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 
 let now = 1_800_000_000
 const clock = () => now
@@ -164,6 +165,166 @@ describe('OfferFillStore: the lifecycle', () => {
     const stuck = await store.findById(submitted.id)
     expect(stuck?.state).toBe('stuck')
     expect(stuck?.failureReason).toBe('spend classified as indeterminate')
+  })
+})
+
+describe('OfferFillStore: the one edge back out of filling', () => {
+  const eventsOf = async (id: string): Promise<string[]> => {
+    const rows = await store.driver.all<{ to_state: string }>(
+      `SELECT to_state FROM offer_fill_event WHERE fill_id = ? ORDER BY id`,
+      [id],
+    )
+    return rows.map((row) => row.to_state)
+  }
+
+  it('walks a row that submitted nothing back to fillable, and clears the phase', async () => {
+    const row = await store.insertIntent(baseIntent)
+    await store.transition(row.id, 'fillable', 'filling', { fill_phase: 'selecting' })
+    expect(await store.revertUnsubmitted(row.id)).toBe(true)
+    expect(await store.findById(row.id)).toMatchObject({ state: 'fillable', fillPhase: null })
+  })
+
+  it('records the walk-back as its own event', async () => {
+    const row = await store.insertIntent(baseIntent)
+    await store.transition(row.id, 'fillable', 'filling', { fill_phase: 'selecting' })
+    await store.revertUnsubmitted(row.id)
+    expect(await eventsOf(row.id)).toEqual(['fillable', 'filling', 'fillable'])
+  })
+
+  it('refuses a row whose attempt reached the submission, leaving it filling', async () => {
+    // The model's RevertGuard: the walk-back is issued from a read taken before
+    // the latch, so matching on `filling` alone would re-offer a submitted fill.
+    const row = await store.insertIntent(baseIntent)
+    await store.transition(row.id, 'fillable', 'filling', { fill_phase: 'selecting' })
+    const stale = await store.findById(row.id)
+    expect(await store.markSubmitting(row.id)).toBe(true)
+    expect(stale?.fillPhase).toBe('selecting')
+    expect(await store.revertUnsubmitted(row.id)).toBe(false)
+    expect(await store.findById(row.id)).toMatchObject({ state: 'filling', fillPhase: 'submitting' })
+  })
+
+  it('refuses a filling row with no phase at all, which an older version left', async () => {
+    const row = await store.insertIntent(baseIntent)
+    await store.transition(row.id, 'fillable', 'filling')
+    expect((await store.findById(row.id))?.fillPhase).toBeNull()
+    expect(await store.revertUnsubmitted(row.id)).toBe(false)
+    expect((await store.findById(row.id))?.state).toBe('filling')
+  })
+
+  it.each<[OfferFillState, readonly OfferFillState[]]>([
+    ['fillable', []],
+    ['filled', ['filling', 'filled']],
+    ['lost', ['lost']],
+    ['refused', ['refused']],
+    ['stuck', ['filling', 'stuck']],
+  ])('is a no-op from %s, so a lost race changes nothing', async (state, path) => {
+    const row = await store.insertIntent(baseIntent)
+    let from: OfferFillState = 'fillable'
+    for (const to of path) {
+      await store.transition(row.id, from, to)
+      from = to
+    }
+    const before = await eventsOf(row.id)
+    const announced: string[] = []
+    store.onTransition = (event) => void announced.push(`${event.from}->${event.to}`)
+    expect(await store.revertUnsubmitted(row.id)).toBe(false)
+    expect((await store.findById(row.id))?.state).toBe(state)
+    expect(await eventsOf(row.id)).toEqual(before)
+    expect(announced).toEqual([])
+  })
+
+  it('leaves the generic transition refusing the same edge', async () => {
+    const row = await store.insertIntent(baseIntent)
+    await store.transition(row.id, 'fillable', 'filling', { fill_phase: 'selecting' })
+    await expect(store.transition(row.id, 'filling', 'fillable')).rejects.toThrow(/illegal transition/)
+  })
+
+  it('announces the walk-back the way every other transition is announced', async () => {
+    const seen: string[] = []
+    store.onTransition = (event) => void seen.push(`${event.id} ${event.from}->${event.to}`)
+    const row = await store.insertIntent(baseIntent)
+    await store.transition(row.id, 'fillable', 'filling', { fill_phase: 'selecting' })
+    await store.revertUnsubmitted(row.id)
+    expect(seen).toEqual([`${row.id} fillable->filling`, `${row.id} filling->fillable`])
+  })
+})
+
+describe('OfferFillStore: the fill phase', () => {
+  const claimed = async () => {
+    const row = await store.insertIntent(baseIntent)
+    await store.transition(row.id, 'fillable', 'filling', { fill_phase: 'selecting' })
+    return row
+  }
+
+  it('stamps selecting on the claim, before anything is selected or sent', async () => {
+    const row = await claimed()
+    expect(await store.findById(row.id)).toMatchObject({ state: 'filling', fillPhase: 'selecting' })
+  })
+
+  it('latches a claimed row, and is not a transition', async () => {
+    const row = await claimed()
+    const announced: string[] = []
+    store.onTransition = (event) => void announced.push(`${event.from}->${event.to}`)
+    expect(await store.markSubmitting(row.id)).toBe(true)
+    expect(await store.findById(row.id)).toMatchObject({ state: 'filling', fillPhase: 'submitting' })
+    expect(announced).toEqual([])
+    const events = await store.driver.all<{ to_state: string }>(
+      `SELECT to_state FROM offer_fill_event WHERE fill_id = ? ORDER BY id`,
+      [row.id],
+    )
+    expect(events.map((e) => e.to_state)).toEqual(['fillable', 'filling'])
+  })
+
+  it('lets only one attempt latch a claim — the model`s NoLatch', async () => {
+    const row = await claimed()
+    await store.revertUnsubmitted(row.id)
+    await store.transition(row.id, 'fillable', 'filling', { fill_phase: 'selecting' })
+    expect(await store.markSubmitting(row.id)).toBe(true)
+    expect(await store.markSubmitting(row.id)).toBe(false)
+  })
+
+  it('refuses to latch a filling row with no phase, which an older version left', async () => {
+    const row = await store.insertIntent(baseIntent)
+    await store.transition(row.id, 'fillable', 'filling')
+    expect(await store.markSubmitting(row.id)).toBe(false)
+    expect((await store.findById(row.id))?.fillPhase).toBeNull()
+  })
+
+  it.each<[OfferFillState, readonly OfferFillState[]]>([
+    ['fillable', []],
+    ['filled', ['filling', 'filled']],
+    ['lost', ['lost']],
+    ['refused', ['refused']],
+    ['stuck', ['filling', 'stuck']],
+  ])('refuses to latch a %s row', async (state, path) => {
+    const row = await store.insertIntent(baseIntent)
+    let from: OfferFillState = 'fillable'
+    for (const to of path) {
+      await store.transition(row.id, from, to, from === 'fillable' ? { fill_phase: 'selecting' } : {})
+      from = to
+    }
+    expect(await store.markSubmitting(row.id)).toBe(false)
+    expect((await store.findById(row.id))?.state).toBe(state)
+  })
+
+  it('adds the column to a database that predates it, leaving existing rows NULL', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    await driver.exec(`CREATE TABLE offer_fill (
+      id TEXT PRIMARY KEY, state TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+      offer_txid TEXT NOT NULL, offer_vout INTEGER NOT NULL, offer_pk_script TEXT NOT NULL,
+      want_asset_id TEXT, want_amount TEXT NOT NULL, offer_asset_id TEXT, offer_amount TEXT NOT NULL,
+      fill_txid TEXT, failure_reason TEXT, rfq_id TEXT
+    )`)
+    await driver.run(
+      `INSERT INTO offer_fill (id, state, created_at, updated_at, offer_txid, offer_vout, offer_pk_script,
+         want_amount, offer_amount) VALUES ('old', 'filling', 1, 1, 'aa', 0, '66', '1', '2')`,
+    )
+
+    const legacy = await OfferFillStore.open(driver, clock)
+    expect(await legacy.findById('old')).toMatchObject({ state: 'filling', fillPhase: null })
+    await expect(OfferFillStore.open(driver, clock)).resolves.toBeInstanceOf(OfferFillStore)
+    expect((await legacy.findById('old'))?.fillPhase).toBeNull()
+    await legacy.close()
   })
 })
 

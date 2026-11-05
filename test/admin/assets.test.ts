@@ -66,7 +66,7 @@ const fakeServices = (over: { balance?: unknown; assetManager?: unknown; vtxos?:
     network: 'regtest',
     lnBackend: 'fake',
     emulatorUrl: 'http://emulator.test',
-    arkade: { arkServerUrl: 'http://ark.test' },
+    arkade: { operatorUrl: 'http://arkade.test' },
     maxExposedSats: 300_000,
     limits: { minSats: 1_000, maxSats: 100_000 },
     offerMarkets: [],

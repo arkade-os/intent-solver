@@ -17,7 +17,7 @@ const document = (corridors: Record<string, unknown> = {}) => ({
   rails: {
     arkade: {
       mnemonic: 'test mnemonic, never a real one',
-      serverUrl: 'http://localhost:7070',
+      operatorUrl: 'http://localhost:7070',
       emulatorUrl: 'http://localhost:7073',
     },
     lightning: { backend: 'fake' },

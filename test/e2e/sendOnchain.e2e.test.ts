@@ -23,7 +23,7 @@
  * PREREQUISITES
  *   - arkade-regtest up WITH the boltz profile: arkd, emulator, boltz-lnd,
  *     bitcoin + miner, esplora
- *   - `.env.regtest.lnd` (or E2E_ENV_FILE): ARK_MNEMONIC, ARK_SERVER_URL,
+ *   - `.env.regtest.lnd` (or E2E_ENV_FILE): WALLET_MNEMONIC, ARKADE_OPERATOR_URL,
  *     EMULATOR_URL, LND_SOCKET, LND_CERT_PATH, LND_MACAROON_PATH
  *     (extract the cert/macaroon per docs/runbook.md's LND section)
  *   - the Arkade wallet funded AND SETTLED (`scripts/regtest-fund.mjs`), and

@@ -37,9 +37,9 @@ sets every field. Below, `rails.lightning.backend` is a path into it, and
 | `rails.lightning.lnd.macaroon` / `rails.lightning.lnd.macaroonPath` | yes if `rails.lightning.backend: "lnd"` (exactly one)        | LND's macaroon, inline base64 or a file path                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `rails.lightning.fake.statePath`                                    | no (`<storage.dir>/fake-ln.json`)                            | the fake backend's preimage map                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `rails.arkade.mnemonic`                                             | yes                                                          | Arkade wallet. Secret — never logged                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `rails.arkade.serverUrl`                                            | yes                                                          | arkd endpoint; startup refuses a server reporting a different network than `network`                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `rails.arkade.operatorUrl`                                          | yes                                                          | arkd endpoint; startup refuses a server reporting a different network than `network`                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `storage.dir`                                                       | no (`.data`; `/data` in the image)                           | directory for every database file; the two below override it per file                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `storage.arkDb`                                                     | no (`<storage.dir>/ark.sqlite`)                              | Arkade wallet state                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `storage.walletDb`                                                  | no (`<storage.dir>/ark.sqlite`)                              | Arkade wallet state                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `storage.swapDb`                                                    | no (`<storage.dir>/swaps.sqlite`)                            | swap rows — one file, or five on an older deployment; see Backups                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `rails.arkade.emulatorUrl`                                          | no on `bitcoin` (defaults to the known emulator), else yes   | covenant co-signer                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `limits.maxSwapSats`                                                | no                                                           | narrows the per-swap cap (can never widen)                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
@@ -129,7 +129,7 @@ truth.
 funded script whose row is lost is unclaimable AND unrefundable by us (clients
 can still be refunded by anyone reconstructing the script, but do not rely on
 it). Snapshot at least every few minutes; SQLite online backup or litestream
-both work. `storage.arkDb` is wallet cache + state; back it up too, it is cheap.
+both work. `storage.walletDb` is wallet cache + state; back it up too, it is cheap.
 
 WHICH files those are depends on when the deployment was first started, and the
 service picks whichever it finds — it never moves rows between them.
@@ -278,6 +278,8 @@ correlation. The receive record splits preparation, hold-invoice creation,
 and persistence; the relay record splits quote handling and reply publish.
 Neither record includes invoices, payment hashes, preimages, or wallet keys.
 Funding already logs `receive_fund_call_timing` and `receive_fund_timing`.
+The wallet logs `arkade_submit_timing` and `arkade_finalize_timing` for its
+submit and finalize calls to the operator, on any process with the setting on.
 
 That script defaults to `scripts/mock-relay.mjs`, which needs no relay running
 but speaks a broker framing (`{op:'sub'}`) that only it understands. To prove
@@ -352,7 +354,7 @@ are deployment-specific):
     "producers": [{ "binding": "DRIVE_QUEUE", "queue": "swap-drive" }],
     "consumers": [{ "queue": "swap-drive", "max_retries": 10 }],
   },
-  // secrets via `wrangler secret put`: ARK_MNEMONIC, ...
+  // secrets via `wrangler secret put`: WALLET_MNEMONIC, ...
 }
 ```
 
@@ -1259,7 +1261,7 @@ timelock parameters rather than rounded display values.
 #### The value to set
 
 ```
-ARK_UNILATERAL_EXIT_DELAY=260096
+rails.arkade.unilateralExitDelay: 260096
 ```
 
 One BIP68 unit **above** the observed floor, and deliberately neither extreme:
@@ -1478,7 +1480,7 @@ hard way. The numbers below are the smallest legal values, not arbitrary ones.
 Three more things that cost time if forgotten:
 
 - **The e2e suite uses a DIFFERENT wallet from the `cli` walkthroughs.** It
-  defaults to `E2E_ENV_FILE=.env.regtest.lnd`, whose `ARK_DB_PATH` is
+  defaults to `E2E_ENV_FILE=.env.regtest.lnd`, whose `WALLET_DB_PATH` is
   `.data/ark-regtest-lnd.sqlite` — not `.env.regtest`'s. Funding one does not
   fund the other.
 - **A stack rebuild regenerates boltz-lnd's TLS cert and macaroon.** The
@@ -1526,7 +1528,7 @@ COVCLAIMD_IMAGE=ghcr.io/arkade-os/covclaimd:v0.0.1-rc.5 \
 node regtest.mjs start --clean
 
 # 2. this repo
-cp .env.regtest.example .env.regtest       # fill ARK_MNEMONIC with any bip39 phrase
+cp .env.regtest.example .env.regtest       # fill WALLET_MNEMONIC with any bip39 phrase
 pnpm install && pnpm build
 
 # 3. fund the provider's Arkade wallet (boarding -> faucet -> settle)
@@ -1590,7 +1592,7 @@ docker cp boltz-lnd:/root/.lnd/data/chain/bitcoin/regtest/admin.macaroon ../inte
 
 # 3. this repo
 cd ../intent-solver
-cp .env.regtest.lnd.example .env.regtest.lnd    # fill ARK_MNEMONIC with any bip39 phrase
+cp .env.regtest.lnd.example .env.regtest.lnd    # fill WALLET_MNEMONIC with any bip39 phrase
 pnpm install && pnpm build
 
 # 4. fund the provider's Arkade wallet (boarding -> faucet -> settle), same as the fake walkthrough
@@ -1744,7 +1746,7 @@ covers separately — see "covclaimd" below.
   Everything Arkade-side is real in all three.
 - **Swap stores go to a temp directory**, never the configured `SWAP_DB_PATH`,
   so a run leaves no rows in an operator's own database. The Arkade wallet
-  database (`ARK_DB_PATH`) is used as configured — it is the wallet.
+  database (`WALLET_DB_PATH`) is used as configured — it is the wallet.
 - **The receive corridors are the highest-value tests here.** They are the only
   place the solver learns `P` by reading it back out of a real covclaimd claim
   (`findClaimPreimage`), which rests on Ark's `ConditionWitness` PSBT field

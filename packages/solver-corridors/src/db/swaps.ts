@@ -21,53 +21,12 @@ import { betterSqliteDriver, type SqlDriver } from './driver.js'
 import { BaseSwapStore, addColumns, numberOrNull, text, type RawRow, type StoreShape } from './baseSwapStore.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
+import { LnSendMachine, type LnSendSwapState } from '../machines/lnSend.js'
 
-/**
- * Forward-only lifecycle.
- *
- * - `quoted`   params on disk, nothing has moved
- * - `funded`   lockup seen; nothing paid, so abandoning is safe
- * - `paying`   a Lightning payment may be in flight — the exposed state
- * - `paid`     payment id known, preimage maybe not
- * - `claiming` preimage on disk; the claim needs nothing external any more
- * - `claimed`  done
- * - `refused`  never funded, no exposure
- * - `stuck`    paid but could not claim before the refund deadline; needs a human
- */
-export type SendSwapState = 'quoted' | 'funded' | 'paying' | 'paid' | 'claiming' | 'claimed' | 'refused' | 'stuck'
-
-export const NON_TERMINAL: readonly SendSwapState[] = ['quoted', 'funded', 'paying', 'paid', 'claiming']
-
-/** States in which the provider may have paid out and not yet been made whole. */
-export const EXPOSED: readonly SendSwapState[] = ['paying', 'paid', 'claiming']
-
-/**
- * The complete edge set of the lifecycle. `transition()` refuses anything else
- * LOUDLY: the forward-only ordering is a money invariant, and enforcing it here
- * — rather than by every caller's discipline — means a future retry tool or
- * admin command cannot silently walk a swap backwards into re-paying.
- */
-const LEGAL_EDGES: Record<SendSwapState, readonly SendSwapState[]> = {
-  quoted: ['funded', 'refused'],
-  // `funded -> claiming` is the COUPLED path only: our own node cannot pay its own
-  // invoice, so it claims on the preimage the client revealed claiming our payout.
-  funded: ['paying', 'claiming', 'refused'],
-  // `refused` from `paying`/`paid` needs PROOF the sats never left: our own node, as
-  // payee, says a self-payment was never paid; or the backend's `getSendHtlcState`
-  // holds nothing for a refusal that never reached `payInvoice`. Otherwise `stuck`.
-  paying: ['paid', 'stuck', 'refused'],
-  paid: ['claiming', 'stuck', 'refused'],
-  claiming: ['claimed', 'stuck'],
-  claimed: [],
-  refused: [],
-  // Operator edges only (`stuck` is not NON_TERMINAL, so no sweep takes them):
-  // `claiming` with a preimage in hand, `refused` by `refundNow` after a refund
-  // actually pushed. Neither reaches `paying`/`paid`, so nothing can re-pay.
-  stuck: ['claiming', 'refused'],
-}
-
-/** The lifecycle table, for tests that pin its shape. Not for production use. */
-export const LEGAL_EDGES_FOR_TEST: Record<SendSwapState, readonly SendSwapState[]> = LEGAL_EDGES
+export type SendSwapState = LnSendSwapState
+export const NON_TERMINAL: readonly SendSwapState[] = LnSendMachine.live
+export const EXPOSED: readonly SendSwapState[] = LnSendMachine.exposed
+export const LEGAL_EDGES_FOR_TEST: Record<SendSwapState, readonly SendSwapState[]> = LnSendMachine.edges
 
 /**
  * Columns a transition may set alongside its state change, and the only ones
@@ -452,7 +411,7 @@ const SHAPE: StoreShape<SendSwapRow, SendSwapState> = {
   noun: 'swap',
   lifecycleLabel: 'swap lifecycle',
   searchColumns: SEND_SEARCH_COLUMNS,
-  legalEdges: LEGAL_EDGES,
+  legalEdges: LnSendMachine.edges,
   transitionColumns: TRANSITION_COLUMNS,
   patchColumns: PATCH_COLUMNS,
   live: NON_TERMINAL,

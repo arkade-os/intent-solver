@@ -58,7 +58,7 @@ import {
   type E2eArkade,
 } from './support/stack.js'
 
-const ARKD_URL = process.env.ARK_SERVER_URL ?? 'http://localhost:7070'
+const ARKD_URL = process.env.ARKADE_OPERATOR_URL ?? 'http://localhost:7070'
 
 /** Enough for four deposits plus the carrier outputs and change, with room to spare. */
 const NEEDED_SATS = 120_000

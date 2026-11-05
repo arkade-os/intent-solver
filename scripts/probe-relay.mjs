@@ -168,7 +168,7 @@ setTimeout(() => {
     console.log('\n=> the relay works and our framing is right, but the solver has NEVER')
     console.log('   published here. It is not connected to this relay, or it is running')
     console.log('   under a different identity than the card advertises. Check RELAY_URL')
-    console.log('   and that ARK_MNEMONIC derives the pubkey above.')
+    console.log('   and that WALLET_MNEMONIC derives the pubkey above.')
   } else if (reachedSolverFilter) {
     console.log('\n=> our side is fine; the solver has been here before but is not answering now.')
   } else if (acceptedByRelay) {
