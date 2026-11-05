@@ -169,6 +169,7 @@ export const sweptRefundBatchHandler = (deps: {
   network: ReturnType<typeof getNetwork>
   recipients: readonly Recipient[]
   feeCoin?: ExtendedVirtualCoin
+  onValidatedCommitment?: (evidence: { commitmentTxid: string; vtxoTree: TxTree }) => Promise<void>
 }): Batch.Handler => {
   const { arkProvider, identity, session, network, feeCoin } = deps
   let batchId: string
@@ -206,6 +207,7 @@ export const sweptRefundBatchHandler = (deps: {
       if (!shared?.amount) throw new Error('commitment tx has no shared output')
       validatedCommitmentTxid = commitmentTx.id
       await session.init(vtxoTree, sweepTapTreeRoot, shared.amount)
+      await deps.onValidatedCommitment?.({ commitmentTxid: commitmentTx.id, vtxoTree })
       await arkProvider.submitTreeNonces(batchId, hex.encode(await session.getPublicKey()), await session.getNonces())
       return { skip: false }
     },

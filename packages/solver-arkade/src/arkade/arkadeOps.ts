@@ -13,6 +13,8 @@ import type { UnilateralDelays } from '@arkade-os/solver-core/core/timelocks.js'
 import type { FundedOutput, LockupSpendEvidence } from './wallet.js'
 import type { CovenantScriptRow } from './covenantRow.js'
 import type { SaveUnrolledSpend, UnrolledSpendRecord, UnrolledSpendStep } from './unrolledSpend.js'
+import type { SweptClaimEvidence, SweptClaimJournal } from './sweptClaimEvidence.js'
+import type { SweptClaimCommitment, SweptClaimRegistration } from './sweptClaim.js'
 
 /** The Arkade operations the send-side orchestrators need, shaped for injection. */
 export interface ArkadeOps {
@@ -70,6 +72,16 @@ export interface ArkadeOps {
   findSweptLockups?(pkScriptHex: string): Promise<FundedOutput[]>
   /** Through a BATCH, the one shape reaching a swept input; it costs a whole round, so only the operator refunds and the float pass call it. */
   refundSwept?(row: CovenantScriptRow, swept: readonly FundedOutput[]): Promise<string>
+  claimSwept?(
+    row: CovenantScriptRow,
+    swept: readonly FundedOutput[],
+    preimageHex: string,
+    expectedSats: number,
+    onRegistered: (registration: SweptClaimRegistration) => Promise<void>,
+    onCommitmentValidated: (commitment: SweptClaimCommitment) => Promise<void>,
+  ): Promise<string>
+  verifySweptClaim?(journal: SweptClaimJournal): Promise<SweptClaimEvidence>
+  deleteSweptClaim?(deleteProof: string): Promise<void>
 }
 
 /**

@@ -26,6 +26,8 @@ import {
 import { rawDelaySeconds } from '@arkade-os/solver-core/core/timelocks.js'
 import { unrolledSpenderFor } from '@arkade-os/solver-arkade/arkade/unrolledSpend.js'
 import { refundSweptSwapScript } from '@arkade-os/solver-arkade/arkade/sweptRefund.js'
+import { claimSweptSwapScript, deleteSweptClaimIntent } from '@arkade-os/solver-arkade/arkade/sweptClaim.js'
+import { verifySweptClaimCommitment } from '@arkade-os/solver-arkade/arkade/sweptClaimEvidence.js'
 import type { ArkadeOps, CovenantScriptRow } from './orchestrator.js'
 
 /** The emulator service the refund covenant is signed by. */
@@ -113,5 +115,22 @@ export const arkadeOpsFromContext = async (ctx: ArkadeContext, emulator: Emulato
       assertScriptMatchesRow(script, row)
       return refundSweptSwapScript(ctx, emulator.url, script, swept, hex.decode(row.refundPkScript!))
     },
+    claimSwept: async (row, swept, preimageHex, expectedSats, onRegistered, onCommitmentValidated) => {
+      const mismatch = keyMismatch(row)
+      if (mismatch) throw new Error(mismatch)
+      const script = covenantScriptFromRow(row)
+      assertScriptMatchesRow(script, row)
+      return claimSweptSwapScript(
+        ctx,
+        script,
+        swept,
+        hex.decode(preimageHex),
+        expectedSats,
+        onRegistered,
+        onCommitmentValidated,
+      )
+    },
+    verifySweptClaim: (journal) => verifySweptClaimCommitment(ctx.wallet.indexerProvider, journal),
+    deleteSweptClaim: (deleteProof) => deleteSweptClaimIntent(ctx, deleteProof),
   }
 }

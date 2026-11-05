@@ -64,6 +64,7 @@ const PATCH_COLUMNS = new Set([
   'payment_wallet',
   'routing_fee_paid_sats',
   'unrolled_claim',
+  'claim_batch',
   'claim_ark_txid',
 ])
 
@@ -166,6 +167,7 @@ export interface SendSwapRow {
   paymentId: string | null
   preimage: string | null
   claimArkTxid: string | null
+  claimBatch: string | null
   /** JSON, by outpoint: the last step of each L1 claim of a lockup output the client unrolled. */
   unrolledClaim: string | null
   /** JSON `[{txid, vout, value}]`: the lockup outputs adopted at funding, each to be collected. Null on older rows. */
@@ -261,6 +263,7 @@ const SEND_SWAP_COLUMNS = `
   payment_id                    TEXT,
   preimage                      TEXT,
   claim_ark_txid                TEXT,
+  claim_batch                   TEXT,
   failure_reason                TEXT,
   rfq_id                        TEXT,
   payment_evidence              TEXT,
@@ -342,6 +345,7 @@ const toRow = (raw: Raw): SendSwapRow => ({
   paymentId: raw.payment_id === null ? null : String(raw.payment_id),
   preimage: raw.preimage === null ? null : String(raw.preimage),
   claimArkTxid: raw.claim_ark_txid === null ? null : String(raw.claim_ark_txid),
+  claimBatch: text(raw.claim_batch),
   failureReason: raw.failure_reason === null ? null : String(raw.failure_reason),
   paymentEvidence: text(raw.payment_evidence),
   paymentFailureReason: text(raw.payment_failure_reason),
@@ -468,6 +472,7 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
       ['routing_fee_paid_sats', 'INTEGER'],
       ['quoted_refund_deadline', 'INTEGER'],
       ['unrolled_claim', 'TEXT'],
+      ['claim_batch', 'TEXT'],
       ['lockup_outpoints', 'TEXT'],
     ])
 

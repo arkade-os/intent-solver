@@ -220,9 +220,9 @@ export const REFUSAL_EXPLANATIONS: Record<RefusalReason, RefusalExplanation> = {
   },
   uncapped_route_deadline_too_short: {
     meaning:
-      'This deployment’s Lightning rail cannot cap the CLTV of the route it picks — its pay call exposes no max-CLTV control — and the refund deadline stored on the swap cannot contain the longest HTLC such a route could build. Not the same as cltv_budget_too_short: there the deadline was sized correctly for this rail and the clock ran down; here the deadline was never sized for the rail now paying it. The ordinary cause is a deployment moved from LND to an uncapped rail with rows already quoted and funded — LND sizes the deadline off the best route hint because it can decline the worst, and an uncapped rail can decline nothing. A row funded more than REFUND_SAFETY_MARGIN before payment, typically after a crash, reaches it too.',
+      'The Lightning backend cannot limit the route’s CLTV, and the scripted refund deadline no longer leaves enough time for the longest possible payment.',
     whatToDo:
-      'Nothing for the swap itself — it refunds, and paying it is exactly the case where the outbound HTLC outlives the client refund and both sides get taken. If it appeared right after a `rails.lightning.backend` change, that is the cause and it clears once the rows quoted under the old rail have drained; the alternative is to move back to LND until they have. Seeing it on a settled deployment means swaps are being funded long after they were quoted — check for a stalled worker.',
+      'Check that this lockup was refunded, then request a new quote. If this recurs, check for delayed funding or a changed Lightning backend.',
   },
 
   // --- receive-leg funding gates ---
