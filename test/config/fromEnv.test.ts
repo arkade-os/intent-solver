@@ -1,7 +1,8 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { parseEnv } from 'node:util'
 import { configFromKnobs, type Config } from '@arkade-os/solver-app/config.js'
 import { loadConfig } from '@arkade-os/solver-app/config/load.js'
 import {
@@ -174,6 +175,22 @@ describe('envToDocument — what it writes', () => {
     expect(doc.rails?.lightning?.lnd).toEqual({ certPath: '/secrets/tls.cert', macaroonPath: '/secrets/m' })
   })
 
+  it('reads a setting under its id as well as its legacy name, and prefers the id', () => {
+    expect(envToDocument(asKnobs(FULL_ENV), [])).toEqual(envToDocument(FULL_ENV, []))
+    const both = envToDocument({ ...MINIMAL_ENV, ARKADE_OPERATOR_URL: 'https://current.example' }, [])
+    expect(both.rails?.arkade?.operatorUrl).toBe('https://current.example')
+  })
+
+  it.each(['.env.regtest.example', '.env.regtest.lnd.example', '.env.mutinynet.lnd.example'])(
+    'reads the wallet settings from %s',
+    (file) => {
+      const env = parseEnv(readFileSync(new URL(`../../${file}`, import.meta.url), 'utf8'))
+      const arkade = envToDocument(env, []).rails?.arkade
+      expect(arkade?.mnemonic).toBeTruthy()
+      expect(arkade?.operatorUrl).toBeTruthy()
+    },
+  )
+
   it('omits what is unset, and what is set but blank', () => {
     expect(envToDocument({ SWAP_NETWORK: 'regtest', RELAY_URL: '  ' }, [])).toEqual({
       network: 'regtest',
@@ -277,7 +294,10 @@ describe('migrationHint', () => {
 
   it('is the export with each credential named by its variable, and only that', async () => {
     const hint = (await migrationHint(env))!
-    for (const name of [...SECRET_KNOBS, 'EVM_USDC_PRICE_FEED']) expect(hint).not.toContain(env[name])
+    for (const name of [...[...SECRET_KNOBS].map(legacyEnvName), 'EVM_USDC_PRICE_FEED']) {
+      expect(env[name], name).toBeTruthy()
+      expect(hint).not.toContain(env[name])
+    }
     const restored = hint
       .slice(hint.indexOf('{'))
       .replace(/"<([A-Z][A-Z0-9_]*)>"/g, (_: string, name: string) => JSON.stringify(env[name]))

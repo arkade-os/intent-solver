@@ -77,7 +77,8 @@ export const envToDocument = (
   }
 
   for (const [path, knob, encode] of PATHS) {
-    const raw = read(legacyEnvName(knob))
+    // A deployment's old file holds the legacy name; the regtest env files hold the id.
+    const raw = read(knob) ?? read(legacyEnvName(knob))
     if (raw === undefined) continue
     const segments = path.split('.')
     setAt(doc, segments, encode ? encode(true) === raw : decodeAt(segments, raw))
