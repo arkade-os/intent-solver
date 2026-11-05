@@ -77,6 +77,9 @@ export const assertColumns = (columns: string[], allowed: ReadonlySet<string>, m
 /** A nullable column; `undefined` (a column this database predates) reads as null too. */
 export const text = (value: unknown): string | null => (value === null || value === undefined ? null : String(value))
 
+/** NULL, a claim from before this column, escalates like `submitting`: that version may have submitted. */
+export type FillPhase = 'selecting' | 'submitting'
+
 export const numberOrNull = (value: unknown): number | null =>
   value === null || value === undefined ? null : Number(value)
 

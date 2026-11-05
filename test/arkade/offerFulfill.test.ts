@@ -9,7 +9,12 @@ import { describe, it, expect, vi } from 'vitest'
 import { offerVtxoScript, type Offer } from '@arkade-os/swap/protocol'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { asset } from '@arkade-os/sdk'
-import { fulfillOffer, ASSET_CARRIER_SATS, makerScriptHex } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
+import {
+  fulfillOffer,
+  ASSET_CARRIER_SATS,
+  makerScriptHex,
+  OfferNotSubmittedError,
+} from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 
@@ -52,6 +57,12 @@ const refusalOf = async (promise: Promise<unknown>): Promise<string> =>
   promise.then(
     () => '',
     (error: unknown) => (error instanceof Error ? error.message : String(error)),
+  )
+
+const rejectionOf = async (promise: Promise<unknown>): Promise<unknown> =>
+  promise.then(
+    () => undefined,
+    (error: unknown) => error,
   )
 
 describe('fulfillOffer refuses before it spends', () => {
@@ -122,6 +133,57 @@ describe('fulfillOffer refuses before it spends', () => {
     expect(reserve).toHaveBeenCalledTimes(1)
     expect(reserve).toHaveBeenCalledWith([expect.objectContaining({ txid: coin.txid, vout: coin.vout })])
     expect(release).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('which refusals a caller may retry', () => {
+  const pinnedCtx = () => {
+    const reservations = createReservationLedger()
+    reservations.reserve([coin])
+    return ctx({ getSpendableVtxos: async () => [coin] }, { reservations })
+  }
+
+  it('types an empty float as provably unsubmitted', async () => {
+    const error = await rejectionOf(
+      fulfillOffer(ctx(), 'http://emulator.test', offerWith({ swapPkScript: honest }), deposit),
+    )
+    expect(error).toBeInstanceOf(OfferNotSubmittedError)
+  })
+
+  it('types a float another operation has pinned the same way', async () => {
+    const error = await rejectionOf(
+      fulfillOffer(pinnedCtx(), 'http://emulator.test', offerWith({ swapPkScript: honest }), deposit),
+    )
+    expect(error).toBeInstanceOf(OfferNotSubmittedError)
+  })
+
+  it('leaves the § 5.1 abort untyped', async () => {
+    const error = await rejectionOf(
+      fulfillOffer(ctx(), 'http://emulator.test', offerWith({ swapPkScript: new Uint8Array(34).fill(0xab) }), deposit),
+    )
+    expect(error).not.toBeInstanceOf(OfferNotSubmittedError)
+  })
+
+  it('leaves the both-legs guard untyped', async () => {
+    const both = offerWith({
+      wantAsset: asset.AssetId.fromString(ASSET_ID),
+      offerAsset: asset.AssetId.fromString(ASSET_ID_B),
+    })
+    const consistent = offerVtxoScript(both, SERVER).pkScript
+    const error = await rejectionOf(
+      fulfillOffer(ctx(), 'http://emulator.test', offerWith({ ...both, swapPkScript: consistent }), deposit),
+    )
+    expect(error).not.toBeInstanceOf(OfferNotSubmittedError)
+  })
+
+  it('leaves a failure raised AFTER the coins are reserved untyped', async () => {
+    const reservations = { reserve: () => () => {}, reserved: () => new Set<string>() }
+    const spending = ctx({ getSpendableVtxos: async () => [coin] }, { reservations })
+    const error = await rejectionOf(
+      fulfillOffer(spending, 'http://emulator.test', offerWith({ swapPkScript: honest }), deposit),
+    )
+    expect(error).toBeInstanceOf(Error)
+    expect(error).not.toBeInstanceOf(OfferNotSubmittedError)
   })
 })
 

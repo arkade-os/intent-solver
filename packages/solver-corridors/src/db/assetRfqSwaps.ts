@@ -21,7 +21,10 @@
  * - `quoted`   terms issued; awaiting the client's deposit until `valid_until`
  * - `funded`   a deposit matching the quoted terms is at the offer's script;
  *              NOTHING submitted, and no solver capital is committed yet
- * - `filling`  `fulfill` submitted — the one EXPOSED state
+ * - `filling`  an attempt holds the row — the one EXPOSED state — and
+ *              `fill_phase` says how far it got (@see FillPhase). Only
+ *              `selecting` may be walked back, by the one refusal above the
+ *              submission; @see AssetRfqSwapStore.revertUnsubmitted
  * - `filled`   the fill landed; the client is paid and the deposit is ours
  * - `refused`  declined, or the quote lapsed unfunded; no exposure ever existed
  * - `stuck`    `fulfill` failed or its outcome is unknown; needs a human
@@ -36,9 +39,18 @@
  */
 
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
-import { BaseSwapStore, addColumns, numberOrNull, type RawRow, type StoreShape } from './baseSwapStore.js'
+import {
+  BaseSwapStore,
+  addColumns,
+  numberOrNull,
+  text,
+  type FillPhase,
+  type RawRow,
+  type StoreShape,
+} from './baseSwapStore.js'
 import { pageQuery, takePage, type PageOptions, type PageRawFields } from '@arkade-os/solver-core/core/page.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { announceTransition } from '@arkade-os/solver-core/core/businessEvent.js'
 import { clampLedgerLimit, type LedgerWindow } from '@arkade-os/solver-core/analytics/economics.js'
 
 export type AssetRfqSwapState = 'quoted' | 'funded' | 'filling' | 'filled' | 'refused' | 'stuck'
@@ -65,7 +77,9 @@ const LEGAL_EDGES: Record<AssetRfqSwapState, readonly AssetRfqSwapState[]> = {
   funded: ['filling', 'refused'],
   // No edge back to `funded`. Once `fulfill` is submitted its outcome is either
   // known or unknown, and "unknown" is `stuck` — never a retry, which is how a
-  // solver double-spends its own float.
+  // solver double-spends its own float. An edge cannot see the one phase that
+  // provably did not submit: `revertUnsubmitted` is that case, and stays OFF the
+  // graph for the reason stated there.
   filling: ['filled', 'stuck'],
   filled: [],
   refused: [],
@@ -80,11 +94,12 @@ const LEGAL_EDGES: Record<AssetRfqSwapState, readonly AssetRfqSwapState[]> = {
  * so a row that could edit any of them could describe a contract that was never
  * funded — and `offer_pk_script` is what a deposit is recognised by.
  */
-const TRANSITION_COLUMNS = new Set(['deposit_txid', 'deposit_vout', 'fill_txid', 'failure_reason'])
+const TRANSITION_COLUMNS = new Set(['deposit_txid', 'deposit_vout', 'fill_txid', 'failure_reason', 'fill_phase'])
 
 export interface AssetRfqSwapRow {
   id: string
   state: AssetRfqSwapState
+  fillPhase: FillPhase | null
   createdAt: number
   updatedAt: number
   /** The client-chosen correlation key for the whole negotiation (§ 4.5). */
@@ -187,7 +202,8 @@ const COLUMNS = `
   quote_implied_scale    INTEGER,
   quote_gives_base       INTEGER,
   fill_price_mantissa    TEXT,
-  fill_price_scale       INTEGER
+  fill_price_scale       INTEGER,
+  fill_phase             TEXT
 `
 
 const SCHEMA = `
@@ -230,6 +246,7 @@ type Raw = Record<string, string | number | null>
 const toRow = (raw: Raw): AssetRfqSwapRow => ({
   id: String(raw.id),
   state: String(raw.state) as AssetRfqSwapState,
+  fillPhase: text(raw.fill_phase) as FillPhase | null,
   createdAt: Number(raw.created_at),
   updatedAt: Number(raw.updated_at),
   rfqId: String(raw.rfq_id),
@@ -312,6 +329,7 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
       ['quote_gives_base', 'INTEGER'],
       ['fill_price_mantissa', 'TEXT'],
       ['fill_price_scale', 'INTEGER'],
+      ['fill_phase', 'TEXT'],
     ])
   }
 
@@ -462,6 +480,36 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
     const raw = await this.driver.all<Raw & PageRawFields>(sql, params)
     const { page, nextCursor } = takePage(raw, limit)
     return { rows: page.map(toRow), nextCursor }
+  }
+
+  /**
+   * The ONE edge back out of `filling`, and sound only for its one caller: a fill
+   * refused with `OfferNotSubmittedError`, raised above the call that submits.
+   * Compare-and-swap on the state AND the phase, for the reason `OfferFillStore` gives. Deliberately
+   * absent from `LEGAL_EDGES`, so the generic `filling -> funded` keeps throwing —
+   * an edge cannot say "only when nothing was sent", so this is reached by name.
+   */
+  async revertUnsubmitted(id: string): Promise<boolean> {
+    const result = await this.driver.run(
+      `UPDATE asset_rfq_swap SET state = 'funded', fill_phase = NULL, updated_at = ?
+       WHERE id = ? AND state = 'filling' AND fill_phase = 'selecting'`,
+      [this.now(), id],
+    )
+    if (result.changes === 1) {
+      await this.recordEvent(id, 'filling', 'funded', null)
+      announceTransition(this.onTransition, id, 'filling', 'funded')
+    }
+    return result.changes === 1
+  }
+
+  /** THE LATCH. @see OfferFillStore.markSubmitting */
+  async markSubmitting(id: string): Promise<boolean> {
+    const result = await this.driver.run(
+      `UPDATE asset_rfq_swap SET fill_phase = 'submitting', updated_at = ?
+       WHERE id = ? AND state = 'filling' AND fill_phase = 'selecting'`,
+      [this.now(), id],
+    )
+    return result.changes === 1
   }
 
   override async fail(id: string, from: AssetRfqSwapState, reason: string): Promise<void> {

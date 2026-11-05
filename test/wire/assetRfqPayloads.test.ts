@@ -98,6 +98,7 @@ describe('AssetRfqRequest', () => {
 const row = (over: Partial<AssetRfqSwapRow> = {}): AssetRfqSwapRow => ({
   id: 'swap-1',
   state: 'quoted',
+  fillPhase: null,
   createdAt: 1_000,
   updatedAt: 1_000,
   rfqId: RFQ_ID,

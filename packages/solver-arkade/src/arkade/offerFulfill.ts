@@ -36,6 +36,29 @@ import { offerIsConsistent } from './offerConsistency.js'
  * second copy here diverges silently the day upstream changes it. */
 export { ASSET_CARRIER_SATS }
 
+/**
+ * A fill refusal that provably submitted nothing, so a caller holding the row in
+ * `filling` may walk it back. Raised ONLY at the two coin-selection refusals
+ * below, both above `fillOffer` — the call that builds AND submits. The other
+ * guards here stay plain on purpose: they mean the row disagrees with the chain,
+ * which needs a human. @see FundNotSubmittedError, the same boundary on receive.
+ */
+export class OfferNotSubmittedError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options)
+    this.name = 'OfferNotSubmittedError'
+  }
+}
+
+export interface FulfillOptions {
+  /**
+   * Claimed immediately before the submission: `false` means another attempt
+   * holds the row and nothing may be sent. A throw is left untyped — a failed
+   * write cannot say whether the latch landed. @see OfferFillStore.markSubmitting
+   */
+  markSubmitting?: () => Promise<boolean>
+}
+
 export interface OfferDepositOutpoint {
   txid: string
   vout: number
@@ -63,6 +86,7 @@ export const fulfillOffer = async (
   emulatorUrl: string,
   offer: Offer,
   deposit: OfferDepositOutpoint,
+  options?: FulfillOptions,
 ): Promise<string> => {
   const serverPubkey = ctx.wallet.arkServerPublicKey
   if (!offerIsConsistent(offer, serverPubkey)) {
@@ -109,16 +133,24 @@ export const fulfillOffer = async (
     }
   } catch (error) {
     const held = free.reduce((total, coin) => total + BigInt(coin.value), 0n)
-    throw new Error(
+    throw new OfferNotSubmittedError(
       `no spendable coins to pay the maker ${wantAmount} ${wantedAssetId ?? 'sats'} (holding ${held} sats): ${
         error instanceof Error ? error.message : String(error)
       }`,
+      { cause: error },
     )
   }
-  if (funding.length === 0) throw new Error(`no spendable coins to pay the maker ${wantAmount} sats`)
+  if (funding.length === 0) throw new OfferNotSubmittedError(`no spendable coins to pay the maker ${wantAmount} sats`)
 
   const release = ctx.reservations.reserve(funding)
   try {
+    // THE LAST AWAIT BEFORE THE SUBMISSION, and it has to be: anything awaited after
+    // the latch is a window where a crash leaves a row claiming a fill never sent.
+    if (options?.markSubmitting && !(await options.markSubmitting())) {
+      throw new OfferNotSubmittedError(
+        `another attempt already holds the fill for ${deposit.txid}:${deposit.vout}; nothing was submitted`,
+      )
+    }
     return await fillOffer(ctx.wallet, ctx.operatorUrl, hex.encode(encodeOffer(offer)), {
       // Inputs 1..n, in this order. Every asset a coin carries is declared, not
       // just the two the swap is about: arkd refuses with ASSET_NOT_FOUND when an

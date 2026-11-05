@@ -80,12 +80,25 @@ describe('quotedOfferSettleFor', () => {
   it('spends the outpoint the row recorded, at the value the chain reports', async () => {
     const { settle, fulfill } = settleWith([funded({ vout: 0, sats: 999n }), funded()])
     await settle(intent())
-    expect(fulfill).toHaveBeenCalledWith(expect.anything(), 'http://emulator.test', expect.anything(), {
-      txid: TXID,
-      vout: 1,
-      value: 20_000,
-      assetAmount: undefined,
-    })
+    expect(fulfill).toHaveBeenCalledWith(
+      expect.anything(),
+      'http://emulator.test',
+      expect.anything(),
+      {
+        txid: TXID,
+        vout: 1,
+        value: 20_000,
+        assetAmount: undefined,
+      },
+      undefined,
+    )
+  })
+
+  it('forwards the submission latch, which is what keeps a walk-back sound', async () => {
+    const { settle, fulfill } = settleWith([funded()])
+    const options = { markSubmitting: async () => true }
+    await settle(intent(), options)
+    expect(fulfill.mock.calls[0]![4]).toBe(options)
   })
 
   it('hands `fulfill` an offer whose script is the DERIVED one', async () => {
