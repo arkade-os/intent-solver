@@ -244,9 +244,9 @@ const assetRowsPair = (balance) => {
 /** Corridor label short enough for a table cell. */
 const corridorLabel = (corridor) =>
   ({
-    'arkade:BTC->lightning:BTC': 'ark→ln',
-    'lightning:BTC->arkade:BTC': 'ln→ark',
-    'arkade:BTC->onchain:BTC': 'ark→L1',
+    'arkade:BTC->lightning:BTC': 'arkade→ln',
+    'lightning:BTC->arkade:BTC': 'ln→arkade',
+    'arkade:BTC->onchain:BTC': 'arkade→L1',
   })[corridor] ?? corridor
 
 /** Ended with nothing out — no delivery, but no harm — so the `failed` chip drops its colour. */

@@ -58,7 +58,7 @@ const clientWallet = () => ({
   getContractManager: async () =>
     new Proxy({}, { get: (_t, prop) => (prop === 'then' ? undefined : async () => undefined) }),
   // `createOffer` now reads server info off the wallet rather than a raw
-  // `arkServerUrl`; routed through the real provider so the stubbed `/v1/info`
+  // `operatorUrl`; routed through the real provider so the stubbed `/v1/info`
   // still exercises the SDK's own parsing.
   getArkadeInfo: async () => new RestArkProvider(ARKD_URL).getInfo(),
 })

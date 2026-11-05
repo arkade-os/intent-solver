@@ -54,7 +54,7 @@ const makeDeps = (
     services: {
       config: {
         lnBackend: 'lnd',
-        arkade: { arkServerUrl: 'http://ark' },
+        arkade: { operatorUrl: 'http://arkade' },
         emulatorUrl: 'http://emu',
         // Kept deliberately DIFFERENT from the per-corridor caps in the tests
         // that care, so reverting to it is detectable rather than invisible.

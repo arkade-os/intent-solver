@@ -174,11 +174,11 @@ export const createArkadeRebalanceSource = async (
     destination: string,
     amount: number,
     coins: NormalizedExtendedVirtualCoin[],
-    kind: 'onchain' | 'ark',
+    kind: 'onchain' | 'arkade',
   ): Promise<RouteQuote> => {
     const router = new PaymentRouter({ wallet, prefs: {} })
     router.use(
-      kind === 'ark' ? arkRail() : onchainRail({ feeInfo: async () => (await wallet.arkProvider.getInfo()).fees }),
+      kind === 'arkade' ? arkRail() : onchainRail({ feeInfo: async () => (await wallet.arkProvider.getInfo()).fees }),
     )
     return router.route({ raw: destination, amount, selectedVtxos: coins })
   }
@@ -186,7 +186,7 @@ export const createArkadeRebalanceSource = async (
   const selectQuote = async (
     destination: string,
     amount: number,
-    kind: 'onchain' | 'ark',
+    kind: 'onchain' | 'arkade',
     candidates: NormalizedExtendedVirtualCoin[],
   ) => {
     const minimumChange = Math.max(Number(services.arkade.dustSats ?? 330n), Number(services.arkade.vtxoMinSats ?? 0n))
@@ -222,7 +222,7 @@ export const createArkadeRebalanceSource = async (
       rfq?.record.lockupAddress ?? row.deposit.destination,
       rfq?.fundAmount ?? row.deposit.amountSats,
       coins,
-      rfq ? 'ark' : 'onchain',
+      rfq ? 'arkade' : 'onchain',
     )
     wholeSats(quote.total)
     if (
@@ -258,7 +258,7 @@ export const createArkadeRebalanceSource = async (
     return row.inputs.map((input) => byKey.get(outpointKey(input.txid, input.vout)))
   }
 
-  const proveArkOutput = async (txid: string, address: string, amount: number): Promise<boolean> => {
+  const proveArkadeOutput = async (txid: string, address: string, amount: number): Promise<boolean> => {
     const script = hex.encode(ArkAddress.decode(address).pkScript)
     const { txs } = await indexer.getVirtualTxs([txid])
     for (const raw of txs) {
@@ -276,7 +276,7 @@ export const createArkadeRebalanceSource = async (
     const address = record.profile.refundAddress
     if (typeof address !== 'string') return false
     for (const txid of [...new Set([record.refundTxid, ...(record.lockupSpendTxids ?? [])].filter(validTxid))]) {
-      if (await proveArkOutput(txid, address, amount)) return true
+      if (await proveArkadeOutput(txid, address, amount)) return true
     }
     return false
   }
@@ -285,7 +285,7 @@ export const createArkadeRebalanceSource = async (
     async quote(deposit: RebalanceDeposit, policy: RebalancePolicy) {
       let destination = deposit.destination
       let amount = deposit.amountSats
-      let kind: 'onchain' | 'ark' = 'onchain'
+      let kind: 'onchain' | 'arkade' = 'onchain'
       let expiresAt = now() + 60
       let routeData: Record<string, unknown> | undefined
       if (deposit.kind === 'onchain') Address(ONCHAIN_NETWORKS[services.config.network]).decode(destination)
@@ -359,7 +359,7 @@ export const createArkadeRebalanceSource = async (
           await repository.create({ record, fundAmount: request.fundAmount, validUntil: expiresAt })
           destination = request.address
           amount = request.fundAmount
-          kind = 'ark'
+          kind = 'arkade'
           routeData = { rfqId: request.rfqId }
         } finally {
           transport.close?.()
@@ -484,7 +484,7 @@ export const createArkadeRebalanceSource = async (
         funding &&
         source.length === row.inputs.length &&
         source.every((coin) => coin?.arkTxId === funding) &&
-        (await proveArkOutput(funding, record.lockupAddress, stored.fundAmount))
+        (await proveArkadeOutput(funding, record.lockupAddress, stored.fundAmount))
       if (proven && (await proveRefund(record, stored.fundAmount))) return { state: 'refunded' }
       if (proven && !record.fundingTxid) {
         record = { ...record, fundingTxid: funding, state: 'pending', updatedAt: now() }

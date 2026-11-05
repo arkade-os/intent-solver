@@ -59,7 +59,7 @@ const makeDeps = (over: { nostrAdPublish?: AdPublishMode; adPublisher?: AdPublis
     services: {
       config: {
         lnBackend: 'lnd',
-        arkade: { arkServerUrl: 'http://ark' },
+        arkade: { operatorUrl: 'http://arkade' },
         emulatorUrl: 'http://emu',
         relayUrl: 'wss://relay.example',
         solverName: 'test-solver',

@@ -46,7 +46,7 @@ import { latencyDiagnosticsEnabled } from '@arkade-os/solver-core/util/diagnosti
 import { ensureDatabaseDir } from '@arkade-os/solver-core/util/sqlite.js'
 import type { CovenantSwapScript } from './covenant.js'
 import { virtualTxPages, vtxoPages } from './indexerPaging.js'
-import { SharedSyncIndexerProvider, TimedArkProvider, TimedIndexerProvider } from './latencyProviders.js'
+import { SharedSyncIndexerProvider, TimedArkadeProvider, TimedIndexerProvider } from './latencyProviders.js'
 import { createReservationLedger, type ReservationLedger } from './reservations.js'
 
 /** What {@link claimSwapScript} spends; CovenantSwapScript satisfies it. */
@@ -76,7 +76,7 @@ export const sqliteExecutor = (path: string): SQLExecutor & { close(): void } =>
 
 export interface ArkadeWalletConfig {
   mnemonic: string
-  arkServerUrl: string
+  operatorUrl: string
   databasePath: string
   isMainnet: boolean
   arkadeHrp: string
@@ -138,10 +138,10 @@ export interface ArkadeContext {
   identity: MnemonicIdentity
   /** The server the wallet was built against. Carried because the SDK's own
    * entry points take it separately — the wallet does not expose it. */
-  arkServerUrl: string
+  operatorUrl: string
   /** Unilateral delays this server will accept, derived from its own minimum. */
   unilateralDelays: UnilateralDelays
-  /** As advertised, BEFORE `ARK_UNILATERAL_EXIT_DELAY`: a client compiles an
+  /** As advertised, BEFORE `ARKADE_UNILATERAL_EXIT_DELAY`: a client compiles an
    * offer's exit leaf from this, so that covenant follows the server. */
   advertisedExitDelay: number
   dustSats: bigint
@@ -177,7 +177,7 @@ export interface ArkadeContext {
  * hardcoded — the server refuses any script below its own minimum. The unit is part of
  * that same fact: an arkd configured with block delays advertises a value that IS blocks
  * by the SDK's own `toTimelock` rule, so believing it is one source of truth rather than
- * two that can drift. An `ARK_TIMELOCK_UNIT` knob was considered and dropped for exactly
+ * two that can drift. An `ARKADE_TIMELOCK_UNIT` knob was considered and dropped for exactly
  * that: a disagreement there writes a script whose leaves count a different clock than
  * the server enforcing them.
  *
@@ -188,7 +188,7 @@ export interface ArkadeContext {
 export const resolveTimelockUnit = (params: {
   /** What arkd reports at `/v1/info`, in its own unit. */
   advertisedExitDelay: number
-  /** `ARK_UNILATERAL_EXIT_DELAY`, if the operator set one. */
+  /** `ARKADE_UNILATERAL_EXIT_DELAY`, if the operator set one. */
   unilateralExitDelayOverride?: number
   isMainnet: boolean
 }): { unit: TimelockUnit; notices: string[] } => {
@@ -255,12 +255,12 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
   const wallet = await Wallet.create({
     identity,
     arkProvider: latencyDiagnostics
-      ? new TimedArkProvider(config.arkServerUrl)
-      : new RestArkProvider(config.arkServerUrl),
+      ? new TimedArkadeProvider(config.operatorUrl)
+      : new RestArkProvider(config.operatorUrl),
     // The SDK's own default is a plain `RestIndexerProvider` at this same URL.
     indexerProvider: latencyDiagnostics
-      ? new TimedIndexerProvider(config.arkServerUrl)
-      : new SharedSyncIndexerProvider(config.arkServerUrl),
+      ? new TimedIndexerProvider(config.operatorUrl)
+      : new SharedSyncIndexerProvider(config.operatorUrl),
     storage: {
       walletRepository: new SQLiteWalletRepository(executor),
       contractRepository: new SQLiteContractRepository(executor),
@@ -308,19 +308,19 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
   // chain — refuse to start rather than discover it with money in flight.
   if (info.network !== config.expectedArkdNetwork) {
     throw new Error(
-      `Arkade server at ${config.arkServerUrl} reports network '${info.network}', ` +
-        `expected '${config.expectedArkdNetwork}' — check rails.arkade.serverUrl / network`,
+      `Arkade server at ${config.operatorUrl} reports network '${info.network}', ` +
+        `expected '${config.expectedArkdNetwork}' — check rails.arkade.operatorUrl / network`,
     )
   }
 
   const dustSats = BigInt(info.dust)
   // A quote prices against this; zero would remove the sats leg's dust floor.
   if (dustSats <= 0n) {
-    throw new Error(`Arkade server at ${config.arkServerUrl} reports dust=${info.dust}, which no asset can ride on`)
+    throw new Error(`Arkade server at ${config.operatorUrl} reports dust=${info.dust}, which no asset can ride on`)
   }
   const vtxoMinSats = BigInt(info.vtxoMinAmount ?? 0)
   if (vtxoMinSats < 0n || vtxoMinSats > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new Error(`Arkade server at ${config.arkServerUrl} reports invalid vtxoMinAmount=${info.vtxoMinAmount}`)
+    throw new Error(`Arkade server at ${config.operatorUrl} reports invalid vtxoMinAmount=${info.vtxoMinAmount}`)
   }
 
   const advertisedExitDelay = Number(info.unilateralExitDelay)
@@ -334,7 +334,7 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
   return {
     wallet,
     identity,
-    arkServerUrl: config.arkServerUrl,
+    operatorUrl: config.operatorUrl,
     unilateralDelays: deriveUnilateralDelays(config.unilateralExitDelayOverride ?? advertisedExitDelay),
     advertisedExitDelay,
     dustSats,
@@ -422,7 +422,7 @@ const hashMatches = (candidate: Uint8Array, paymentHashHex: string): boolean =>
 
 /**
  * Every candidate witness item a spend of ONE input might carry, in the order
- * worth trying: the Ark-specific condition field first (the mechanism this
+ * worth trying: the Arkade-specific condition field first (the mechanism this
  * repo's claims use, via the SDK's `claimWithPreimageIdentity` — `setArkPsbtField(...,
  * ConditionWitness, [preimage])` — confirmed to survive a `toPSBT()`/`fromPSBT()`
  * round trip against the pinned SDK version), then whatever the input's own
@@ -638,7 +638,7 @@ export const claimSwapScript = async (
 /**
  * Finalize OUR spend that arkd accepted and never finalized, which leaves the lockup spent with no output;
  * arkd answers finalizeTx on a tx it already finalized, as a one-shot submit does, with success.
- * Null unless every spent output went into one ark tx through `leaf`: only that leaf rebuilds
+ * Null unless every spent output went into one Arkade transaction through `leaf`: only that leaf rebuilds
  * the checkpoint txid arkd names as the spender, and it needs our signature.
  */
 const finalizePendingSpend = async (
@@ -652,9 +652,9 @@ const finalizePendingSpend = async (
   for await (const batch of vtxoPages(ctx.wallet.indexerProvider, { scripts: [pkScriptHex] })) {
     spent.push(...batch.filter((vtxo) => isVtxoSpent(vtxo)))
   }
-  const arkTxids = new Set(spent.map((vtxo) => vtxo.arkTxId))
-  const [arkTxid] = arkTxids
-  if (spent.length === 0 || arkTxids.size !== 1 || !arkTxid) return null
+  const arkadeTxids = new Set(spent.map((vtxo) => vtxo.arkTxId))
+  const [arkTxid] = arkadeTxids
+  if (spent.length === 0 || arkadeTxids.size !== 1 || !arkTxid) return null
   const { checkpoints } = buildOffchainTx(
     spent.map(({ txid, vout, value }) => ({ txid, vout, value, tapLeafScript: leaf, tapTree })),
     [{ script: hex.decode(pkScriptHex), amount: BigInt(spent.reduce((sum, vtxo) => sum + vtxo.value, 0)) }],
@@ -898,7 +898,7 @@ export const refundSwapScript = async (
   // forged response, and persisting it as the refund's txid would bury that.
   const returned = Transaction.fromPSBT(base64.decode(result.signedArkTx))
   if (returned.id !== arkTx.id) {
-    throw new Error(`emulator returned ark tx ${returned.id}, expected ${arkTx.id}`)
+    throw new Error(`emulator returned Arkade transaction ${returned.id}, expected ${arkTx.id}`)
   }
   return returned.id
 }

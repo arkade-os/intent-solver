@@ -16,7 +16,7 @@ const minimalDoc = {
   rails: {
     arkade: {
       mnemonic: 'test mnemonic, never a real one',
-      serverUrl: 'http://localhost:7070',
+      operatorUrl: 'http://localhost:7070',
       emulatorUrl: 'http://localhost:7073',
     },
     lightning: { backend: 'fake' },
@@ -215,7 +215,7 @@ describe('loadConfig — the document', () => {
   it('names the JSON path of a missing requirement', () => {
     const doc = {
       ...minimalDoc,
-      rails: { ...minimalDoc.rails, arkade: { serverUrl: 'http://x', emulatorUrl: 'http://y' } },
+      rails: { ...minimalDoc.rails, arkade: { operatorUrl: 'http://x', emulatorUrl: 'http://y' } },
     }
     expect(() => loadConfig({ env: inline(doc) })).toThrow('rails.arkade.mnemonic is not set')
   })

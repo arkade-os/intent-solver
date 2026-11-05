@@ -1,7 +1,8 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { parseEnv } from 'node:util'
 import { configFromKnobs, type Config } from '@arkade-os/solver-app/config.js'
 import { loadConfig } from '@arkade-os/solver-app/config/load.js'
 import {
@@ -11,7 +12,7 @@ import {
   healthPathNote,
   migrationHint,
 } from '@arkade-os/solver-app/config/fromEnv.js'
-import { SECRET_KNOBS } from '@arkade-os/solver-app/config/knobs.js'
+import { legacyEnvName, PATHS, SECRET_KNOBS } from '@arkade-os/solver-app/config/knobs.js'
 import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
 import { resolveLimits } from '@arkade-os/solver-core/core/limits.js'
 import { DEFAULT_SERVING } from '@arkade-os/solver-core/core/assetMarketConfig.js'
@@ -135,15 +136,24 @@ const withoutDocumentFields = ({ configPaths: _paths, lightningRailBlock: _block
 
 const loadedFrom = (doc: unknown) => loadConfig({ env: { SOLVER_CONFIG_JSON: JSON.stringify(doc) } })
 
+/** An old environment under the setting ids `configFromKnobs` reads. */
+const asKnobs = (env: Record<string, string>) =>
+  Object.fromEntries(
+    Object.entries(env).map(([name, value]) => [
+      PATHS.find(([, knob]) => legacyEnvName(knob) === name)?.[1] ?? name,
+      value,
+    ]),
+  )
+
 describe('envToDocument round-trips', () => {
   it('every setting the environment can carry', () => {
     const doc = envToDocument(FULL_ENV, [])
-    expect(withoutDocumentFields(loadedFrom(doc))).toEqual(withoutDocumentFields(configFromKnobs(FULL_ENV)))
+    expect(withoutDocumentFields(loadedFrom(doc))).toEqual(withoutDocumentFields(configFromKnobs(asKnobs(FULL_ENV))))
   })
 
   it('a minimal mutinynet environment', () => {
     const doc = envToDocument(MINIMAL_ENV, [])
-    expect(withoutDocumentFields(loadedFrom(doc))).toEqual(withoutDocumentFields(configFromKnobs(MINIMAL_ENV)))
+    expect(withoutDocumentFields(loadedFrom(doc))).toEqual(withoutDocumentFields(configFromKnobs(asKnobs(MINIMAL_ENV))))
   })
 })
 
@@ -164,6 +174,22 @@ describe('envToDocument — what it writes', () => {
     const doc = envToDocument({ LND_CERT_PATH: '/secrets/tls.cert', LND_MACAROON_PATH: '/secrets/m' }, [])
     expect(doc.rails?.lightning?.lnd).toEqual({ certPath: '/secrets/tls.cert', macaroonPath: '/secrets/m' })
   })
+
+  it('reads a setting under its id as well as its legacy name, and prefers the id', () => {
+    expect(envToDocument(asKnobs(FULL_ENV), [])).toEqual(envToDocument(FULL_ENV, []))
+    const both = envToDocument({ ...MINIMAL_ENV, ARKADE_OPERATOR_URL: 'https://current.example' }, [])
+    expect(both.rails?.arkade?.operatorUrl).toBe('https://current.example')
+  })
+
+  it.each(['.env.regtest.example', '.env.regtest.lnd.example', '.env.mutinynet.lnd.example'])(
+    'reads the wallet settings from %s',
+    (file) => {
+      const env = parseEnv(readFileSync(new URL(`../../${file}`, import.meta.url), 'utf8'))
+      const arkade = envToDocument(env, []).rails?.arkade
+      expect(arkade?.mnemonic).toBeTruthy()
+      expect(arkade?.operatorUrl).toBeTruthy()
+    },
+  )
 
   it('omits what is unset, and what is set but blank', () => {
     expect(envToDocument({ SWAP_NETWORK: 'regtest', RELAY_URL: '  ' }, [])).toEqual({
@@ -268,7 +294,10 @@ describe('migrationHint', () => {
 
   it('is the export with each credential named by its variable, and only that', async () => {
     const hint = (await migrationHint(env))!
-    for (const name of [...SECRET_KNOBS, 'EVM_USDC_PRICE_FEED']) expect(hint).not.toContain(env[name])
+    for (const name of [...[...SECRET_KNOBS].map(legacyEnvName), 'EVM_USDC_PRICE_FEED']) {
+      expect(env[name], name).toBeTruthy()
+      expect(hint).not.toContain(env[name])
+    }
     const restored = hint
       .slice(hint.indexOf('{'))
       .replace(/"<([A-Z][A-Z0-9_]*)>"/g, (_: string, name: string) => JSON.stringify(env[name]))
