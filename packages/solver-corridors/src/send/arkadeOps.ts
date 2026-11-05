@@ -13,6 +13,7 @@ import { hex } from '@scure/base'
 import { ArkAddress } from '@arkade-os/sdk'
 import {
   claimSwapScript,
+  claimSwapScriptDetailed,
   finalizePendingClaim,
   findClaimPreimage,
   findLockupOutpoints,
@@ -89,6 +90,14 @@ export const arkadeOpsFromContext = async (ctx: ArkadeContext, emulator: Emulato
       const destination = await ctx.wallet.getAddress()
       return claimSwapScript(ctx, script, outputs, hex.decode(preimageHex), destination)
     },
+    claimDetailed: async (row, outputs, preimageHex) => {
+      const mismatch = keyMismatch(row)
+      if (mismatch) throw new Error(mismatch)
+      const script = covenantScriptFromRow(row)
+      assertScriptMatchesRow(script, row)
+      const destination = await ctx.wallet.getAddress()
+      return claimSwapScriptDetailed(ctx, script, outputs, hex.decode(preimageHex), destination)
+    },
     finalizePendingClaim: async (row, preimageHex) => {
       const mismatch = keyMismatch(row)
       if (mismatch) throw new Error(mismatch)
@@ -115,7 +124,7 @@ export const arkadeOpsFromContext = async (ctx: ArkadeContext, emulator: Emulato
       assertScriptMatchesRow(script, row)
       return refundSweptSwapScript(ctx, emulator.url, script, swept, hex.decode(row.refundPkScript!))
     },
-    claimSwept: async (row, swept, preimageHex, expectedSats, onRegistered, onCommitmentValidated) => {
+    claimSwept: async (row, swept, preimageHex, expectedSats, onRegistered, onCommitmentValidated, onPrepared) => {
       const mismatch = keyMismatch(row)
       if (mismatch) throw new Error(mismatch)
       const script = covenantScriptFromRow(row)
@@ -128,6 +137,7 @@ export const arkadeOpsFromContext = async (ctx: ArkadeContext, emulator: Emulato
         expectedSats,
         onRegistered,
         onCommitmentValidated,
+        onPrepared,
       )
     },
     verifySweptClaim: (journal) => verifySweptClaimCommitment(ctx.wallet.indexerProvider, journal),

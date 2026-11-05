@@ -75,26 +75,49 @@ const priceIntent = (
   estimator: Estimator,
   swept: readonly FundedOutput[],
   refundPkScript: Uint8Array,
+  changePkScript: Uint8Array,
   feeCoin?: { value: number; createdAt: Date; isSwept?: boolean },
 ): bigint => {
-  const script = hex.encode(refundPkScript)
   const inputFee = (params: Parameters<Estimator['evalOffchainInput']>[0]): bigint =>
     BigInt(estimator.evalOffchainInput(params).satoshis)
-  const outputFee = (amount: number): bigint =>
-    BigInt(estimator.evalOffchainOutput({ amount: BigInt(amount), script }).satoshis)
+  const outputFee = (amount: bigint, script: Uint8Array): bigint =>
+    BigInt(estimator.evalOffchainOutput({ amount, script: hex.encode(script) }).satoshis)
 
-  let fee = 0n
-  for (const output of swept) {
-    fee += inputFee(offchainInputFeeParams({ value: output.value, createdAt: new Date(), isSwept: true }))
-    fee += outputFee(output.value)
-  }
-  if (feeCoin) {
-    fee += inputFee(
-      offchainInputFeeParams({ value: feeCoin.value, createdAt: feeCoin.createdAt, isSwept: feeCoin.isSwept }),
+  const base = swept.reduce((sum, output) => {
+    if (/\bbirth\b/.test(estimator.config.offchainInput ?? '') && !output.createdAt) {
+      throw new Error(`swept input ${output.txid}:${output.vout} has no creation time for fee pricing`)
+    }
+    return (
+      sum +
+      inputFee({
+        amount: BigInt(output.value),
+        type: 'recoverable',
+        weight: 0,
+        birth: output.createdAt,
+        ...(output.expiresAt ? { expiry: new Date(output.expiresAt * 1000) } : {}),
+      }) +
+      outputFee(BigInt(output.value), refundPkScript)
     )
-    fee += outputFee(feeCoin.value)
+  }, 0n)
+  if (!feeCoin) return base
+  const fixed = base + inputFee(offchainInputFeeParams(feeCoin))
+  const gross = BigInt(feeCoin.value)
+  let fee = fixed + outputFee(gross, changePkScript)
+  const seen = new Set<bigint>()
+  let highest = fee
+  for (let i = 0; i < 64 && fee >= 0n && fee < gross; i++) {
+    const next = fixed + outputFee(gross - fee, changePkScript)
+    if (next === fee) return fee
+    if (next > highest) highest = next
+    if (seen.has(next)) {
+      if (highest < gross && fixed + outputFee(gross - highest, changePkScript) <= highest) return highest
+      break
+    }
+    seen.add(fee)
+    fee = next
   }
-  return fee
+  if (fee >= gross) return fee
+  throw new Error('swept refund intent fee did not converge')
 }
 
 const planFee = async (
@@ -102,8 +125,9 @@ const planFee = async (
   estimator: Estimator,
   swept: readonly FundedOutput[],
   refundPkScript: Uint8Array,
+  changePkScript: Uint8Array,
 ): Promise<FeePlan> => {
-  if (priceIntent(estimator, swept, refundPkScript) === 0n) return { change: 0n, release: () => {} }
+  if (priceIntent(estimator, swept, refundPkScript, changePkScript) === 0n) return { change: 0n, release: () => {} }
 
   const candidates = await ctx.wallet.getSpendableVtxos(FEE_COIN_FILTER)
   // Read and pinned with no await between: a funding runs beside this pass.
@@ -112,7 +136,7 @@ const planFee = async (
     .filter((coin) => !reserved.has(`${coin.txid}:${coin.vout}`) && (coin.assets ?? []).length === 0)
     .sort((a, b) => a.value - b.value)
   for (const coin of free) {
-    const change = BigInt(coin.value) - priceIntent(estimator, swept, refundPkScript, coin)
+    const change = BigInt(coin.value) - priceIntent(estimator, swept, refundPkScript, changePkScript, coin)
     if (change >= ctx.dustSats) return { coin, change, release: ctx.reservations.reserve([coin]) }
   }
   throw new Error(
@@ -273,11 +297,12 @@ export const refundSweptSwapScript = async (
 
   const info = await ctx.wallet.arkProvider.getInfo()
   const estimator = new Estimator(info.fees.intentFee)
-  const { coin: feeCoin, change, release } = await planFee(ctx, estimator, swept, refundPkScript)
+  const walletPkScript = ArkAddress.decode(await ctx.wallet.getAddress()).pkScript
+  const { coin: feeCoin, change, release } = await planFee(ctx, estimator, swept, refundPkScript, walletPkScript)
 
   try {
     const coins = await withPrevTxs(intentCoinsFor(script, swept, feeCoin), ctx.wallet.indexerProvider)
-    const changePkScript = change > 0n ? ArkAddress.decode(await ctx.wallet.getAddress()).pkScript : undefined
+    const changePkScript = change > 0n ? walletPkScript : undefined
     const payouts = [
       ...swept.map((output) => ({ script: refundPkScript, amount: BigInt(output.value) })),
       ...(changePkScript ? [{ script: changePkScript, amount: change }] : []),

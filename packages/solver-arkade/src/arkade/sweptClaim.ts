@@ -30,19 +30,48 @@ const priceIntent = (
   estimator: Estimator,
   swept: readonly FundedOutput[],
   payoutPkScript: Uint8Array,
+  changePkScript: Uint8Array,
   feeCoin?: { value: number; createdAt: Date; isSwept?: boolean },
 ): bigint => {
-  const script = hex.encode(payoutPkScript)
-  const inputFee = (value: number, createdAt: Date, isSwept: boolean): bigint =>
-    BigInt(estimator.evalOffchainInput(offchainInputFeeParams({ value, createdAt, isSwept })).satoshis)
-  const outputFee = (amount: number): bigint =>
-    BigInt(estimator.evalOffchainOutput({ amount: BigInt(amount), script }).satoshis)
-  let fee = swept.reduce((sum, output) => sum + inputFee(output.value, new Date(), true) + outputFee(output.value), 0n)
-  if (feeCoin) {
-    fee += inputFee(feeCoin.value, feeCoin.createdAt, feeCoin.isSwept === true)
-    fee += BigInt(estimator.evalOffchainOutput({ amount: BigInt(feeCoin.value), script }).satoshis)
+  const inputFee = (params: Parameters<Estimator['evalOffchainInput']>[0]): bigint =>
+    BigInt(estimator.evalOffchainInput(params).satoshis)
+  const outputFee = (amount: bigint, script: Uint8Array): bigint =>
+    BigInt(estimator.evalOffchainOutput({ amount, script: hex.encode(script) }).satoshis)
+  const base = swept.reduce((sum, output) => {
+    if (/\bbirth\b/.test(estimator.config.offchainInput ?? '') && !output.createdAt) {
+      throw new Error(`swept input ${output.txid}:${output.vout} has no creation time for fee pricing`)
+    }
+    return (
+      sum +
+      inputFee({
+        amount: BigInt(output.value),
+        type: 'recoverable',
+        weight: 0,
+        birth: output.createdAt,
+        ...(output.expiresAt ? { expiry: new Date(output.expiresAt * 1000) } : {}),
+      }) +
+      outputFee(BigInt(output.value), payoutPkScript)
+    )
+  }, 0n)
+  if (!feeCoin) return base
+  const fixed = base + inputFee(offchainInputFeeParams(feeCoin))
+  const gross = BigInt(feeCoin.value)
+  let fee = fixed + outputFee(gross, changePkScript)
+  const seen = new Set<bigint>()
+  let highest = fee
+  for (let i = 0; i < 64 && fee >= 0n && fee < gross; i++) {
+    const next = fixed + outputFee(gross - fee, changePkScript)
+    if (next === fee) return fee
+    if (next > highest) highest = next
+    if (seen.has(next)) {
+      if (highest < gross && fixed + outputFee(gross - highest, changePkScript) <= highest) return highest
+      break
+    }
+    seen.add(fee)
+    fee = next
   }
-  return fee
+  if (fee >= gross) return fee
+  throw new Error('swept claim intent fee did not converge')
 }
 
 const planFee = async (
@@ -50,8 +79,9 @@ const planFee = async (
   estimator: Estimator,
   swept: readonly FundedOutput[],
   payoutPkScript: Uint8Array,
+  changePkScript: Uint8Array,
 ): Promise<{ coin?: ExtendedVirtualCoin; change: bigint; release: () => void }> => {
-  if (priceIntent(estimator, swept, payoutPkScript) === 0n) return { change: 0n, release: () => {} }
+  if (priceIntent(estimator, swept, payoutPkScript, changePkScript) === 0n) return { change: 0n, release: () => {} }
   const candidates = await ctx.wallet.getSpendableVtxos(FEE_COIN_FILTER)
   const reserved = ctx.reservations.reserved()
   for (const coin of candidates
@@ -59,7 +89,7 @@ const planFee = async (
       (candidate) => !reserved.has(`${candidate.txid}:${candidate.vout}`) && (candidate.assets ?? []).length === 0,
     )
     .sort((a, b) => a.value - b.value)) {
-    const change = BigInt(coin.value) - priceIntent(estimator, swept, payoutPkScript, coin)
+    const change = BigInt(coin.value) - priceIntent(estimator, swept, payoutPkScript, changePkScript, coin)
     if (change >= ctx.dustSats) return { coin, change, release: ctx.reservations.reserve([coin]) }
   }
   throw new Error(`no sats-only float coin can pay the intent fee for a swept claim of ${swept.length} output(s)`)
@@ -88,10 +118,13 @@ const claimCoins = (
   return feeCoin ? [...lockups, feeCoin] : lockups
 }
 
-export interface SweptClaimRegistration {
-  intentId: string
+export interface SweptClaimPrepared {
   proofTxid: string
   deleteProof: string
+}
+
+export interface SweptClaimRegistration extends SweptClaimPrepared {
+  intentId: string
 }
 
 export interface SweptClaimCommitment extends SweptClaimRegistration {
@@ -143,6 +176,7 @@ export const claimSweptSwapScript = async (
   expectedSats: number,
   onRegistered?: (registration: SweptClaimRegistration) => Promise<void>,
   onCommitmentValidated?: (commitment: SweptClaimCommitment) => Promise<void>,
+  onPrepared?: (prepared: SweptClaimPrepared) => Promise<void>,
 ): Promise<string> => {
   if (swept.length === 0 || swept.length > MAX_LOCKUP_SPEND_INPUTS) {
     throw new Error(`swept claim needs 1-${MAX_LOCKUP_SPEND_INPUTS} outputs, got ${swept.length}`)
@@ -163,10 +197,11 @@ export const claimSweptSwapScript = async (
 
   const info = await ctx.wallet.arkProvider.getInfo()
   const estimator = new Estimator(info.fees.intentFee)
-  const { coin: feeCoin, change, release } = await planFee(ctx, estimator, swept, payoutPkScript)
+  const walletPkScript = ArkAddress.decode(await ctx.wallet.getAddress()).pkScript
+  const { coin: feeCoin, change, release } = await planFee(ctx, estimator, swept, payoutPkScript, walletPkScript)
   try {
     const coins = await withPrevTxs(claimCoins(script, swept, preimage, feeCoin), ctx.wallet.indexerProvider)
-    const changePkScript = change > 0n ? ArkAddress.decode(await ctx.wallet.getAddress()).pkScript : undefined
+    const changePkScript = change > 0n ? walletPkScript : undefined
     const payouts = [
       ...swept.map((output) => ({ script: payoutPkScript, amount: BigInt(output.value) })),
       ...(changePkScript ? [{ script: changePkScript, amount: change }] : []),
@@ -190,14 +225,31 @@ export const claimSweptSwapScript = async (
         throw new Error(`swept claim proof input ${vin} lost its preimage witness`)
       }
     }
-    const intentId = await ctx.wallet.arkProvider.registerIntent({
-      proof: base64.encode(signedProof.toPSBT()),
-      message,
-    })
-    await onRegistered?.({ intentId, proofTxid: proof.id, deleteProof })
+    await onPrepared?.({ proofTxid: proof.id, deleteProof })
     const abort = new AbortController()
     const timer = setTimeout(() => abort.abort(), SWEPT_REFUND_BATCH_TIMEOUT_MS)
+    const stream = ctx.wallet.arkProvider.getEventStream(abort.signal, [
+      cosigner,
+      ...[...swept, ...(feeCoin ? [feeCoin] : [])].map((output) => `${output.txid}:${output.vout}`),
+    ])
+    const firstEvent = stream.next()
+    void firstEvent.catch(() => undefined)
     try {
+      let intentId: string
+      try {
+        intentId = await ctx.wallet.arkProvider.registerIntent({
+          proof: base64.encode(signedProof.toPSBT()),
+          message,
+        })
+        await onRegistered?.({ intentId, proofTxid: proof.id, deleteProof })
+      } catch (error) {
+        try {
+          await deleteSweptClaimIntent(ctx, deleteProof)
+        } catch {
+          // The prepared journal retains the delete proof for recovery.
+        }
+        throw error
+      }
       const recipientFor = (payout: (typeof payouts)[number]): Recipient => ({
         address: new ArkAddress(ctx.wallet.arkServerPublicKey, payout.script.subarray(2), ctx.hrp).encode(),
         amount: Number(payout.amount),
@@ -221,10 +273,12 @@ export const claimSweptSwapScript = async (
         },
       })
       return await Batch.join(
-        ctx.wallet.arkProvider.getEventStream(abort.signal, [
-          cosigner,
-          ...[...swept, ...(feeCoin ? [feeCoin] : [])].map((output) => `${output.txid}:${output.vout}`),
-        ]),
+        (async function* () {
+          const first = await firstEvent
+          if (first.done) return
+          yield first.value
+          yield* stream
+        })(),
         handler,
         { abortController: abort },
       )

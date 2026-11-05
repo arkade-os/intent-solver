@@ -426,6 +426,15 @@ const SHAPE: StoreShape<SendSwapRow, SendSwapState> = {
 export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
   protected readonly shape = SHAPE
 
+  async compareAndSwapClaimBatch(id: string, expected: string | null, next: string | null): Promise<boolean> {
+    const result = await this.driver.run(
+      `UPDATE send_swap SET claim_batch = ?, updated_at = ?
+       WHERE id = ? AND state = 'claiming' AND claim_batch IS ?`,
+      [next, this.now(), id, expected],
+    )
+    return result.changes === 1
+  }
+
   /**
    * Open a store over a driver — or a SQLite file path, the Node convenience —
    * and bring the schema up to date BEFORE handing the store out. Nothing can

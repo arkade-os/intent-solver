@@ -14,7 +14,7 @@ import type { FundedOutput, LockupSpendEvidence } from './wallet.js'
 import type { CovenantScriptRow } from './covenantRow.js'
 import type { SaveUnrolledSpend, UnrolledSpendRecord, UnrolledSpendStep } from './unrolledSpend.js'
 import type { SweptClaimEvidence, SweptClaimJournal } from './sweptClaimEvidence.js'
-import type { SweptClaimCommitment, SweptClaimRegistration } from './sweptClaim.js'
+import type { SweptClaimCommitment, SweptClaimPrepared, SweptClaimRegistration } from './sweptClaim.js'
 
 /** The Arkade operations the send-side orchestrators need, shaped for injection. */
 export interface ArkadeOps {
@@ -48,6 +48,11 @@ export interface ArkadeOps {
   lockupSpendEvidence(pkScriptHex: string): Promise<LockupSpendEvidence>
   /** Spend the claim leaf of the script the row describes, revealing the preimage. */
   claim(row: CovenantScriptRow, outputs: FundedOutput[], preimageHex: string): Promise<string>
+  claimDetailed?(
+    row: CovenantScriptRow,
+    outputs: FundedOutput[],
+    preimageHex: string,
+  ): Promise<{ txid: string; inputsActuallySubmitted: FundedOutput[] }>
   /** Finalize our claim arkd accepted without finalizing; its Arkade txid, or null when the lockup's spend is not that. */
   finalizePendingClaim?(row: CovenantScriptRow, preimageHex: string): Promise<string | null>
   /** Push the covenant refund of the script the row describes. Needs no keys of ours. */
@@ -79,6 +84,7 @@ export interface ArkadeOps {
     expectedSats: number,
     onRegistered: (registration: SweptClaimRegistration) => Promise<void>,
     onCommitmentValidated: (commitment: SweptClaimCommitment) => Promise<void>,
+    onPrepared?: (prepared: SweptClaimPrepared) => Promise<void>,
   ): Promise<string>
   verifySweptClaim?(journal: SweptClaimJournal): Promise<SweptClaimEvidence>
   deleteSweptClaim?(deleteProof: string): Promise<void>

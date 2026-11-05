@@ -102,6 +102,26 @@ describe('a swept send-leg lockup is claimed through a batch', () => {
       expect(await findLockups(ctx, pkScript)).toEqual([])
       expect(await lockupSpendEvidence(ctx, pkScript)).toBe('unspent')
 
+      const canceled: string[] = []
+      await expect(
+        claimSweptSwapScript(
+          ctx,
+          script,
+          swept,
+          PREIMAGE,
+          LOCKUP_SATS,
+          async () => {
+            canceled.push('registered')
+            throw new Error('cancel this registered claim')
+          },
+          undefined,
+          async () => {
+            canceled.push('prepared')
+          },
+        ),
+      ).rejects.toThrow('cancel this registered claim')
+      expect(canceled).toEqual(['prepared', 'registered'])
+
       let registered: SweptClaimRegistration | undefined
       let journal: SweptClaimJournal | undefined
       const callbackOrder: string[] = []
@@ -113,14 +133,8 @@ describe('a swept send-leg lockup is claimed through a batch', () => {
         LOCKUP_SATS,
         async (record) => {
           registered = record
-          journal = {
-            ...record,
-            registeredAt: Math.floor(Date.now() / 1000),
-            fundingOutpoints: swept.map(({ txid, vout, value }) => ({ txid, vout, value })),
-            lockupPkScript: pkScript,
-            recipientPkScript: hex.encode(payoutPkScript),
-            expectedSats: LOCKUP_SATS,
-          }
+          if (!journal) throw new Error('batch claim registered before the prepared journal')
+          journal = { ...journal, intentId: record.intentId }
           callbackOrder.push('registered')
         },
         async (evidence) => {
@@ -128,9 +142,21 @@ describe('a swept send-leg lockup is claimed through a batch', () => {
           journal = { ...journal, commitmentTxid: evidence.commitmentTxid, payoutOutpoints: evidence.payoutOutpoints }
           callbackOrder.push('validated')
         },
+        async (prepared) => {
+          journal = {
+            ...prepared,
+            intentId: null,
+            registeredAt: Math.floor(Date.now() / 1000),
+            fundingOutpoints: swept.map(({ txid, vout, value }) => ({ txid, vout, value })),
+            lockupPkScript: pkScript,
+            recipientPkScript: hex.encode(payoutPkScript),
+            expectedSats: LOCKUP_SATS,
+          }
+          callbackOrder.push('prepared')
+        },
       )
       expect(commitmentTxid).toMatch(/^[0-9a-f]{64}$/)
-      expect(callbackOrder).toEqual(['registered', 'validated'])
+      expect(callbackOrder).toEqual(['prepared', 'registered', 'validated'])
       expect(journal).toMatchObject({
         ...registered,
         commitmentTxid,

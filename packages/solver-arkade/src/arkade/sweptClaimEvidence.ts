@@ -9,7 +9,7 @@ export interface ClaimBatchOutpoint {
 }
 
 export interface SweptClaimJournal {
-  intentId: string
+  intentId: string | null
   proofTxid: string
   registeredAt: number
   fundingOutpoints: ClaimBatchOutpoint[]
@@ -53,8 +53,7 @@ export const parseSweptClaimJournal = (raw: string): SweptClaimJournal => {
   if (typeof parsed !== 'object' || parsed === null) throw new Error('invalid swept claim journal')
   const value = parsed as Record<string, unknown>
   if (
-    typeof value.intentId !== 'string' ||
-    value.intentId.length === 0 ||
+    (value.intentId !== null && (typeof value.intentId !== 'string' || value.intentId.length === 0)) ||
     !isTxid(value.proofTxid) ||
     !Number.isSafeInteger(value.registeredAt) ||
     (value.registeredAt as number) <= 0 ||
@@ -66,6 +65,8 @@ export const parseSweptClaimJournal = (raw: string): SweptClaimJournal => {
     !Number.isSafeInteger(value.expectedSats) ||
     (value.expectedSats as number) <= 0 ||
     (value.deleteProof !== undefined && !isCanonicalBase64(value.deleteProof)) ||
+    (value.intentId === null &&
+      (value.deleteProof === undefined || value.commitmentTxid !== undefined || value.payoutOutpoints !== undefined)) ||
     (value.commitmentTxid !== undefined && !isTxid(value.commitmentTxid)) ||
     (value.payoutOutpoints !== undefined &&
       (!Array.isArray(value.payoutOutpoints) || !value.payoutOutpoints.every(isOutpoint))) ||
@@ -97,6 +98,7 @@ export const verifySweptClaimCommitment = async (
   journal: SweptClaimJournal,
 ): Promise<SweptClaimEvidence> => {
   const { commitmentTxid, payoutOutpoints, fundingOutpoints, lockupPkScript, recipientPkScript, expectedSats } = journal
+  if (journal.intentId === null) return { status: 'pending' }
   if (!commitmentTxid || !payoutOutpoints?.length) return { status: 'pending' }
   if (
     fundingOutpoints.length === 0 ||
@@ -148,10 +150,10 @@ export const verifySweptClaimCommitment = async (
     if (coin.value !== expected.value || coin.script !== recipientPkScript || (coin.assets ?? []).length > 0) {
       return { status: 'conflict', reason: `batch claim payout ${keyOf(expected)} changed` }
     }
-    if (coin.commitmentTxIds && !coin.commitmentTxIds.includes(commitmentTxid)) {
+    if (coin.commitmentTxIds?.length && !coin.commitmentTxIds.includes(commitmentTxid)) {
       return { status: 'conflict', reason: `batch claim payout ${keyOf(expected)} belongs to another batch` }
     }
-    if (!coin.commitmentTxIds) pending = true
+    if (!coin.commitmentTxIds?.length) pending = true
   }
   if (pending) return { status: 'pending' }
   return { status: 'claimed', commitmentTxid }

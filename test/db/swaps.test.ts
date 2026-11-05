@@ -192,6 +192,21 @@ describe('transition', () => {
 })
 
 describe('patch', () => {
+  it('atomically reserves a claim journal against a stale writer', async () => {
+    await store.insertQuote(quote())
+    await store.transition('swap-1', 'quoted', 'funded')
+    await store.transition('swap-1', 'funded', 'claiming', { preimage: 'aa'.repeat(32) })
+    const first = '[{"intentId":"first"}]'
+    const second = '[{"intentId":"second"}]'
+    expect(await store.compareAndSwapClaimBatch('swap-1', null, first)).toBe(true)
+    expect(await store.compareAndSwapClaimBatch('swap-1', null, second)).toBe(false)
+    expect((await store.get('swap-1')).claimBatch).toBe(first)
+    expect(await store.compareAndSwapClaimBatch('swap-1', first, second)).toBe(true)
+    expect((await store.get('swap-1')).claimBatch).toBe(second)
+    await store.transition('swap-1', 'claiming', 'claimed')
+    expect(await store.compareAndSwapClaimBatch('swap-1', second, null)).toBe(false)
+  })
+
   it('refuses to touch a column outside its allowlist — never state', async () => {
     await store.insertQuote(quote())
     await expect(store.patch('swap-1', { state: 'claimed' })).rejects.toThrow(/may not set/)

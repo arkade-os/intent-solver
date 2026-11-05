@@ -220,7 +220,7 @@ export const REFUSAL_EXPLANATIONS: Record<RefusalReason, RefusalExplanation> = {
   },
   uncapped_route_deadline_too_short: {
     meaning:
-      'The Lightning backend cannot limit the route’s CLTV, and the scripted refund deadline no longer leaves enough time for the longest possible payment.',
+      'The Lightning backend cannot limit the route’s CLTV, and the time available to claim this lockup no longer covers the longest possible payment. For older swaps this can be the VTXO expiry; for newer batch-claim swaps it is the scripted refund deadline.',
     whatToDo:
       'Check that this lockup was refunded, then request a new quote. If this recurs, check for delayed funding or a changed Lightning backend.',
   },

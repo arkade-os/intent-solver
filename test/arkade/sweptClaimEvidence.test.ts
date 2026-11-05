@@ -52,6 +52,8 @@ const indexerWith = (rows: VirtualCoin[]) => {
 describe('swept claim commitment evidence', () => {
   it('decodes each journal stage and rejects malformed persisted evidence', () => {
     const registered = journal({ commitmentTxid: undefined, payoutOutpoints: undefined })
+    const prepared = { ...registered, intentId: null, deleteProof: 'AQIDBA==' }
+    expect(parseSweptClaimJournal(JSON.stringify(prepared))).toEqual(prepared)
     expect(parseSweptClaimJournal(JSON.stringify(registered))).toEqual(registered)
     const withDeleteProof = { ...registered, deleteProof: 'AQIDBA==' }
     expect(parseSweptClaimJournal(JSON.stringify(withDeleteProof))).toEqual(withDeleteProof)
@@ -81,6 +83,15 @@ describe('swept claim commitment evidence', () => {
     })
     expect(getVtxos).not.toHaveBeenCalled()
     await expect(verifySweptClaimCommitment(indexer, journal())).resolves.toEqual({ status: 'pending' })
+    await expect(verifySweptClaimCommitment(indexer, journal({ intentId: null }))).resolves.toEqual({
+      status: 'pending',
+    })
+    await expect(verifySweptClaimCommitment(indexerWith([payout()]).indexer, journal())).resolves.toEqual({
+      status: 'pending',
+    })
+    await expect(
+      verifySweptClaimCommitment(indexerWith([funding(), payout({ commitmentTxIds: [] })]).indexer, journal()),
+    ).resolves.toEqual({ status: 'pending' })
   })
 
   it('does not mistake a competing spend or unrelated payout for a claim', async () => {

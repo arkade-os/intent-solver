@@ -351,6 +351,8 @@ export interface FundedOutput {
   txid: string
   vout: number
   value: number
+  /** Mint time used by the server's intent fee program. */
+  createdAt?: Date
   /** Assets carried, when any. Absent rather than empty on a sats lockup. */
   assets?: readonly FundedAsset[]
   /** Batch expiry in unix seconds, when the server gave a wall-clock one. The block-typed `expiresAtHeight` needs a chain tip, and stays unmapped. */
@@ -408,6 +410,7 @@ const lockupsMatching = async (
         txid: vtxo.txid,
         vout: vtxo.vout,
         value: Number(vtxo.value),
+        ...(vtxo.createdAt ? { createdAt: vtxo.createdAt } : {}),
         ...(assets.length > 0 ? { assets } : {}),
         ...(vtxo.expiresAt ? { expiresAt: Math.floor(vtxo.expiresAt.getTime() / 1000) } : {}),
       })
@@ -603,18 +606,18 @@ const preimageSigner = (identity: ArkadeContext['identity'], preimage: Uint8Arra
   )
 
 /** Spend a swap script's claim leaf, revealing the preimage; throws on any server response the SDK cannot verify. */
-export const claimSwapScript = async (
+export const claimSwapScriptDetailed = async (
   ctx: ArkadeContext,
   script: ClaimableScript,
   funded: readonly FundedOutput[],
   preimage: Uint8Array,
   destination: string,
-): Promise<string> => {
+): Promise<{ txid: string; inputsActuallySubmitted: FundedOutput[] }> => {
   if (funded.length === 0) throw new Error('nothing to claim: no funded outputs')
   const inputs = spendable(funded, 'claim')
   // Anyone can add an asset to a lockup; without its packet arkd refuses the claim, after we already paid.
   const assetPacket = refundAssetPacket(inputs, 'aggregate')
-  return signAndSubmitOffchainTx({
+  const txid = await signAndSubmitOffchainTx({
     // Signs every checkpoint before submit, so each carries the preimage arkd v0.9.24+ demands there.
     identity: preimageSigner(ctx.identity, preimage),
     provider: ctx.wallet.arkProvider,
@@ -633,7 +636,16 @@ export const claimSwapScript = async (
     // The leaf's own key, not the wallet's live one: a lockup quoted before a signer rotation is co-signed under it.
     verifyServerSignatures: { serverPubkey: script.vhtlcOptions.server },
   })
+  return { txid, inputsActuallySubmitted: inputs }
 }
+
+export const claimSwapScript = async (
+  ctx: ArkadeContext,
+  script: ClaimableScript,
+  funded: readonly FundedOutput[],
+  preimage: Uint8Array,
+  destination: string,
+): Promise<string> => (await claimSwapScriptDetailed(ctx, script, funded, preimage, destination)).txid
 
 /**
  * Finalize OUR spend that arkd accepted and never finalized, which leaves the lockup spent with no output;

@@ -1640,7 +1640,7 @@ export class SendSwapService {
 
   private async availableLockups(row: SendSwapRow): Promise<FundedOutput[]> {
     const spendable = await this.deps.arkade.findLockups(row.pkScript)
-    if (!this.batchClaimReady(row)) return spendable
+    if (!this.batchClaimReady(row) || row.lockupOutpoints === null) return spendable
     const swept = await this.deps.arkade.findSweptLockups!(row.pkScript)
     const seen = new Set(spendable.map(outpointKey))
     return [...spendable, ...swept.filter((output) => !seen.has(outpointKey(output)))]
@@ -1987,10 +1987,19 @@ export class SendSwapService {
       throw new Error(`swap ${row.id}: adopted lockup value does not match the paid amount`)
     }
     const batches = claimBatches(row.claimBatch)
+    let journalRaw = row.claimBatch
+    const persistBatches = async () => {
+      const next = batches.length > 0 ? JSON.stringify(batches) : null
+      if (!(await store.compareAndSwapClaimBatch(row.id, journalRaw, next))) {
+        throw new Error(`swap ${row.id}: batch claim journal changed concurrently; retry from the stored row`)
+      }
+      journalRaw = next
+    }
     const claimedInBatch: ClaimBatchOutpoint[] = []
     const adoptedValues = new Map(adopted.map((point) => [outpointKey(point), point.value]))
     const reservedKeys = new Set<string>()
     const pendingBatches: SweptClaimJournal[] = []
+    let batchError: unknown
     let currentSwept = seenSwept
     for (let index = 0; index < batches.length;) {
       const batch = batches[index]!
@@ -2007,6 +2016,15 @@ export class SendSwapService {
         return false
       }
       if (!batch.commitmentTxid && this.now() - batch.registeredAt >= (2 * SWEPT_REFUND_BATCH_TIMEOUT_MS) / 1000) {
+        if (batch.intentId === null) {
+          batchError ??= new Error(
+            `swap ${row.id}: prepared batch ${batch.proofTxid} registration outcome is unknown; needs review`,
+          )
+          for (const point of batch.fundingOutpoints) reservedKeys.add(outpointKey(point))
+          pendingBatches.push(batch)
+          index += 1
+          continue
+        }
         if (!batch.deleteProof) {
           await store.fail(
             row.id,
@@ -2015,19 +2033,27 @@ export class SendSwapService {
           )
           return false
         }
-        await arkade.deleteSweptClaim!(batch.deleteProof)
-        currentSwept = await arkade.findSweptLockups!(row.pkScript)
-        const recovered = matchingLockups(batch.fundingOutpoints, currentSwept)
-        const history = await arkade.findLockupOutpoints(row.pkScript)
-        const stillUnspent = batch.fundingOutpoints.every((point) =>
-          history.some((output) => outpointKey(output) === outpointKey(point) && !output.spent && !output.unrolled),
-        )
-        if (!recovered || !stillUnspent) {
-          throw new Error(`swap ${row.id}: batch ${batch.intentId} cancelled but exact swept funding is unverified`)
+        try {
+          await arkade.deleteSweptClaim!(batch.deleteProof)
+          currentSwept = await arkade.findSweptLockups!(row.pkScript)
+          const recovered = matchingLockups(batch.fundingOutpoints, currentSwept)
+          const history = await arkade.findLockupOutpoints(row.pkScript)
+          const stillUnspent = batch.fundingOutpoints.every((point) =>
+            history.some((output) => outpointKey(output) === outpointKey(point) && !output.spent && !output.unrolled),
+          )
+          if (!recovered || !stillUnspent) {
+            throw new Error(`swap ${row.id}: batch ${batch.intentId} cancelled but exact swept funding is unverified`)
+          }
+          batches.splice(index, 1)
+          await persistBatches()
+          continue
+        } catch (error) {
+          batchError ??= error
+          for (const point of batch.fundingOutpoints) reservedKeys.add(outpointKey(point))
+          pendingBatches.push(batch)
+          index += 1
+          continue
         }
-        batches.splice(index, 1)
-        await store.patch(row.id, { claim_batch: batches.length > 0 ? JSON.stringify(batches) : null })
-        continue
       }
       for (const point of batch.fundingOutpoints) reservedKeys.add(outpointKey(point))
       const evidence = await arkade.verifySweptClaim!(batch)
@@ -2052,6 +2078,21 @@ export class SendSwapService {
     if (sweptNow.length > 0) {
       const fundingOutpoints = sweptNow.map(({ txid, vout, value }) => ({ txid, vout, value }))
       const expectedSats = fundingOutpoints.reduce((sum, point) => sum + point.value, 0)
+      let journaledThisCall = false
+      const onPrepared = async ({ proofTxid, deleteProof }: { proofTxid: string; deleteProof: string }) => {
+        batches.push({
+          intentId: null,
+          proofTxid,
+          deleteProof,
+          registeredAt: this.now(),
+          fundingOutpoints,
+          lockupPkScript: row.pkScript,
+          recipientPkScript: row.receiverPkScript!,
+          expectedSats,
+        })
+        await persistBatches()
+        journaledThisCall = true
+      }
       const onRegistered = async ({
         intentId,
         proofTxid,
@@ -2061,18 +2102,25 @@ export class SendSwapService {
         proofTxid: string
         deleteProof: string
       }) => {
-        const journal: SweptClaimJournal = {
-          intentId,
-          proofTxid,
-          deleteProof,
-          registeredAt: this.now(),
-          fundingOutpoints,
-          lockupPkScript: row.pkScript,
-          recipientPkScript: row.receiverPkScript!,
-          expectedSats,
+        const prepared = batches.at(-1)
+        if (prepared?.intentId === null && prepared.proofTxid === proofTxid && prepared.deleteProof === deleteProof) {
+          batches[batches.length - 1] = { ...prepared, intentId }
+        } else if (!journaledThisCall) {
+          batches.push({
+            intentId,
+            proofTxid,
+            deleteProof,
+            registeredAt: this.now(),
+            fundingOutpoints,
+            lockupPkScript: row.pkScript,
+            recipientPkScript: row.receiverPkScript!,
+            expectedSats,
+          })
+        } else {
+          throw new Error(`swap ${row.id}: registered batch does not match its prepared proof`)
         }
-        batches.push(journal)
-        await store.patch(row.id, { claim_batch: JSON.stringify(batches) })
+        await persistBatches()
+        journaledThisCall = true
       }
       const onCommitmentValidated = async ({
         intentId,
@@ -2097,9 +2145,31 @@ export class SendSwapService {
           throw new Error(`swap ${row.id}: batch commitment did not match its registration`)
         }
         batches[batches.length - 1] = { ...journal, commitmentTxid, payoutOutpoints }
-        await store.patch(row.id, { claim_batch: JSON.stringify(batches) })
+        await persistBatches()
       }
-      await arkade.claimSwept!(row, sweptNow, row.preimage, expectedSats, onRegistered, onCommitmentValidated)
+      try {
+        await arkade.claimSwept!(
+          row,
+          sweptNow,
+          row.preimage,
+          expectedSats,
+          onRegistered,
+          onCommitmentValidated,
+          onPrepared,
+        )
+      } catch (error) {
+        if (
+          !journaledThisCall &&
+          (await store.get(row.id)).claimBatch === journalRaw &&
+          (await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip))
+        ) {
+          const detail = error instanceof Error ? error.message : String(error)
+          const recourse = unilateralExitRecourse(row, { solverPubkey: arkade.providerPubkey })
+          await store.fail(row.id, 'claiming', `batch claim failing past the refund deadline: ${detail} — ${recourse}`)
+          return false
+        }
+        throw error
+      }
       const journal = batches.at(-1)
       if (!journal) throw new Error(`swap ${row.id}: batch claim has no registration journal`)
       const evidence = await arkade.verifySweptClaim!(journal)
@@ -2136,14 +2206,23 @@ export class SendSwapService {
       {
         findLockupOutpoints: async (script) =>
           (await arkade.findLockupOutpoints!(script)).filter((output) => selected.has(outpointKey(output))),
-        claimUnrolled: arkade.claimUnrolled,
+        claimUnrolled: arkade.claimUnrolled?.bind(arkade),
       },
       row,
       row.preimage,
     )
     let txid: string | null = null
+    let spendableClaimed: FundedOutput[] = []
     try {
-      if (spendable.length > 0) txid = await arkade.claim(row, spendable, row.preimage)
+      if (spendable.length > 0) {
+        if (arkade.claimDetailed) {
+          const submitted = await arkade.claimDetailed(row, spendable, row.preimage)
+          txid = submitted.txid
+          spendableClaimed = submitted.inputsActuallySubmitted
+        } else {
+          txid = await arkade.claim(row, spendable, row.preimage)
+        }
+      }
     } catch (error) {
       if (await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip)) {
         const detail = error instanceof Error ? error.message : String(error)
@@ -2155,6 +2234,7 @@ export class SendSwapService {
     }
     if (pendingBatches.length > 0) {
       if (txid !== null) await store.patch(row.id, { claim_ark_txid: txid })
+      if (batchError !== undefined) throw batchError
       if (await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip)) {
         await store.fail(row.id, 'claiming', 'batch claim commitment has no verified payout at the refund deadline')
       } else if (
@@ -2167,8 +2247,12 @@ export class SendSwapService {
       }
       return false
     }
-    const leftover = await lockupLeftover(arkade, row, [...claimedInBatch, ...spendable], unrolled)
     const recourse = () => unilateralExitRecourse(row, { solverPubkey: arkade.providerPubkey })
+    if (unrolled !== null && !unrolled.settled) {
+      if (txid !== null) await store.patch(row.id, { claim_ark_txid: txid })
+      return settleUnrolledClaims(store, row.id, { from: 'claiming', to: 'claimed' }, unrolled, recourse)
+    }
+    const leftover = await lockupLeftover(arkade, row, [...claimedInBatch, ...spendableClaimed], unrolled)
     if (leftover.length > 0) {
       return awaitLeftover(
         store,
@@ -2178,6 +2262,9 @@ export class SendSwapService {
         await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip),
         recourse,
       )
+    }
+    if ((await store.get(row.id)).claimBatch !== journalRaw) {
+      throw new Error(`swap ${row.id}: batch claim journal changed while collecting; retry from the stored row`)
     }
     let claimTxid = txid ?? row.claimArkTxid ?? batches.at(-1)?.commitmentTxid ?? null
     if (claimTxid === null && unrolled === null) {
