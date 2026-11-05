@@ -197,7 +197,11 @@ export interface FundSource extends FundSourceInfo {
    * rounding: this is the money path, and a rounded withdrawal is a wrong number
    * nobody typed.
    */
-  withdraw?(params: { address: string; amount: string }): Promise<FundWithdrawal>
+  withdraw?(params: {
+    address: string
+    amount: string
+    onSending?: (feeSats: number) => Promise<void>
+  }): Promise<FundWithdrawal>
 }
 
 /** Which of the three optional operations a source actually offers. */

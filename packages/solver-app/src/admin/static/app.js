@@ -3569,6 +3569,24 @@ const runAction = async (name, body) => {
     // A refunded or parked row leaves the live set, so no stream event will ever name it.
     if (state.detail) await openDetail(state.detail.swap, true)
   } catch (error) {
+    const uncertainWithdrawal =
+      name === 'fund-withdraw' &&
+      (error?.body?.error === 'withdrawal_uncertain' ||
+        typeof error?.status !== 'number' ||
+        !error?.body ||
+        typeof error.body !== 'object')
+    if (uncertainWithdrawal) {
+      state.dialog = null
+      delete state.data.withdrawDrafts?.[body.source]
+      state.withdrawing = null
+      state.result = null
+      const detail = error instanceof Error ? error.message : String(error)
+      state.banner =
+        error?.body?.error === 'withdrawal_uncertain'
+          ? detail
+          : `Withdrawal status is unknown. The payment may have gone out. Check the wallet and chain before retrying. Request error: ${detail}`
+      return
+    }
     // A failure belongs INSIDE the dialog that caused it. The page banner
     // renders behind the scrim, so an operator would have to dismiss the
     // dialog — losing the value they typed — just to read why their refund

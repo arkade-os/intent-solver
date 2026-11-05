@@ -13,6 +13,7 @@ import {
   checkpointChanges,
   checkpointNotices,
   formatCheckpointDeferral,
+  formatOperatorWithdrawalNotice,
   formatCheckpointRecovery,
   formatCheckpointWarning,
   rebalanceOverlapReady,
@@ -54,6 +55,13 @@ const lockup = (sender: Uint8Array, receiver: Uint8Array, value: number) => {
 
 const fixture = async (path?: string) => {
   const arkade = { total: 1_000, assets: [{ assetId: 'aa'.repeat(34), amount: 10n ** 25n }] }
+  const history: {
+    key: { boardingTxid: string; commitmentTxid: string; arkTxid: string }
+    type: 'SENT'
+    amount: number
+    settled: boolean
+    createdAt: number
+  }[] = []
   const lightning = { availableSats: 2_000, incomingSats: 90_000 }
   const onchain = { confirmedSats: 3_000, unconfirmedSats: 400, sharedWithLightning: false }
   const lockups: ReturnType<typeof lockup>[] = []
@@ -63,7 +71,11 @@ const fixture = async (path?: string) => {
     config: { network: 'regtest', lnBackend: 'lnd', arkade: { operatorUrl: 'http://arkade.test' } },
     providerPubkey: 'provider',
     arkade: {
-      wallet: { getBalance: vi.fn(async () => arkade), getContractManager: async () => ({ getContractsWithVtxos }) },
+      wallet: {
+        getBalance: vi.fn(async () => arkade),
+        getTransactionHistory: vi.fn(async () => history),
+        getContractManager: async () => ({ getContractsWithVtxos }),
+      },
       identity: { xOnlyPublicKey: async () => SOLVER },
     },
     ln: { getBalance: vi.fn(async () => lightning) },
@@ -72,6 +84,7 @@ const fixture = async (path?: string) => {
   return {
     services,
     arkade,
+    history,
     lightning,
     onchain,
     lockups,
@@ -132,11 +145,317 @@ const overlapFixture = async (path?: string) => {
   return { ...f, first, second }
 }
 
+const withdrawalFixture = async (path?: string) => {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  const f = await fixture(path)
+  const sample = async () => {
+    const result = await f.sample()
+    vi.setSystemTime(Date.now() + 1_000)
+    return result
+  }
+  const create = async (id = 'withdrawal-1', amountSats = 500) =>
+    f.services.adminStore.createOperatorWithdrawal({
+      id,
+      scope: balanceCheckpointScope(f.services),
+      source: 'arkade',
+      address: 'bc1destination',
+      amountSats,
+    })
+  const sent = async (id = 'withdrawal-1', feeSats = 10) => {
+    await f.services.adminStore.transitionOperatorWithdrawal(id, 'preparing', 'sending')
+    const row = await f.services.adminStore.transitionOperatorWithdrawal(id, 'sending', 'sent', {
+      feeSats,
+      reference: 'ab'.repeat(32),
+    })
+    f.history.push({
+      key: { boardingTxid: '', commitmentTxid: '', arkTxid: row.reference! },
+      type: 'SENT',
+      amount: row.amountSats + feeSats,
+      settled: true,
+      createdAt: Date.now(),
+    })
+    return row
+  }
+  return { ...f, sample, create, sent }
+}
+
 afterEach(async () => {
   vi.useRealTimers()
   await Promise.all(stores.splice(0).map((store) => store.close()))
   await Promise.all(rebalanceDrivers.splice(0).map((driver) => driver.close()))
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true })
+})
+
+describe('operator withdrawal balance accounting', () => {
+  it('accounts for an exact observed Arkade debit without changing the raw balance or sending a recovery', async () => {
+    const f = await withdrawalFixture()
+    await f.sample()
+    await f.create()
+    await f.sent()
+    f.arkade.total -= 510
+    const accounted = await f.sample()
+    expect(accounted.totalSats).toBe('5890')
+    expect(accounted.operatorWithdrawals?.explained?.[0]?.debitSats).toBe('510')
+    expect(accounted.decreases).toEqual([])
+    expect(formatOperatorWithdrawalNotice(accounted, 'regtest')).toContain('OPERATOR WITHDRAWAL ACCOUNTED FOR')
+    expect(formatOperatorWithdrawalNotice(accounted, 'regtest')).toContain('destination receipt is not verified')
+    const next = await f.sample()
+    expect(formatCheckpointWarning(next, 'regtest')).toBeNull()
+    expect(formatCheckpointRecovery(next, 'regtest')).toBeNull()
+  })
+
+  it('still reports an unrelated excess drop after the documented withdrawal', async () => {
+    const f = await withdrawalFixture()
+    await f.sample()
+    await f.create()
+    await f.sent()
+    f.arkade.total -= 535
+    const drop = await f.sample()
+    expect(drop.decreases).toEqual([expect.objectContaining({ asset: 'BTC', decrease: '25' })])
+    expect(formatCheckpointWarning(await f.sample(), 'regtest')).toContain('25 sats')
+  })
+
+  it('waits for the source debit after send success and preserves pending attribution across restart', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'solver-operator-withdrawal-'))
+    directories.push(directory)
+    const path = join(directory, 'admin.sqlite')
+    const f = await withdrawalFixture(path)
+    await f.sample()
+    await f.create()
+    await f.sent()
+    const stale = await f.sample()
+    expect(stale.operatorWithdrawals?.observedSourceDropSats).toBe('0')
+    expect(formatOperatorWithdrawalNotice(stale, 'regtest')).toContain('WITHDRAWAL BALANCE CHECK PENDING')
+    expect(stale.decreases).toEqual([])
+    await f.services.adminStore.close()
+    const restarted = await fixture(path)
+    restarted.history.push(...f.history)
+    restarted.arkade.total -= 510
+    const accounted = await restarted.sample()
+    expect(accounted.operatorWithdrawals?.explained).toEqual([
+      { id: 'withdrawal-1', reference: 'ab'.repeat(32), address: 'bc1destination', debitSats: '510' },
+    ])
+    expect(accounted.decreases).toEqual([])
+    expect(accounted.recovered).toEqual([])
+  })
+
+  it('defers an in-flight send, then accounts for the observed debit when its fee and reference arrive', async () => {
+    const f = await withdrawalFixture()
+    await f.sample()
+    await f.create()
+    await f.services.adminStore.transitionOperatorWithdrawal('withdrawal-1', 'preparing', 'sending')
+    f.arkade.total -= 510
+    const sending = await f.sample()
+    expect(sending.operatorWithdrawals?.observedSourceDropSats).toBe('510')
+    expect(sending.operatorWithdrawals?.deferred).toBeDefined()
+    expect(sending.decreases).toEqual([])
+    expect(formatCheckpointWarning(await f.sample(), 'regtest')).toBeNull()
+    await f.services.adminStore.transitionOperatorWithdrawal('withdrawal-1', 'sending', 'sent', {
+      feeSats: 10,
+      reference: 'ab'.repeat(32),
+    })
+    f.history.push({
+      key: { boardingTxid: '', commitmentTxid: '', arkTxid: 'ab'.repeat(32) },
+      type: 'SENT',
+      amount: 510,
+      settled: true,
+      createdAt: Date.now(),
+    })
+    const accounted = await f.sample()
+    expect(accounted.operatorWithdrawals?.deferred).toBeUndefined()
+    expect(accounted.operatorWithdrawals?.explained?.[0]?.debitSats).toBe('510')
+    expect(accounted.decreases).toEqual([])
+    expect(accounted.recovered).toEqual([])
+  })
+
+  it('does not let a preparing or failed withdrawal mask an unrelated loss', async () => {
+    const f = await withdrawalFixture()
+    await f.sample()
+    await f.create()
+    f.arkade.total -= 20
+    const preparing = await f.sample()
+    expect(preparing.decreases[0]?.decrease).toBe('20')
+    await f.services.adminStore.transitionOperatorWithdrawal('withdrawal-1', 'preparing', 'failed')
+    expect(formatCheckpointWarning(await f.sample(), 'regtest')).toContain('20 sats')
+  })
+
+  it('does not count a simultaneous rebalance source debit as a withdrawal debit', async () => {
+    const f = await rebalanceFixture()
+    await f.sample()
+    await f.store.create(f.transfer)
+    await f.services.adminStore.createOperatorWithdrawal({
+      id: 'withdrawal-1',
+      scope: balanceCheckpointScope(f.services),
+      source: 'arkade',
+      address: 'bc1destination',
+      amountSats: 100,
+    })
+    await f.services.adminStore.transitionOperatorWithdrawal('withdrawal-1', 'preparing', 'sending')
+    await f.services.adminStore.transitionOperatorWithdrawal('withdrawal-1', 'sending', 'sent', {
+      feeSats: 10,
+      reference: 'ab'.repeat(32),
+    })
+    f.history.push({
+      key: { boardingTxid: '', commitmentTxid: '', arkTxid: 'ab'.repeat(32) },
+      type: 'SENT',
+      amount: 110,
+      settled: true,
+      createdAt: Date.now(),
+    })
+    f.arkade.total -= 500
+    const ambiguous = await f.sample()
+    expect(ambiguous.operatorWithdrawals?.observedSourceDropSats).toBe('500')
+    expect(ambiguous.operatorWithdrawals?.deferred).toBeDefined()
+    expect(ambiguous.operatorWithdrawals?.explained).toBeUndefined()
+    f.arkade.total -= 110
+    await f.sample()
+    f.onchain.confirmedSats += 498
+    f.transfer.state = 'completed'
+    f.transfer.creditedSats = 498
+    await f.save()
+    const accounted = await f.sample()
+    expect(accounted.operatorWithdrawals?.explained?.[0]?.debitSats).toBe('110')
+    expect(accounted.decreases).toEqual([])
+  })
+
+  it('keeps BTC deferred when the withdrawal debit was first mistaken for a rebalance debit', async () => {
+    const f = await rebalanceFixture()
+    await f.sample()
+    await f.store.create(f.transfer)
+    await f.services.adminStore.createOperatorWithdrawal({
+      id: 'withdrawal-1',
+      scope: balanceCheckpointScope(f.services),
+      source: 'arkade',
+      address: 'bc1destination',
+      amountSats: 100,
+    })
+    await f.services.adminStore.transitionOperatorWithdrawal('withdrawal-1', 'preparing', 'sending')
+    await f.services.adminStore.transitionOperatorWithdrawal('withdrawal-1', 'sending', 'sent', {
+      feeSats: 10,
+      reference: 'ab'.repeat(32),
+    })
+    f.history.push({
+      key: { boardingTxid: '', commitmentTxid: 'ab'.repeat(32), arkTxid: '' },
+      type: 'SENT',
+      amount: 110,
+      settled: true,
+      createdAt: Date.now(),
+    })
+    f.arkade.total -= 110
+    const withdrawalFirst = await f.sample()
+    expect(withdrawalFirst.operatorWithdrawals?.deferred).toBeDefined()
+    f.arkade.total -= 500
+    await f.sample()
+    f.onchain.confirmedSats += 498
+    f.transfer.state = 'completed'
+    f.transfer.creditedSats = 498
+    await f.save()
+    const ambiguous = await f.sample()
+    expect(ambiguous.operatorWithdrawals?.rebalanceAttributionAmbiguous).toBe(true)
+    expect(ambiguous.decreases).toEqual([])
+    expect(ambiguous.recovered).toEqual([])
+    expect(formatOperatorWithdrawalNotice(ambiguous, 'regtest')).toContain('Manual reconciliation is needed')
+    f.arkade.assets[0]!.amount -= 5n
+    const next = await f.sample()
+    expect(next.decreases.map((row) => row.asset)).toEqual([`arkade:${f.arkade.assets[0]!.assetId}`])
+    expect(next.decreases.some((row) => row.asset === 'BTC')).toBe(false)
+    expect(formatCheckpointWarning(next, 'regtest')).toBeNull()
+  })
+
+  it('does not account for an Arkade drop without matching settled wallet history', async () => {
+    const f = await withdrawalFixture()
+    await f.sample()
+    await f.create()
+    await f.sent()
+    f.history[0]!.settled = false
+    f.arkade.total -= 510
+    const pending = await f.sample()
+    expect(pending.operatorWithdrawals?.deferred).toBeDefined()
+    expect(pending.operatorWithdrawals?.explained).toBeUndefined()
+    f.history[0]!.settled = true
+    const accounted = await f.sample()
+    expect(accounted.operatorWithdrawals?.explained?.[0]?.debitSats).toBe('510')
+    expect(accounted.decreases).toEqual([])
+  })
+
+  it('accounts for two concurrent withdrawals with distinct settled transactions', async () => {
+    const f = await withdrawalFixture()
+    await f.sample()
+    await f.create('first', 500)
+    await f.create('second', 300)
+    for (const [id, feeSats, reference, amount] of [
+      ['first', 10, 'ab'.repeat(32), 510],
+      ['second', 20, 'cd'.repeat(32), 320],
+    ] as const) {
+      await f.services.adminStore.transitionOperatorWithdrawal(id, 'preparing', 'sending')
+      await f.services.adminStore.transitionOperatorWithdrawal(id, 'sending', 'sent', { feeSats, reference })
+      f.history.push({
+        key: { boardingTxid: '', commitmentTxid: '', arkTxid: reference },
+        type: 'SENT',
+        amount,
+        settled: true,
+        createdAt: Date.now(),
+      })
+    }
+    f.arkade.total -= 830
+    const accounted = await f.sample()
+    expect(accounted.operatorWithdrawals?.explained?.map(({ id }) => id)).toEqual(['first', 'second'])
+    expect(accounted.operatorWithdrawals?.deferred).toBeUndefined()
+    expect(accounted.decreases).toEqual([])
+    expect(formatCheckpointWarning(await f.sample(), 'regtest')).toBeNull()
+  })
+
+  it('reminds the operator to verify a long-pending send by journal ID', async () => {
+    const f = await withdrawalFixture()
+    await f.sample()
+    await f.create()
+    await f.services.adminStore.transitionOperatorWithdrawal('withdrawal-1', 'preparing', 'sending')
+    const first = await f.sample()
+    expect(formatOperatorWithdrawalNotice(first, 'regtest')).toContain('withdrawal-1')
+    vi.setSystemTime(Date.now() + 30 * 60 * 1_000)
+    const reminder = await f.sample()
+    expect(formatOperatorWithdrawalNotice(reminder, 'regtest')).toContain('Action needed')
+    expect(formatOperatorWithdrawalNotice(reminder, 'regtest')).toContain('wallet transaction and destination receipt')
+    expect(formatOperatorWithdrawalNotice(await f.sample(), 'regtest')).toBeNull()
+  })
+
+  it.each(['sending', 'uncertain'] as const)(
+    'shows one initial notice when the first baseline starts during a %s withdrawal',
+    async (state) => {
+      const f = await withdrawalFixture()
+      await f.create()
+      await f.services.adminStore.transitionOperatorWithdrawal('withdrawal-1', 'preparing', state)
+      const first = await f.sample()
+      expect(first.previousId).toBeNull()
+      expect(formatOperatorWithdrawalNotice(first, 'regtest')).toContain('withdrawal-1')
+      const next = await f.sample()
+      expect(formatOperatorWithdrawalNotice(next, 'regtest')).toBeNull()
+      vi.setSystemTime(Date.now() + 30 * 60 * 1_000)
+      const reminder = await f.sample()
+      expect(formatOperatorWithdrawalNotice(reminder, 'regtest')).toContain('Action needed')
+      expect(formatOperatorWithdrawalNotice(await f.sample(), 'regtest')).toBeNull()
+    },
+  )
+
+  it('shows a newly explained withdrawal alongside another pending one between reminders', async () => {
+    const f = await withdrawalFixture()
+    await f.sample()
+    await f.create()
+    await f.services.adminStore.transitionOperatorWithdrawal('withdrawal-1', 'preparing', 'sending')
+    await f.sample()
+    const quiet = await f.sample()
+    expect(formatOperatorWithdrawalNotice(quiet, 'regtest')).toBeNull()
+    const combined = {
+      ...quiet,
+      operatorWithdrawals: {
+        ...quiet.operatorWithdrawals!,
+        explained: [{ id: 'withdrawal-2', reference: 'ab'.repeat(32), address: 'bc1other', debitSats: '110' }],
+      },
+    }
+    const notice = formatOperatorWithdrawalNotice(combined, 'regtest')
+    expect(notice).toContain('110 sats left Arkade for bc1other')
+    expect(notice).toContain('withdrawal-1')
+  })
 })
 
 describe('rebalance balance accounting', () => {

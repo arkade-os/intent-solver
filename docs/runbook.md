@@ -187,6 +187,30 @@ incomplete, never zero, and do not replace the comparison baseline. The baseline
 survives restarts and is separated by network, Arkade server, provider identity,
 and backend (including the LND socket).
 
+Console withdrawals from Arkade are journaled before sending. Checkpoints wait
+while a send or its source debit is uncertain, and send a withdrawal balance
+check notice with the journal ID, destination and transaction reference. A
+withdrawal is labeled accounted for only after the wallet history shows its
+settled outgoing transaction and the Arkade debit is observed. The notice does
+not prove destination receipt. If a withdrawal overlaps an ambiguous rebalance,
+BTC classification stays paused and reminders call for manual reconciliation;
+asset checks continue. An additional unexplained BTC decrease can still raise
+`POSSIBLE LOSS` once attribution is resolved. Earlier alerts are not
+retroactively reclassified by this journal.
+
+A `sending` or `uncertain` withdrawal with no transaction reference needs an
+operator check. The notice repeats every 30 minutes and BTC classification
+remains paused for that scope. Stop the solver and back up the admin SQLite
+database before reconciling. Inspect `operator_withdrawal` by journal ID and
+scope, then compare the destination with the audit/chain record and the wallet's
+outgoing history. If a settled outgoing transaction is verified, set that row
+to `sent`, its `reference` to the matching wallet transaction ID, and its
+`fee_sats` to the verified net debit minus `amount_sats`; update only that ID,
+scope and a `sending` or `uncertain` state. Mark it `failed` only with positive
+evidence that nothing was sent. Absence from a delayed index is not that
+evidence. Restart and check the next checkpoint; keep a record of the evidence
+used for the correction.
+
 Each decrease is then followed against its own before amount. The first later
 complete checkpoint where that asset is back at or above it emits `RECOVERED`,
 naming the checkpoint that reported the drop. Followed decreases are carried in
@@ -582,9 +606,13 @@ deployment's network before any money moves — the float's Arkade addresses
 inside the SDK's `wallet.send`, everything else in the source. The rail refuses
 an amount above the **confirmed** balance; the float refuses when a live swap's
 funding pins every coin, or when the unpinned coins cannot cover the amount and
-the exit fee. It is **not safe to repeat**: nothing persists or re-drives it, so
-each attempt is a separate payment and a withdrawal that timed out must be
-checked against the chain before retrying.
+the exit fee. It is **not safe to repeat**: each attempt is a separate payment.
+Arkade withdrawals persist a journal row before sending and record the quoted
+fee and transaction reference after success. If the send or settlement result
+is uncertain, the API returns `withdrawal_uncertain` with the journal ID and
+the console closes the armed confirmation. Check the wallet transaction and
+destination before retrying. Other fund sources retain their own withdrawal
+behavior.
 
 Remember what `admin.host` is: with the console reachable, `fund-withdraw` lets
 anything that can reach the port send a source's balance to an address of its
