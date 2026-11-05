@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
 import type { SqlDriver } from '@arkade-os/solver-core/core/driver.js'
 import type { RebalanceTransfer } from '@arkade-os/solver-core/ports/rebalance.js'
-import { RebalanceStore } from '../../packages/solver-app/src/ops/rebalanceStore.js'
+import { RebalanceStore, parseTransferCursor } from '../../packages/solver-app/src/ops/rebalanceStore.js'
 
 const transfer = (id: string, overrides: Partial<RebalanceTransfer> = {}): RebalanceTransfer => ({
   id,
@@ -105,6 +105,40 @@ describe('rebalance journal', () => {
     expect((await store.list(1)).map((row) => row.id)).toEqual(['2'])
     await expect(store.create(transfer('bad', { debitSats: Number.MAX_SAFE_INTEGER + 1 }))).rejects.toThrow()
     expect(await store.lastAttempt()).toBe(0)
+  })
+
+  it('pages equal timestamps without duplicates or skipping older transfers', async () => {
+    for (const [id, createdAt] of [
+      ['b', 101],
+      ['a', 101],
+      ['c', 100],
+      ['b-old', 100],
+      ['a-old', 100],
+      ['z', 99],
+    ] as const)
+      await store.create(transfer(id, { createdAt }))
+    const first = await store.page(2)
+    expect(first.transfers.map((row) => row.id)).toEqual(['b', 'a'])
+    expect(parseTransferCursor(first.nextCursor!)).toEqual({ createdAt: 101, id: 'a' })
+    await store.create(transfer('new', { createdAt: 102 }))
+    const second = await store.page(2, parseTransferCursor(first.nextCursor!))
+    expect(second.transfers.map((row) => row.id)).toEqual(['c', 'b-old'])
+    const third = await store.page(2, parseTransferCursor(second.nextCursor!))
+    expect(third.transfers.map((row) => row.id)).toEqual(['a-old', 'z'])
+    expect(third.nextCursor).toBeNull()
+  })
+
+  it('reaches transfers past the original 100-row overview limit and rejects bad cursors', async () => {
+    for (let i = 0; i < 105; i++) await store.create(transfer(`row-${i}`, { createdAt: i }))
+    const first = await store.page(100)
+    expect(first.transfers).toHaveLength(100)
+    const older = await store.page(20, parseTransferCursor(first.nextCursor!))
+    expect(older.transfers.map((row) => row.id)).toEqual(['row-4', 'row-3', 'row-2', 'row-1', 'row-0'])
+    expect(older.nextCursor).toBeNull()
+    for (const invalid of ['', 'bad', '!!!', Buffer.from('[1,"bad:colon"]').toString('base64url')])
+      expect(() => parseTransferCursor(invalid)).toThrow('invalid transfer cursor')
+    await expect(store.page(0)).rejects.toThrow()
+    await expect(store.page(101)).rejects.toThrow()
   })
 
   it('preserves maximum safe debit exactly and fails closed when aggregate charges overflow', async () => {

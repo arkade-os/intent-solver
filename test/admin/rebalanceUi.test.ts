@@ -17,6 +17,17 @@ const overview = {
   pools: [{ id: 'rail:shared', label: 'shared pool', balanceSats: 50, kinds: ['onchain', 'lightning'] }],
   transfers: [],
 }
+const historyTransfer = (id: string, createdAt: number, state = 'completed') => ({
+  id,
+  createdAt,
+  state,
+  origin: 'manual',
+  poolId: 'rail:shared',
+  netSats: 100,
+  feeSats: 1,
+  debitSats: 101,
+  kind: 'onchain',
+})
 const h = (tag: string, ...children: unknown[]) => ({ tag, children })
 const nodesIn = (tree: any): { tag: string; children: any[] }[] => {
   if (Array.isArray(tree)) return tree.flatMap(nodesIn)
@@ -310,6 +321,85 @@ describe('rebalance wallet panel', () => {
     expect(settings.children[0].open).toBe(false)
     expect(nodesIn(settings).some((node) => node.tag === 'fieldset.wallet-fieldset')).toBe(true)
     expect(JSON.stringify(nodes)).toContain('No transfers yet. Review a quote to start a transfer.')
+  })
+  it('keeps active transfers visible while loading older history only when requested', async () => {
+    const recent = Array.from({ length: 12 }, (_, index) => historyTransfer(`recent-${index}`, 100 - index))
+    const pending = historyTransfer('old-pending', 1, 'pending')
+    const api = vi
+      .fn()
+      .mockResolvedValueOnce({ ...overview, transfers: [...recent, pending], transfersNextCursor: 'opaque-cursor' })
+      .mockResolvedValueOnce({ transfers: [pending, historyTransfer('older', 0)], nextCursor: null })
+      .mockResolvedValueOnce({ ...overview, transfers: recent, transfersNextCursor: 'newer-cursor' })
+    const panel = new RebalancePanel(api, vi.fn())
+    await panel.refresh()
+    const history = () => nodesIn(panel.render(h)).find((node) => node.tag === 'section.wallet-history')!
+    const ids = () =>
+      nodesIn(history())
+        .filter((node) => node.tag === 'li.wallet-transfer')
+        .map((row) => nodesIn(row).find((node) => node.tag === 'code')?.children[0])
+    const loadOlder = () => nodesIn(history()).find((node) => node.children[1] === 'Load older transfers')!
+    expect(nodesIn(history()).find((node) => node.tag === 'ol.wallet-transfer-list')!.children[0]).toEqual({
+      tabindex: 0,
+      'aria-labelledby': 'wallet-transfer-history',
+    })
+    expect(ids()).toHaveLength(11)
+    expect(ids()).toContain('old-pending')
+    await loadOlder().children[0].onclick()
+    expect(ids()).toHaveLength(13)
+    expect(api).toHaveBeenCalledTimes(1)
+    await loadOlder().children[0].onclick()
+    expect(api.mock.calls[1]?.[0]).toBe('/api/rebalance/transfers?before=opaque-cursor&limit=20')
+    expect(ids()).toHaveLength(14)
+    expect(ids()).toContain('older')
+    expect(nodesIn(history()).some((node) => node.children[1] === 'Load older transfers')).toBe(false)
+    await panel.refresh()
+    expect(ids()).not.toContain('old-pending')
+    expect(ids()).toContain('older')
+  })
+  it('starts server paging when a later overview grows past the recent-history limit', async () => {
+    const latest = Array.from({ length: 100 }, (_, index) => historyTransfer(`recent-${index}`, 200 - index))
+    const api = vi
+      .fn()
+      .mockResolvedValueOnce({ ...overview, transfers: [historyTransfer('first', 1)], transfersNextCursor: null })
+      .mockResolvedValueOnce({ ...overview, transfers: latest, transfersNextCursor: 'cursor-after-100' })
+      .mockResolvedValueOnce({ transfers: [historyTransfer('older', 0)], nextCursor: null })
+    const panel = new RebalancePanel(api, vi.fn())
+    await panel.refresh()
+    await panel.refresh()
+    const loadOlder = () => nodesIn(panel.render(h)).find((node) => node.children[1] === 'Load older transfers')!
+    const ids = () =>
+      nodesIn(panel.render(h))
+        .filter((node) => node.tag === 'li.wallet-transfer')
+        .map((row) => nodesIn(row).find((node) => node.tag === 'code')?.children[0])
+    for (let index = 0; index < 6; index++) await loadOlder().children[0].onclick()
+    expect(api.mock.calls[2]?.[0]).toBe('/api/rebalance/transfers?before=cursor-after-100&limit=20')
+    expect(ids()).toContain('older')
+  })
+  it('does not restore stale in-flight history when a page resolves after refresh', async () => {
+    const recent = Array.from({ length: 12 }, (_, index) => historyTransfer(`recent-${index}`, 100 - index))
+    const oldPending = historyTransfer('old-pending', 1, 'pending')
+    let finishPage: (value: unknown) => void = () => {}
+    const pendingPage = new Promise((resolve) => {
+      finishPage = resolve
+    })
+    const api = vi
+      .fn()
+      .mockResolvedValueOnce({ ...overview, transfers: [...recent, oldPending], transfersNextCursor: 'cursor' })
+      .mockReturnValueOnce(pendingPage)
+      .mockResolvedValueOnce({ ...overview, transfers: recent, transfersNextCursor: 'later-cursor' })
+    const panel = new RebalancePanel(api, vi.fn())
+    await panel.refresh()
+    const loadOlder = () => nodesIn(panel.render(h)).find((node) => node.children[1] === 'Load older transfers')!
+    await loadOlder().children[0].onclick()
+    const loading = loadOlder().children[0].onclick()
+    await panel.refresh()
+    finishPage({ transfers: [oldPending, historyTransfer('older', 0)], nextCursor: null })
+    await loading
+    const ids = nodesIn(panel.render(h))
+      .filter((node) => node.tag === 'li.wallet-transfer')
+      .map((row) => nodesIn(row).find((node) => node.tag === 'code')?.children[0])
+    expect(ids).not.toContain('old-pending')
+    expect(ids).toContain('older')
   })
   it('keeps expanded policy and edits through a balance refresh without saving or enabling automation', async () => {
     const api = vi.fn().mockResolvedValue(overview)

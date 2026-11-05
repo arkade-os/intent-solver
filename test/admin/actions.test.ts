@@ -15,6 +15,7 @@ import { ripemd160 } from '@noble/hashes/legacy.js'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
 import { ACTIONS } from '@arkade-os/solver-app/admin/routes/actions.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
 
 const adminStore = () => ({
   recordAction: vi.fn().mockResolvedValue(undefined),
@@ -166,6 +167,34 @@ describe('auditing', () => {
     } finally {
       run.mockRestore()
     }
+  })
+
+  it('allows a confirmed in-provider reshape despite old committed rows while excluding pinned coins', async () => {
+    const send = vi.fn().mockResolvedValue('reshaped-tx')
+    const ledger = createReservationLedger()
+    ledger.reserve([{ txid: 'busy', vout: 0 }])
+    const services = fakeServices({
+      config: { limits: { maxSats: 100_000 }, maxExposedSats: 300_000 },
+      readers: new Set([{ committedSats: vi.fn().mockResolvedValue(9_758) }]),
+      arkade: {
+        reservations: ledger,
+        wallet: {
+          arkProvider: { getInfo: vi.fn().mockResolvedValue({ dust: 330 }) },
+          getSpendableVtxos: vi.fn().mockResolvedValue([
+            { txid: 'busy', vout: 0, value: 300_000 },
+            { txid: 'free', vout: 0, value: 250_000 },
+          ]),
+          getAddress: vi.fn().mockResolvedValue('tark1solver'),
+          send,
+        },
+      },
+    })
+    const response = await post('pool-mint', { confirm: 'MINT' }, services)
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ ok: true, result: { txid: 'reshaped-tx', committedSats: 9_758 } })
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(send.mock.calls[0]![0].selectedVtxos.map((coin: { txid: string }) => coin.txid)).toEqual(['free'])
+    expect([...ledger.reserved()]).toEqual(['busy:0'])
   })
 
   it('records a SUCCESSFUL action', async () => {

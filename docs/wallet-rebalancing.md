@@ -28,6 +28,10 @@ Unsupported deployments show rebalancing as unavailable.
    expected or confirmed credit, and links to available Arkade and Bitcoin
    transaction evidence. Lightning invoices are not sent to an explorer.
 
+Transfer history stays in a scrollable card. It shows active transfers and the
+newest entries first; **Load older** reveals more entries and fetches older pages
+on demand.
+
 All amounts are whole satoshis. The backend creates the receive address or
 fixed-amount plain Lightning invoice; the browser cannot supply a replacement
 destination. Quotes expire within 60 seconds, or earlier if the route or invoice

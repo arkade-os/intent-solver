@@ -2,6 +2,7 @@ import type { Hono } from 'hono'
 import type { RebalanceTransfer } from '@arkade-os/solver-core/ports/rebalance.js'
 import type { AdminDeps } from '../server.js'
 import { parseWholeSats } from '../../ops/fundSources.js'
+import { parseTransferCursor } from '../../ops/rebalanceStore.js'
 
 const txid = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{64}$/i.test(value)
 const whole = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 0
@@ -74,6 +75,26 @@ export const registerRebalanceRoutes = (app: Hono, deps: AdminDeps): void => {
     if (!service) return c.json({ error: 'unsupported', message: 'rebalancing is unavailable on this deployment' }, 503)
     const overview = await service.overview()
     return c.json({ ...overview, transfers: overview.transfers.map(transferSummary) })
+  })
+
+  app.get('/api/rebalance/transfers', async (c) => {
+    const service = deps.services.rebalance
+    if (!service) return c.json({ error: 'unsupported', message: 'rebalancing is unavailable on this deployment' }, 503)
+    const rawLimit = c.req.query('limit')
+    const rawBefore = c.req.query('before')
+    let limit = 20
+    let before
+    try {
+      if (rawLimit !== undefined) {
+        if (!/^[1-9][0-9]{0,2}$/.test(rawLimit) || Number(rawLimit) > 100) throw new Error()
+        limit = Number(rawLimit)
+      }
+      if (rawBefore !== undefined) before = parseTransferCursor(rawBefore)
+    } catch {
+      return c.json({ error: 'invalid_page', message: 'Invalid transfer history page request.' }, 400)
+    }
+    const page = await service.transfersPage(limit, before)
+    return c.json({ transfers: page.transfers.map(transferSummary), nextCursor: page.nextCursor })
   })
 
   for (const action of ['policy', 'quote', 'submit', 'cancel'] as const) {

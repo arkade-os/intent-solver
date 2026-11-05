@@ -15,6 +15,7 @@ const transfer = {
 const setup = () => {
   const service = {
     overview: vi.fn().mockResolvedValue({ pools: [], policy: {}, transfers: [transfer] }),
+    transfersPage: vi.fn().mockResolvedValue({ transfers: [transfer], nextCursor: null }),
     quote: vi.fn().mockResolvedValue(transfer),
     submit: vi.fn().mockResolvedValue(transfer),
     cancel: vi.fn().mockResolvedValue(transfer),
@@ -41,6 +42,18 @@ describe('rebalance administration', () => {
     expect(await response.text()).not.toMatch(/private-destination|secret|routeData/)
     expect(service.tick).not.toHaveBeenCalled()
     expect(service.submit).not.toHaveBeenCalled()
+  })
+  it('pages safe transfer summaries and rejects malformed page requests', async () => {
+    const { app, service } = setup()
+    const cursor = Buffer.from(JSON.stringify([100, 'q1'])).toString('base64url')
+    const response = await app.request(`/api/rebalance/transfers?limit=20&before=${cursor}`)
+    expect(response.status).toBe(200)
+    expect(service.transfersPage).toHaveBeenCalledWith(20, { createdAt: 100, id: 'q1' })
+    expect(await response.text()).not.toMatch(/private-destination|secret|routeData/)
+    for (const query of ['limit=0', 'limit=101', 'limit=1.5', 'before=bad', 'before=%21%21%21']) {
+      expect((await app.request(`/api/rebalance/transfers?${query}`)).status).toBe(400)
+    }
+    expect(service.transfersPage).toHaveBeenCalledTimes(1)
   })
   it.each(['submit', 'cancel', 'policy'])('requires explicit confirmation for %s', async (action) => {
     const { post, service, recordAction } = setup()

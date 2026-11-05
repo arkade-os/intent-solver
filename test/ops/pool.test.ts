@@ -397,6 +397,16 @@ describe('mintPool — the spend gate', () => {
     expect(result).toMatchObject({ txid: 'ark-txid' })
   })
 
+  it('uses the provider ledger when in-process swaps remain committed', async () => {
+    const send = vi.fn().mockResolvedValue('ark-txid')
+    const services = servicesWith({ committed: 9_758, spendable: [300_000, 250_000], reserved: ['coin0:0'], send })
+    const result = await mintPool(services, { inProviderProcess: true })
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(send.mock.calls[0]![0].selectedVtxos.map((coin: { txid: string }) => coin.txid)).toEqual(['coin1'])
+    expect(result).toMatchObject({ txid: 'ark-txid', committedSats: 9_758 })
+    expect([...services.arkade.reservations.reserved()]).toEqual(['coin0:0'])
+  })
+
   it('spends exactly once — a split is one Arkade transaction, not one per piece', async () => {
     const send = vi.fn().mockResolvedValue('ark-txid')
     const result = await mintPool(servicesWith({ send }))
@@ -450,7 +460,7 @@ describe('mintPool — bounded weight rejection retries', () => {
   it('releases rejected pins and rereads both inventory and reservations before retrying', async () => {
     const ledger = createReservationLedger()
     const send = vi.fn().mockRejectedValueOnce(tooLarge()).mockResolvedValue('smaller-txid')
-    const services = servicesWith({ spendable: Array(70).fill(4_000), send, ledger })
+    const services = servicesWith({ committed: 9_758, spendable: Array(70).fill(4_000), send, ledger })
     const read = vi.mocked(services.arkade.wallet.getSpendableVtxos)
     const coins = await read()
     read.mockClear()
@@ -459,7 +469,7 @@ describe('mintPool — bounded weight rejection retries', () => {
       ledger.reserve([{ txid: 'coin1', vout: 0 }])
       return coins.filter((coin) => coin.txid !== 'coin0')
     })
-    await mintPool(services)
+    await mintPool(services, { inProviderProcess: true })
     const selected = send.mock.calls[1]![0].selectedVtxos.map((coin: { txid: string }) => coin.txid)
     expect(selected).not.toContain('coin0')
     expect(selected).not.toContain('coin1')
@@ -532,9 +542,11 @@ describe('mintPool — named, pinned inputs', () => {
     const send = vi.fn()
     const committed = async () => {
       ledger.reserve([{ txid: 'coin0', vout: 0 }])
-      return 0
+      return 9_758
     }
-    expect(await mintPool(servicesWith({ ledger, send, committed }))).toEqual({ skipped: 'inputs-pinned' })
+    expect(await mintPool(servicesWith({ ledger, send, committed }), { inProviderProcess: true })).toEqual({
+      skipped: 'inputs-pinned',
+    })
     expect(send).not.toHaveBeenCalled()
   })
 

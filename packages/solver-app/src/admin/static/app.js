@@ -1440,7 +1440,12 @@ const walletView = () => {
                 h('b', `${pool.pieces.length} coins `),
                 h('span.faint.mono', pool.pieces.slice(0, 12).map(sats).join('  ')),
               ),
-              h('p.muted', pool.plan.reason),
+              h(
+                'p.muted',
+                pool.plan.outputs.length
+                  ? `Plan preview: ${pool.plan.reason}. Select Reshape… above to attempt a fresh plan.`
+                  : `No pool transaction planned: ${pool.plan.reason}`,
+              ),
               /* assets: begin — why the pieces above add up to less than the balance */
               pool.assetEncumberedSats
                 ? h(
@@ -3557,7 +3562,7 @@ const runAction = async (name, body) => {
             ? 'No pool transaction could be planned. No coins were moved.'
             : `Pool reshape skipped: ${answer.skipped}. No coins were moved.`
         : name === 'pool-mint' && Array.isArray(answer?.minted)
-          ? `Pool reshaped into ${answer.minted.length} coins. Transaction: ${answer.txid}`
+          ? `Pool reshape created ${answer.minted.length} new ${answer.minted.length === 1 ? 'coin' : 'coins'}. Transaction: ${answer.txid}`
           : answer
     state.result = { name, result: displayed, forSwap: state.running.forSwap }
     await load(state.view)

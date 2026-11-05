@@ -178,12 +178,13 @@ export type MintOutcome =
  * the default gate — a deliberately loose proxy, hence `force`. Liveness itself is
  * undetectable: `watch` and `serve` leave no heartbeat.
  *
- * NOTE the admin console runs INSIDE the provider process, so the hazard does not
- * apply to it the same way. The gate is kept because a second provider elsewhere on
- * the same database is still possible and this function cannot tell which case it is
- * in.
+ * Admin and automatic maintenance run inside the provider process and share its
+ * reservations. They may use `inProviderProcess`; a standalone CLI mint cannot.
  */
-export const mintPool = async (services: Services, opts: { force?: boolean } = {}): Promise<MintOutcome> => {
+export const mintPool = async (
+  services: Services,
+  opts: { force?: boolean; inProviderProcess?: boolean } = {},
+): Promise<MintOutcome> => {
   let maxInputs = 50
   let committed = 0
   for (;;) {
@@ -198,7 +199,7 @@ export const mintPool = async (services: Services, opts: { force?: boolean } = {
     }
 
     committed = await committedAcrossCorridors(services.readers)
-    if (committed > 0 && opts.force !== true) {
+    if (committed > 0 && opts.force !== true && opts.inProviderProcess !== true) {
       return {
         refused:
           `${committed} sat committed across non-terminal swaps. ` +

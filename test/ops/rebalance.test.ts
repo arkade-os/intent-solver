@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { RebalanceService, type RebalanceSource } from '../../packages/solver-app/src/ops/rebalance.js'
-import { RebalanceStore } from '../../packages/solver-app/src/ops/rebalanceStore.js'
+import { RebalanceStore, parseTransferCursor } from '../../packages/solver-app/src/ops/rebalanceStore.js'
 import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
 import type {
   RebalancePolicy,
@@ -76,6 +76,30 @@ const setup = async () => {
 }
 
 describe('backend rebalancing', () => {
+  it('keeps an older active transfer visible beyond the first history page', async () => {
+    const f = await setup()
+    try {
+      const quote = await f.service.quote({ poolId: 'rail:onchain', amountSats: 5000, requestKey: 'page-base' })
+      for (let i = 0; i < 100; i++)
+        await f.store.create({ ...quote, id: `page-${i}`, requestKey: `page-${i}`, createdAt: i + 1 })
+      await f.store.create({
+        ...quote,
+        id: 'old-active',
+        requestKey: 'old-active',
+        createdAt: 0,
+        state: 'pending',
+        chargedAt: 0,
+      })
+      const overview = await f.service.overview()
+      expect(overview.transfers).toHaveLength(101)
+      expect(overview.transfers.find((row) => row.id === 'old-active')?.state).toBe('pending')
+      expect(overview.transfersNextCursor).not.toBeNull()
+      const older = await f.service.transfersPage(20, parseTransferCursor(overview.transfersNextCursor!))
+      expect(older.transfers.map((row) => row.id)).toContain('old-active')
+    } finally {
+      await f.driver.close()
+    }
+  })
   it('guarded deposit maintenance runs while source automation is disabled and shutdown waits for it', async () => {
     const f = await setup()
     try {

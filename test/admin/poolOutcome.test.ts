@@ -47,7 +47,7 @@ describe('pool reshape feedback', () => {
   it('shows the completed shape and transaction when a mint actually succeeds', async () => {
     const { state, runAction } = setup(vi.fn().mockResolvedValue({ result: { minted: [100, 200], txid: 'tx-1' } }))
     await runAction('pool-mint', { confirm: 'MINT' })
-    expect(state.result.result).toBe('Pool reshaped into 2 coins. Transaction: tx-1')
+    expect(state.result.result).toBe('Pool reshape created 2 new coins. Transaction: tx-1')
   })
 
   it('does not claim the pool has its requested shape when no transaction was planned', async () => {

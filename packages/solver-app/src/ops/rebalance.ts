@@ -13,7 +13,7 @@ import type {
   RebalancePool,
   RebalanceTransfer,
 } from '@arkade-os/solver-core/ports/rebalance.js'
-import type { RebalanceStore } from './rebalanceStore.js'
+import type { RebalanceStore, TransferCursor } from './rebalanceStore.js'
 
 export interface RebalanceSource {
   quote(
@@ -146,13 +146,28 @@ export class RebalanceService {
         }
       }),
     )
+    const [page, active] = await Promise.all([this.deps.store.page(100), this.deps.store.active()])
+    const known = new Set(page.transfers.map((row) => row.id))
+    const transfers = [
+      ...page.transfers,
+      ...active.filter((row) => {
+        if (known.has(row.id)) return false
+        known.add(row.id)
+        return true
+      }),
+    ].sort((a, b) => b.createdAt - a.createdAt || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0))
     return {
       policy: this.policy(),
       policyRevision: revision(this.currentPolicy),
       pools: readings,
-      transfers: await this.deps.store.list(),
+      transfers,
+      transfersNextCursor: page.nextCursor,
       lastEvaluation: this.evaluation,
     }
+  }
+
+  async transfersPage(limit = 20, before?: TransferCursor) {
+    return this.deps.store.page(limit, before)
   }
 
   async quote(params: {

@@ -558,9 +558,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
     try {
       const mint = await maybeMintPool(services, {
         enabled: services.config.poolAutoMint,
-        // No `force`: the concurrent-provider guard exists for exactly the
-        // caller that has no human to weigh it.
-        mint: (s) => mintPool(s),
+        mint: (s) => mintPool(s, { inProviderProcess: true }),
       })
       if (mint.minted) log('pool auto-minted', JSON.stringify(mint.result))
       else if ('refused' in mint) log('pool auto-mint refused:', mint.refused)
