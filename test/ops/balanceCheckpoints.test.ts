@@ -182,6 +182,7 @@ describe('rebalance balance accounting', () => {
     f.arkade.assets[0]!.amount -= 1n
     const assetLoss = await f.sample()
     expect(assetLoss.decreases.map((change) => change.asset)).toEqual([`arkade:${'aa'.repeat(34)}`])
+    expect(formatCheckpointWarning(await f.sample(), 'regtest')).toContain(`arkade:${'aa'.repeat(34)}`)
     expect(assetLoss.recovered).toEqual([])
     expect(assetLoss.unrecovered).toContainEqual({ checkpointId: priorLoss.id, asset: 'BTC', before: '6400' })
     f.arkade.total -= 400
@@ -225,6 +226,39 @@ describe('rebalance balance accounting', () => {
       expect(formatCheckpointWarning(settled, 'regtest')).toContain('25 sats')
       expect(settled.recovered).toEqual([])
     }
+  })
+
+  it('retains a delayed BTC warning past the asset recovery cap', async () => {
+    const f = await rebalanceFixture()
+    const assets = Array.from({ length: 22 }, (_, index) => ({
+      assetId: (index + 1).toString(16).padStart(2, '0').repeat(34),
+      amount: 1n,
+    }))
+    f.arkade.assets.push(...assets)
+    await f.sample()
+    await f.store.create(f.transfer)
+    f.arkade.total -= 500
+    await f.sample()
+    f.lightning.availableSats -= 25
+    const loss = await f.sample()
+    f.onchain.confirmedSats += 400
+    await f.sample()
+    for (const asset of assets) {
+      f.arkade.assets = f.arkade.assets.filter((row) => row.assetId !== asset.assetId)
+      await f.sample()
+    }
+    const during = await f.sample()
+    expect(during.unrecovered).toContainEqual({ checkpointId: loss.id, asset: 'BTC', before: '6400' })
+    expect(during.unrecovered).toHaveLength(20)
+    f.arkade.total -= 400
+    f.onchain.confirmedSats += 498
+    f.transfer.state = 'completed'
+    f.transfer.creditedSats = 498
+    await f.save()
+    await f.sample()
+    const settled = await f.sample()
+    expect(formatCheckpointWarning(settled, 'regtest')).toContain('25 sats')
+    expect(settled.unrecovered).toContainEqual({ checkpointId: loss.id, asset: 'BTC', before: '6400' })
   })
 
   it('reports a real BTC loss after ambiguous rebalance movements settle', async () => {
@@ -426,6 +460,24 @@ describe('rebalance balance accounting', () => {
     await f.save()
     await f.sample()
     expect((await f.sample()).decreases[0]?.decrease).toBe('5')
+  })
+
+  it('accounts for a proven completion fee when an unrelated credit offset the source debit', async () => {
+    const f = await rebalanceFixture()
+    await f.sample()
+    await f.store.create(f.transfer)
+    f.arkade.total -= 500
+    f.onchain.confirmedSats += 500
+    const offset = await f.sample()
+    expect(offset.rebalance?.pending[0]?.remainingSats).toBe('0')
+    f.transfer.state = 'completed'
+    f.transfer.creditedSats = 498
+    await f.save()
+    await f.sample()
+    const settled = await f.sample()
+    expect(settled.rebalance?.feeAllowanceUsedSats).toBe('2')
+    expect(settled.decreases).toEqual([])
+    expect((await f.sample()).decreases).toEqual([])
   })
 
   it('still alerts an unrelated loss during a pending transfer and does not clear it with the deposit', async () => {
