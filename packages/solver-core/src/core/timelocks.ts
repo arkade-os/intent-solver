@@ -65,7 +65,7 @@ export interface RelativeDelay {
  * Read a raw BIP68 delay's unit off its own magnitude.
  *
  * The SDK's `toTimelock` rule, restated rather than imported: it is applied to values
- * that never pass through the SDK — an operator's `ARK_UNILATERAL_EXIT_DELAY`, a
+ * that never pass through the SDK — an operator's `ARKADE_UNILATERAL_EXIT_DELAY`, a
  * `claim_delay` column — and a silent change to the SDK's threshold must break a test
  * here, not a lockup in production.
  */
@@ -130,7 +130,7 @@ export const SOLO_REFUND_HEADROOM_BLOCKS = 8
 
 /**
  * The longest relative timelock BIP68 can encode. Named because
- * `deriveUnilateralDelays` and `ARK_UNILATERAL_EXIT_DELAY`'s parser both enforce it,
+ * `deriveUnilateralDelays` and `ARKADE_UNILATERAL_EXIT_DELAY`'s parser both enforce it,
  * and two spellings of `0xffff * 512` is how they stop agreeing.
  */
 export const MAX_BIP68_SECONDS = 0xffff * SEQUENCE_GRANULARITY_SECONDS

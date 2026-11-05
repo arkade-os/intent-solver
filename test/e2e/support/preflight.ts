@@ -168,10 +168,10 @@ const probeCounterparty = async (): Promise<ProbeResult> => {
 /** Probe every dependency, in parallel. Never throws — the report is the product. */
 export const probeStack = async (): Promise<ProbeResult[]> => {
   loadE2eEnv()
-  const arkServerUrl = process.env.ARK_SERVER_URL ?? 'http://localhost:7070'
+  const operatorUrl = process.env.ARKADE_OPERATOR_URL ?? 'http://localhost:7070'
   const emulatorUrl = process.env.EMULATOR_URL ?? 'http://localhost:7073'
   return Promise.all([
-    probeHttp('arkd', `${arkServerUrl.replace(/\/$/, '')}/v1/info`),
+    probeHttp('arkd', `${operatorUrl.replace(/\/$/, '')}/v1/info`),
     probeHttp('emulator', `${emulatorUrl.replace(/\/$/, '')}/v1/info`),
     probeHttp('esplora', `${esploraUrl().replace(/\/$/, '')}/blocks/tip/height`),
     probeHttp('covclaimd', `${covclaimdUrl().replace(/\/$/, '')}/v1/preimage/covclaimd-pubkey`),

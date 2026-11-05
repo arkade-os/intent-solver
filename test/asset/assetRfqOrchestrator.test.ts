@@ -14,9 +14,12 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { approvalGateFor } from '@arkade-os/solver-app/ops/approvals.js'
 import type { SwapApprovalRequest } from '@arkade-os/solver-app/admin/db.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
+import { OfferNotSubmittedError } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { IMPLIED_PRICE_HEADROOM } from '@arkade-os/solver-core/core/assetRfq.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 import {
@@ -433,6 +436,42 @@ describe('tick — driving a negotiation', () => {
     expect((await store.get('swap-1')).failureReason).toMatch(/emulator refused/)
   })
 
+  it('hands the settle a latch for its own row, and leaves the row latched', async () => {
+    let atSettle: Record<string, unknown> = {}
+    const { service, store } = await harness({
+      depositAt: async () => deposit(),
+      settle: async (row, options) => {
+        atSettle = { state: row.state, phase: row.fillPhase }
+        expect(await options?.markSubmitting?.()).toBe(true)
+        return 'fa'.repeat(32)
+      },
+    })
+    await service.quote(request())
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+    expect(atSettle).toEqual({ state: 'filling', phase: 'selecting' })
+    expect(await store.get('swap-1')).toMatchObject({ state: 'filled', fillPhase: 'submitting' })
+  })
+
+  it('walks a row a restart left mid-selection back to funded', async () => {
+    const { service, store, settled } = await harness({ depositAt: async () => deposit() })
+    await service.quote(request())
+    await service.tick('swap-1')
+    await store.transition('swap-1', 'funded', 'filling', { fill_phase: 'selecting' })
+    await service.tick('swap-1')
+    expect(settled).toEqual([])
+    expect(await store.get('swap-1')).toMatchObject({ state: 'funded', fillPhase: null })
+  })
+
+  it('still escalates a row whose attempt reached the submission', async () => {
+    const { service, store } = await harness({ depositAt: async () => deposit() })
+    await service.quote(request())
+    await service.tick('swap-1')
+    await store.transition('swap-1', 'funded', 'filling', { fill_phase: 'submitting' })
+    await service.tick('swap-1')
+    expect(await store.get('swap-1')).toMatchObject({ state: 'stuck' })
+  })
+
   it('escalates a row found still filling to stuck rather than resubmitting', async () => {
     // A crash between submitting and recording leaves `filling`. Whether the
     // spend landed is not knowable from here, and guessing either way risks
@@ -452,6 +491,122 @@ describe('tick — driving a negotiation', () => {
     await store.fail('swap-1', 'quoted', 'declined')
     await service.tick('swap-1')
     expect((await store.get('swap-1')).state).toBe('refused')
+  })
+})
+
+describe('a fill the float cannot fund yet', () => {
+  const busy = () => new OfferNotSubmittedError('no spendable coins to pay the maker 1000 sats')
+
+  const funded = async (over: Partial<AssetRfqDeps> = {}) => {
+    const built = await harness({ depositAt: async () => deposit(), ...over })
+    await built.service.quote(request())
+    await built.service.tick('swap-1')
+    return built
+  }
+
+  it('walks the row back to funded rather than parking it stuck', async () => {
+    const errors: unknown[] = []
+    const { service, store } = await funded({
+      settle: async () => {
+        throw busy()
+      },
+      onError: (_id, error) => void errors.push(error),
+    })
+    await service.tick('swap-1')
+    expect(await store.get('swap-1')).toMatchObject({ state: 'funded', fillTxid: null, failureReason: null })
+    expect(errors).toEqual([])
+  })
+
+  it('reports every deferral, so a quote that lapses on a pinned float still names why', async () => {
+    const deferred: string[] = []
+    const { service } = await funded({
+      settle: async () => {
+        throw busy()
+      },
+      onDeferred: (id, error) => void deferred.push(`${id}: ${(error as Error).message}`),
+    })
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+    expect(deferred).toEqual([
+      'swap-1: no spendable coins to pay the maker 1000 sats',
+      'swap-1: no spendable coins to pay the maker 1000 sats',
+    ])
+  })
+
+  it('fills it on a later tick, submitting exactly once', async () => {
+    let pinned = true
+    const settled: string[] = []
+    const { service, store } = await funded({
+      settle: async (row) => {
+        if (pinned) throw busy()
+        settled.push(row.id)
+        return 'fa'.repeat(32)
+      },
+    })
+    await service.tick('swap-1')
+    pinned = false
+    await service.tick('swap-1')
+    expect(settled).toEqual(['swap-1'])
+    expect(await store.get('swap-1')).toMatchObject({ state: 'filled', fillTxid: 'fa'.repeat(32) })
+  })
+
+  it('stops retrying at valid_until, ending refused', async () => {
+    const { service, store, tick } = await funded({
+      settle: async () => {
+        throw busy()
+      },
+    })
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).state).toBe('funded')
+    tick(1_031)
+    await service.tick('swap-1')
+    expect(await store.get('swap-1')).toMatchObject({ state: 'refused' })
+  })
+
+  it('does not mark a deferral against the market', async () => {
+    const { service, store } = await funded({
+      settle: async () => {
+        throw busy()
+      },
+    })
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).fillPriceMantissa).toBeNull()
+  })
+
+  it('gates on the TYPE, not the message — a plain error reading the same way still sticks', async () => {
+    const { service, store } = await funded({
+      settle: async () => {
+        throw new Error('no spendable coins to pay the maker 1000 sats')
+      },
+    })
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).state).toBe('stuck')
+  })
+
+  it('leaves the row alone when another worker moved it inside the settle, and logs no deferral', async () => {
+    let moved: (() => Promise<void>) | null = null
+    const deferred: string[] = []
+    const built = await funded({
+      settle: async () => {
+        await moved?.()
+        throw busy()
+      },
+      onDeferred: (id) => void deferred.push(id),
+    })
+    moved = async () => {
+      await built.store.transition('swap-1', 'filling', 'stuck', { failure_reason: 'another worker' })
+    }
+    await built.service.tick('swap-1')
+    expect(await built.store.get('swap-1')).toMatchObject({ state: 'stuck', failureReason: 'another worker' })
+    expect(deferred).toEqual([])
+  })
+
+  it('is WIRED to the log on the shipped daemon', () => {
+    const services = readFileSync(
+      fileURLToPath(new URL('../../packages/solver-app/src/ops/services.ts', import.meta.url)),
+      'utf8',
+    )
+    expect(services).toMatch(/onDeferred:\s*\([^)]*\)\s*=>\s*log\(`asset rfq \$\{\w+\} deferred/)
   })
 })
 

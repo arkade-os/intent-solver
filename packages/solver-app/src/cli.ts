@@ -398,7 +398,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
     void services.assetOffers
       .consumeOfferTxs(
         streamOfferTxs({
-          arkdUrl: services.config.arkade.arkServerUrl,
+          arkdUrl: services.config.arkade.operatorUrl,
           signal: offers.signal,
           onError: (error) => log('offer stream:', error instanceof Error ? error.message : String(error)),
         }),
@@ -1418,7 +1418,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       }
 
       const txid = await services.arkade.wallet.send({ address: localAddress, amount: decoded.amountSats })
-      log('funded', decoded.amountSats, 'sats at own derivation, arkTxid', txid)
+      log('funded', decoded.amountSats, 'sats at own derivation, arkadeTxid', txid)
 
       const row = await driveToTerminal(services.service, swap.id)
       log('terminal:', json(printable(row)))
@@ -1521,7 +1521,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       }
 
       const fundTxid = await services.arkade.wallet.send({ address: localArkadeAddress, amount: amountSats })
-      log('funded Arkade lockup', amountSats, 'sats, arkTxid', fundTxid)
+      log('funded Arkade lockup', amountSats, 'sats, arkadeTxid', fundTxid)
 
       const funded = await driveOnchainUntil(onchainService, swap.id, new Set(['awaiting_claim', ...ONCHAIN_TERMINAL]))
       if (funded.state !== 'awaiting_claim') {
@@ -1633,7 +1633,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
         log('nothing at the script — already spent or never funded')
         return
       }
-      log('COVENANT REFUND PUSHED, arkTxid', result.txid)
+      log('COVENANT REFUND PUSHED, arkadeTxid', result.txid)
     })
   },
 
@@ -1774,7 +1774,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
         log('nothing at the script — already spent or never funded')
         return
       }
-      log('COVENANT REFUND PUSHED, arkTxid', result.txid)
+      log('COVENANT REFUND PUSHED, arkadeTxid', result.txid)
     })
   },
 
@@ -1896,7 +1896,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       log('funding covenant script', address, 'refundable at', refundLocktime, '(offset', offset, 's)')
 
       const fundTxid = await arkade.wallet.send({ address, amount: amountSats })
-      log('funded', amountSats, 'sats, arkTxid', fundTxid)
+      log('funded', amountSats, 'sats, arkadeTxid', fundTxid)
 
       const pkScriptHex = hex.encode(script.pkScript)
       const outputs = await poll(() => findLockups(arkade, pkScriptHex).then((o) => (o.length ? o : null)), {
@@ -1924,7 +1924,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
         // this run cannot land it, a later run costs nothing. Bounded noise.
         { attempts: 6, intervalMs: 30_000, whenExhausted: 'refund not accepted within 6 attempts; re-run later' },
       )
-      log('COVENANT REFUND PUSHED, arkTxid', txid)
+      log('COVENANT REFUND PUSHED, arkadeTxid', txid)
     })
   },
 
@@ -2092,7 +2092,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       }
       if (result.committedSats > 0) log(`--force: minting with ${result.committedSats} sat committed`)
       log('minted', result.minted.length, 'output(s) from', result.spent.length, 'coin(s):', json(result.minted))
-      log('arkTxid', result.txid)
+      log('arkadeTxid', result.txid)
     })
   },
 }

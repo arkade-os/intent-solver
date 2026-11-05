@@ -67,9 +67,8 @@ export const fundLockup = async (
     inputs = selection.inputs
     readMs = selection.readMs
     selectMs = selection.selectMs
-    const reserveStarted = performance.now()
-    release = ctx.reservations.reserve(inputs)
-    reserveMs = Math.round(performance.now() - reserveStarted)
+    reserveMs = selection.reserveMs
+    release = selection.release
   } catch (error) {
     log(
       'receive_fund_timing',
@@ -175,9 +174,15 @@ const selectFundingInputs = async (ctx: ArkadeContext, amountSats: number, scope
     dustSats: Number(ctx.dustSats),
     vtxoMinSats: Number(ctx.vtxoMinSats),
   })
+  const selectMs = Math.round(performance.now() - selectStarted)
   if (!selection.ok) {
     throw new FundNotSubmittedError(`refusing to fund lockup of ${amountSats} sats: ${selection.reason}`)
   }
+  // Pinned in the same synchronous turn as the `reserved()` read above, so a funding
+  // running beside this one cannot select these coins in the gap before we reserve.
+  const reserveStarted = performance.now()
+  const release = ctx.reservations.reserve(selection.inputs)
+  const reserveMs = Math.round(performance.now() - reserveStarted)
   if (!selection.clearedHorizon) {
     // Not fatal — see selectLockupFunding on why this is a preference — but
     // never silent. It means the lockup inherits a batch that may lapse before
@@ -188,5 +193,5 @@ const selectFundingInputs = async (ctx: ArkadeContext, amountSats: number, scope
       'float needs renewing, or this network batches shorter than the horizon',
     )
   }
-  return { inputs: [...selection.inputs], readMs, selectMs: Math.round(performance.now() - selectStarted) }
+  return { inputs: [...selection.inputs], release, readMs, selectMs, reserveMs }
 }

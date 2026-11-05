@@ -1438,6 +1438,26 @@ describe('tick: failure and recovery', () => {
     expect(arkade.refundCalls).toHaveLength(1)
   })
 
+  it('does not record a terminally-failed refund as pushed when it could only cover part of the lockup', async () => {
+    const { swap } = await quoted()
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
+    ln.payResult = { id: 'pay-1', status: 'pending' }
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
+    expect((await service.tick(swap.id)).state).toBe('paid')
+
+    // A near-expiry output lands before the payment dies: the refund can spend f1 but not f2.
+    arkade.lockups = [
+      { txid: 'f1', vout: 0, value: AMOUNT },
+      { txid: 'f2', vout: 0, value: AMOUNT, expiresAt: clock + 60 },
+    ]
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'failed' })
+
+    expect((await service.tick(swap.id)).state).toBe('refused')
+    expect(arkade.refundCalls).toHaveLength(1)
+    expect((await store.get(swap.id)).refundOutcome).toBeNull()
+    expect(await service.refundSweep()).toEqual([swap.id])
+  })
+
   it('still parks in stuck when the refund could NOT be pushed', async () => {
     const { swap } = await quoted()
     // Funded, then nothing at the script when the refund runs: the client is
@@ -2183,6 +2203,29 @@ describe('tick: failure and recovery', () => {
     expect(done.claimArkTxid).toBeNull()
     expect(done.failureReason).toContain('no claim txid')
     expect(arkade.claimCalls).toHaveLength(0)
+  })
+
+  it('finalizes our own claim arkd accepted but never finalized, and records its txid', async () => {
+    const row = await claiming()
+    arkade.lockups = []
+    arkade.lockupsSpent = true
+    arkade.finalizePendingClaim = async () => 'pending-claim-txid'
+
+    const done = await service.tick(row.id)
+    expect(done.state).toBe('claimed')
+    expect(done.claimArkTxid).toBe('pending-claim-txid')
+  })
+
+  it('keeps claiming while finalizing our pending claim fails, so the sweep retries it', async () => {
+    const row = await claiming()
+    arkade.lockups = []
+    arkade.lockupsSpent = true
+    arkade.finalizePendingClaim = async () => {
+      throw new Error('INVALID_SIGNATURE (18): invalid signature in checkpoint tx')
+    }
+
+    await expect(service.tick(row.id)).rejects.toThrow(/INVALID_SIGNATURE/)
+    expect((await store.get(row.id)).state).toBe('claiming')
   })
 
   it('parks a lockup that holds only a dust asset vtxo after the clean funding was swept', async () => {

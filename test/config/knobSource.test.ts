@@ -1,12 +1,12 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import { arkDbPath, configFromKnobs, sentryOptionsFromKnobs, swapDbPath } from '@arkade-os/solver-app/config.js'
+import { walletDbPath, configFromKnobs, sentryOptionsFromKnobs, swapDbPath } from '@arkade-os/solver-app/config.js'
 import { latencyDiagnosticsEnabled, setLatencyDiagnostics } from '@arkade-os/solver-core/util/diagnostics.js'
 import { createServicesBody } from '../support/createServicesBody.js'
 
 const minimalRegtestKnobs = {
   SWAP_NETWORK: 'regtest',
-  ARK_MNEMONIC: 'test mnemonic, never a real one',
-  ARK_SERVER_URL: 'http://localhost:7070',
+  WALLET_MNEMONIC: 'test mnemonic, never a real one',
+  ARKADE_OPERATOR_URL: 'http://localhost:7070',
   EMULATOR_URL: 'http://localhost:7073',
   LN_BACKEND: 'fake',
 }
@@ -32,6 +32,22 @@ describe('configFromKnobs', () => {
     expect(config.cardRelays).toEqual(['wss://a', 'wss://b'])
   })
 
+  it.each(['ln*solver', 'ln_solver', 'ln`solver', 'ln~solver', 'ln\nsolver'])(
+    'refuses a solver name Slack would reformat: %j',
+    (solverName) => {
+      expect(() => configFromKnobs({ ...minimalRegtestKnobs, SOLVER_NAME: solverName })).toThrow(
+        /SOLVER_NAME must not contain Slack formatting characters/,
+      )
+    },
+  )
+
+  it('refuses a solver name long enough to crowd out the event body', () => {
+    expect(configFromKnobs({ ...minimalRegtestKnobs, SOLVER_NAME: 'x'.repeat(64) }).solverName).toHaveLength(64)
+    expect(() => configFromKnobs({ ...minimalRegtestKnobs, SOLVER_NAME: 'x'.repeat(65) })).toThrow(
+      /SOLVER_NAME must be at most 64 characters/,
+    )
+  })
+
   it('leaves the name null and the relays empty when unset', () => {
     const config = configFromKnobs(minimalRegtestKnobs)
     expect(config.solverName).toBeNull()
@@ -52,7 +68,7 @@ describe('configFromKnobs', () => {
 
   it('resolves database paths and Sentry from the knobs too', () => {
     expect(swapDbPath({ DB_DIR: '/data' })).toMatch(/^[\\/]data[\\/]swaps\.sqlite$/)
-    expect(arkDbPath({ ARK_DB_PATH: '/w/ark.sqlite' })).toBe('/w/ark.sqlite')
+    expect(walletDbPath({ WALLET_DB_PATH: '/w/ark.sqlite' })).toBe('/w/ark.sqlite')
     expect(sentryOptionsFromKnobs({})).toBeNull()
   })
 })

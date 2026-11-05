@@ -100,7 +100,7 @@ export const openFleet = async (arkade: E2eArkade, size: number): Promise<Fleet>
     Array.from({ length: size }, async (_unused, index): Promise<FleetWallet> => {
       const ctx = await createArkadeContext({
         mnemonic: fleetMnemonic(index),
-        arkServerUrl: process.env.ARK_SERVER_URL ?? 'http://localhost:7070',
+        operatorUrl: process.env.ARKADE_OPERATOR_URL ?? 'http://localhost:7070',
         databasePath: `${FLEET_DIR}/wallet-${index}.sqlite`,
         isMainnet: arkade.profile.isMainnet,
         arkadeHrp: arkade.profile.arkadeHrp,

@@ -188,7 +188,7 @@ describe('Arkade rebalance source routes', () => {
       providerPubkey: 'cc'.repeat(32),
       readers: [],
       arkade: {
-        arkServerUrl: 'https://operator.example',
+        operatorUrl: 'https://operator.example',
         reservations: createReservationLedger(),
         wallet: {
           getSpendableVtxos: vi.fn(async () => coins),

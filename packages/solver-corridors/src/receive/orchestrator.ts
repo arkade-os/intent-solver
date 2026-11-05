@@ -60,7 +60,7 @@ import type { OnchainBackend } from '@arkade-os/solver-core/ports/onchain.js'
 import { FundNotSubmittedError } from './fundLockup.js'
 import type { CovclaimdClient } from './covclaimd.js'
 import type { LightningBackend } from '@arkade-os/solver-core/ports/lightning.js'
-import type { ReceiveSwapRow, ReceiveSwapStore } from '../db/receiveSwaps.js'
+import { EXPOSED, type ReceiveSwapRow, type ReceiveSwapStore } from '../db/receiveSwaps.js'
 import type { SendSwapRow } from '../db/swaps.js'
 import { GiveUp, json, log, messageOf, nowSeconds, poll } from '@arkade-os/solver-core/util/poll.js'
 import { sweep } from '@arkade-os/solver-core/util/sweep.js'
@@ -739,6 +739,13 @@ export class ReceiveSwapService {
         )
         return false
       }
+      // A funded refusal still answers `findLiveByPaymentHash` but never reaches `funded`; stop
+      // waiting, or it pins this row in `quoted` and holds its capacity for a swap that cannot be.
+      if (coupled.state === 'refused') {
+        await this.retireInvoice(row.paymentHash)
+        await store.fail(row.id, 'quoted', 'coupled send was refused; the receive leg can never fund against it')
+        return false
+      }
       if (coupled.state !== 'funded') return false
       if (
         !refundWithoutReceiverDelayCovers(
@@ -865,7 +872,25 @@ export class ReceiveSwapService {
       })
     }
     // A lost funding response cannot be turned into a clean refusal by invoice expiry.
-    if (row.fundStartedAt !== null) return false
+    if (row.fundStartedAt !== null) {
+      // But it must not hold exposure in `armed` forever. A lagging funding is still adopted
+      // above, so wait until the REFUND DEADLINE — by then any real lockup has appeared, and a
+      // still-empty script means the swap is dead. Escalate to `stuck` (not `refused`: a lost
+      // response may mean a lockup is out there for an operator to refund).
+      const deadline = await refundDeadlineSeconds(
+        row.refundLocktime,
+        this.now,
+        this.deps.chainTip,
+        DEADLINE_SECONDS_PURPOSE,
+      )
+      if (this.now() >= deadline) {
+        await store.transition(row.id, 'armed', 'stuck', {
+          failure_reason:
+            'funding response lost; refund deadline reached with no lockup adopted — review for a stray lockup',
+        })
+      }
+      return false
+    }
 
     // Re-polled HERE, immediately before funding — not trusted from whenQuoted's
     // observation, which can be minutes stale. Only 'armed' status's E is
@@ -1259,6 +1284,10 @@ export class ReceiveSwapService {
 
     const outputs = await arkade.findLockups(row.pkScript)
     if (outputs.length === 0) {
+      // Our own refund, finalized (one-shot) or accepted before its response reached us. A throw keeps
+      // the row refunding, so the sweep retries a finalize arkd refused.
+      const own = await arkade.finalizePendingRefund?.(receiveCovenantRowFor(row))
+      if (own) return store.transition(row.id, 'refunding', 'refunded', { refund_ark_txid: own })
       // Nothing left to refund and no claim readable either. Two very
       // different things look identical from here, and only TIME separates
       // them (see EMPTY_LOCKUP_GRACE): ordinary lag between these two reads,
@@ -1333,6 +1362,14 @@ export class ReceiveSwapService {
   async refundNow(id: string): Promise<string | null> {
     const { store, arkade } = this.deps
     const row = await store.get(id)
+    // Only where the lockup can be open and unresolved — EXPOSED or stuck. Elsewhere a refund
+    // spends nothing it should, and the patch below would just restart the grace clock.
+    if (!EXPOSED.includes(row.state) && row.state !== 'stuck') {
+      const hint = row.state === 'armed' ? ' — let the sweep escalate a lost funding to stuck first, then refund' : ''
+      throw new Error(
+        `swap ${id} is ${row.state}: nothing to refund here — the solver's lockup is open only while funded/claimed/refunding or stuck${hint}`,
+      )
+    }
     const outputs = await arkade.findLockups(row.pkScript)
     if (outputs.length === 0) return null
     const txid = await arkade.refund(receiveCovenantRowFor(row), outputs)

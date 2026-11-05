@@ -2031,6 +2031,20 @@ describe('ReceiveSwapService.tick — refund path', () => {
     expect(arkade.state.refundCalls).toBe(0)
   })
 
+  it('records our own refund as refunded when the lockup is gone because its response never reached us', async () => {
+    const funded = await armAndFund()
+    const row0 = await store.get(funded.id)
+    now = row0.refundLocktime
+    arkade.state.outputs = []
+    arkade.state.claimPreimage = null
+    arkade.ops.finalizePendingRefund = async () => 'pending-refund-ark-txid'
+
+    const row = await service.tick(funded.id)
+    expect(row.state).toBe('refunded')
+    expect(row.refundArkTxid).toBe('pending-refund-ark-txid')
+    expect(arkade.state.refundCalls).toBe(0)
+  })
+
   it('still escalates to stuck when the claim never becomes readable, however many ticks it takes', async () => {
     const funded = await armAndFund()
     const row0 = await store.get(funded.id)
@@ -2230,6 +2244,24 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
     const row = await svc.tick(swap.id)
 
     expect(row.state).toBe('quoted')
+    expect(arkade.state.fundCalls).toHaveLength(0)
+  })
+
+  it('refuses and retires a coupled payout once the coupled send is refused, rather than waiting in quoted forever', async () => {
+    const svc = coupledService()
+    const swap = await quotedCoupled(svc)
+    // A funded refusal still answers findLiveByPaymentHash, but it will never reach `funded`.
+    sendRow = coupledSendRow('refused')
+    let cancelled = false
+    ln.cancelHold = async () => {
+      cancelled = true
+    }
+
+    const row = await svc.tick(swap.id)
+
+    expect(row.state).toBe('refused')
+    expect(row.failureReason).toContain('refused')
+    expect(cancelled).toBe(true)
     expect(arkade.state.fundCalls).toHaveLength(0)
   })
 
@@ -2837,5 +2869,59 @@ describe('the CLTV headroom note at the armed edge', () => {
     const detail = await noteOn(row.id)
     expect(detail).toMatch(/^cltv headroom -?\d+s — -?\d+s spare$/)
     for (const secret of [hex.encode(P), paymentHash, invoice]) expect(detail).not.toContain(secret)
+  })
+})
+
+describe('ReceiveSwapService.refundNow', () => {
+  const quoted = async () => {
+    const outcome = await service.quote(quoteRequest())
+    if (!outcome.accepted) throw new Error(`expected acceptance, got ${outcome.reason}`)
+    return outcome.swap
+  }
+
+  it('refuses on a resolved row rather than refunding a stray output and restarting its grace', async () => {
+    const swap = await quoted()
+    await store.transition(swap.id, 'quoted', 'refused')
+    arkade.state.outputs = [{ txid: 'stray', vout: 0, value: 5_000 }]
+
+    await expect(service.refundNow(swap.id)).rejects.toThrow(/refused/)
+    expect(arkade.state.refundCalls).toBe(0)
+    expect((await store.get(swap.id)).refundArkTxid).toBeNull()
+  })
+
+  it('still refunds the solver’s own lockup on a stuck row', async () => {
+    const swap = await quoted()
+    await store.transition(swap.id, 'quoted', 'armed')
+    await store.transition(swap.id, 'armed', 'funded')
+    await store.transition(swap.id, 'funded', 'stuck')
+    arkade.state.outputs = [{ txid: 'lk', vout: 0, value: 5_000 }]
+
+    await expect(service.refundNow(swap.id)).resolves.toBe('refund-ark-txid')
+    expect(arkade.state.refundCalls).toBe(1)
+  })
+})
+
+describe('ReceiveSwapService.whenArmed — a lost funding response', () => {
+  const armedWithLostFunding = async () => {
+    const outcome = await service.quote(quoteRequest())
+    if (!outcome.accepted) throw new Error(`expected acceptance, got ${outcome.reason}`)
+    await store.transition(outcome.swap.id, 'quoted', 'armed')
+    // A fund attempt ran and its response was lost: the lease stamped fund_started_at but
+    // nothing was ever adopted. Written directly — no store method produces this combination.
+    await driver.run('UPDATE receive_swap SET fund_started_at = ? WHERE id = ?', [now, outcome.swap.id])
+    arkade.state.outputs = []
+    return outcome.swap
+  }
+
+  it('keeps waiting in armed past invoice expiry, so a lagging funding can still be adopted', async () => {
+    const swap = await armedWithLostFunding()
+    now = swap.invoiceExpiresAt + 1
+    expect((await service.tick(swap.id)).state).toBe('armed')
+  })
+
+  it('escalates to stuck at the refund deadline, instead of holding exposure in armed forever', async () => {
+    const swap = await armedWithLostFunding()
+    now = swap.refundLocktime + 1
+    expect((await service.tick(swap.id)).state).toBe('stuck')
   })
 })

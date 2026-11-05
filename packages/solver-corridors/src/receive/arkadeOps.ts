@@ -16,6 +16,7 @@
 import { hex } from '@scure/base'
 import { ArkAddress } from '@arkade-os/sdk'
 import {
+  finalizePendingRefund,
   findLockups,
   findLockupOutpoints,
   findClaimPreimage,
@@ -71,6 +72,11 @@ export const receiveArkadeOpsFromContext = async (
     // @see lockupFunding.ts for why, and reservations.ts for the other half.
     fund: (address, amountSats, stamp) => fundLockup(ctx, address, amountSats, stamp),
     refund: refundReceiveLockup(ctx),
+    finalizePendingRefund: async (row) => {
+      const script = covenantScriptFromRow(row)
+      assertScriptMatchesRow(script, row)
+      return finalizePendingRefund(ctx, script, row.pkScript)
+    },
     findClaimPreimage: (outpoints, paymentHashHex) => findClaimPreimage(ctx, outpoints, paymentHashHex),
     refundUnrolled: refundUnrolledLockup(unrolledSpenderFor(ctx)),
   }

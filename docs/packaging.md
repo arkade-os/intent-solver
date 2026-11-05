@@ -72,6 +72,30 @@ Needs per-repo work:
   backend-specific; each repo keeps only the backends it ships.
 - **`package-sets` CI job.** Collapses to the single set that repo contains.
 
+## Docker architectures
+
+The release workflow publishes `linux/amd64` and `linux/arm64` images under the
+same tags. Docker selects the matching image for the host automatically. To
+build and load just the ARM64 image locally:
+
+```sh
+docker buildx build --platform linux/arm64 --load \
+  -f packages/solver-app/Dockerfile -t intent-solver:arm64 .
+```
+
+On an `amd64` host the ARM64 build runs under emulation, so the Docker engine
+needs ARM64 binfmt support. A standalone Docker Engine may need QEMU registered
+first, as the CI job does with `docker/setup-qemu-action`:
+
+```sh
+docker run --privileged --rm tonistiigi/binfmt --install arm64
+```
+
+The `docker` CI job builds the image for both architectures on each supported
+Node major, amd64 natively and ARM64 under QEMU, and smoke-tests each by running
+`list`. That opens the swap database, so the native `better-sqlite3` module has
+to load.
+
 ## Extending, rather than forking
 
 A consumer defines a corridor and hands it to the shipped daemon:

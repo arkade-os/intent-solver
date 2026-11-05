@@ -16,7 +16,7 @@ const minimalDoc = {
   rails: {
     arkade: {
       mnemonic: 'test mnemonic, never a real one',
-      serverUrl: 'http://localhost:7070',
+      operatorUrl: 'http://localhost:7070',
       emulatorUrl: 'http://localhost:7073',
     },
     lightning: { backend: 'fake' },
@@ -66,6 +66,22 @@ describe('loadConfig — where the document comes from', () => {
     const message = errorOf(() => loadConfig({ env }))
     expect(message).toMatch(/SOLVER_CONFIG_JSON: invalid JSON at position \d+/)
     expect(message).not.toContain('seed words')
+  })
+
+  it('refuses a key repeated in one object, naming it, where JSON.parse would keep only the last', () => {
+    const env = {
+      SOLVER_CONFIG_JSON:
+        '{"admin":{"allowedHosts":["solver.example.com"]},"rails":{"arkade":{"mnemonic":"seed words"}},' +
+        '"admin":{"port":8788}}',
+    }
+    const message = errorOf(() => loadConfig({ env }))
+    expect(message).toContain('SOLVER_CONFIG_JSON: key "admin" appears more than once')
+    expect(message).not.toContain('seed words')
+  })
+
+  it('reads the same key in sibling objects as no repeat', () => {
+    const doc = { ...minimalDoc, admin: { port: 8788 }, corridors: { a: { enabled: true }, b: { enabled: false } } }
+    expect(() => loadConfig({ env: inline(doc) })).not.toThrow(/more than once/)
   })
 
   it('never echoes content when the parser would quote it either', () => {
@@ -199,7 +215,7 @@ describe('loadConfig — the document', () => {
   it('names the JSON path of a missing requirement', () => {
     const doc = {
       ...minimalDoc,
-      rails: { ...minimalDoc.rails, arkade: { serverUrl: 'http://x', emulatorUrl: 'http://y' } },
+      rails: { ...minimalDoc.rails, arkade: { operatorUrl: 'http://x', emulatorUrl: 'http://y' } },
     }
     expect(() => loadConfig({ env: inline(doc) })).toThrow('rails.arkade.mnemonic is not set')
   })

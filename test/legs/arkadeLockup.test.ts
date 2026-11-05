@@ -28,24 +28,38 @@ describe('uncollected', () => {
   const none = new Set<string>()
 
   it('counts an output the read does not show as uncollected', () => {
-    const left = uncollected(adopted, { outpoints: [], claimedOffchain: none, claimedOnL1: none })
+    const left = uncollected(adopted, { outpoints: [], claimedOffchain: none, claimedOnL1: none, spentByUs: none })
     expect(left.map((o) => o.txid)).toEqual(['a', 'u'])
   })
 
-  it('needs a spend offchain and a confirmed claim on L1', () => {
+  it('counts our own offchain spend as collected, and needs a confirmed claim on L1', () => {
     const outpoints = [
       { txid: 'a', vout: 0, spent: true, unrolled: false },
       { txid: 'u', vout: 0, spent: true, unrolled: true },
     ]
-    expect(uncollected(adopted, { outpoints, claimedOffchain: none, claimedOnL1: none }).map((o) => o.txid)).toEqual([
-      'u',
-    ])
-    expect(uncollected(adopted, { outpoints, claimedOffchain: none, claimedOnL1: new Set(['u:0']) })).toEqual([])
+    const spentByUs = new Set(['a:0'])
+    expect(
+      uncollected(adopted, { outpoints, claimedOffchain: none, claimedOnL1: none, spentByUs }).map((o) => o.txid),
+    ).toEqual(['u'])
+    expect(
+      uncollected(adopted, { outpoints, claimedOffchain: none, claimedOnL1: new Set(['u:0']), spentByUs }),
+    ).toEqual([])
+  })
+
+  it('counts a spend we cannot attribute to our claim as uncollected, so a client refund of a dropped output is not read as a payout', () => {
+    const outpoints = [{ txid: 'a', vout: 0, spent: true, unrolled: false }]
+    const left = uncollected(adopted, { outpoints, claimedOffchain: none, claimedOnL1: none, spentByUs: none })
+    expect(left.map((o) => o.txid)).toEqual(['a', 'u'])
   })
 
   it('trusts this tick’s accepted claim over a read that has not caught up', () => {
     const outpoints = [{ txid: 'a', vout: 0, spent: false, unrolled: false }]
-    const left = uncollected(adopted, { outpoints, claimedOffchain: new Set(['a:0']), claimedOnL1: new Set(['u:0']) })
+    const left = uncollected(adopted, {
+      outpoints,
+      claimedOffchain: new Set(['a:0']),
+      claimedOnL1: new Set(['u:0']),
+      spentByUs: none,
+    })
     expect(left).toEqual([{ txid: 'u', vout: 0, value: 1 }])
   })
 })

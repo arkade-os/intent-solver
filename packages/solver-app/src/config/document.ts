@@ -113,7 +113,7 @@ const buildSchema = (railNames: readonly string[]) =>
     rails: section({
       arkade: section({
         mnemonic: str,
-        serverUrl: str,
+        operatorUrl: str,
         emulatorUrl: str,
         esploraUrl: str,
         unilateralExitDelay: num,
@@ -150,7 +150,7 @@ const buildSchema = (railNames: readonly string[]) =>
       adPublish: str,
       cardRelays: strings,
     }),
-    storage: section({ dir: str, swapDb: str, arkDb: str }),
+    storage: section({ dir: str, swapDb: str, walletDb: str }),
     http: section({ host: str, port: num }),
     admin: section({ host: str, allowedHosts: strings, port: num.nullable(), restartEnabled: bool }),
     sentry: section({ dsn: str, environment: str, release: str }),

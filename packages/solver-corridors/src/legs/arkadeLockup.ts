@@ -34,6 +34,8 @@ export interface CollectionEvidence {
   readonly claimedOffchain: ReadonlySet<string>
   /** Unrolled outputs whose L1 claim has confirmed. */
   readonly claimedOnL1: ReadonlySet<string>
+  /** Offchain outputs the read shows spent whose spend reveals OUR preimage, i.e. an earlier claim of ours. */
+  readonly spentByUs: ReadonlySet<string>
 }
 
 export const outpointKey = (o: { txid: string; vout: number }): string => `${o.txid}:${o.vout}`
@@ -45,5 +47,7 @@ export const uncollected = (adopted: readonly AdoptedOutput[], evidence: Collect
     if (evidence.claimedOffchain.has(key)) return false
     const seen = evidence.outpoints.find((o) => outpointKey(o) === key)
     if (seen === undefined) return true
-    return seen.unrolled ? !evidence.claimedOnL1.has(key) : !seen.spent
+    if (seen.unrolled) return !evidence.claimedOnL1.has(key)
+    // A spend counts as collected only if it was ours: a client refund of a dropped output reads spent too.
+    return seen.spent ? !evidence.spentByUs.has(key) : true
   })

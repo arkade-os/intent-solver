@@ -13,6 +13,7 @@ import { hex } from '@scure/base'
 import { ArkAddress } from '@arkade-os/sdk'
 import {
   claimSwapScript,
+  finalizePendingClaim,
   findClaimPreimage,
   findLockupOutpoints,
   findLockups,
@@ -85,6 +86,13 @@ export const arkadeOpsFromContext = async (ctx: ArkadeContext, emulator: Emulato
       assertScriptMatchesRow(script, row)
       const destination = await ctx.wallet.getAddress()
       return claimSwapScript(ctx, script, outputs, hex.decode(preimageHex), destination)
+    },
+    finalizePendingClaim: async (row, preimageHex) => {
+      const mismatch = keyMismatch(row)
+      if (mismatch) throw new Error(mismatch)
+      const script = covenantScriptFromRow(row)
+      assertScriptMatchesRow(script, row)
+      return finalizePendingClaim(ctx, script, row.pkScript, hex.decode(preimageHex))
     },
     refund: async (row, outputs) => {
       const script = covenantScriptFromRow(row)

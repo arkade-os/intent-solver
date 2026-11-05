@@ -60,7 +60,7 @@ import {
   type E2eArkade,
 } from './support/stack.js'
 
-const ARKD_URL = process.env.ARK_SERVER_URL ?? 'http://localhost:7070'
+const ARKD_URL = process.env.ARKADE_OPERATOR_URL ?? 'http://localhost:7070'
 
 /**
  * Relay addressing identity, DISTINCT from the covenant maker key: the broker

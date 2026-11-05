@@ -70,7 +70,7 @@ try {
       if (name === 'funded') console.log(`solver funded the quoted ${data.sats} sats — claiming`)
     },
   })
-  console.log(`claimed to ${payoutAddress}, arkTxid ${claimed.txid}`)
+  console.log(`claimed to ${payoutAddress}, arkadeTxid ${claimed.txid}`)
 } catch (error) {
   if (error.name === 'SwapRefusal') {
     console.error('solver refused:', error.reason)

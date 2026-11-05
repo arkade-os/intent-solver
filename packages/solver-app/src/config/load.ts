@@ -8,7 +8,7 @@ import { configFromKnobs, sentryOptionsFromKnobs, type Config, type Knobs } from
 import { lightningRailFor, lightningRailNames } from '../ops/rails.js'
 import type { SentryOptions } from '../ops/sentry.js'
 import { parseDocument, type SolverDocument } from './document.js'
-import { documentToKnobs, PATHS, renameKnobs } from './knobs.js'
+import { documentToKnobs, legacyEnvName, PATHS, renameKnobs } from './knobs.js'
 
 export interface LoadOptions {
   env?: NodeJS.ProcessEnv
@@ -25,6 +25,38 @@ let registeredProfile: LoadOptions['profile']
 export const registerConfigProfile = (profile: NonNullable<LoadOptions['profile']>): void => {
   if (registeredProfile) throw new Error('a config profile is already registered')
   registeredProfile = profile
+}
+
+/** The first key one object of `text` repeats, as a dotted path; JSON.parse keeps only the last. */
+const repeatedKey = (text: string): string | null => {
+  const frames: { path: string; keys?: Set<string>; awaitingKey?: boolean }[] = []
+  let lastKey = ''
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (ch === '"') {
+      let end = i + 1
+      while (text[end] !== '"') end += text[end] === '\\' ? 2 : 1
+      const frame = frames.at(-1)
+      if (frame?.keys && frame.awaitingKey) {
+        const key = JSON.parse(text.slice(i, end + 1)) as string
+        lastKey = frame.path ? `${frame.path}.${key}` : key
+        if (frame.keys.has(key)) return lastKey
+        frame.keys.add(key)
+        frame.awaitingKey = false
+      }
+      i = end
+    } else if (ch === '{' || ch === '[') {
+      const top = frames.at(-1)
+      const path = top && !top.keys ? top.path : lastKey
+      frames.push(ch === '{' ? { path, keys: new Set(), awaitingKey: true } : { path })
+    } else if (ch === '}' || ch === ']') {
+      frames.pop()
+    } else if (ch === ',') {
+      const top = frames.at(-1)
+      if (top?.keys) top.awaitingKey = true
+    }
+  }
+  return null
 }
 
 const positionOf = (error: unknown, text: string): string => {
@@ -56,19 +88,25 @@ export const readDocument = (env: NodeJS.ProcessEnv): unknown => {
     }
   }
   text = text.replace(/^﻿/, '')
+  let document: unknown
   try {
-    return JSON.parse(text)
+    document = JSON.parse(text)
   } catch (error) {
     // Position only: V8's message can quote the text it failed on, and the text holds the mnemonic.
     throw new Error(`${source}: invalid JSON${positionOf(error, text)}`)
   }
+  const repeated = repeatedKey(text)
+  if (repeated !== null) {
+    throw new Error(`${source}: key "${repeated}" appears more than once; JSON keeps only the last, so merge them`)
+  }
+  return document
 }
 
 /** Set by platforms rather than operators, so refusing them would refuse a deployment for its host. */
 export const LEGACY_IGNORED = ['HOST', 'PORT'] as const
 
 const LEGACY = new Set(
-  PATHS.map(([, knob]) => knob).filter((knob) => !(LEGACY_IGNORED as readonly string[]).includes(knob)),
+  PATHS.map(([, knob]) => legacyEnvName(knob)).filter((name) => !(LEGACY_IGNORED as readonly string[]).includes(name)),
 )
 // No LND_ family: its settings are all exact ids above, and Kubernetes derives LND_PORT & co from a service named lnd.
 const LEGACY_FAMILY = /^(LN_SEND|LN_RECEIVE|ONCHAIN_SEND|EVM|ASSET|OFFER)_/

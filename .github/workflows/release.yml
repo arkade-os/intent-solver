@@ -107,6 +107,7 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -133,19 +134,18 @@ jobs:
           # image name above nor anything it consumes changes with that move.
           context: .
           file: packages/solver-app/Dockerfile
+          platforms: linux/amd64,linux/arm64
           push: ${{ inputs.dry_run != true }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # The same proof the CI docker job makes: usage text means node, the
-      # compiled output and the native sqlite module all load in the runtime
-      # image. Run against the built image before anyone deploys it.
+      # The CI docker job's smoke test, run on the built image before a deploy.
       - name: Smoke test the published image
         run: |
           set -eu
           tag=$(echo "${{ steps.meta.outputs.tags }}" | head -n1)
           docker build -f packages/solver-app/Dockerfile -t smoke:local .
-          (docker run --rm smoke:local help || true) 2>&1 | grep -q "usage:"
+          docker run --rm -e SOLVER_CONFIG_JSON='{}' smoke:local list
           echo "image ok: $tag"

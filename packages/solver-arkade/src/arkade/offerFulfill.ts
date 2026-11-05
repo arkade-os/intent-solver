@@ -1,6 +1,6 @@
 /**
  * Settle an offer: spend the maker's deposit through its fulfill leaf, paying
- * the maker what the covenant obliges, in one Ark transaction.
+ * the maker what the covenant obliges, in one Arkade transaction.
  *
  * Swap Protocol V1 § 4. The covenant is what makes this trustless for the
  * maker: the fulfill leaf's second key is the emulator's, tweaked by a commitment
@@ -28,12 +28,36 @@ import { selectVirtualCoins, selectCoinsWithAsset, type ExtendedVirtualCoin } fr
 import { ASSET_CARRIER_SATS, encodeOffer, fillOffer, type FillFunding, type Offer } from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
 import { type ArkadeContext } from './wallet.js'
+import { outpointKey } from './lockupFunding.js'
 import { offerIsConsistent } from './offerConsistency.js'
 
 /** The dust carrier output[0] takes when the maker is paid in an ASSET, not sats.
  * Re-exported from the SDK rather than restated: it is a covenant constant, and a
  * second copy here diverges silently the day upstream changes it. */
 export { ASSET_CARRIER_SATS }
+
+/**
+ * A fill refusal that provably submitted nothing, so a caller holding the row in
+ * `filling` may walk it back. Raised ONLY at the two coin-selection refusals
+ * below, both above `fillOffer` — the call that builds AND submits. The other
+ * guards here stay plain on purpose: they mean the row disagrees with the chain,
+ * which needs a human. @see FundNotSubmittedError, the same boundary on receive.
+ */
+export class OfferNotSubmittedError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options)
+    this.name = 'OfferNotSubmittedError'
+  }
+}
+
+export interface FulfillOptions {
+  /**
+   * Claimed immediately before the submission: `false` means another attempt
+   * holds the row and nothing may be sent. A throw is left untyped — a failed
+   * write cannot say whether the latch landed. @see OfferFillStore.markSubmitting
+   */
+  markSubmitting?: () => Promise<boolean>
+}
 
 export interface OfferDepositOutpoint {
   txid: string
@@ -51,7 +75,7 @@ export interface OfferDepositOutpoint {
 }
 
 /**
- * Fulfil one offer and return the settled ark txid.
+ * Fulfil one offer and return the settled Arkade txid.
  *
  * Both directions: an asset-wanting maker is paid through the asset packet with
  * a 330-sat carrier at output[0], and an asset DEPOSIT is routed to us the same
@@ -62,6 +86,7 @@ export const fulfillOffer = async (
   emulatorUrl: string,
   offer: Offer,
   deposit: OfferDepositOutpoint,
+  options?: FulfillOptions,
 ): Promise<string> => {
   const serverPubkey = ctx.wallet.arkServerPublicKey
   if (!offerIsConsistent(offer, serverPubkey)) {
@@ -82,6 +107,11 @@ export const fulfillOffer = async (
   // GATED, as `fundLockup` reads it: `getVtxos` carries the escrowed and locked buckets
   // `offerInventory.ts` keeps out of the float this fill was admitted against.
   const spendable = (await ctx.wallet.getSpendableVtxos()) as ExtendedVirtualCoin[]
+  // The gate hides escrow but not the solver's own in-flight spends. Drop what a
+  // funding or renewal has pinned, then reserve our pick below in the same turn, so
+  // neither side takes the other's coins. @see arkade/reservations.ts
+  const reserved = ctx.reservations.reserved()
+  const free = spendable.filter((coin) => !reserved.has(outpointKey(coin.txid, coin.vout)))
 
   // What output[0] must carry in SATS. An asset-wanting maker is paid through
   // the asset packet, so its BTC leg is only this server's own dust (§ 4.1).
@@ -93,48 +123,62 @@ export const fulfillOffer = async (
   let funding: ExtendedVirtualCoin[]
   try {
     if (wantedAssetId === undefined) {
-      funding = selectVirtualCoins(spendable, Number(makerSats)).inputs ?? []
+      funding = selectVirtualCoins(free, Number(makerSats)).inputs ?? []
     } else {
       // Only the coins are taken from the helper. The surplus it gathered above
       // `wantAmount` is ours, and `fillOffer` routes it back by deriving the
       // taker's side from what the declared inputs carry — a subtraction here
       // would duplicate a job already discharged there.
-      funding = selectCoinsWithAsset(spendable, wantedAssetId, wantAmount).selected
+      funding = selectCoinsWithAsset(free, wantedAssetId, wantAmount).selected
     }
   } catch (error) {
-    const held = spendable.reduce((total, coin) => total + BigInt(coin.value), 0n)
-    throw new Error(
+    const held = free.reduce((total, coin) => total + BigInt(coin.value), 0n)
+    throw new OfferNotSubmittedError(
       `no spendable coins to pay the maker ${wantAmount} ${wantedAssetId ?? 'sats'} (holding ${held} sats): ${
         error instanceof Error ? error.message : String(error)
       }`,
+      { cause: error },
     )
   }
-  if (funding.length === 0) throw new Error(`no spendable coins to pay the maker ${wantAmount} sats`)
+  if (funding.length === 0) throw new OfferNotSubmittedError(`no spendable coins to pay the maker ${wantAmount} sats`)
 
-  return await fillOffer(ctx.wallet, ctx.arkServerUrl, hex.encode(encodeOffer(offer)), {
-    // Inputs 1..n, in this order. Every asset a coin carries is declared, not
-    // just the two the swap is about: arkd refuses with ASSET_NOT_FOUND when an
-    // input owns an asset the packet does not mention, and selection picks for
-    // sats or for the wanted asset — whatever else rides along comes too.
-    fund: funding.map((coin): FillFunding => ({
-      txid: coin.txid,
-      vout: coin.vout,
-      value: coin.value,
-      tapLeafScript: coin.forfeitTapLeafScript,
-      tapTree: coin.tapTree,
-      assets: assetsOn(coin),
-    })),
-    // The deposit this fill was admitted against. Identical offers share one
-    // address, so without it `fillOffer` refuses rather than guessing.
-    fundingTxid: deposit.txid,
-    assetCarrierSats: carrierSats,
-    emulator: emulatorUrl,
-    // No `emulatorPubkey`: that override is 33-byte COMPRESSED and an offer
-    // carries the x-only 32, which cannot be widened — the parity bit is not in
-    // it. It only ever names the client's own key anyway; the covenant here is
-    // rebuilt from the offer's, and a mismatch fails loudly against
-    // `swapPkScript` rather than silently.
-  })
+  const release = ctx.reservations.reserve(funding)
+  try {
+    // THE LAST AWAIT BEFORE THE SUBMISSION, and it has to be: anything awaited after
+    // the latch is a window where a crash leaves a row claiming a fill never sent.
+    if (options?.markSubmitting && !(await options.markSubmitting())) {
+      throw new OfferNotSubmittedError(
+        `another attempt already holds the fill for ${deposit.txid}:${deposit.vout}; nothing was submitted`,
+      )
+    }
+    return await fillOffer(ctx.wallet, ctx.operatorUrl, hex.encode(encodeOffer(offer)), {
+      // Inputs 1..n, in this order. Every asset a coin carries is declared, not
+      // just the two the swap is about: arkd refuses with ASSET_NOT_FOUND when an
+      // input owns an asset the packet does not mention, and selection picks for
+      // sats or for the wanted asset — whatever else rides along comes too.
+      fund: funding.map((coin): FillFunding => ({
+        txid: coin.txid,
+        vout: coin.vout,
+        value: coin.value,
+        tapLeafScript: coin.forfeitTapLeafScript,
+        tapTree: coin.tapTree,
+        assets: assetsOn(coin),
+      })),
+      // The deposit this fill was admitted against. Identical offers share one
+      // address, so without it `fillOffer` refuses rather than guessing.
+      fundingTxid: deposit.txid,
+      assetCarrierSats: carrierSats,
+      emulator: emulatorUrl,
+      // No `emulatorPubkey`: that override is 33-byte COMPRESSED and an offer
+      // carries the x-only 32, which cannot be widened — the parity bit is not in
+      // it. It only ever names the client's own key anyway; the covenant here is
+      // rebuilt from the offer's, and a mismatch fails loudly against
+      // `swapPkScript` rather than silently.
+    })
+  } finally {
+    // Freed on failure too, where nothing else would release the pin.
+    release()
+  }
 }
 
 /** The maker's script, hex, for logging a fill against its offer. */

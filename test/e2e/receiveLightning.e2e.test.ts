@@ -66,11 +66,11 @@
  * drive the shipped adapter unwrapped and the wrapper is gone.
  *
  * PREREQUISITES
- *   - arkade-regtest up: arkd (ARK_SERVER_URL), emulator (EMULATOR_URL), and
+ *   - arkade-regtest up: arkd (ARKADE_OPERATOR_URL), emulator (EMULATOR_URL), and
  *     BOTH LND nodes with their channel active:
  *       docker exec lnd lncli --network=regtest listchannels
  *     No covclaimd needed by any test in this file.
- *   - `.env.regtest.lnd` (or E2E_ENV_FILE) with ARK_MNEMONIC / ARK_SERVER_URL /
+ *   - `.env.regtest.lnd` (or E2E_ENV_FILE) with WALLET_MNEMONIC / ARKADE_OPERATOR_URL /
  *     EMULATOR_URL / LND_SOCKET / LND_CERT_PATH / LND_MACAROON_PATH
  *   - the Arkade wallet funded AND SETTLED (`scripts/regtest-fund.mjs`) — on
  *     THIS corridor the SOLVER funds the lockup out of its own balance

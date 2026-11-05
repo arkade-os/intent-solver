@@ -92,8 +92,8 @@ const CONFIG_KEYS = [
   // Listed for the same reason `EVM_TOKENS` is: a leaked `LN_SEND_ENABLED=false`
   // would silently exempt every later test from needing a rail at all.
   ...CORRIDOR_ENABLED_KEYS,
-  'ARK_MNEMONIC',
-  'ARK_SERVER_URL',
+  'WALLET_MNEMONIC',
+  'ARKADE_OPERATOR_URL',
   'EMULATOR_URL',
   'COVCLAIMD_URL',
   'SWAP_NETWORK',
@@ -103,7 +103,7 @@ const CONFIG_KEYS = [
   'NOSTR_AD_PUBLISH',
   'DB_DIR',
   'SWAP_DB_PATH',
-  'ARK_DB_PATH',
+  'WALLET_DB_PATH',
   'FAKE_LN_STATE_PATH',
   'POOL_AUTO_MINT',
   'CONTRACT_RETENTION_DAYS',
@@ -138,8 +138,8 @@ const CONFIG_KEYS = [
  */
 const BASE_ENV: Record<string, string> = {
   SWAP_NETWORK: 'regtest',
-  ARK_MNEMONIC: 'test mnemonic, never a real one',
-  ARK_SERVER_URL: 'http://localhost:7070',
+  WALLET_MNEMONIC: 'test mnemonic, never a real one',
+  ARKADE_OPERATOR_URL: 'http://localhost:7070',
   EMULATOR_URL: 'http://localhost:7073',
   LN_BACKEND: TEST_RAIL,
 }
@@ -365,14 +365,14 @@ describe('loadConfig — LN_BACKEND is required unless no BTC corridor is served
  * the set case would leave the fallback — the state every existing deployment
  * is in — unpinned.
  */
-describe('loadConfig — ARK_ESPLORA_URL', () => {
+describe('loadConfig — ARKADE_ESPLORA_URL', () => {
   it('passes the operator-supplied explorer through to the wallet config', () => {
-    process.env.ARK_ESPLORA_URL = 'http://mempool_web/api'
+    process.env.ARKADE_ESPLORA_URL = 'http://mempool_web/api'
     expect(configFromKnobs(process.env).arkade.esploraUrl).toBe('http://mempool_web/api')
   })
 
   it('leaves it undefined when unset, keeping the SDK per-network default', () => {
-    delete process.env.ARK_ESPLORA_URL
+    delete process.env.ARKADE_ESPLORA_URL
     expect(configFromKnobs(process.env).arkade.esploraUrl).toBeUndefined()
   })
 
@@ -382,7 +382,7 @@ describe('loadConfig — ARK_ESPLORA_URL', () => {
     // Lightning side at a private Esplora silently repoints the Arkade wallet
     // with it.
     process.env.LND_ESPLORA_URL = 'http://lightning-side/api'
-    delete process.env.ARK_ESPLORA_URL
+    delete process.env.ARKADE_ESPLORA_URL
     expect(configFromKnobs(process.env).arkade.esploraUrl).toBeUndefined()
   })
 })
@@ -478,7 +478,7 @@ describe('loadConfig — DB_DIR', () => {
     // opening an empty swap database and reporting nothing wrong.
     process.env.DB_DIR = '/somewhere/else'
     process.env.SWAP_DB_PATH = '/data/swaps.sqlite'
-    process.env.ARK_DB_PATH = '/data/ark.sqlite'
+    process.env.WALLET_DB_PATH = '/data/ark.sqlite'
     const config = configFromKnobs(process.env)
     expect(config.swapDbPath).toBe('/data/swaps.sqlite')
     expect(config.arkade.databasePath).toBe('/data/ark.sqlite')
@@ -486,7 +486,7 @@ describe('loadConfig — DB_DIR', () => {
 
   it('lets the two paths disagree with each other, as they always could', () => {
     process.env.DB_DIR = '/data'
-    process.env.ARK_DB_PATH = '/wallets/ark.sqlite'
+    process.env.WALLET_DB_PATH = '/wallets/ark.sqlite'
     const config = configFromKnobs(process.env)
     // Verbatim, not joined: an explicit path is passed through untouched.
     expect(config.arkade.databasePath).toBe('/wallets/ark.sqlite')
@@ -717,24 +717,24 @@ describe('loadConfig — EVM corridors', () => {
  * assertion about a deployment this process cannot check, because the thing it
  * would check against is the advertised number being overridden.
  */
-describe('ARK_UNILATERAL_EXIT_DELAY', () => {
+describe('ARKADE_UNILATERAL_EXIT_DELAY', () => {
   it('is absent when unset, so the server is believed', () => {
     expect(configFromKnobs(process.env).arkade.unilateralExitDelayOverride).toBeUndefined()
   })
 
   it('reads a whole number of seconds', () => {
-    process.env.ARK_UNILATERAL_EXIT_DELAY = '259200'
+    process.env.ARKADE_UNILATERAL_EXIT_DELAY = '259200'
     expect(configFromKnobs(process.env).arkade.unilateralExitDelayOverride).toBe(259_200)
   })
 
   it.each(['0', '-1', '1.5', 'three days', '3d', '', '  '])('refuses %s', (raw) => {
-    process.env.ARK_UNILATERAL_EXIT_DELAY = raw
+    process.env.ARKADE_UNILATERAL_EXIT_DELAY = raw
     // Blank reads as unset rather than as an error — an unfilled .env template.
     if (raw.trim() === '') {
       expect(configFromKnobs(process.env).arkade.unilateralExitDelayOverride).toBeUndefined()
       return
     }
-    expect(() => configFromKnobs(process.env)).toThrow(/ARK_UNILATERAL_EXIT_DELAY must be a positive whole number/)
+    expect(() => configFromKnobs(process.env)).toThrow(/ARKADE_UNILATERAL_EXIT_DELAY must be a positive whole number/)
   })
 
   it.each([
@@ -750,17 +750,17 @@ describe('ARK_UNILATERAL_EXIT_DELAY', () => {
     // that is exactly why they are repeated here: downstream runs inside
     // `createArkadeContext` and says "server exit delay", sending an operator to
     // debug arkd over a value they set themselves.
-    process.env.ARK_UNILATERAL_EXIT_DELAY = String(raw)
+    process.env.ARKADE_UNILATERAL_EXIT_DELAY = String(raw)
     expect(() => configFromKnobs(process.env)).toThrow(message)
   })
 
   it.each([1, 20, 144, 503])('accepts %s as a block count, deferring the unit check to the server', (raw) => {
-    process.env.ARK_UNILATERAL_EXIT_DELAY = String(raw)
+    process.env.ARKADE_UNILATERAL_EXIT_DELAY = String(raw)
     expect(configFromKnobs(process.env).arkade.unilateralExitDelayOverride).toBe(raw)
   })
 
   it('accepts the BIP68 ceiling itself, since the bound is inclusive', () => {
-    process.env.ARK_UNILATERAL_EXIT_DELAY = String(MAX_BIP68_SECONDS)
+    process.env.ARKADE_UNILATERAL_EXIT_DELAY = String(MAX_BIP68_SECONDS)
     expect(configFromKnobs(process.env).arkade.unilateralExitDelayOverride).toBe(MAX_BIP68_SECONDS)
   })
 
@@ -768,7 +768,7 @@ describe('ARK_UNILATERAL_EXIT_DELAY', () => {
     // Not constrained to sit below the advertised value. Raising is the SAFE
     // direction — the server accepts any script at or above its minimum — so a
     // deployment wanting a longer recourse than its server demands may have one.
-    process.env.ARK_UNILATERAL_EXIT_DELAY = String(10 * 24 * 3600)
+    process.env.ARKADE_UNILATERAL_EXIT_DELAY = String(10 * 24 * 3600)
     expect(configFromKnobs(process.env).arkade.unilateralExitDelayOverride).toBe(864_000)
   })
 })

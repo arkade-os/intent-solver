@@ -45,7 +45,7 @@ const solverConfig = (): Config => {
     limits,
     arkade: {
       mnemonic: 'test mnemonic, never a real one',
-      arkServerUrl: 'http://localhost:7070',
+      operatorUrl: 'http://localhost:7070',
       databasePath: ':memory:',
       isMainnet: false,
       arkadeHrp: 'tark',

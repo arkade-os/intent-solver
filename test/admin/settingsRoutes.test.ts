@@ -23,7 +23,7 @@ const baseConfig = {
   relayProtocol: 'nostr',
   openRfqMaxBidsPerMinute: 30,
   emulatorUrl: 'http://emulator.test',
-  arkade: { arkServerUrl: 'http://ark.test', databasePath: '.data/ark.sqlite' },
+  arkade: { operatorUrl: 'http://arkade.test', databasePath: '.data/ark.sqlite' },
   limits: { minSats: 1_000, maxSats: 100_000 },
   maxExposedSats: 300_000,
   corridorLimits: {
@@ -220,7 +220,7 @@ describe('PATCH /api/settings', () => {
 
   it('refuses a non-editable key', async () => {
     const { app, setOverrideWithAudit } = build()
-    expect((await patch(app, { key: 'ARK_MNEMONIC', value: 'hunter2' })).status).toBe(400)
+    expect((await patch(app, { key: 'WALLET_MNEMONIC', value: 'hunter2' })).status).toBe(400)
     expect(setOverrideWithAudit).not.toHaveBeenCalled()
   })
 

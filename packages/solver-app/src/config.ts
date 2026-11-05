@@ -565,7 +565,7 @@ const loadLndConfig = (env: Knobs): LndConfig => ({
  * off the same stem, and the Arkade wallet. Point `DB_DIR` at the volume and every
  * file lands there.
  *
- * Strictly a DEFAULT, never an override: `SWAP_DB_PATH` and `ARK_DB_PATH` still win
+ * Strictly a DEFAULT, never an override: `SWAP_DB_PATH` and `WALLET_DB_PATH` still win
  * where set, so an existing deployment keeps opening the exact files it did before.
  *
  * Set-but-empty is unset, and it matters most on the path knobs: better-sqlite3 reads
@@ -580,7 +580,7 @@ const dbDir = (env: Knobs): string => env.DB_DIR?.trim() || '.data'
  *
  * Read-only inspection (`status`, `list`, `timeline`) needs this string and no key
  * material, but {@link loadConfig} validates the whole deployment up front and would
- * demand ARK_MNEMONIC first — putting a seed phrase into the environment, shell
+ * demand WALLET_MNEMONIC first — putting a seed phrase into the environment, shell
  * history and crash dumps of a process that never signs anything.
  *
  * `loadConfig` calls this too, so the default cannot drift between them.
@@ -596,7 +596,7 @@ export const swapDbPath = (env: Knobs): string => env.SWAP_DB_PATH?.trim() || jo
  * wallet than the service under test, on any deployment that moved the
  * directory.
  */
-export const arkDbPath = (env: Knobs): string => env.ARK_DB_PATH?.trim() || join(dbDir(env), 'ark.sqlite')
+export const walletDbPath = (env: Knobs): string => env.WALLET_DB_PATH?.trim() || join(dbDir(env), 'ark.sqlite')
 
 /**
  * Crash reporting, or null when `SENTRY_DSN` is unset.
@@ -789,7 +789,7 @@ const corridorEnabledFromEnv = (env: Knobs): Record<Corridor, boolean> => {
 }
 
 /**
- * `ARK_UNILATERAL_EXIT_DELAY` — what to believe instead of the server's own
+ * `ARKADE_UNILATERAL_EXIT_DELAY` — what to believe instead of the server's own
  * advertised unilateral exit delay.
  *
  * Seconds or blocks, told apart the way every other relative delay in this service is
@@ -807,11 +807,11 @@ const corridorEnabledFromEnv = (env: Knobs): Record<Corridor, boolean> => {
  * constrained below the advertised delay either — raising it is the safe direction.
  */
 const unilateralExitDelayOverride = (env: Knobs): number | undefined => {
-  const raw = env.ARK_UNILATERAL_EXIT_DELAY?.trim()
+  const raw = env.ARKADE_UNILATERAL_EXIT_DELAY?.trim()
   if (!raw) return undefined
   const value = Number(raw)
   if (!Number.isInteger(value) || value <= 0) {
-    throw new Error(`ARK_UNILATERAL_EXIT_DELAY must be a positive whole number, got ${raw}`)
+    throw new Error(`ARKADE_UNILATERAL_EXIT_DELAY must be a positive whole number, got ${raw}`)
   }
   // The SAME window `deriveUnilateralDelays` enforces, checked here so the error names
   // the variable the operator set. Downstream it is caught inside
@@ -826,14 +826,14 @@ const unilateralExitDelayOverride = (env: Knobs): number | undefined => {
   if (relativeDelayFrom(value).unit === 'blocks') {
     if (value > MAX_BIP68_BLOCKS) {
       throw new Error(
-        `ARK_UNILATERAL_EXIT_DELAY is ${value} blocks, beyond the ${MAX_BIP68_BLOCKS} a ladder can carry ` +
+        `ARKADE_UNILATERAL_EXIT_DELAY is ${value} blocks, beyond the ${MAX_BIP68_BLOCKS} a ladder can carry ` +
           'before its top rung re-types itself as seconds',
       )
     }
     return value
   }
   if (value > MAX_BIP68_SECONDS) {
-    throw new Error(`ARK_UNILATERAL_EXIT_DELAY is ${value}s, beyond the ${MAX_BIP68_SECONDS}s BIP68 can encode`)
+    throw new Error(`ARKADE_UNILATERAL_EXIT_DELAY is ${value}s, beyond the ${MAX_BIP68_SECONDS}s BIP68 can encode`)
   }
   return value
 }
@@ -948,6 +948,20 @@ const sendHintScidDenylistFromEnv = (env: Knobs): ReadonlySet<string> => {
     }
   }
   return new Set(entries)
+}
+
+const MAX_SOLVER_NAME_CHARS = 64
+
+const solverNameFromEnv = (env: Knobs): string | null => {
+  const name = env.SOLVER_NAME?.trim()
+  if (!name) return null
+  if (name.length > MAX_SOLVER_NAME_CHARS) {
+    throw new Error(`SOLVER_NAME must be at most ${MAX_SOLVER_NAME_CHARS} characters, got ${name.length}`)
+  }
+  if (/[\p{Cc}*_`~]/u.test(name)) {
+    throw new Error('SOLVER_NAME must not contain Slack formatting characters (*, _, `, ~) or line breaks')
+  }
+  return name
 }
 
 export const configFromKnobs = (env: Knobs): Config => {
@@ -1124,7 +1138,7 @@ export const configFromKnobs = (env: Knobs): Config => {
     // the VOLUME that declares it — rather than baked into an app default.
     relayHealthPath: env.RELAY_HEALTH_PATH?.trim() || '.data/relay-health',
     sentry: sentryOptionsFromKnobs(env),
-    solverName: env.SOLVER_NAME?.trim() || null,
+    solverName: solverNameFromEnv(env),
     cardRelays: (env.SOLVER_CARD_RELAYS ?? '')
       .split(',')
       .map((relay) => relay.trim())
@@ -1169,9 +1183,9 @@ export const configFromKnobs = (env: Knobs): Config => {
       throw new Error(`COVCLAIMD_URL must use https on mainnet, got "${url.protocol}//${url.host}"`)
     })(),
     arkade: {
-      mnemonic: required(env, 'ARK_MNEMONIC'),
-      arkServerUrl: required(env, 'ARK_SERVER_URL'),
-      databasePath: arkDbPath(env),
+      mnemonic: required(env, 'WALLET_MNEMONIC'),
+      operatorUrl: required(env, 'ARKADE_OPERATOR_URL'),
+      databasePath: walletDbPath(env),
       isMainnet: profile.isMainnet,
       arkadeHrp: profile.arkadeHrp,
       unilateralExitDelayOverride: unilateralExitDelayOverride(env),
@@ -1180,7 +1194,7 @@ export const configFromKnobs = (env: Knobs): Config => {
       // a deployment can legitimately point them at different hosts. Unset
       // takes the SDK's per-network default, which on regtest is a localhost
       // URL that resolves to the container itself.
-      esploraUrl: env.ARK_ESPLORA_URL,
+      esploraUrl: env.ARKADE_ESPLORA_URL,
       expectedArkdNetwork: profile.arkdNetwork,
     },
   }
