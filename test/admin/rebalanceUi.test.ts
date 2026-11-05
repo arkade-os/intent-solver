@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RebalancePanel } from '../../packages/solver-app/src/admin/static/rebalance.js'
 
 const policy = {
@@ -23,6 +23,8 @@ const nodesIn = (tree: any): { tag: string; children: any[] }[] => {
   if (!tree?.tag) return []
   return [tree, ...tree.children.flatMap(nodesIn)]
 }
+
+afterEach(() => vi.useRealTimers())
 
 describe('rebalance wallet panel', () => {
   it('omits untouched automatic targets when saving a manual-only policy after rendering', async () => {
@@ -210,6 +212,76 @@ describe('rebalance wallet panel', () => {
     expect(nodesIn(review()).find((node) => node.children[1] === 'Send')!.children[0].disabled).toBe(true)
     quote.state = 'pending'
     expect(review()).toBeUndefined()
+  })
+  it('redraws the countdown and disables an expired quote without a status refresh', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_800_000_000_000)
+    const quote = {
+      id: 'short-quote',
+      state: 'quoted',
+      poolId: 'rail:shared',
+      netSats: 123,
+      feeSats: 5,
+      debitSats: 128,
+      kind: 'onchain',
+      expiresAt: Date.now() / 1000 + 2,
+    }
+    const api = vi.fn().mockResolvedValue({ ...overview, transfers: [quote] })
+    const redraw = vi.fn()
+    const panel = new RebalancePanel(api, redraw)
+    await panel.refresh()
+    panel.quote = quote
+    let tree = panel.render(h)
+    redraw.mockImplementation(() => {
+      tree = panel.render(h)
+    })
+    const originalSend = nodesIn(tree).find((node) => node.children[1] === 'Send')!
+    expect(JSON.stringify(tree)).toContain('Expires in 2 seconds')
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(JSON.stringify(tree)).toContain('Expires in 1 second')
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(JSON.stringify(tree)).toContain('This quote has expired')
+    expect(nodesIn(tree).find((node) => node.children[1] === 'Send')!.children[0].disabled).toBe(true)
+    expect(nodesIn(tree).some((node) => node.children[1] === 'Review a fresh quote')).toBe(true)
+    await originalSend.children[0].onclick()
+    expect(api).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it('reviews an expired transfer with a new request key before allowing Send again', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_800_000_000_000)
+    const expired = {
+      id: 'old-quote',
+      state: 'quoted',
+      poolId: 'rail:shared',
+      netSats: 123,
+      feeSats: 5,
+      debitSats: 128,
+      kind: 'onchain',
+      expiresAt: Date.now() / 1000 - 1,
+    }
+    const fresh = { ...expired, id: 'fresh-quote', feeSats: 6, debitSats: 129, expiresAt: Date.now() / 1000 + 60 }
+    const api = vi
+      .fn()
+      .mockResolvedValueOnce({ ...overview, transfers: [expired] })
+      .mockResolvedValueOnce({ ok: true, result: fresh })
+      .mockResolvedValueOnce({ ...overview, transfers: [fresh, expired] })
+    const panel = new RebalancePanel(api, vi.fn())
+    await panel.refresh()
+    panel.quote = expired
+    panel.draft.amount = '123'
+    const previousKey = panel.quoteBody().requestKey
+    const review = nodesIn(panel.render(h)).find((node) => node.children[1] === 'Review a fresh quote')!
+    await review.children[0].onclick()
+    const request = JSON.parse(api.mock.calls[1]![1].body)
+    expect(request.requestKey).not.toBe(previousKey)
+    expect(request.amount).toBe('123')
+    expect(api.mock.calls.map(([path]) => path)).toEqual(['/api/rebalance', '/api/rebalance/quote', '/api/rebalance'])
+    const tree = panel.render(h)
+    expect(JSON.stringify(tree)).toContain('129 sat')
+    expect(JSON.stringify(tree)).toContain('Expires in 60 seconds')
+    expect(nodesIn(tree).find((node) => node.children[1] === 'Send')!.children[0].disabled).toBe(false)
+    expect(JSON.stringify(tree)).toContain('These limits govern automatic transfers.')
   })
   it('clears a failed balance read when the operator retries with Refresh', async () => {
     const api = vi.fn().mockRejectedValueOnce(new Error('backend unavailable')).mockResolvedValue(overview)

@@ -183,4 +183,21 @@ describe('rebalance administration', () => {
     expect(await response.text()).not.toContain('secret')
     expect(JSON.stringify(recordAction.mock.calls)).not.toContain('secret')
   })
+  it.each([
+    ['source selection cannot cover this transfer within the 50 input limit', 'input limit'],
+    ['TX_TOO_LARGE: proof weight exceeds limit', 'transaction size'],
+  ])('explains the selection refusal %s without leaking details', async (error, expected) => {
+    const { post, service, recordAction } = setup()
+    service.quote.mockRejectedValue(new Error(`${error}; secret invoice`))
+    const response = await post('quote', {
+      poolId: 'rail:shared',
+      amount: '2000000',
+      requestKey: '11111111-1111-4111-8111-111111111111',
+    })
+    expect(response.status).toBe(400)
+    const message = ((await response.json()) as { message: string }).message
+    expect(message).toContain(expected)
+    expect(message).not.toContain('secret')
+    expect(JSON.stringify(recordAction.mock.calls)).not.toContain('secret')
+  })
 })

@@ -804,6 +804,16 @@ export const registerActionRoutes = (app: Hono, deps: AdminDeps): void => {
       // the reason, and the action WAS attempted, unlike a confirm failure.
       return c.json({ ok: false, error: 'action_failed', message: messageOf(error) }, 500)
     }
+    if (
+      name === 'pool-mint' &&
+      result &&
+      typeof result === 'object' &&
+      'refused' in result &&
+      typeof result.refused === 'string'
+    ) {
+      await record('error', JSON.stringify(result).slice(0, 500))
+      return c.json({ ok: false, error: 'pool_mint_refused', message: result.refused, result }, 409)
+    }
     await record('ok', JSON.stringify(result).slice(0, 500))
     return c.json({ ok: true, result })
   })

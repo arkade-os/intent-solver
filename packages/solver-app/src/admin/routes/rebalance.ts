@@ -9,6 +9,10 @@ const address = (value: string): boolean =>
   /^(?:[13mn2][a-km-zA-HJ-NP-Z1-9]{25,34}|(?:bc|tb|bcrt)1[ac-hj-np-z02-9]{11,87})$/i.test(value)
 const refusalMessage = (error: unknown, fallback: string): string => {
   const message = error instanceof Error ? error.message : String(error)
+  if (/50 input limit/i.test(message))
+    return 'Available Arkade funds cannot cover this transfer within the input limit. Try a smaller amount.'
+  if (/TX_TOO_LARGE|proof.?weight|transaction.*(?:too large|weight.*(?:limit|exceed))/i.test(message))
+    return 'Arkade rejected the transaction size. Check the transfer status before trying a smaller amount.'
   if (/insufficient.*(inventory|funds)|insufficient surplus|source reserve or outstanding payouts/i.test(message))
     return 'Available Arkade funds cannot cover this transfer and outstanding payouts. Try a smaller amount.'
   if (/active rebalance transfer/i.test(message))

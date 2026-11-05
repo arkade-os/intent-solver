@@ -563,6 +563,7 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
         mint: (s) => mintPool(s),
       })
       if (mint.minted) log('pool auto-minted', JSON.stringify(mint.result))
+      else if ('refused' in mint) log('pool auto-mint refused:', mint.refused)
       else if (mint.skipped !== 'disabled') log('pool auto-mint skipped:', mint.skipped)
     } catch (error) {
       // Isolated from the report below, not from the cadence: a failed split

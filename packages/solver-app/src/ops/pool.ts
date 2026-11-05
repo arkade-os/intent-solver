@@ -5,7 +5,7 @@
  * code.
  */
 
-import type { ExtendedVirtualCoin } from '@arkade-os/sdk'
+import { ArkError, type ExtendedVirtualCoin } from '@arkade-os/sdk'
 import { MAX_SPLIT_OUTPUTS, planPool, poolTarget, type PoolCoin } from '@arkade-os/solver-arkade/arkade/vtxoPool.js'
 import { outpointKey, usableSatsOf } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
 import { isRenewalDue } from '@arkade-os/solver-arkade/arkade/vtxoLifecycle.js'
@@ -44,11 +44,11 @@ export interface PoolPlan {
  * it holds, since funding pins the coins it spends and one fat coin funds one swap.
  *
  * Read-only; {@link mintPool} acts on the same plan. `maxCount`, `maxInputs` and `maxOutputs`
- * bound one transaction's shape rather than deployment policy, which is why they are
- * constants: an operator who wants a different pool changes the exposure cap, and
+ * bound one transaction's shape rather than deployment policy; a retry can lower the
+ * input cap. An operator who wants a different pool changes the exposure cap, and
  * `poolTarget` derives the target from that.
  */
-export const poolPlan = async (services: Services): Promise<PoolPlan> => {
+export const poolPlan = async (services: Services, maxInputs = 50): Promise<PoolPlan> => {
   // RESERVED COINS ARE NOT AVAILABLE TO SPLIT, and this is the caller that owes
   // `planPool` that filter: the ledger is process-local, so only in-process callers
   // hold the authoritative copy. Unfiltered, a split can spend a coin an in-flight
@@ -90,7 +90,7 @@ export const poolPlan = async (services: Services): Promise<PoolPlan> => {
     target,
     maxCount: 64,
     // The SDK's own self-send migration batches at this many inputs.
-    maxInputs: 50,
+    maxInputs,
     maxOutputs: MAX_SPLIT_OUTPUTS,
     minOutput: Math.max(dustSats, Number(info.vtxoMinAmount ?? 0)),
     maxAmount,
@@ -184,31 +184,58 @@ export type MintOutcome =
  * in.
  */
 export const mintPool = async (services: Services, opts: { force?: boolean } = {}): Promise<MintOutcome> => {
-  const { plan, inputCoins } = await poolPlan(services)
-  if (plan.outputs.length === 0) return { skipped: 'nothing-to-do' }
-
-  const committed = await committedAcrossCorridors(services.readers)
-  if (committed > 0 && opts.force !== true) {
-    return {
-      refused:
-        `${committed} sat committed across non-terminal swaps. ` +
-        'A running provider reserves coins in memory this process cannot see. ' +
-        'Stop it and re-run, or force if you know none is running.',
-      committedSats: committed,
+  let maxInputs = 50
+  let committed = 0
+  for (;;) {
+    const { plan, inputCoins } = await poolPlan(services, maxInputs)
+    if (plan.outputs.length === 0) {
+      return maxInputs === 50
+        ? { skipped: 'nothing-to-do' }
+        : {
+            refused: `Pool reshape deferred: the server rejected a larger transaction, and a smaller plan cannot make progress. ${plan.reason}`,
+            committedSats: committed,
+          }
     }
-  }
 
-  // Destructured rather than spread because `send` wants a non-empty tuple.
-  const address = await services.arkade.wallet.getAddress()
-  const [first, ...rest] = plan.outputs.map((amount) => ({ address, amount }))
-  if (!first) return { skipped: 'nothing-to-do' }
-  const release = pinInputs(services, inputCoins)
-  if (release === null) return { skipped: 'inputs-pinned' }
-  try {
-    const txid = await services.arkade.wallet.send({ recipients: [first, ...rest], selectedVtxos: inputCoins })
-    return { minted: plan.outputs, spent: plan.inputs, txid, committedSats: committed }
-  } finally {
-    release()
+    committed = await committedAcrossCorridors(services.readers)
+    if (committed > 0 && opts.force !== true) {
+      return {
+        refused:
+          `${committed} sat committed across non-terminal swaps. ` +
+          'A running provider reserves coins in memory this process cannot see. ' +
+          'Stop it and re-run, or force if you know none is running.',
+        committedSats: committed,
+      }
+    }
+
+    const address = await services.arkade.wallet.getAddress()
+    const [first, ...rest] = plan.outputs.map((amount) => ({ address, amount }))
+    if (!first) return { skipped: 'nothing-to-do' }
+    const release = pinInputs(services, inputCoins)
+    if (release === null) return { skipped: 'inputs-pinned' }
+    try {
+      const txid = await services.arkade.wallet.send({ recipients: [first, ...rest], selectedVtxos: inputCoins })
+      return { minted: plan.outputs, spent: plan.inputs, txid, committedSats: committed }
+    } catch (error) {
+      // These typed weight rejections happen before arkd accepts the transaction.
+      if (
+        !(error instanceof ArkError) ||
+        error.code !== 46 ||
+        error.name !== 'TX_TOO_LARGE' ||
+        !/^(?:ark tx|proof) weight is too high: \d+$/.test(error.message)
+      ) {
+        throw error
+      }
+      if (inputCoins.length <= 1) {
+        return {
+          refused: 'Pool reshape deferred: even a one-coin transaction exceeds the server transaction weight limit.',
+          committedSats: committed,
+        }
+      }
+      maxInputs = Math.floor(inputCoins.length / 2)
+    } finally {
+      release()
+    }
   }
 }
 

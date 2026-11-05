@@ -798,9 +798,15 @@ the reasons to take one.
   and the console's pool line then read `consolidating M of N coins…`. Each
   `cli pool --mint` (or console `pool-mint`) merges up to 50 of them into the
   pool's pieces plus one remainder, in one Arkade transaction and at no intent
-  fee; repeat until the reason stops saying `consolidating`. With
+  fee. If the server rejects an oversized proof before accepting it, the
+  planner retries a smaller complete set. It never sends a partial plan or
+  retries an uncertain submission. Repeat until the reason stops saying
+  `consolidating`. With
   `rails.arkade.poolAutoMint: true` the watch loop does one pass per lifecycle cadence
-  while no swap is in flight.
+  while no swap is in flight. Pool minting refuses while any non-terminal swap
+  has committed funds: the aggregate amount does not identify the exact coins
+  another process may have reserved. The console shows this refusal and the
+  automatic pass tries again at the next five-minute lifecycle cadence.
 
 - **Exposure**: `cli balances` shows current exposed sats vs the cap. The cap
   counts every non-terminal swap including bare quotes, and quote creation is

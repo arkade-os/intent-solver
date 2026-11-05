@@ -275,6 +275,86 @@ describe('Arkade rebalance source routes', () => {
     release()
   })
 
+  it.each(['manual', 'automatic'] as const)(
+    'chooses six older inputs over one expensive input for %s refill',
+    async (origin) => {
+      const older = new Date('2026-11-10T00:00:00Z')
+      const newer = new Date('2026-12-20T00:00:00Z')
+      coins = [
+        { ...coin('f', 7_278_590), expiresAt: newer },
+        ...Array.from({ length: 6 }, (_, i) => ({ ...coin(String(i + 1), 90_207), expiresAt: older })),
+      ]
+      mocks.route.mockImplementation(async ({ amount, selectedVtxos }) => {
+        const fee = selectedVtxos.some((input: NormalizedExtendedVirtualCoin) => input.txid === coins[0]!.txid)
+          ? 14_757
+          : 200
+        return { amount, total: amount + fee, fee, send }
+      })
+      const receiving = { ...deposit, amountSats: 500_500, netSats: 500_000, feeSats: 500 }
+      const quote = await source.quote(receiving, policy, origin)
+      expect(quote.inputs).toEqual(coins.slice(1).map(({ txid, vout, value }) => ({ txid, vout, value })))
+      expect(quote.debitSats).toBe(500_700)
+      expect(quote.feeSats).toBe(700)
+      expect(send).not.toHaveBeenCalled()
+      const row = { ...rowFrom(quote, receiving), origin }
+      const limits = { ...policy, maxDebitSats: 600_000, maxFeeSats: 800 }
+      const release = await source.reserve(row, limits)
+      expect(await source.submit(row)).toBe(txid)
+      expect(mocks.route.mock.lastCall?.[0].selectedVtxos).toEqual(coins.slice(1))
+      expect(send).toHaveBeenCalledTimes(1)
+      release()
+    },
+  )
+
+  it('keeps the smaller selection when older inputs quote a higher fee', async () => {
+    coins = [coin('1', 2_000), { ...coin('2', 1_500), expiresAt: new Date('2026-11-10') }]
+    mocks.route.mockImplementation(async ({ amount, selectedVtxos }) => {
+      const fee = selectedVtxos[0].txid === coins[0]!.txid ? 10 : 20
+      return { amount, total: amount + fee, fee, send }
+    })
+    const quote = await source.quote(deposit, policy)
+    expect(quote.inputs[0]!.txid).toBe(coins[0]!.txid)
+    expect(quote.debitSats).toBe(1_030)
+  })
+
+  it('can quote an alternative input set after a preview failure without sending either set', async () => {
+    coins = [coin('1', 2_000), { ...coin('2', 1_500), expiresAt: new Date('2026-11-10') }]
+    mocks.route.mockImplementation(async ({ amount, selectedVtxos }) => {
+      if (selectedVtxos[0].txid === coins[0]!.txid) throw new Error('TX_TOO_LARGE: proof weight exceeds limit')
+      return { amount, total: amount + 10, fee: 10, send }
+    })
+    const quote = await source.quote(deposit, policy)
+    expect(quote.inputs[0]!.txid).toBe(coins[1]!.txid)
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('refuses a transfer requiring more than 50 inputs without sending', async () => {
+    coins = Array.from({ length: 60 }, (_, i) => ({ ...coin('1', 100), vout: i }))
+    await expect(source.quote({ ...deposit, amountSats: 5_100, netSats: 5_080 }, policy, 'manual')).rejects.toThrow(
+      /50 input limit/,
+    )
+    expect(mocks.route).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('never grows a fee-short selection beyond 50 inputs', async () => {
+    coins = Array.from({ length: 60 }, (_, i) => ({ ...coin('1', 100), vout: i }))
+    sourceFee = 100
+    await expect(source.quote({ ...deposit, amountSats: 4_950, netSats: 4_930 }, policy, 'manual')).rejects.toThrow(
+      /50 input limit/,
+    )
+    expect(mocks.route).toHaveBeenCalledTimes(1)
+    expect(mocks.route.mock.lastCall?.[0].selectedVtxos).toHaveLength(50)
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('surfaces a rejected proof-size quote without claiming a transfer or sending', async () => {
+    mocks.route.mockRejectedValue(new Error('TX_TOO_LARGE: proof weight exceeds limit'))
+    await expect(source.quote(deposit, policy)).rejects.toThrow(/TX_TOO_LARGE/)
+    expect(send).not.toHaveBeenCalled()
+    expect(services.arkade.reservations.reserved().size).toBe(0)
+  })
+
   it('manual transfers cannot consume outstanding payouts or inventory reserved for customer quotes', async () => {
     const limits = { ...policy, reserveSats: 10_000 }
     const row = rowFrom(await source.quote(deposit, limits, 'manual'))

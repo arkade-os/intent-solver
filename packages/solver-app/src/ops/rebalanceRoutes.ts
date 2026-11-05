@@ -190,20 +190,60 @@ export const createArkadeRebalanceSource = async (
     candidates: NormalizedExtendedVirtualCoin[],
   ) => {
     const minimumChange = Math.max(Number(services.arkade.dustSats ?? 330n), Number(services.arkade.vtxoMinSats ?? 0n))
-    const sorted = [...candidates].sort(
-      (a, b) => b.value - a.value || outpointKey(a.txid, a.vout).localeCompare(outpointKey(b.txid, b.vout)),
-    )
-    const selected: NormalizedExtendedVirtualCoin[] = []
-    for (const coin of sorted) {
-      selected.push(coin)
-      if (sum(selected) < amount) continue
-      const quote = await routerQuote(destination, amount, selected, kind)
-      wholeSats(quote.total)
-      if (quote.amount !== amount || quote.total < amount)
-        throw new Error('source rail quoted a different payment amount')
-      const change = sum(selected) - quote.total
-      if (change === 0 || change >= minimumChange) return { quote, selected }
+    const maxInputs = 50
+    const byValue = (a: NormalizedExtendedVirtualCoin, b: NormalizedExtendedVirtualCoin) =>
+      b.value - a.value || outpointKey(a.txid, a.vout).localeCompare(outpointKey(b.txid, b.vout))
+    const orderings = [
+      [...candidates].sort(byValue),
+      [...candidates].sort(
+        (a, b) =>
+          (a.expiresAt?.getTime() ?? Infinity) - (b.expiresAt?.getTime() ?? Infinity) ||
+          (a.expiresAtHeight ?? Infinity) - (b.expiresAtHeight ?? Infinity) ||
+          byValue(a, b),
+      ),
+    ]
+    const quotes = new Map<string, Promise<RouteQuote>>()
+    let best: { quote: RouteQuote; selected: NormalizedExtendedVirtualCoin[] } | undefined
+    let failure: unknown
+    for (const sorted of orderings) {
+      const selected: NormalizedExtendedVirtualCoin[] = []
+      for (const coin of sorted.slice(0, maxInputs)) {
+        selected.push(coin)
+        if (sum(selected) < amount) continue
+        const key = selected
+          .map((input) => outpointKey(input.txid, input.vout))
+          .sort()
+          .join(',')
+        let quote: RouteQuote
+        try {
+          let pending = quotes.get(key)
+          if (!pending) {
+            pending = routerQuote(destination, amount, [...selected], kind)
+            quotes.set(key, pending)
+          }
+          quote = await pending
+          wholeSats(quote.total)
+          if (quote.amount !== amount || quote.total < amount)
+            throw new Error('source rail quoted a different payment amount')
+        } catch (error) {
+          failure = error
+          break
+        }
+        const change = sum(selected) - quote.total
+        if (change !== 0 && change < minimumChange) continue
+        if (
+          !best ||
+          quote.total < best.quote.total ||
+          (quote.total === best.quote.total && selected.length < best.selected.length)
+        )
+          best = { quote, selected }
+        break
+      }
     }
+    if (best) return best
+    if (failure) throw failure
+    if (candidates.length > maxInputs)
+      throw new Error('source selection cannot cover this transfer within the 50 input limit')
     throw new Error('insufficient unreserved asset-free source inventory')
   }
 

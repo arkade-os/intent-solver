@@ -142,6 +142,32 @@ describe('the confirmation gate', () => {
 })
 
 describe('auditing', () => {
+  it('keeps a refused pool reshape visible as a conflict and audits the refusal', async () => {
+    const services = fakeServices()
+    const run = vi.spyOn(ACTIONS['pool-mint']!, 'run').mockResolvedValue({
+      refused: '9758 sat committed across non-terminal swaps.',
+      committedSats: 9758,
+    })
+    try {
+      const response = await post('pool-mint', { confirm: 'MINT' }, services)
+      expect(response.status).toBe(409)
+      expect(await response.json()).toMatchObject({
+        ok: false,
+        error: 'pool_mint_refused',
+        message: '9758 sat committed across non-terminal swaps.',
+      })
+      expect(services.adminStore.recordAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'pool-mint',
+          outcome: 'error',
+          detail: expect.stringContaining('9758 sat committed'),
+        }),
+      )
+    } finally {
+      run.mockRestore()
+    }
+  })
+
   it('records a SUCCESSFUL action', async () => {
     const services = fakeServices({
       arkade: { wallet: {} },

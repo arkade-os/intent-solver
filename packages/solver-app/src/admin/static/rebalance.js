@@ -121,6 +121,7 @@ export class RebalancePanel {
   }
 
   render(h) {
+    clearTimeout(this.quoteTimer)
     if (!this.loaded) void this.refresh()
     const field = (label, object, key, type = 'text') =>
       h(
@@ -232,7 +233,14 @@ export class RebalancePanel {
     if (quote?.state === 'quoted') {
       const destination = pools.find((pool) => pool.id === quote.poolId)?.label ?? 'Backend wallet'
       const kind = quote.deposit?.kind ?? quote.kind
-      const expired = Number.isSafeInteger(quote.expiresAt) && quote.expiresAt <= Date.now() / 1000
+      const remaining = Number.isSafeInteger(quote.expiresAt)
+        ? Math.max(0, Math.ceil(quote.expiresAt - Date.now() / 1000))
+        : 0
+      const expired = remaining === 0
+      if (!expired) {
+        this.quoteTimer = setTimeout(() => this.redraw(), Math.min(1000, quote.expiresAt * 1000 - Date.now()))
+        this.quoteTimer.unref?.()
+      }
       children.push(
         h(
           'section.wallet-quote',
@@ -263,7 +271,7 @@ export class RebalancePanel {
             'p.muted',
             expired
               ? 'This quote has expired. Review a new quote to continue.'
-              : `Quote valid until ${time(quote.expiresAt)}.`,
+              : `Expires in ${remaining} ${remaining === 1 ? 'second' : 'seconds'} · valid until ${time(quote.expiresAt)}.`,
           ),
           h(
             'div.wallet-confirm',
@@ -271,10 +279,19 @@ export class RebalancePanel {
               'button.act',
               {
                 disabled: this.busy || expired,
-                onclick: () => this.act('submit', { id: quote.id, confirm: quote.id }),
+                onclick: () => {
+                  if (quote.expiresAt <= Date.now() / 1000) return this.redraw()
+                  return this.act('submit', { id: quote.id, confirm: quote.id })
+                },
               },
               'Send',
             ),
+            expired
+              ? button('Review a fresh quote', () => {
+                  this.requestKey = null
+                  return this.act('quote', this.quoteBody())
+                })
+              : null,
           ),
           h('p.wallet-transfer-id', 'Quote ID ', h('code', quote.id)),
         ),
@@ -368,7 +385,7 @@ export class RebalancePanel {
     )
     const policy = this.policy
     const policyChildren = [
-      h('p.notice', 'These limits also govern manual transfers.'),
+      h('p.notice', 'These limits govern automatic transfers. Manual transfers use the reviewed quote.'),
       h(
         'label.wallet-toggle',
         h('input', {
