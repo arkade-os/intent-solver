@@ -806,21 +806,156 @@ describe('withdrawing from the arkade float — both rails out, routed by the de
     expect(wallet.settle).not.toHaveBeenCalled()
   })
 
-  it('hands the router every unpinned coin, and the exit returns the rest as one change coin', async () => {
+  it('spends only enough unpinned coins, leaving the rest available to swaps', async () => {
     const coins = [coin(0x01, 60_000), coin(0x02, 60_000)]
     const wallet = withdrawingWallet(coins)
 
     await withdraw(servicesWith(wallet), { address: TESTNET_ARKADE_ADDRESS, amount: '50000' })
     await withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '50000' })
 
-    expect(wallet.send).toHaveBeenCalledWith(expect.objectContaining({ selectedVtxos: coins }))
+    expect(wallet.send).toHaveBeenCalledWith(expect.objectContaining({ selectedVtxos: [coins[0]] }))
     expect(wallet.settle.mock.calls[0]![0]).toEqual({
-      inputs: coins,
+      inputs: [coins[0]],
       outputs: [
         { address: REGTEST_ADDRESS, amount: 50_000n },
-        { address: ARKADE_ADDRESS, amount: 70_000n },
+        { address: ARKADE_ADDRESS, amount: 10_000n },
       ],
     })
+  })
+
+  it('withdraws the full requested amount without putting the entire float into the proof', async () => {
+    const large = coin(0x01, 7_279_149)
+    const coins = [...Array.from({ length: 80 }, (_, i) => coin(i + 2, 50_000)), large]
+    const wallet = withdrawingWallet(coins, {
+      settle: vi.fn(async ({ inputs }: { inputs: unknown[] }) => {
+        if (inputs.length > 50) throw new Error('TX_TOO_LARGE (46): proof weight is too high: 43917')
+        return 'ff'.repeat(32)
+      }),
+    })
+
+    const result = await withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '3000000' })
+
+    expect(wallet.settle).toHaveBeenCalledTimes(1)
+    expect(wallet.settle.mock.calls[0]![0]).toEqual({
+      inputs: [large],
+      outputs: [
+        { address: REGTEST_ADDRESS, amount: 3_000_000n },
+        { address: ARKADE_ADDRESS, amount: 4_279_149n },
+      ],
+    })
+    expect(result.amount).toBe('3000000')
+  })
+
+  it('adds an input when the first one cannot cover the quoted fee', async () => {
+    const coins = [coin(0x01, 50_100), coin(0x02, 1_000), coin(0x03, 500)]
+    const wallet = withdrawingWallet(coins, {
+      arkProvider: {
+        getInfo: vi
+          .fn()
+          .mockResolvedValue({ dust: 330n, vtxoMaxAmount: -1n, fees: { intentFee: { onchainOutput: '200.0' } } }),
+      },
+    })
+
+    await withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '50000' })
+
+    expect(wallet.settle.mock.calls[0]![0]).toEqual({
+      inputs: coins.slice(0, 2),
+      outputs: [
+        { address: REGTEST_ADDRESS, amount: 50_000n },
+        { address: ARKADE_ADDRESS, amount: 900n },
+      ],
+    })
+  })
+
+  it('adds an input to avoid dust change and keeps unused coins unreserved during settlement', async () => {
+    const coins = [coin(0x01, 50_200), coin(0x02, 1_000), coin(0x03, 500)]
+    const reservations = createReservationLedger()
+    const wallet = withdrawingWallet(coins, {
+      settle: vi.fn(async () => {
+        expect([...reservations.reserved()]).toEqual(coins.slice(0, 2).map((c) => `${c.txid}:0`))
+        return 'ff'.repeat(32)
+      }),
+    })
+
+    await withdraw(servicesWith(wallet, reservations), { address: REGTEST_ADDRESS, amount: '50000' })
+
+    expect(wallet.settle.mock.calls[0]![0].inputs).toEqual(coins.slice(0, 2))
+    expect(reservations.reserved().size).toBe(0)
+  })
+
+  it('refreshes unselected coins after a competing swap spends during the quote', async () => {
+    const first = coin(0x01, 50_100)
+    const competing = coin(0x02, 1_000)
+    const remaining = coin(0x03, 500)
+    let spendable = [first, competing, remaining]
+    let startQuote!: () => void
+    const quoting = new Promise<void>((resolve) => {
+      startQuote = resolve
+    })
+    let finishQuote!: (address: string) => void
+    const quotedAddress = new Promise<string>((resolve) => {
+      finishQuote = resolve
+    })
+    const reservations = createReservationLedger()
+    const wallet = withdrawingWallet(spendable, {
+      getSpendableVtxos: vi.fn(async () => spendable),
+      getAddress: vi
+        .fn()
+        .mockImplementationOnce(() => {
+          startQuote()
+          return quotedAddress
+        })
+        .mockResolvedValue(ARKADE_ADDRESS),
+      arkProvider: {
+        getInfo: vi
+          .fn()
+          .mockResolvedValue({ dust: 330n, vtxoMaxAmount: -1n, fees: { intentFee: { onchainOutput: '200.0' } } }),
+      },
+    })
+
+    const withdrawal = withdraw(servicesWith(wallet, reservations), { address: REGTEST_ADDRESS, amount: '50000' })
+    await quoting
+    const releaseCompeting = reservations.reserve([competing])
+    spendable = [first, remaining]
+    releaseCompeting()
+    finishQuote(ARKADE_ADDRESS)
+    await withdrawal
+
+    expect(wallet.settle).toHaveBeenCalledTimes(1)
+    expect(wallet.settle.mock.calls[0]![0].inputs).toEqual([first, remaining])
+    expect(reservations.reserved().size).toBe(0)
+  })
+
+  it('allows asset-free Arkade change below Bitcoin dust when the operator minimum allows it', async () => {
+    const input = coin(0x01, 50_200)
+    const wallet = withdrawingWallet([input], {
+      arkProvider: {
+        getInfo: vi
+          .fn()
+          .mockResolvedValue({ dust: 330n, vtxoMinAmount: 0n, vtxoMaxAmount: -1n, fees: { intentFee: {} } }),
+      },
+    })
+
+    await withdraw(servicesWith(wallet), { address: TESTNET_ARKADE_ADDRESS, amount: '50000' })
+
+    expect(wallet.send).toHaveBeenCalledWith({
+      recipients: [{ address: TESTNET_ARKADE_ADDRESS, amount: 50_000 }],
+      selectedVtxos: [input],
+    })
+    expect(wallet.settle).not.toHaveBeenCalled()
+  })
+
+  it('refuses an input-heavy withdrawal before sending and never sends a partial amount', async () => {
+    const reservations = createReservationLedger()
+    const wallet = withdrawingWallet(Array.from({ length: 51 }, (_, i) => coin(i + 1, 1_000)))
+
+    await expect(
+      withdraw(servicesWith(wallet, reservations), { address: REGTEST_ADDRESS, amount: '51000' }),
+    ).rejects.toThrow('needs more than 50 inputs')
+
+    expect(wallet.settle).not.toHaveBeenCalled()
+    expect(wallet.send).not.toHaveBeenCalled()
+    expect(reservations.reserved().size).toBe(0)
   })
 
   it('leaves an asset-bearing coin out of both routes, and refuses when nothing else is free', async () => {

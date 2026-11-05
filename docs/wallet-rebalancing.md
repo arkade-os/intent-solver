@@ -2,7 +2,7 @@
 
 The admin console's **Wallet** page can replenish configured backend pools
 from surplus Arkade funds. Manual transfers and automatic refills share the
-same policy checks and durable transfer journal. A transfer completes when its
+same durable transfer journal. A transfer completes when its
 destination proves spendable credit of at least the quoted minimum.
 
 The configured rail must provide a rebalance capability. LND exposes separate
@@ -13,24 +13,26 @@ Unsupported deployments show rebalancing as unavailable.
 
 ## Prepare and send a manual transfer
 
-1. In **automatic rebalancing & limits**, configure the reserve, debit limits,
-   fee limits and minimum transfer size described below. Automation may remain
-   unchecked; these limits also govern manual transfers. Leave both trigger and
-   target blank for pools you do not want to refill automatically, then select
-   **Save policy**.
-2. Select a **destination pool**, a **deposit route**, and **minimum credit
+1. Select a **destination pool**, a **deposit route**, and **minimum credit
    (sat)**. The automatic route choice compares the bounded costs of routes
    offered by that pool. Selecting a specific route restricts the quote to it.
-3. Select **Review quote**. Review its ID, minimum credit, fee upper bound,
-   source debit, route and expiry. The source debit is the authorized maximum;
-   actual costs or credited funds can differ within those bounds.
+2. Set a **destination fee allowance**. It caps what the backend may use to
+   claim the deposit; unused allowance becomes additional destination credit.
+   Manual quotes start at 1,000 sats and can be adjusted independently of the
+   automatic policy.
+3. Select **Review quote**. Review the minimum credit, total fee upper bound,
+   maximum Arkade debit, route and expiry. The source debit is the authorized
+   maximum; actual costs or credited funds can differ within those bounds.
 4. Select **Send** under the quote. Follow its state in **transfer history** and
-   use **Refresh** to update the display.
+   use **Refresh** to update the display. Each row shows the source, destination,
+   expected or confirmed credit, and links to available Arkade and Bitcoin
+   transaction evidence. Lightning invoices are not sent to an explorer.
 
 All amounts are whole satoshis. The backend creates the receive address or
 fixed-amount plain Lightning invoice; the browser cannot supply a replacement
 destination. Quotes expire within 60 seconds, or earlier if the route or invoice
-expires. A policy change invalidates an earlier quote: prepare a new preview.
+expires. Sending rechecks the selected Arkade inputs and reviewed debit bound;
+prepare a new quote if either changed.
 An unsubmitted quote can be cancelled from transfer history.
 
 Submission retries for the same transfer do not create another source spend.
@@ -41,8 +43,9 @@ the request was manual or automatic.
 ## Configure automatic refills
 
 Automatic rebalancing starts disabled on a new installation or an upgrade with
-no saved policy. Monetary defaults are all zero; transfers require explicit
-configuration. The default cooldown is 300 seconds.
+no saved policy. Its monetary defaults are all zero; automatic transfers
+require explicit configuration. Manual transfers use the reviewed quote and
+destination fee allowance instead. The default automatic cooldown is 300 seconds.
 
 | UI field                         | Policy field                  | Meaning                                                                                               |
 | -------------------------------- | ----------------------------- | ----------------------------------------------------------------------------------------------------- |
@@ -56,8 +59,8 @@ configuration. The default cooldown is 300 seconds.
 | Minimum trigger (sat)            | `targets[poolId].minimumSats` | Refill only when fresh spendable balance is below this threshold. Zero never triggers automatically.  |
 | Refill target (sat)              | `targets[poolId].targetSats`  | Desired spendable pool balance; must exceed the minimum trigger.                                      |
 
-Both fee limits apply, including to manual transfers. Setting either fee limit
-to zero permits only transfers with no quoted fees. All policy values must be
+Both fee limits apply to automatic transfers. Setting either fee limit
+to zero permits only automatic transfers with no quoted fees. All policy values must be
 nonnegative safe integers; zero is permitted for the reserve and cooldown.
 
 Choose values for your deployment, enable **automatic rebalancing**, and save.
@@ -71,8 +74,9 @@ from the backend and skips unreadable or invalid readings. Among eligible
 positive thresholds, the lowest `balance / minimum` is considered first.
 The target is a refill goal: source surplus, fees and remaining debit allowance
 may require a smaller transfer. Amounts below the configured minimum are skipped.
-The panel's **Last automatic evaluation** explains why an attempt was skipped
-or refused.
+The panel's **Automatic refill** message explains why an attempt was skipped
+or refused and, during cooldown, when the next attempt can begin. A failed
+quote does not send funds. The attempt still starts the configured cooldown.
 
 ## Lightning counterparty
 
@@ -110,9 +114,20 @@ increase alone is insufficient receipt evidence.
 
 The maximum debit is charged when submission begins. Pending, uncertain,
 completed and refunded transfers retain that charge for the rolling window;
-a refund does not reset the daily allowance. Attempt cooldown and charges
+a refund does not reset the automatic daily allowance. Manual transfers are
+not blocked by that allowance, but their charged debits still count against
+future automatic attempts. Attempt cooldown and charges
 survive restart. A restart during `submitting` moves the transfer to
 `needs_reconciliation` and restores its source hold rather than replaying it.
+
+Configured notification sinks report a started transfer, confirmed spendable
+credit, uncertain submission, refund, and a failed automatic quote. The start
+notice states the authorized maximum debit and minimum expected credit; it
+does not claim the destination has received funds. The completion notice gives
+the actual credited amount. The journal does not separately record the final
+source debit, so the maximum debit and fee limit are bounds, not paid amounts.
+The notification queue remains best effort; use transfer history as the durable
+record after a notifier outage or process crash.
 
 Ambiguous submissions can require operator investigation. A timeout or elapsed
 refund deadline does not clear an uncertain hold. Destination failure does not

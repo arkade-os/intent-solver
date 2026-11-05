@@ -75,6 +75,105 @@ describe('rebalance administration', () => {
     expect(service.quote).toHaveBeenCalledWith(expect.objectContaining({ amountSats: 100 }))
     expect(JSON.stringify(recordAction.mock.calls)).not.toMatch(/private-destination|secret|routeData/)
   })
+  it('returns safe transfer evidence for the history and quote review', async () => {
+    const { app, service } = setup()
+    const fundingTxid = 'ab'.repeat(32)
+    const sourceTxid = 'cd'.repeat(32)
+    const destination = `bc1q${'q'.repeat(38)}`
+    service.overview.mockResolvedValue({
+      pools: [],
+      policy: {},
+      transfers: [
+        {
+          ...transfer,
+          chargedAt: 100,
+          fundingTxid,
+          receivingFeeAllowanceSats: 1000,
+          inputs: [
+            { txid: sourceTxid, vout: 2, value: 5000 },
+            { txid: 'secret', vout: -1, value: 1 },
+          ],
+          deposit: {
+            ...transfer.deposit,
+            destination,
+            amountSats: 103,
+            netSats: 100,
+            feeSats: 3,
+            paymentHash: 'secret',
+          },
+        },
+      ],
+    } as never)
+    const response = await app.request('/api/rebalance')
+    const body = (await response.json()) as { transfers: Record<string, unknown>[] }
+    expect(body.transfers[0]).toMatchObject({
+      chargedAt: 100,
+      fundingTxid,
+      receivingFeeAllowanceSats: 1000,
+      inputs: [{ txid: sourceTxid, vout: 2 }],
+      deposit: { kind: 'onchain', destination, amountSats: 103, netSats: 100, feeSats: 3 },
+    })
+    expect(JSON.stringify(body)).not.toMatch(/secret|paymentHash|routeData|"value"/)
+  })
+  it('never exposes a Lightning invoice or private transfer failure in the summary', async () => {
+    const { app, service } = setup()
+    service.overview.mockResolvedValue({
+      pools: [],
+      policy: {},
+      transfers: [
+        {
+          ...transfer,
+          error: 'secret Lightning invoice lnbc1private',
+          fundingTxid: 'secret',
+          deposit: { ...transfer.deposit, kind: 'lightning', destination: 'lnbc1private', paymentHash: 'secret' },
+        },
+      ],
+    } as never)
+    const response = await app.request('/api/rebalance')
+    const body = (await response.json()) as { transfers: Record<string, unknown>[] }
+    expect(body.transfers[0]?.deposit).toEqual({ kind: 'lightning' })
+    expect(body.transfers[0]?.error).toContain('needs checking')
+    expect(JSON.stringify(body)).not.toMatch(/lnbc1private|secret|paymentHash|routeData/)
+  })
+  it.each(['0', '1000'])('accepts a manual receiving allowance of %s sats', async (allowance) => {
+    const { post, service } = setup()
+    const response = await post('quote', {
+      poolId: 'rail:shared',
+      amount: '2000000',
+      requestKey: '11111111-1111-4111-8111-111111111111',
+      receivingFeeAllowanceSats: allowance,
+    })
+    expect(response.status).toBe(200)
+    expect(service.quote).toHaveBeenCalledWith(
+      expect.objectContaining({
+        amountSats: 2_000_000,
+        receivingFeeAllowanceSats: Number(allowance),
+      }),
+    )
+  })
+  it.each(['-1', '1.5', '9007199254740992', 1000])('rejects an invalid receiving allowance %s', async (allowance) => {
+    const { post, service } = setup()
+    const response = await post('quote', {
+      poolId: 'rail:shared',
+      amount: '100',
+      requestKey: '11111111-1111-4111-8111-111111111111',
+      receivingFeeAllowanceSats: allowance,
+    })
+    expect(response.status).toBe(400)
+    expect(((await response.json()) as { message: string }).message).toContain('receiving fee allowance')
+    expect(service.quote).not.toHaveBeenCalled()
+  })
+  it('explains a safe refusal category without exposing the route error', async () => {
+    const { post, service, recordAction } = setup()
+    service.quote.mockRejectedValue(new Error('insufficient unreserved asset-free source inventory; secret invoice'))
+    const response = await post('quote', {
+      poolId: 'rail:shared',
+      amount: '2000000',
+      requestKey: '11111111-1111-4111-8111-111111111111',
+    })
+    expect(((await response.json()) as { message: string }).message).toContain('Available Arkade funds')
+    expect(JSON.stringify(recordAction.mock.calls)).not.toContain('secret')
+  })
   it('audits an unknown confirmed submit without leaking the error', async () => {
     const { post, service, recordAction } = setup()
     service.submit.mockRejectedValue(new Error('secret transport credentials'))

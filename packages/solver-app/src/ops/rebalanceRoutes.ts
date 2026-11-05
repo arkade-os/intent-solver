@@ -282,7 +282,7 @@ export const createArkadeRebalanceSource = async (
   }
 
   return {
-    async quote(deposit: RebalanceDeposit, policy: RebalancePolicy) {
+    async quote(deposit: RebalanceDeposit, policy: RebalancePolicy, origin: RebalanceTransfer['origin'] = 'automatic') {
       let destination = deposit.destination
       let amount = deposit.amountSats
       let kind: 'onchain' | 'arkade' = 'onchain'
@@ -371,7 +371,10 @@ export const createArkadeRebalanceSource = async (
         const candidates = coins.filter((coin) => !pinned.has(outpointKey(coin.txid, coin.vout)))
         const { quote, selected } = await selectQuote(destination, amount, kind, candidates)
         if (
-          quote.total + policy.reserveSats + (await owed()) + admission.outstandingInventorySats('arkade') >
+          quote.total +
+            (origin === 'manual' ? 0 : policy.reserveSats) +
+            (await owed()) +
+            admission.outstandingInventorySats('arkade') >
           sum(candidates)
         )
           throw new Error('source reserve or outstanding payouts leave insufficient surplus')
@@ -400,8 +403,14 @@ export const createArkadeRebalanceSource = async (
           held.delete(row.id)
         }
       }
-      checkRebalanceFees(policy, row.netSats, row.debitSats)
-      if (row.debitSats > policy.maxDebitSats || row.feeSats !== row.debitSats - row.netSats)
+      wholeSats(row.netSats)
+      wholeSats(row.debitSats)
+      if (row.origin !== 'manual') checkRebalanceFees(policy, row.netSats, row.debitSats)
+      if (
+        (row.origin !== 'manual' && row.debitSats > policy.maxDebitSats) ||
+        row.debitSats < row.netSats ||
+        row.feeSats !== row.debitSats - row.netSats
+      )
         throw new Error('invalid approved source debit')
       const coins = await snapshot()
       const selected = exactInputs(row, coins)
@@ -412,7 +421,8 @@ export const createArkadeRebalanceSource = async (
       try {
         await currentQuote(row, selected)
         const available =
-          sum(coins.filter((coin) => !pinned.has(outpointKey(coin.txid, coin.vout)))) - policy.reserveSats
+          sum(coins.filter((coin) => !pinned.has(outpointKey(coin.txid, coin.vout)))) -
+          (row.origin === 'manual' ? 0 : policy.reserveSats)
         const balance = await admission.reserveInventory('arkade', row.debitSats, available, owed)
         if (!balance) throw new Error('source reserve or outstanding payouts leave insufficient surplus')
         held.set(row.id, selected)

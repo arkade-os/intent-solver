@@ -49,7 +49,7 @@ sets every field. Below, `rails.lightning.backend` is a path into it, and
 | `http.port` / `http.host`                                           | no (`8787` / `127.0.0.1`)                                    | `serve` binding                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `admin.port`                                                        | no (off)                                                     | admin console port. Unset means no console and no new socket. **No authentication — see "The admin console"**                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `admin.host`                                                        | no (`127.0.0.1`)                                             | admin console binding. A non-loopback value is ALLOWED (the container needs it); access control is a reverse proxy's job                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `admin.allowedHosts`                                                | no (unset: any `Host`)                                       | opt-in DNS-rebinding guard: once set, a state-changing request must carry one of these `Host` values, the bound host or its loopback aliases, or the console answers `403 host_not_allowed`; include the port unless it is the scheme's default. Set it on a console a browser can reach without authentication in front of it                                                                                                                                                                                       |
+| `admin.allowedHosts`                                                | no (unset: any `Host`)                                       | opt-in DNS-rebinding guard: once set, a state-changing request must carry one of these `Host` values, the bound host or its loopback aliases, or the console answers `403 host_not_allowed`; include the port unless it is the scheme's default. Set it on a console a browser can reach without authentication in front of it                                                                                                                                                                                           |
 | `relay.url`                                                         | yes for `relay` (the default command)                        | outbound relay WebSocket URL (e.g. `wss://nostr.arkade.sh`) — `wss://`, not `https://`                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `relay.healthPath`                                                  | no (`.data/relay-health`; `/data/relay-health` in the image) | `relay` refreshes this file's mtime every 10s while the relay socket is up; the image's HEALTHCHECK reads it                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `relay.protocol`                                                    | no (`nostr`)                                                 | relay wire dialect; `dev` speaks the mock-relay broker framing                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
@@ -177,7 +177,12 @@ quantities stay in their own atomic units. EVM wallets and custom fund sources
 are not covered.
 
 A decrease since the last complete checkpoint emits `POSSIBLE LOSS` with the
-before, after, and decrease amounts. Failed or invalid reads are stored as
+before, after, and decrease amounts. For journaled rebalances, checkpoints
+also keep a comparison total that accounts for an observed source debit while
+the destination credit is pending and a bounded fee after completion. Raw
+balances and balance-report deltas still show the actual readings. An
+unexplained decrease beyond the transfer attribution remains visible and can
+still trigger `POSSIBLE LOSS`. Failed or invalid reads are stored as
 incomplete, never zero, and do not replace the comparison baseline. The baseline
 survives restarts and is separated by network, Arkade server, provider identity,
 and backend (including the LND socket).
@@ -206,10 +211,12 @@ best-effort delivery. A failed notification delivery does not roll it back.
 The next report compares from that advanced baseline, so changes from an
 undelivered report are not repeated after delivery retries are exhausted.
 
-This is a sanity check, not reconciled profit or solvency: fees, withdrawals,
-token trades, pending HTLCs and non-atomic reads during transfers can cause
-warnings; deposits or gains can mask losses. Investigate warnings against swap
-and operator history. They do not stop trading. Checkpoints are retained until
+This is a sanity check, not reconciled profit or solvency: withdrawals, token
+trades, pending HTLCs and non-atomic reads can cause warnings; deposits or
+gains can mask losses. The bounded rebalance attribution cannot prove the
+exact source fee or retroactively classify alerts written before this change.
+Investigate warnings against the transfer journal, swap and operator history.
+They do not stop trading. Checkpoints are retained until
 removed by the operator; back up the admin database to preserve the history.
 
 ## Shape 1a — the same thing as a Docker image (recommended)
@@ -547,15 +554,18 @@ sats is `float-lifecycle`'s job (it carries the CLTV guard, and a bare
 `settle()` would merge the whole float into one coin). It does withdraw, and the
 destination's form picks the rail — an Arkade address is paid offchain at once,
 a bitcoin address by collaborative exit at the server's next batch. Either way
-the withdrawal spends **every asset-free coin no live swap's funding has pinned**,
-holding all of them until it settles — for a bitcoin address that is the next
-batch, and until then no swap can be funded from the float — and
-returns the rest as one change coin, so the float's piece count drops to one
-until `pool-mint` splits it again — on its own only with `rails.arkade.poolAutoMint: true`,
-otherwise at the next renewal or by hand. The pinned coins are left alone, because
-the SDK's own selection cannot be told "not that one". The destination receives
-exactly the typed amount; the exit's intent fees — one per coin spent — come out
-of the change back to the float.
+the withdrawal selects only enough unpinned, asset-free coins to cover the
+amount, quoted fees and valid change. It holds that selected set until the send
+settles; other float coins remain available for swaps. The selection uses at
+most 50 inputs, matching the SDK's settlement input bound. If a single bounded
+selection cannot cover the amount, it refuses without sending a partial
+payment. The selected coins return any change as one coin; unselected float
+pieces stay separate. `pool-mint` can split change when
+`rails.arkade.poolAutoMint: true`, or the operator can do so at a later renewal.
+The destination receives exactly the typed amount; the exit's intent fees —
+one per selected coin spent — come out of the change back to the float. A
+server can still reject an unusually heavy proof, so inspect any failed send
+before trying again.
 
 **Nothing here opens Lightning channels.** Neither port has a channel primitive,
 so a rail deposit lands in its onchain wallet and whether it becomes inbound or

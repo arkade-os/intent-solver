@@ -253,8 +253,42 @@ describe('Arkade rebalance source routes', () => {
     expect(quote.feeSats).toBe(30)
     expect(services.arkade.wallet.getSpendableVtxos).toHaveBeenCalledWith({ withRecoverable: false })
     const capped = rowFrom(await source.quote(deposit, { ...policy, maxFeeSats: 29 }))
+    capped.origin = 'automatic'
     await expect(source.reserve(capped, { ...policy, maxFeeSats: 29 })).rejects.toThrow(/fee/)
     release()
+  })
+
+  it('authorizes a reviewed manual debit beyond automatic limits while retaining its exact source bound', async () => {
+    coins = [coin('1', 3_000_000)]
+    sourceFee = 14_759
+    const receiving = { ...deposit, netSats: 2_000_000, amountSats: 2_001_000, feeSats: 1000 }
+    const limits = { ...policy, reserveSats: 2_000_000, maxFeeSats: 500, maxFeeBps: 20, maxDebitSats: 500_500 }
+    await expect(source.quote(receiving, limits)).rejects.toThrow(/surplus/)
+    const row = rowFrom(await source.quote(receiving, limits, 'manual'), receiving)
+    expect(row.debitSats).toBe(2_015_759)
+    const release = await source.reserve(row, limits)
+    sourceFee += 1
+    await expect(source.submit(row)).rejects.toThrow(/debit changed/)
+    expect(send).not.toHaveBeenCalled()
+    sourceFee -= 1
+    expect(await source.submit(row)).toBe(txid)
+    release()
+  })
+
+  it('manual transfers cannot consume outstanding payouts or inventory reserved for customer quotes', async () => {
+    const limits = { ...policy, reserveSats: 10_000 }
+    const row = rowFrom(await source.quote(deposit, limits, 'manual'))
+    const readers = services.readers
+    services.readers = [{ committedSats: async () => 2500 }] as unknown as Services['readers']
+    await expect(source.quote(deposit, limits, 'manual')).rejects.toThrow(/surplus/)
+    await expect(source.reserve(row, limits)).rejects.toThrow(/surplus/)
+    expect(services.arkade.reservations.reserved().size).toBe(0)
+    services.readers = readers
+    const customer = await admission.reserveInventory('arkade', 2500, 3500, async () => 0)
+    await expect(source.quote(deposit, limits, 'manual')).rejects.toThrow(/surplus/)
+    await expect(source.reserve(row, limits)).rejects.toThrow(/surplus/)
+    expect(send).not.toHaveBeenCalled()
+    customer?.release()
   })
 
   it('rejects another Bitcoin network before source quoting', async () => {

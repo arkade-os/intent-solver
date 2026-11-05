@@ -19,9 +19,13 @@ import { createNotifier } from '@arkade-os/solver-app/ops/notify.js'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { LOCKUP_CONTRACT_TYPE, lockupContractRegistration } from '@arkade-os/solver-arkade/arkade/vtxoLifecycle.js'
+import { RebalanceStore } from '../../packages/solver-app/src/ops/rebalanceStore.js'
+import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
+import type { RebalanceTransfer } from '@arkade-os/solver-core/ports/rebalance.js'
 
 const stores: AdminStore[] = []
 const directories: string[] = []
+const rebalanceDrivers: ReturnType<typeof betterSqliteDriver>[] = []
 const openStore = async (path = ':memory:') => {
   const store = await AdminStore.open(path)
   stores.push(store)
@@ -74,10 +78,278 @@ const fixture = async (path?: string) => {
   }
 }
 
+const rebalanceFixture = async (path?: string) => {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  const f = await fixture(path)
+  const driver = betterSqliteDriver(':memory:')
+  rebalanceDrivers.push(driver)
+  const store = await RebalanceStore.open(driver)
+  f.services.rebalanceStore = store
+  const now = Math.floor(Date.now() / 1000)
+  const transfer: RebalanceTransfer = {
+    id: 'rebalance-1',
+    requestKey: 'rebalance-1',
+    origin: 'automatic',
+    poolId: 'rail:onchain',
+    netSats: 490,
+    debitSats: 500,
+    feeSats: 10,
+    policyRevision: '1',
+    createdAt: now,
+    updatedAt: now,
+    expiresAt: now + 60,
+    chargedAt: now + 1,
+    state: 'pending',
+    deposit: { kind: 'onchain', destination: 'deposit', amountSats: 500, netSats: 490, feeSats: 10 },
+    inputs: [{ txid: 'ab'.repeat(32), vout: 0, value: 1_000 }],
+  }
+  const sample = async () => {
+    const result = await f.sample()
+    vi.setSystemTime(Date.now() + 1_000)
+    return result
+  }
+  return { ...f, sample, store, transfer, save: () => store.save(transfer) }
+}
+
 afterEach(async () => {
   vi.useRealTimers()
   await Promise.all(stores.splice(0).map((store) => store.close()))
+  await Promise.all(rebalanceDrivers.splice(0).map((driver) => driver.close()))
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true })
+})
+
+describe('rebalance balance accounting', () => {
+  it.each([-1, 0])(
+    'does not reuse an old pending debit when upgrading a legacy baseline (offset %i)',
+    async (offset) => {
+      const f = await rebalanceFixture()
+      delete f.services.rebalanceStore
+      f.arkade.total -= 500
+      const legacy = await f.sample()
+      expect(legacy.rebalance).toBeUndefined()
+      f.transfer.chargedAt = legacy.startedAt + offset
+      await f.store.create(f.transfer)
+      f.services.rebalanceStore = f.store
+      expect((await f.sample()).rebalance?.pending[0]).toMatchObject({
+        debitObserved: true,
+        observedDebitSats: '0',
+        remainingSats: '0',
+      })
+      f.arkade.total -= 25
+      expect((await f.sample()).decreases[0]?.decrease).toBe('25')
+    },
+  )
+
+  it('holds the observed source debit while credit is pending, then accounts only for the remaining fee', async () => {
+    const f = await rebalanceFixture()
+    const initial = await f.sample()
+    await f.store.create(f.transfer)
+    f.arkade.total -= 500
+    const sent = await f.sample()
+    expect(sent.totalSats).toBe('5900')
+    expect(sent.rebalance?.comparisonTotalSats).toBe('6400')
+    expect(sent.decreases).toEqual([])
+    expect((await f.sample()).unrecovered).toEqual([])
+    f.onchain.confirmedSats += 498
+    const creditedBeforeJournal = await f.sample()
+    expect(creditedBeforeJournal.rebalance?.pending[0]?.remainingSats).toBe('2')
+    f.transfer.state = 'completed'
+    f.transfer.creditedSats = 498
+    await f.save()
+    const completed = await f.sample()
+    expect(completed.totalSats).toBe('6398')
+    expect(completed.rebalance).toMatchObject({ comparisonTotalSats: '6400', feeAllowanceUsedSats: '2', pending: [] })
+    expect(completed.decreases).toEqual([])
+    expect(completed.unrecovered).toEqual([])
+    expect(formatCheckpointWarning(completed, 'regtest')).toBeNull()
+    expect(checkpointChanges(initial, completed)?.[0]?.delta).toBe('-2')
+    f.arkade.total -= 1
+    expect((await f.sample()).decreases[0]?.decrease).toBe('1')
+  })
+
+  it('attributes a same-second new debit when the modern baseline had already read an empty journal', async () => {
+    const f = await rebalanceFixture()
+    const initial = await f.sample()
+    expect(initial.rebalance?.seenIds).toEqual([])
+    f.transfer.chargedAt = initial.startedAt
+    await f.store.create(f.transfer)
+    f.arkade.total -= 500
+    const sent = await f.sample()
+    expect(sent.rebalance?.pending[0]).toMatchObject({ observedDebitSats: '500', remainingSats: '500' })
+    expect(sent.decreases).toEqual([])
+    expect((await f.sample()).unrecovered).toEqual([])
+  })
+
+  it('does not book the authorized maximum as an actual debit', async () => {
+    const f = await rebalanceFixture()
+    await f.sample()
+    f.transfer.netSats = 440
+    f.transfer.feeSats = 60
+    f.transfer.deposit = { ...f.transfer.deposit, netSats: 440, feeSats: 60 }
+    await f.store.create(f.transfer)
+    f.arkade.total -= 450
+    expect((await f.sample()).rebalance?.pending[0]?.remainingSats).toBe('450')
+    f.onchain.confirmedSats += 448
+    f.lightning.availableSats -= 5
+    f.transfer.state = 'completed'
+    f.transfer.creditedSats = 448
+    await f.save()
+    const completed = await f.sample()
+    expect(completed.rebalance?.feeAllowanceUsedSats).toBe('2')
+    expect(completed.decreases[0]?.decrease).toBe('5')
+  })
+
+  it('retains the source debit when both legs are visible before the journal completes', async () => {
+    const f = await rebalanceFixture()
+    await f.sample()
+    await f.store.create(f.transfer)
+    f.arkade.total -= 500
+    f.onchain.confirmedSats += 498
+    const pending = await f.sample()
+    expect(pending.rebalance?.pending[0]).toMatchObject({ observedDebitSats: '500', remainingSats: '2' })
+    expect(pending.decreases).toEqual([])
+    f.transfer.state = 'completed'
+    f.transfer.creditedSats = 498
+    await f.save()
+    const completed = await f.sample()
+    expect(completed.rebalance?.feeAllowanceUsedSats).toBe('2')
+    expect(completed.decreases).toEqual([])
+    expect(completed.unrecovered).toEqual([])
+  })
+
+  it('consumes a source debit even when an incoming payment offsets its fee', async () => {
+    const f = await rebalanceFixture()
+    await f.sample()
+    await f.store.create(f.transfer)
+    f.arkade.total -= 500
+    f.onchain.confirmedSats += 500
+    expect((await f.sample()).rebalance?.pending[0]).toMatchObject({
+      debitObserved: true,
+      observedDebitSats: '500',
+      remainingSats: '0',
+    })
+    f.arkade.total -= 5
+    expect((await f.sample()).decreases[0]?.decrease).toBe('5')
+  })
+
+  it('still alerts an unrelated loss during a pending transfer and does not clear it with the deposit', async () => {
+    const f = await rebalanceFixture()
+    await f.sample()
+    await f.store.create(f.transfer)
+    f.arkade.total -= 500
+    await f.sample()
+    f.onchain.confirmedSats -= 25
+    const loss = await f.sample()
+    expect(loss.decreases).toEqual([{ asset: 'BTC', before: '6400', after: '6375', decrease: '25' }])
+    expect(formatCheckpointWarning(await f.sample(), 'regtest')).toContain('unexplained decrease of 25 sats')
+    f.onchain.confirmedSats += 498
+    f.transfer.state = 'completed'
+    f.transfer.creditedSats = 498
+    await f.save()
+    const completed = await f.sample()
+    expect(completed.recovered).toEqual([])
+    expect(completed.unrecovered).toEqual([{ checkpointId: loss.id, asset: 'BTC', before: '6400' }])
+    f.onchain.confirmedSats += 25
+    expect(formatCheckpointRecovery(await f.sample(), 'regtest')).toContain('unexplained decrease cleared')
+  })
+
+  it('keeps the part of a simultaneous decline that exceeds the debit cap visible', async () => {
+    const f = await rebalanceFixture()
+    await f.sample()
+    await f.store.create(f.transfer)
+    f.arkade.total -= 500
+    f.lightning.availableSats -= 20
+    expect((await f.sample()).decreases[0]?.decrease).toBe('20')
+  })
+
+  it('uses only the completion fee bound when both legs settle between checkpoints', async () => {
+    const f = await rebalanceFixture()
+    await f.sample()
+    f.transfer.state = 'completed'
+    f.transfer.creditedSats = 498
+    await f.store.create(f.transfer)
+    f.arkade.total -= 500
+    f.onchain.confirmedSats += 498
+    f.lightning.availableSats -= 5
+    const completed = await f.sample()
+    expect(completed.rebalance?.feeAllowanceUsedSats).toBe('2')
+    expect(completed.decreases[0]?.decrease).toBe('5')
+  })
+
+  it('bounds first-seen completion fees by the observed source debit, not its authorized maximum', async () => {
+    const f = await rebalanceFixture()
+    await f.sample()
+    f.transfer.state = 'completed'
+    f.transfer.netSats = 440
+    f.transfer.feeSats = 60
+    f.transfer.creditedSats = 448
+    await f.store.create(f.transfer)
+    f.arkade.total -= 450
+    f.onchain.confirmedSats += 448
+    f.lightning.availableSats -= 5
+    const completed = await f.sample()
+    expect(completed.rebalance?.feeAllowanceUsedSats).toBe('2')
+    expect(completed.decreases[0]?.decrease).toBe('5')
+  })
+
+  it('retains the consumed debit allowance across an admin-store restart', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'solver-rebalance-checkpoints-'))
+    directories.push(directory)
+    const path = join(directory, 'admin.sqlite')
+    const f = await rebalanceFixture(path)
+    await f.sample()
+    await f.store.create(f.transfer)
+    f.arkade.total -= 500
+    await f.sample()
+    await f.services.adminStore.close()
+    const restarted = await fixture(path)
+    restarted.services.rebalanceStore = f.store
+    restarted.arkade.total -= 500
+    expect((await restarted.sample()).decreases).toEqual([])
+    restarted.arkade.total -= 12
+    expect((await restarted.sample()).decreases[0]?.decrease).toBe('12')
+  })
+
+  it.each([500, 480])('releases a refunded transfer hold after %i sats return', async (returned) => {
+    const f = await rebalanceFixture()
+    await f.sample()
+    await f.store.create(f.transfer)
+    f.arkade.total -= 500
+    await f.sample()
+    f.arkade.total += returned
+    f.transfer.state = 'refunded'
+    await f.save()
+    const refunded = await f.sample()
+    expect(refunded.rebalance?.pending).toEqual([])
+    expect(refunded.rebalance?.feeAllowanceUsedSats).toBe('0')
+    expect(refunded.decreases.map((row) => row.decrease)).toEqual(returned === 500 ? [] : ['20'])
+  })
+
+  it('does not excuse a decline using a failed, uncharged quote', async () => {
+    const f = await rebalanceFixture()
+    await f.sample()
+    f.transfer.state = 'failed'
+    delete f.transfer.chargedAt
+    await f.store.create(f.transfer)
+    f.arkade.total -= 10
+    expect((await f.sample()).decreases[0]?.decrease).toBe('10')
+  })
+
+  it('keeps a journal read failure incomplete and retains the last complete attribution', async () => {
+    const f = await rebalanceFixture()
+    await f.sample()
+    await f.store.create(f.transfer)
+    f.arkade.total -= 500
+    const sent = await f.sample()
+    vi.spyOn(f.store, 'checkpointTransfers').mockRejectedValueOnce(new Error('journal unavailable'))
+    const incomplete = await f.sample()
+    expect(incomplete.totalSats).toBeNull()
+    expect(incomplete.errors.rebalance).toBe('journal unavailable')
+    const next = await f.sample()
+    expect(next.previousId).toBe(sent.id)
+    expect(next.rebalance?.pending[0]?.remainingSats).toBe('500')
+    expect(next.decreases).toEqual([])
+  })
 })
 
 describe('balance checkpoints', () => {

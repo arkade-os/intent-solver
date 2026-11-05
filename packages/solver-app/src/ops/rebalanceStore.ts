@@ -40,6 +40,9 @@ const encode = (row: RebalanceTransfer): string =>
     netSats: decimal(row.netSats, 'netSats'),
     debitSats: decimal(row.debitSats, 'debitSats'),
     feeSats: decimal(row.feeSats, 'feeSats'),
+    ...(row.receivingFeeAllowanceSats === undefined
+      ? {}
+      : { receivingFeeAllowanceSats: decimal(row.receivingFeeAllowanceSats, 'receivingFeeAllowanceSats') }),
     ...(row.creditedSats === undefined ? {} : { creditedSats: decimal(row.creditedSats, 'creditedSats') }),
     deposit: {
       ...row.deposit,
@@ -57,6 +60,9 @@ const decode = (data: string): RebalanceTransfer => {
     netSats: amount(row.netSats, 'netSats'),
     debitSats: amount(row.debitSats, 'debitSats'),
     feeSats: amount(row.feeSats, 'feeSats'),
+    ...(row.receivingFeeAllowanceSats === undefined
+      ? {}
+      : { receivingFeeAllowanceSats: amount(row.receivingFeeAllowanceSats, 'receivingFeeAllowanceSats') }),
     ...(row.creditedSats === undefined ? {} : { creditedSats: amount(row.creditedSats, 'creditedSats') }),
     deposit: {
       ...row.deposit,
@@ -128,6 +134,15 @@ export class RebalanceStore {
   async active(): Promise<RebalanceTransfer[]> {
     const rows = await this.driver.all<{ data: string }>(
       `SELECT data FROM rebalance_transfer WHERE state IN (${ACTIVE})`,
+    )
+    return rows.map((row) => decode(row.data))
+  }
+
+  async checkpointTransfers(since: number): Promise<RebalanceTransfer[]> {
+    safeInteger(since, 'checkpoint time')
+    const rows = await this.driver.all<{ data: string }>(
+      `SELECT data FROM rebalance_transfer WHERE charged_at >= ? OR state IN (${ACTIVE}) ORDER BY charged_at, id`,
+      [since],
     )
     return rows.map((row) => decode(row.data))
   }

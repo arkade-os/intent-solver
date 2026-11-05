@@ -1742,11 +1742,30 @@ tr.note td:first-child {
 }
 
 .wallet-manual,
+.wallet-quote,
 .wallet-policy {
   padding: 20px;
   background: var(--raised);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
+}
+
+.wallet-quote {
+  margin-top: 20px;
+  border-left: 3px solid var(--text-dim);
+}
+
+.wallet-quote-route {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+  font-size: 15px;
+}
+
+.wallet-quote > p {
+  font-size: 13px;
 }
 
 .wallet-manual > p {
@@ -1811,6 +1830,12 @@ tr.note td:first-child {
   margin: 28px 0;
 }
 
+.wallet-transfer-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
 .wallet-empty {
   padding: 16px 0;
   color: var(--text-dim);
@@ -1818,9 +1843,75 @@ tr.note td:first-child {
 }
 
 .wallet-transfer {
-  padding: 12px 0;
+  padding: 18px 0;
   border-bottom: 1px solid var(--line);
   overflow-wrap: anywhere;
+}
+
+.wallet-transfer-heading,
+.wallet-transfer-route {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.wallet-transfer-heading {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.wallet-transfer-route {
+  font-size: 15px;
+}
+
+.wallet-transfer-arrow,
+.wallet-transfer-meta,
+.wallet-transfer-description,
+.wallet-transfer-id {
+  color: var(--text-dim);
+}
+
+.wallet-transfer-meta,
+.wallet-transfer-description,
+.wallet-transfer-id {
+  margin: 6px 0;
+  font-size: 13px;
+}
+
+.wallet-transfer-amounts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+  gap: 12px;
+  margin: 14px 0;
+}
+
+.wallet-transfer-amounts > div {
+  padding-left: 12px;
+  border-left: 1px solid var(--line-strong);
+}
+
+.wallet-transfer-amounts dt {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.wallet-transfer-amounts dd {
+  margin: 3px 0 0;
+  font: 500 15px/1.4 var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.wallet-transfer-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin: 12px 0;
+  font-size: 13px;
+}
+
+.wallet-transfer-id code {
+  font-size: 12px;
 }
 
 .wallet-page .notice,
@@ -1834,6 +1925,7 @@ tr.note td:first-child {
   }
 
   .wallet-manual,
+  .wallet-quote,
   .wallet-policy,
   .wallet-fieldset {
     padding: 16px;

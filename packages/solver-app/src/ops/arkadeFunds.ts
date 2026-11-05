@@ -28,8 +28,7 @@
  *  - `withdraw` — BOTH ways out of the float, routed by the destination's form:
  *    an Arkade address is paid offchain, a bitcoin address by collaborative
  *    exit. The SDK's `PaymentRouter` prices, settles and refuses; this file only
- *    hands it, as `selectedVtxos`, every coin no live swap's funding has pinned,
- *    because the router's own selection cannot be told "not that one".
+ *    hands it a bounded set of unpinned inputs that covers the quote.
  *
  * The absent half of that pair is the point of a capability seam rather than an
  * interface every source must satisfy: absent is a fact the console can render,
@@ -37,7 +36,15 @@
  * ever fail.
  */
 
-import { PaymentRouter, arkRail, isBtcAddress, networks, onchainRail } from '@arkade-os/sdk'
+import {
+  PaymentRouter,
+  arkRail,
+  isBtcAddress,
+  networks,
+  onchainRail,
+  type NormalizedExtendedVirtualCoin,
+  type RouteQuote,
+} from '@arkade-os/sdk'
 import { Address } from '@scure/btc-signer'
 import { ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import { outpointKey } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
@@ -52,6 +59,8 @@ import {
 } from './fundSources.js'
 
 export const ARKADE_FUND_SOURCE_ID = 'arkade'
+// The SDK caps automatic settlement selection at 50; caller-selected inputs bypass that cap.
+const MAX_WITHDRAWAL_INPUTS = 50
 
 /**
  * The funding-relevant split, not the whole balance object.
@@ -178,23 +187,62 @@ const arkadeWithdraw = async (
   const amountSats = parseWholeSats(params.amount)
   assertOnchainNetwork(address, services.config.network)
 
-  // Swept coins fund nothing; an asset coin would move its asset onto the one change coin, which no sats swap can fund from.
-  const spendable = (await wallet.getSpendableVtxos({ withRecoverable: false })).filter((v) => !v.assets?.length)
-  // No await between this read and the `reserve` below: the filter and the pin
-  // are one synchronous section, or the ledger arbitrates nothing.
-  const pinned = reservations.reserved()
-  const candidates = spendable.filter((vtxo) => !pinned.has(outpointKey(vtxo.txid, vtxo.vout)))
-  if (candidates.length === 0) {
-    throw new Error(
-      "every asset-free coin in the float is pinned by a live swap's funding, or there are none — nothing was sent",
-    )
-  }
-  const release = reservations.reserve(candidates)
+  const info = await wallet.arkProvider.getInfo()
+  const selected: NormalizedExtendedVirtualCoin[] = []
+  const releases: (() => void)[] = []
+  const minimumVtxo = Math.max(0, Number(info.vtxoMinAmount ?? 0n))
+  const maximumChange = info.vtxoMaxAmount ?? -1n
   try {
     const router = new PaymentRouter({ wallet, prefs: {} })
       .use(arkRail())
-      .use(onchainRail({ feeInfo: async () => (await wallet.arkProvider.getInfo()).fees }))
-    const quote = await router.route({ raw: address, amount: amountSats, selectedVtxos: candidates })
+      .use(onchainRail({ feeInfo: async () => info.fees }))
+    let quote: RouteQuote | undefined
+    let refusal: Error | undefined
+    for (;;) {
+      // A swap can spend an unselected coin while the preceding quote is awaiting fees.
+      const candidates = (await wallet.getSpendableVtxos({ withRecoverable: false }))
+        .filter((coin) => !coin.assets?.length)
+        .sort((a, b) => b.value - a.value || outpointKey(a.txid, a.vout).localeCompare(outpointKey(b.txid, b.vout)))
+      const pinned = reservations.reserved()
+      const candidate = candidates.find((coin) => !pinned.has(outpointKey(coin.txid, coin.vout)))
+      if (!candidate) break
+      if (selected.length === MAX_WITHDRAWAL_INPUTS)
+        throw new Error(
+          `this withdrawal needs more than ${MAX_WITHDRAWAL_INPUTS} inputs; consolidate the float first — nothing was sent`,
+        )
+      // Each added input is pinned before the asynchronous quote can let a swap claim it.
+      releases.push(reservations.reserve([candidate]))
+      selected.push(candidate)
+      const offered = await router.route({ raw: address, amount: amountSats, selectedVtxos: [...selected] })
+      if (!Number.isSafeInteger(offered.total) || offered.total < amountSats || offered.amount !== amountSats)
+        throw new Error('the withdrawal quote has an invalid amount — nothing was sent')
+      const total = selected.reduce((sum, coin) => sum + BigInt(coin.value), 0n)
+      const change = total - BigInt(offered.total)
+      const minimumChange = offered.railId === 'onchain' ? Math.max(Number(info.dust), minimumVtxo) : minimumVtxo
+      if (change < 0n) {
+        refusal = new Error(
+          `selected vtxos net ${total - BigInt(offered.fee)} sats, ${amountSats} needed — nothing was sent`,
+        )
+        continue
+      }
+      if (change > 0n && change < BigInt(minimumChange)) {
+        refusal = new Error(`change ${change} sats is below dust threshold ${minimumChange} — nothing was sent`)
+        continue
+      }
+      if (offered.railId === 'onchain' && maximumChange > 0n && change > maximumChange)
+        throw new Error(
+          `change ${change} sats exceeds the server per-output ceiling ${maximumChange} — nothing was sent`,
+        )
+      quote = offered
+      break
+    }
+    if (!quote)
+      throw (
+        refusal ??
+        new Error(
+          "every asset-free coin in the float is pinned by a live swap's funding, or there are none — nothing was sent",
+        )
+      )
     const { txid } = await (await quote.send()).settled()
     if (!txid) {
       throw new Error(
@@ -209,7 +257,7 @@ const arkadeWithdraw = async (
       detail: quote.railId === 'onchain' ? { route: 'onchain', feeSats: String(quote.fee) } : { route: 'arkade' },
     }
   } finally {
-    release()
+    for (const release of releases) release()
   }
 }
 

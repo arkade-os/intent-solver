@@ -1330,9 +1330,13 @@ const fundsPanel = () => {
 
 /* ---- fund sources: END --------------------------------------------------- */
 
-const rebalancePanel = new RebalancePanel(api, () => {
-  if (state.view === 'wallet') render()
-})
+const rebalancePanel = new RebalancePanel(
+  api,
+  () => {
+    if (state.view === 'wallet') render()
+  },
+  () => state.overview?.explorers,
+)
 
 const walletView = () => {
   const w = state.data.wallet
