@@ -8,7 +8,7 @@ import { configFromKnobs, sentryOptionsFromKnobs, type Config, type Knobs } from
 import { lightningRailFor, lightningRailNames } from '../ops/rails.js'
 import type { SentryOptions } from '../ops/sentry.js'
 import { parseDocument, type SolverDocument } from './document.js'
-import { documentToKnobs, PATHS, renameKnobs } from './knobs.js'
+import { documentToKnobs, legacyEnvName, PATHS, renameKnobs } from './knobs.js'
 
 export interface LoadOptions {
   env?: NodeJS.ProcessEnv
@@ -106,7 +106,7 @@ export const readDocument = (env: NodeJS.ProcessEnv): unknown => {
 export const LEGACY_IGNORED = ['HOST', 'PORT'] as const
 
 const LEGACY = new Set(
-  PATHS.map(([, knob]) => knob).filter((knob) => !(LEGACY_IGNORED as readonly string[]).includes(knob)),
+  PATHS.map(([, knob]) => legacyEnvName(knob)).filter((name) => !(LEGACY_IGNORED as readonly string[]).includes(name)),
 )
 // No LND_ family: its settings are all exact ids above, and Kubernetes derives LND_PORT & co from a service named lnd.
 const LEGACY_FAMILY = /^(LN_SEND|LN_RECEIVE|ONCHAIN_SEND|EVM|ASSET|OFFER)_/

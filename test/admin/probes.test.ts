@@ -9,7 +9,7 @@ const servicesWith = (
   minimumPayoutSats?: number,
 ) =>
   ({
-    config: { lnBackend: 'lnd', arkade: { arkServerUrl: 'http://ark' }, emulatorUrl: 'http://emu' },
+    config: { lnBackend: 'lnd', arkade: { operatorUrl: 'http://arkade' }, emulatorUrl: 'http://emu' },
     ln: { getBalance: async () => ({ availableSats: 1, incomingSats: 0 }) },
     arkade: { wallet: { getAddress: async () => 'tark1x' } },
     emulatorPubkey: 'ab'.repeat(16),

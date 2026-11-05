@@ -52,7 +52,7 @@ export const balanceCheckpointScope = (services: CheckpointServices): string =>
     // Bumped when what a checkpoint counts changes, so the new measure starts its own baseline.
     'excludes-user-lockups',
     services.config.network,
-    services.config.arkade.arkServerUrl,
+    services.config.arkade.operatorUrl,
     services.providerPubkey,
     services.config.lnBackend,
     services.config.lnd?.socket ?? null,

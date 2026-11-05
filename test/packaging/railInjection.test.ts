@@ -59,6 +59,9 @@ registerLightningRail(RAIL, injected)
 /** The minimum `loadConfig` needs, plus the rail under test. */
 const BASE_ENV: Record<string, string> = {
   SWAP_NETWORK: 'regtest',
+  WALLET_MNEMONIC: 'test mnemonic, never a real one',
+  ARKADE_OPERATOR_URL: 'http://localhost:7070',
+  // The old spellings, for the migration tests below.
   ARK_MNEMONIC: 'test mnemonic, never a real one',
   ARK_SERVER_URL: 'http://localhost:7070',
   EMULATOR_URL: 'http://localhost:7073',
@@ -176,7 +179,7 @@ describe('a registered rail reads its own block of the config document', () => {
     rails: {
       arkade: {
         mnemonic: 'test mnemonic, never a real one',
-        serverUrl: 'http://localhost:7070',
+        operatorUrl: 'http://localhost:7070',
         emulatorUrl: 'http://localhost:7073',
       },
       lightning,

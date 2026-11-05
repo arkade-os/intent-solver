@@ -77,7 +77,7 @@ describe('e2e Arkade surplus rebalance to own Lightning channels through another
     peerArkade = await createArkadeContext({
       mnemonic,
       databasePath: join(dir, 'peer-arkade.sqlite'),
-      arkServerUrl: arkade.ctx.arkServerUrl,
+      operatorUrl: arkade.ctx.operatorUrl,
       isMainnet: false,
       arkadeHrp: arkade.profile.arkadeHrp,
       expectedArkdNetwork: arkade.profile.arkdNetwork,

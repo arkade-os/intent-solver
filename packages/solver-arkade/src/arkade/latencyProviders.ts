@@ -100,12 +100,12 @@ export class TimedIndexerProvider extends SharedSyncIndexerProvider {
   }
 }
 
-export class TimedArkProvider extends RestArkProvider {
+export class TimedArkadeProvider extends RestArkProvider {
   override async submitTx(...args: Parameters<RestArkProvider['submitTx']>) {
     const scope = timingScope.getStore()
     if (scope) scope.submitStarted = performance.now()
     try {
-      return await timed('ark_submit_timing', { fundRef: scope?.fundRef }, () => super.submitTx(...args))
+      return await timed('arkade_submit_timing', { fundRef: scope?.fundRef }, () => super.submitTx(...args))
     } finally {
       if (scope) scope.submitFinished = performance.now()
     }
@@ -115,7 +115,7 @@ export class TimedArkProvider extends RestArkProvider {
     const scope = timingScope.getStore()
     if (scope) scope.finalizeStarted = performance.now()
     try {
-      return await timed('ark_finalize_timing', { fundRef: scope?.fundRef }, () => super.finalizeTx(...args))
+      return await timed('arkade_finalize_timing', { fundRef: scope?.fundRef }, () => super.finalizeTx(...args))
     } finally {
       if (scope) scope.finalizeFinished = performance.now()
     }

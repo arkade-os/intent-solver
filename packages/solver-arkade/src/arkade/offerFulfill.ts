@@ -1,6 +1,6 @@
 /**
  * Settle an offer: spend the maker's deposit through its fulfill leaf, paying
- * the maker what the covenant obliges, in one Ark transaction.
+ * the maker what the covenant obliges, in one Arkade transaction.
  *
  * Swap Protocol V1 § 4. The covenant is what makes this trustless for the
  * maker: the fulfill leaf's second key is the emulator's, tweaked by a commitment
@@ -52,7 +52,7 @@ export interface OfferDepositOutpoint {
 }
 
 /**
- * Fulfil one offer and return the settled ark txid.
+ * Fulfil one offer and return the settled Arkade txid.
  *
  * Both directions: an asset-wanting maker is paid through the asset packet with
  * a 330-sat carrier at output[0], and an asset DEPOSIT is routed to us the same
@@ -119,7 +119,7 @@ export const fulfillOffer = async (
 
   const release = ctx.reservations.reserve(funding)
   try {
-    return await fillOffer(ctx.wallet, ctx.arkServerUrl, hex.encode(encodeOffer(offer)), {
+    return await fillOffer(ctx.wallet, ctx.operatorUrl, hex.encode(encodeOffer(offer)), {
       // Inputs 1..n, in this order. Every asset a coin carries is declared, not
       // just the two the swap is about: arkd refuses with ASSET_NOT_FOUND when an
       // input owns an asset the packet does not mention, and selection picks for

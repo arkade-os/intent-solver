@@ -405,8 +405,8 @@ export class UnrolledSpender {
 }
 
 /** `POST /v1/tx/onchain/cosign`, which the pinned SDK does not wrap. */
-export const cosignOnchainTx = async (arkServerUrl: string, psbtBase64: string): Promise<string> => {
-  const response = await fetch(`${arkServerUrl.replace(/\/$/, '')}/v1/tx/onchain/cosign`, {
+export const cosignOnchainTx = async (operatorUrl: string, psbtBase64: string): Promise<string> => {
+  const response = await fetch(`${operatorUrl.replace(/\/$/, '')}/v1/tx/onchain/cosign`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ tx: psbtBase64 }),
@@ -423,7 +423,7 @@ export const unrolledSpenderFor = (ctx: ArkadeContext): UnrolledSpender =>
   new UnrolledSpender({
     chain: ctx.wallet.onchainProvider,
     signer: ctx.identity,
-    cosign: (psbt) => cosignOnchainTx(ctx.arkServerUrl, psbt),
+    cosign: (psbt) => cosignOnchainTx(ctx.operatorUrl, psbt),
     boarding: ctx.wallet.boardingTapscript,
     now: nowSeconds,
   })
