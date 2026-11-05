@@ -30,25 +30,13 @@
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
 import { BaseSwapStore, addColumns, numberOrNull, text, type RawRow, type StoreShape } from './baseSwapStore.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { LnReceiveMachine, type LnReceiveSwapState } from '../machines/lnReceive.js'
 
-export type ReceiveSwapState =
-  'quoted' | 'armed' | 'funded' | 'claimed' | 'settled' | 'refunding' | 'refunded' | 'refused' | 'stuck'
+export type ReceiveSwapState = LnReceiveSwapState
 
-export const NON_TERMINAL: readonly ReceiveSwapState[] = ['quoted', 'armed', 'funded', 'claimed', 'refunding']
+export const NON_TERMINAL: readonly ReceiveSwapState[] = LnReceiveMachine.live
 /** States in which the provider's OWN Arkade lockup may be funded and not yet made whole. */
-export const EXPOSED: readonly ReceiveSwapState[] = ['funded', 'claimed', 'refunding']
-
-const LEGAL_EDGES: Record<ReceiveSwapState, readonly ReceiveSwapState[]> = {
-  quoted: ['armed', 'refused'],
-  armed: ['funded', 'refused'],
-  funded: ['claimed', 'refunding', 'refunded', 'stuck'],
-  claimed: ['settled', 'stuck'],
-  refunding: ['refunded', 'claimed', 'stuck'],
-  settled: [],
-  refunded: [],
-  refused: [],
-  stuck: [],
-}
+export const EXPOSED: readonly ReceiveSwapState[] = LnReceiveMachine.exposed
 
 // `refund_locktime` is deliberately absent: it is fixed at insert and the
 // covenant's pkScript is derived from it, so no transition may move it.
@@ -363,7 +351,7 @@ const SHAPE: StoreShape<ReceiveSwapRow, ReceiveSwapState> = {
   noun: 'receive swap',
   lifecycleLabel: 'receive swap lifecycle',
   searchColumns: RECEIVE_SEARCH_COLUMNS,
-  legalEdges: LEGAL_EDGES,
+  legalEdges: LnReceiveMachine.edges,
   transitionColumns: TRANSITION_COLUMNS,
   patchColumns: PATCH_COLUMNS,
   live: NON_TERMINAL,
