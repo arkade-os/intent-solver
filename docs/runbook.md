@@ -187,6 +187,77 @@ incomplete, never zero, and do not replace the comparison baseline. The baseline
 survives restarts and is separated by network, Arkade server, provider identity,
 and backend (including the LND socket).
 
+Console withdrawals from Arkade are journaled before sending. Checkpoints wait
+while a send or its source debit is uncertain, and send a withdrawal balance
+check notice with the journal ID, destination and transaction reference. A
+withdrawal is labeled accounted for only after settled outgoing wallet history
+matches its transaction and exact debit, followed by an Arkade balance read
+that shows the source debit. The notice does not prove destination receipt.
+If a withdrawal and rebalance have indistinguishable source debits, BTC
+classification stays paused until the rebalance is terminal and each funding
+transaction has a distinct settled outgoing wallet-history match for its
+actual debit and a checkpoint captured the rebalance's debit basis. A
+rebalance that completed between checkpoints may lack that basis even when
+funding history later appears. The authorized debit is a maximum, not proof
+of what was spent. If evidence is missing, reminders call for manual
+reconciliation; asset checks continue. An additional unexplained BTC decrease
+can still raise `POSSIBLE LOSS` once attribution is
+resolved. Earlier alerts are not retroactively reclassified by this journal.
+
+If a restart uses a missing or different rebalance store while
+`operatorWithdrawals.rebalanceIds` still names its transfers, the checkpoint
+is incomplete instead of guessing their debits. Restore the matching store
+and configuration, or reconcile the recorded transfers with evidence before
+resuming BTC classification.
+
+A `sending` or `uncertain` withdrawal with no transaction reference needs an
+operator check. The notice repeats every 30 minutes and BTC classification
+remains paused for that scope. Stop the solver and back up the admin SQLite
+database before reconciling. Inspect `operator_withdrawal` by journal ID and
+scope, then compare the destination with the audit/chain record and the wallet's
+outgoing history. If a settled outgoing transaction is verified, set a
+`sending` or `uncertain` row to `sent`, its `reference` to that transaction ID,
+and its `fee_sats` to the verified net debit minus `amount_sats`. A `sent` row
+whose quoted fee differs from the matched history debit also needs its
+`fee_sats` corrected to that verified difference; one mismatch defers all
+concurrent live withdrawals. Restrict either correction to the matching ID,
+scope and expected state. Mark a row `failed` only with positive evidence that
+nothing was sent. Absence from a delayed index is not that evidence. Restart
+and check the next checkpoint; keep a record of the evidence used.
+
+An overlapping rebalance can remain deferred after its journal row becomes
+terminal. A withdrawal journal edit alone does not resolve the rebalance's
+source debit or fee allowance. For one overlapping rebalance and withdrawal
+whose funding history or debit basis is missing:
+
+1. Stop the solver and back up both the admin and rebalance databases. Find
+   the latest `complete = 1` row for the current `scope` in
+   `balance_checkpoint`. Preserve its `snapshot`, the matching
+   `operator_withdrawal` row and the `rebalance_transfer.data` row.
+2. Inspect `snapshot.operatorWithdrawals`: `pending`, `rebalanceIds`,
+   `rebalanceReservedSats`, `rebalanceAllowanceBasis`,
+   `observedSourceDropSats`, `comparisonTotalSats`, `deferred`, and
+   `rebalanceAttributionAmbiguous`. Inspect `snapshot.rebalance`:
+   `pending`, `feeAllowanceUsedSats`, and `comparisonTotalSats`.
+3. Independently establish the rebalance's actual source debit from its
+   `fundingTxid` and wallet or chain records, its destination credit or
+   refund, the withdrawal's exact debit and destination, and a fresh Arkade
+   balance. Account for any other activity in the checkpoint interval. The
+   raw drop must cover the proven transfers; retain any unexplained
+   remainder as a possible loss. `debitSats` is an authorized maximum, not
+   the actual debit.
+4. If the evidence is complete, have a DBA reconcile those linked snapshot
+   fields in one recorded operation, including the rebalance's actual debit
+   basis, reserved source drop, fee allowance, and the withdrawal comparison
+   and deferral state. Preserve the raw balance and all unrelated alerts.
+   Never clear `rebalanceAttributionAmbiguous` alone or infer a debit from
+   an aggregate balance drop. Restart and verify the next checkpoint and any
+   remaining `POSSIBLE LOSS` notice.
+
+If any transaction cannot be proven, leave BTC classification deferred and
+escalate for manual accounting. Escalate multi-transfer or manual-override
+overlap rather than applying this single-transfer procedure.
+
 Each decrease is then followed against its own before amount. The first later
 complete checkpoint where that asset is back at or above it emits `RECOVERED`,
 naming the checkpoint that reported the drop. Followed decreases are carried in
@@ -582,9 +653,13 @@ deployment's network before any money moves — the float's Arkade addresses
 inside the SDK's `wallet.send`, everything else in the source. The rail refuses
 an amount above the **confirmed** balance; the float refuses when a live swap's
 funding pins every coin, or when the unpinned coins cannot cover the amount and
-the exit fee. It is **not safe to repeat**: nothing persists or re-drives it, so
-each attempt is a separate payment and a withdrawal that timed out must be
-checked against the chain before retrying.
+the exit fee. It is **not safe to repeat**: each attempt is a separate payment.
+Arkade withdrawals persist a journal row before sending and record the quoted
+fee and transaction reference after success. If the send or settlement result
+is uncertain, the API returns `withdrawal_uncertain` with the journal ID and
+the console closes the armed confirmation. Check the wallet transaction and
+destination before retrying. Other fund sources retain their own withdrawal
+behavior.
 
 Remember what `admin.host` is: with the console reachable, `fund-withdraw` lets
 anything that can reach the port send a source's balance to an address of its

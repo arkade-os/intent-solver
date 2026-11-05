@@ -44,6 +44,20 @@ CREATE TABLE IF NOT EXISTS admin_action (
 );
 CREATE INDEX IF NOT EXISTS idx_admin_action_at ON admin_action(at);
 
+CREATE TABLE IF NOT EXISTS operator_withdrawal (
+  id          TEXT PRIMARY KEY,
+  scope       TEXT NOT NULL,
+  source      TEXT NOT NULL,
+  address     TEXT NOT NULL,
+  amount_sats TEXT NOT NULL,
+  fee_sats    TEXT,
+  reference   TEXT,
+  state       TEXT NOT NULL,
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_operator_withdrawal_scope_at ON operator_withdrawal(scope, created_at);
+
 CREATE TABLE IF NOT EXISTS balance_checkpoint (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   scope TEXT NOT NULL,
@@ -183,6 +197,46 @@ export interface AuditEntry {
 export interface AuditRow extends AuditEntry {
   id: number
   at: number
+}
+
+export type OperatorWithdrawalState = 'preparing' | 'sending' | 'sent' | 'uncertain' | 'failed'
+
+export interface OperatorWithdrawal {
+  id: string
+  scope: string
+  source: string
+  address: string
+  amountSats: number
+  feeSats: number | null
+  reference: string | null
+  state: OperatorWithdrawalState
+  createdAt: number
+  updatedAt: number
+}
+
+const operatorWithdrawalFrom = (row: Record<string, string | number | null>): OperatorWithdrawal => ({
+  id: String(row.id),
+  scope: String(row.scope),
+  source: String(row.source),
+  address: String(row.address),
+  amountSats: Number(row.amount_sats),
+  feeSats: row.fee_sats === null ? null : Number(row.fee_sats),
+  reference: row.reference === null ? null : String(row.reference),
+  state: String(row.state) as OperatorWithdrawalState,
+  createdAt: Number(row.created_at),
+  updatedAt: Number(row.updated_at),
+})
+
+const nonnegativeSats = (value: number, label: string): void => {
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${label} must be non-negative safe integer sats`)
+}
+
+const operatorWithdrawalTransitions: Record<OperatorWithdrawalState, readonly OperatorWithdrawalState[]> = {
+  preparing: ['sending', 'uncertain', 'failed'],
+  sending: ['sent', 'uncertain'],
+  uncertain: ['sent', 'failed'],
+  sent: [],
+  failed: [],
 }
 
 /** A stored market, plus the key it is filed under and when it last moved. */
@@ -629,6 +683,73 @@ export class AdminStore {
       'INSERT INTO admin_action (at, action, target, params, outcome, detail, revision) VALUES (?, ?, ?, ?, ?, ?, ?)',
       [this.now(), entry.action, entry.target, entry.params, entry.outcome, entry.detail, entry.revision ?? null],
     )
+  }
+
+  async createOperatorWithdrawal(input: {
+    id: string
+    scope: string
+    source: string
+    address: string
+    amountSats: number
+  }): Promise<OperatorWithdrawal> {
+    for (const field of ['id', 'scope', 'source', 'address'] as const) {
+      if (!input[field]) throw new Error(`operator withdrawal ${field} is required`)
+    }
+    nonnegativeSats(input.amountSats, 'operator withdrawal amount')
+    if (input.amountSats === 0) throw new Error('operator withdrawal amount must be positive')
+    const at = this.now()
+    await this.driver.run(
+      'INSERT INTO operator_withdrawal (id, scope, source, address, amount_sats, state, created_at, updated_at) ' +
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [input.id, input.scope, input.source, input.address, String(input.amountSats), 'preparing', at, at],
+    )
+    const row = await this.getOperatorWithdrawal(input.id)
+    if (!row) throw new Error('operator withdrawal insert returned no row')
+    return row
+  }
+
+  async getOperatorWithdrawal(id: string): Promise<OperatorWithdrawal | undefined> {
+    const row = await this.driver.get<Record<string, string | number | null>>(
+      'SELECT * FROM operator_withdrawal WHERE id = ?',
+      [id],
+    )
+    return row ? operatorWithdrawalFrom(row) : undefined
+  }
+
+  async transitionOperatorWithdrawal(
+    id: string,
+    from: OperatorWithdrawalState,
+    to: OperatorWithdrawalState,
+    data: { feeSats?: number; reference?: string } = {},
+  ): Promise<OperatorWithdrawal> {
+    if (!operatorWithdrawalTransitions[from].includes(to))
+      throw new Error(`invalid operator withdrawal transition ${from} -> ${to}`)
+    if (data.feeSats !== undefined) nonnegativeSats(data.feeSats, 'operator withdrawal fee')
+    const previous = await this.getOperatorWithdrawal(id)
+    if (!previous || previous.state !== from) throw new Error(`operator withdrawal ${id} is not ${from}`)
+    const feeSats = data.feeSats ?? previous.feeSats
+    const reference = data.reference ?? previous.reference
+    if (to === 'sent' && (feeSats === null || !reference))
+      throw new Error('sent operator withdrawal requires fee and transaction reference')
+    const result = await this.driver.run(
+      'UPDATE operator_withdrawal SET state = ?, fee_sats = ?, reference = ?, updated_at = ? WHERE id = ? AND state = ?',
+      [to, feeSats === null ? null : String(feeSats), reference, this.now(), id, from],
+    )
+    if (result.changes !== 1) throw new Error(`operator withdrawal ${id} changed before transition`)
+    const row = await this.getOperatorWithdrawal(id)
+    if (!row) throw new Error(`operator withdrawal ${id} vanished after transition`)
+    return row
+  }
+
+  async listOperatorWithdrawals(scope: string, since: number): Promise<OperatorWithdrawal[]> {
+    if (!scope) throw new Error('operator withdrawal scope is required')
+    if (!Number.isSafeInteger(since) || since < 0) throw new Error('operator withdrawal cursor must be non-negative')
+    const rows = await this.driver.all<Record<string, string | number | null>>(
+      "SELECT * FROM operator_withdrawal WHERE scope = ? AND (created_at >= ? OR state IN ('sending', 'uncertain')) " +
+        'ORDER BY created_at, id',
+      [scope, since],
+    )
+    return rows.map(operatorWithdrawalFrom)
   }
 
   /**

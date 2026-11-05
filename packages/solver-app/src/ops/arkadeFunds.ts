@@ -180,7 +180,7 @@ const assertOnchainNetwork = (address: string, network: SwapNetwork): void => {
  */
 const arkadeWithdraw = async (
   services: Services,
-  params: { address: string; amount: string },
+  params: { address: string; amount: string; onSending?: (feeSats: number) => Promise<void> },
 ): Promise<FundWithdrawal> => {
   const { wallet, reservations } = services.arkade
   const { address } = params
@@ -243,6 +243,9 @@ const arkadeWithdraw = async (
           "every asset-free coin in the float is pinned by a live swap's funding, or there are none — nothing was sent",
         )
       )
+    if (!Number.isSafeInteger(quote.fee) || quote.fee < 0)
+      throw new Error('the withdrawal quote has an invalid fee — nothing was sent')
+    await params.onSending?.(quote.fee)
     const { txid } = await (await quote.send()).settled()
     if (!txid) {
       throw new Error(
@@ -254,7 +257,10 @@ const arkadeWithdraw = async (
       reference: txid,
       address,
       amount: String(amountSats),
-      detail: quote.railId === 'onchain' ? { route: 'onchain', feeSats: String(quote.fee) } : { route: 'arkade' },
+      detail:
+        quote.railId === 'onchain'
+          ? { route: 'onchain', feeSats: String(quote.fee) }
+          : { route: 'arkade', feeSats: String(quote.fee) },
     }
   } finally {
     for (const release of releases) release()
