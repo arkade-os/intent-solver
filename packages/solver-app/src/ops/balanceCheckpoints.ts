@@ -5,6 +5,7 @@ import { json, messageOf, nowSeconds } from '@arkade-os/solver-core/util/poll.js
 import { startCadence } from './cadence.js'
 import { createJoin, STALE_READ_MS, within } from './guardedRead.js'
 import { limitNotification } from './notify.js'
+import type { RebalanceTransfer } from '@arkade-os/solver-core/ports/rebalance.js'
 
 export interface BalanceCheckpoint {
   id: number
@@ -21,6 +22,18 @@ export interface BalanceCheckpoint {
   // Optional: checkpoints stored before recovery tracking have neither.
   recovered?: (FollowedDecrease & { after: string })[]
   unrecovered?: FollowedDecrease[]
+  rebalance?: {
+    comparisonTotalSats: string
+    feeAllowanceUsedSats: string
+    seenIds: string[]
+    pending: {
+      id: string
+      chargedAt: number
+      debitObserved: boolean
+      observedDebitSats: string
+      remainingSats: string
+    }[]
+  }
 }
 
 /** A decrease reported at `checkpointId`, followed until its asset is back to `before`. */
@@ -33,7 +46,10 @@ export interface FollowedDecrease {
 // ponytail: oldest dropped past this; a time window instead if late follow-ups turn into noise.
 const UNRECOVERED_LIMIT = 20
 
-type CheckpointServices = Pick<Services, 'arkade' | 'ln' | 'onchain' | 'adminStore' | 'config' | 'providerPubkey'>
+type CheckpointServices = Pick<
+  Services,
+  'arkade' | 'ln' | 'onchain' | 'adminStore' | 'config' | 'providerPubkey' | 'rebalanceStore'
+>
 
 export interface BalanceCheckpointReport {
   current: BalanceCheckpoint | null
@@ -92,7 +108,9 @@ export const formatBalanceChange = (change: BalanceChange): string => {
 }
 
 const levelOf = (checkpoint: BalanceCheckpoint, asset: string): string =>
-  asset === 'BTC' ? (checkpoint.totalSats ?? '0') : (checkpoint.arkade?.assets[asset.slice('arkade:'.length)] ?? '0')
+  asset === 'BTC'
+    ? (checkpoint.rebalance?.comparisonTotalSats ?? checkpoint.totalSats ?? '0')
+    : (checkpoint.arkade?.assets[asset.slice('arkade:'.length)] ?? '0')
 
 // A decrease is alerted only once the next checkpoint still shows it: a claim landing a few
 // seconds after its payment, or two rails read a moment apart, is back by then.
@@ -105,9 +123,13 @@ export const formatCheckpointWarning = (checkpoint: BalanceCheckpoint, network: 
           `⚠️ *POSSIBLE LOSS* · ${network} · checkpoint #${checkpoint.id}`,
           ...held.map(({ checkpointId, asset, before }) => {
             const after = levelOf(checkpoint, asset)
+            if (asset === 'BTC' && checkpoint.rebalance)
+              return `BTC: unexplained decrease of ${(BigInt(before) - BigInt(after)).toLocaleString('en-US')} sats since checkpoint #${checkpointId}`
             return `${formatBalanceChange({ asset, before, after, delta: String(BigInt(after) - BigInt(before)) })} since checkpoint #${checkpointId}`
           }),
-          'Fees, withdrawals and funds in flight are not reconciled. A RECOVERED follow-up is sent if the balance comes back.',
+          checkpoint.rebalance
+            ? 'Known rebalances and their allowed fees are accounted for. Other fees and withdrawals may explain this decrease. A RECOVERED follow-up is sent if it clears.'
+            : 'Fees, withdrawals and funds in flight are not reconciled. A RECOVERED follow-up is sent if the balance comes back.',
         ].join('\n'),
       )
 }
@@ -120,11 +142,14 @@ export const formatCheckpointRecovery = (checkpoint: BalanceCheckpoint, network:
     : limitNotification(
         [
           `✅ *RECOVERED* · ${network} · checkpoint #${checkpoint.id}`,
-          ...recovered.map(
-            ({ checkpointId, asset, before, after }) =>
-              `${formatBalanceChange({ asset, before, after, delta: String(BigInt(after) - BigInt(before)) })} since before the drop at checkpoint #${checkpointId}`,
+          ...recovered.map(({ checkpointId, asset, before, after }) =>
+            asset === 'BTC' && checkpoint.rebalance
+              ? `BTC: unexplained decrease cleared since checkpoint #${checkpointId}`
+              : `${formatBalanceChange({ asset, before, after, delta: String(BigInt(after) - BigInt(before)) })} since before the drop at checkpoint #${checkpointId}`,
           ),
-          'The balance is back to its level before the drop; the cause is not reconciled.',
+          checkpoint.rebalance
+            ? 'The unexplained decrease has cleared after accounting for known rebalances and their allowed fees.'
+            : 'The balance is back to its level before the drop; the cause is not reconciled.',
         ].join('\n'),
       )
 }
@@ -144,8 +169,91 @@ const sats = (value: number): string => {
   return String(value)
 }
 
+const minimum = (...values: bigint[]): bigint => values.reduce((a, b) => (a < b ? a : b))
+const positive = (value: bigint): bigint => (value > 0n ? value : 0n)
+const pendingRebalance = (row: RebalanceTransfer): boolean =>
+  row.state === 'submitting' || row.state === 'pending' || row.state === 'needs_reconciliation'
+const completionAllowance = (row: RebalanceTransfer, sourceDebit: bigint): bigint => {
+  if (row.state !== 'completed' || row.creditedSats === undefined) return 0n
+  return minimum(BigInt(sats(row.feeSats)), positive(sourceDebit - BigInt(sats(row.creditedSats))))
+}
+
+const accountRebalances = (
+  previous: BalanceCheckpoint | undefined,
+  totalSats: string,
+  arkadeSats: string,
+  transfers: RebalanceTransfer[],
+): NonNullable<BalanceCheckpoint['rebalance']> => {
+  let feeAllowance = BigInt(previous?.rebalance?.feeAllowanceUsedSats ?? '0')
+  const pending = (previous?.rebalance?.pending ?? []).map((row) => ({ ...row }))
+  const seen = new Set(previous?.rebalance?.seenIds ?? [])
+  const byId = new Map(transfers.map((row) => [row.id, row]))
+  if (pending.some((row) => !byId.has(row.id))) throw new Error('tracked rebalance is missing from its journal')
+  const delta =
+    previous?.totalSats === undefined || previous.totalSats === null
+      ? 0n
+      : BigInt(totalSats) - BigInt(previous.totalSats)
+  let returned = positive(delta)
+  let decrease = positive(-delta)
+  let sourceDecrease = previous?.arkade ? positive(BigInt(previous.arkade.totalSats) - BigInt(arkadeSats)) : 0n
+  for (const row of pending) {
+    const recovered = minimum(returned, BigInt(row.remainingSats))
+    row.remainingSats = String(BigInt(row.remainingSats) - recovered)
+    returned -= recovered
+  }
+  for (const row of transfers) {
+    if (row.chargedAt === undefined) continue
+    sats(row.chargedAt)
+    sats(row.debitSats)
+    if (seen.has(row.id) || pending.some((item) => item.id === row.id)) continue
+    if (pendingRebalance(row)) {
+      pending.push({
+        id: row.id,
+        chargedAt: row.chargedAt,
+        debitObserved: !previous || (!previous.rebalance && row.chargedAt <= previous.startedAt),
+        observedDebitSats: '0',
+        remainingSats: '0',
+      })
+    } else if (previous) {
+      const debit = minimum(sourceDecrease, BigInt(sats(row.debitSats)))
+      const explained = minimum(decrease, completionAllowance(row, debit))
+      feeAllowance += explained
+      decrease -= explained
+      sourceDecrease -= debit
+    }
+  }
+  for (const held of pending) {
+    const row = byId.get(held.id)!
+    if (!held.debitObserved && sourceDecrease > 0n) {
+      const debit = minimum(sourceDecrease, BigInt(sats(row.debitSats)))
+      const explained = minimum(decrease, debit)
+      held.remainingSats = String(explained)
+      held.observedDebitSats = String(debit)
+      held.debitObserved = true
+      decrease -= explained
+      sourceDecrease -= debit
+    }
+  }
+  const remaining = pending.filter((held) => {
+    const row = byId.get(held.id)!
+    if (pendingRebalance(row)) return true
+    feeAllowance += minimum(BigInt(held.remainingSats), completionAllowance(row, BigInt(held.observedDebitSats)))
+    return false
+  })
+  return {
+    comparisonTotalSats: String(
+      BigInt(totalSats) + feeAllowance + remaining.reduce((sum, row) => sum + BigInt(row.remainingSats), 0n),
+    ),
+    feeAllowanceUsedSats: String(feeAllowance),
+    seenIds: transfers.map((row) => row.id),
+    pending: remaining,
+  }
+}
+
 export const recordBalanceCheckpoint = async (services: CheckpointServices): Promise<BalanceCheckpoint> => {
   const startedAt = nowSeconds()
+  const scope = balanceCheckpointScope(services)
+  const baseline = await services.adminStore.latestCompleteBalanceCheckpoint(scope)
   const errors: Record<string, string> = {}
   const joined = balanceReads.get(services) ?? createJoin(STALE_READ_MS)
   balanceReads.set(services, joined)
@@ -204,8 +312,7 @@ export const recordBalanceCheckpoint = async (services: CheckpointServices): Pro
         })
       : null,
   ])
-  const scope = balanceCheckpointScope(services)
-  const totalSats =
+  let totalSats =
     Object.keys(errors).length > 0 || arkade === null
       ? null
       : String(
@@ -214,8 +321,28 @@ export const recordBalanceCheckpoint = async (services: CheckpointServices): Pro
             // A shared rail reports the same pool twice; inbound capacity is never owned funds.
             (onchain?.sharedWithLightning ? 0n : BigInt(lightningSats ?? '0')),
         )
-  const previous = totalSats === null ? undefined : await services.adminStore.latestCompleteBalanceCheckpoint(scope)
-  const changes = previous ? checkpointChanges(previous, { scope, totalSats, arkade }) : null
+  let rebalance: BalanceCheckpoint['rebalance']
+  if (totalSats !== null && (services.rebalanceStore || baseline?.rebalance)) {
+    const since = Math.min(
+      baseline?.startedAt ?? startedAt,
+      ...(baseline?.rebalance?.pending ?? []).map((row) => row.chargedAt),
+    )
+    const transfers = await read('rebalance', async () => services.rebalanceStore?.checkpointTransfers(since) ?? [])
+    try {
+      if (transfers === null) totalSats = null
+      else rebalance = accountRebalances(baseline, totalSats, arkade!.totalSats, transfers)
+    } catch (error) {
+      errors.rebalance = messageOf(error)
+      totalSats = null
+    }
+  }
+  const previous = totalSats === null ? undefined : baseline
+  const changes = previous
+    ? checkpointChanges(
+        { ...previous, totalSats: previous.rebalance?.comparisonTotalSats ?? previous.totalSats },
+        { scope, totalSats: rebalance?.comparisonTotalSats ?? totalSats, arkade },
+      )
+    : null
   const decreases = (changes ?? [])
     .filter(({ delta }) => BigInt(delta) < 0n)
     .map(({ asset, before, after, delta }) => ({ asset, before, after, decrease: String(-BigInt(delta)) }))
@@ -236,6 +363,7 @@ export const recordBalanceCheckpoint = async (services: CheckpointServices): Pro
     lightningSats,
     onchain,
     totalSats,
+    ...(rebalance ? { rebalance } : {}),
     errors,
     previousId: previous?.id ?? null,
     decreases,
@@ -260,7 +388,9 @@ export const withBalanceCheckpoints = async (input: {
       for (const decrease of checkpoint.decreases) {
         input.log(
           `POSSIBLE LOSS: balance decreased at checkpoint ${checkpoint.id}: ${json(decrease)}; ` +
-            'fees, withdrawals and funds in flight are not reconciled',
+            (checkpoint.rebalance
+              ? 'known rebalances and their allowed fees are accounted for'
+              : 'fees, withdrawals and funds in flight are not reconciled'),
         )
       }
       for (const recovery of checkpoint.recovered ?? []) {

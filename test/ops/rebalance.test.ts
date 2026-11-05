@@ -28,6 +28,7 @@ const setup = async () => {
   let balance = 0
   const submit = vi.fn(async () => 'ab'.repeat(32))
   const release = vi.fn()
+  const postNotice = vi.fn<(text: string) => void>()
   const pool: RebalancePool = {
     id: 'rail:onchain',
     label: 'onchain',
@@ -42,6 +43,7 @@ const setup = async () => {
     policy,
     savePolicy: vi.fn(async () => {}),
     now: () => now,
+    postNotice,
     source: {
       quote: vi.fn(async (deposit: RebalanceDeposit) => ({
         debitSats: deposit.netSats + 10,
@@ -62,6 +64,7 @@ const setup = async () => {
     store,
     submit,
     release,
+    postNotice,
     pool,
     advance: () => {
       now += 400
@@ -152,10 +155,149 @@ describe('backend rebalancing', () => {
         inputs: [{ txid: '01'.repeat(32), vout: 0, value: 20000 }],
         expiresAt: 1060,
       }))
-      const q = await f.service.quote({ poolId: 'rail:onchain', amountSats: 5000, requestKey: 'capped' })
+      await f.service.tick()
+      const q = (await f.store.list())[0]!
+      expect(q.origin).toBe('automatic')
       expect(q.deposit.feeSats).toBe(490)
       expect(q.feeSats).toBe(500)
       expect(q.debitSats).toBe(5500)
+    } finally {
+      await f.driver.close()
+    }
+  })
+
+  it('quotes and submits a reviewed manual transfer beyond automatic size, fee, reserve and daily limits', async () => {
+    const f = await setup()
+    try {
+      const previous = await f.service.quote({ poolId: 'rail:onchain', amountSats: 500_490, requestKey: 'previous' })
+      await f.store.save({ ...previous, state: 'completed', chargedAt: 900, creditedSats: 500_490 })
+      await f.service.setPolicy({
+        ...policy,
+        enabled: false,
+        reserveSats: 10_000_000,
+        maxDebitSats: 500_500,
+        dailyDebitSats: 2_000_000,
+        maxFeeSats: 500,
+        maxFeeBps: 20,
+        minTransferSats: 3_000_000,
+      })
+      f.pool.prepare = async (kind, netSats, feeSats) => ({
+        kind,
+        destination: 'receive',
+        amountSats: netSats + feeSats,
+        netSats,
+        feeSats,
+      })
+      f.deps.source.quote.mockImplementation(async (deposit) => ({
+        debitSats: deposit.amountSats + 14_759,
+        feeSats: deposit.feeSats + 14_759,
+        inputs: [{ txid: '01'.repeat(32), vout: 0, value: 3_000_000 }],
+        expiresAt: 1060,
+      }))
+      const q = await f.service.quote({ poolId: 'rail:onchain', amountSats: 2_000_000, requestKey: 'manual-large' })
+      expect(q).toMatchObject({
+        origin: 'manual',
+        receivingFeeAllowanceSats: 1000,
+        debitSats: 2_015_759,
+        feeSats: 15_759,
+        deposit: { feeSats: 1000 },
+      })
+      expect(f.submit).not.toHaveBeenCalled()
+      expect(f.deps.source.quote).toHaveBeenLastCalledWith(
+        q.deposit,
+        expect.objectContaining({ reserveSats: 10_000_000 }),
+        'manual',
+      )
+      expect((await f.service.submit(q.id)).state).toBe('pending')
+      expect(f.submit).toHaveBeenCalledTimes(1)
+      expect(await f.store.rollingDebit(1000)).toBe(2_516_259)
+    } finally {
+      await f.driver.close()
+    }
+  })
+
+  it('keeps automatic quotes capped when their source fees exceed policy', async () => {
+    const f = await setup()
+    try {
+      await f.service.setPolicy({ ...policy, maxFeeSats: 500, maxFeeBps: 20 })
+      f.deps.source.quote.mockImplementation(async (deposit) => ({
+        debitSats: deposit.netSats + 14_759,
+        feeSats: 14_759,
+        inputs: [],
+        expiresAt: 1060,
+      }))
+      await f.service.tick()
+      expect(f.submit).not.toHaveBeenCalled()
+      expect(await f.store.list()).toEqual([])
+      expect((await f.service.overview()).lastEvaluation?.reason).toContain('fees exceed')
+    } finally {
+      await f.driver.close()
+    }
+  })
+
+  it('lets manual receiving fees be reviewed independently and binds request-key reuse to that allowance', async () => {
+    const f = await setup()
+    try {
+      await f.service.setPolicy({
+        ...policy,
+        enabled: false,
+        maxDebitSats: 0,
+        dailyDebitSats: 0,
+        maxFeeSats: 0,
+        maxFeeBps: 0,
+        minTransferSats: 10_000,
+      })
+      f.pool.prepare = async (kind, netSats, feeSats) => ({
+        kind,
+        destination: 'receive',
+        amountSats: netSats + feeSats,
+        netSats,
+        feeSats,
+      })
+      f.deps.source.quote.mockImplementation(async (deposit) => ({
+        debitSats: deposit.amountSats + 10,
+        feeSats: deposit.feeSats + 10,
+        inputs: [],
+        expiresAt: 1060,
+      }))
+      const q = await f.service.quote({
+        poolId: 'rail:onchain',
+        amountSats: 100,
+        receivingFeeAllowanceSats: 30,
+        requestKey: 'manual-budget',
+      })
+      expect(q).toMatchObject({ receivingFeeAllowanceSats: 30, debitSats: 140, feeSats: 40, deposit: { feeSats: 30 } })
+      await expect(
+        f.service.quote({
+          poolId: 'rail:onchain',
+          amountSats: 100,
+          receivingFeeAllowanceSats: 20,
+          requestKey: 'manual-budget',
+        }),
+      ).rejects.toThrow(/request key/)
+      await expect(
+        f.service.quote({
+          poolId: 'rail:onchain',
+          amountSats: 100,
+          receivingFeeAllowanceSats: -1,
+          requestKey: 'bad-budget',
+        }),
+      ).rejects.toThrow(/receiving fee allowance/)
+      f.pool.prepare = async (kind, netSats, feeSats) => ({
+        kind,
+        destination: 'receive',
+        amountSats: netSats + feeSats + 1,
+        netSats,
+        feeSats: feeSats + 1,
+      })
+      await expect(
+        f.service.quote({
+          poolId: 'rail:onchain',
+          amountSats: 100,
+          receivingFeeAllowanceSats: 30,
+          requestKey: 'excess-budget',
+        }),
+      ).rejects.toThrow(/deposit fee allowance/)
     } finally {
       await f.driver.close()
     }
@@ -171,6 +313,192 @@ describe('backend rebalancing', () => {
       expect(await f.store.rollingDebit(1000)).toBe(0)
       await f.service.tick()
       expect(f.deps.source.quote).toHaveBeenCalledTimes(calls)
+      expect((await f.service.overview()).lastEvaluation).toMatchObject({
+        reason: expect.stringContaining('Cooling down after a failed attempt'),
+        nextEligibleAt: 1300,
+      })
+    } finally {
+      await f.driver.close()
+    }
+  })
+
+  it('explains when the backend is above its trigger or its balance cannot be read', async () => {
+    const f = await setup()
+    try {
+      f.credit()
+      await f.service.tick()
+      expect((await f.service.overview()).lastEvaluation?.reason).toContain('above their refill triggers')
+      f.pool.readBalance = async () => {
+        throw new Error('backend offline')
+      }
+      await f.service.tick()
+      expect((await f.service.overview()).lastEvaluation?.reason).toContain('could not be read')
+      expect(f.submit).not.toHaveBeenCalled()
+    } finally {
+      await f.driver.close()
+    }
+  })
+
+  it('explains when a low backend needs less than the minimum transfer', async () => {
+    const f = await setup()
+    try {
+      await f.service.setPolicy({ ...policy, minTransferSats: 6000 })
+      await f.service.tick()
+      expect((await f.service.overview()).lastEvaluation?.reason).toContain(
+        'below the configured minimum transfer size',
+      )
+      expect(f.submit).not.toHaveBeenCalled()
+    } finally {
+      await f.driver.close()
+    }
+  })
+
+  it('notifies once for a failed automatic quote and does not expose the raw error', async () => {
+    const f = await setup()
+    try {
+      f.deps.source.quote.mockRejectedValue(new Error('rebalance fees exceed policy limits; private invoice text'))
+      await f.service.tick()
+      expect(f.postNotice).toHaveBeenCalledTimes(1)
+      expect(f.postNotice.mock.calls[0]?.[0]).toContain('quoted fees exceed the policy limit')
+      expect(f.postNotice.mock.calls[0]?.[0]).toContain('No funds were sent')
+      expect(f.postNotice.mock.calls[0]?.[0]).not.toContain('private invoice text')
+      expect((await f.service.overview()).lastEvaluation?.reason).not.toContain('private invoice text')
+      await f.service.tick()
+      expect(f.postNotice).toHaveBeenCalledTimes(1)
+      f.advance()
+      await f.service.tick()
+      expect(f.postNotice).toHaveBeenCalledTimes(2)
+    } finally {
+      await f.driver.close()
+    }
+  })
+
+  it('reports no source submission when an automatic quote cannot reserve inputs', async () => {
+    const f = await setup()
+    try {
+      f.deps.source.reserve.mockRejectedValueOnce(new Error('reserve floor; private invoice text'))
+      await f.service.tick()
+      expect((await f.store.list())[0]?.state).toBe('quoted')
+      expect(f.submit).not.toHaveBeenCalled()
+      expect(f.postNotice.mock.calls[0]?.[0]).toContain('could not start')
+      expect(f.postNotice.mock.calls[0]?.[0]).toContain('No funds were sent')
+      expect(f.postNotice.mock.calls[0]?.[0]).not.toContain('private invoice text')
+      expect((await f.service.overview()).lastEvaluation?.reason).toContain('reserve')
+      expect((await f.service.overview()).lastEvaluation?.reason).not.toContain('private invoice text')
+    } finally {
+      await f.driver.close()
+    }
+  })
+
+  it('keeps a large cooldown from breaking failure notices or status', async () => {
+    const f = await setup()
+    try {
+      await f.service.setPolicy({ ...policy, cooldownSeconds: Number.MAX_SAFE_INTEGER })
+      f.deps.source.quote.mockRejectedValue(new Error('rebalance fees exceed policy limits'))
+      await f.service.tick()
+      expect(f.postNotice).toHaveBeenCalledTimes(1)
+      await f.service.tick()
+      expect((await f.service.overview()).lastEvaluation?.reason).toContain('Cooling down after a failed attempt')
+      expect((await f.service.overview()).lastEvaluation).not.toHaveProperty('nextEligibleAt')
+    } finally {
+      await f.driver.close()
+    }
+  })
+
+  it('reports a submitted rebalance and its destination credit without repeating pending notices', async () => {
+    const f = await setup()
+    try {
+      f.deps.source.reconcile.mockResolvedValue({ state: 'submitted', fundingTxid: 'ab'.repeat(32) })
+      await f.service.tick()
+      expect((await f.store.active())[0]?.state).toBe('pending')
+      expect(f.postNotice).toHaveBeenCalledTimes(2)
+      expect(f.postNotice.mock.calls[0]?.[0]).toContain('Rebalance starting')
+      expect(f.postNotice.mock.calls[1]?.[0]).toContain('Rebalance submitted')
+      expect(f.postNotice.mock.calls[1]?.[0]).toContain(`Bitcoin transaction: ${'ab'.repeat(32)}`)
+      expect(f.postNotice.mock.calls[1]?.[0]).toContain('Waiting for at least 5,000 sats')
+      await f.service.tick()
+      expect(f.postNotice).toHaveBeenCalledTimes(2)
+      f.credit()
+      await f.service.tick()
+      expect((await f.store.list())[0]?.state).toBe('completed')
+      expect(f.postNotice).toHaveBeenCalledTimes(3)
+      expect(f.postNotice.mock.calls[2]?.[0]).toContain('5,000 sats are now spendable')
+      await f.service.tick()
+      expect(f.postNotice).toHaveBeenCalledTimes(3)
+    } finally {
+      await f.driver.close()
+    }
+  })
+
+  it('labels Lightning funding correctly in the submitted notice', async () => {
+    const f = await setup()
+    try {
+      f.deps.backend.pools = async () => [{ ...f.pool, id: 'rail:lightning', kinds: ['lightning'] }]
+      const q = await f.service.quote({ poolId: 'rail:lightning', amountSats: 5000, requestKey: 'lightning-notice' })
+      await f.service.submit(q.id)
+      expect(f.postNotice.mock.calls[1]?.[0]).toContain(`Arkade funding transaction: ${'ab'.repeat(32)}`)
+    } finally {
+      await f.driver.close()
+    }
+  })
+
+  it('notifies that submission started before the source call resolves', async () => {
+    const f = await setup()
+    try {
+      let finish!: (txid: string) => void
+      f.submit.mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            finish = resolve
+          }),
+      )
+      const q = await f.service.quote({ poolId: 'rail:onchain', amountSats: 5000, requestKey: 'slow-send' })
+      const sending = f.service.submit(q.id)
+      await vi.waitFor(() => expect(f.submit).toHaveBeenCalledOnce())
+      expect((await f.store.get(q.id))?.state).toBe('submitting')
+      expect(f.postNotice).toHaveBeenCalledTimes(1)
+      expect(f.postNotice.mock.calls[0]?.[0]).toContain('Rebalance starting')
+      expect(f.postNotice.mock.calls[0]?.[0]).not.toContain('payment submitted')
+      finish('ab'.repeat(32))
+      expect((await sending).state).toBe('pending')
+      expect(f.postNotice.mock.calls[1]?.[0]).toContain('Rebalance submitted')
+    } finally {
+      await f.driver.close()
+    }
+  })
+
+  it('warns on uncertain sends, then reports reconciliation and refunds once', async () => {
+    const f = await setup()
+    try {
+      f.submit.mockRejectedValueOnce(new Error('timeout after acceptance'))
+      const q = await f.service.quote({ poolId: 'rail:onchain', amountSats: 5000, requestKey: 'notices' })
+      await f.service.submit(q.id)
+      expect((await f.store.get(q.id))?.state).toBe('needs_reconciliation')
+      expect(f.postNotice.mock.calls[0]?.[0]).toContain('Rebalance starting')
+      expect(f.postNotice.mock.calls[1]?.[0]).toContain('Rebalance needs checking')
+      f.deps.source.reconcile.mockResolvedValueOnce({ state: 'submitted', fundingTxid: 'ab'.repeat(32) })
+      await f.service.tick()
+      expect(f.postNotice.mock.calls[2]?.[0]).toContain('Rebalance found')
+      f.deps.source.reconcile.mockResolvedValue({ state: 'refunded' })
+      await f.service.tick()
+      expect((await f.store.get(q.id))?.state).toBe('refunded')
+      expect(f.postNotice.mock.calls[3]?.[0]).toContain('Rebalance refunded')
+      await f.service.tick()
+      expect(f.postNotice).toHaveBeenCalledTimes(4)
+    } finally {
+      await f.driver.close()
+    }
+  })
+
+  it('cannot turn a successful submission into an uncertain transfer when a notifier throws', async () => {
+    const f = await setup()
+    try {
+      f.postNotice.mockImplementation(() => {
+        throw new Error('notification unavailable')
+      })
+      const q = await f.service.quote({ poolId: 'rail:onchain', amountSats: 5000, requestKey: 'sink' })
+      expect((await f.service.submit(q.id)).state).toBe('pending')
+      expect((await f.store.get(q.id))?.state).toBe('pending')
     } finally {
       await f.driver.close()
     }
@@ -237,13 +565,26 @@ describe('backend rebalancing', () => {
     }
   })
 
-  it('rejects reused request keys with a different body and stale policy quotes', async () => {
+  it('rejects reused request keys with a different body while manual quotes survive automatic policy changes', async () => {
     const f = await setup()
     try {
       const q = await f.service.quote({ poolId: 'rail:onchain', amountSats: 5000, requestKey: 'request-3' })
       await expect(
         f.service.quote({ poolId: 'rail:onchain', amountSats: 4000, requestKey: 'request-3' }),
       ).rejects.toThrow(/request key/)
+      await f.service.setPolicy({ ...policy, reserveSats: 2000 })
+      expect((await f.service.submit(q.id)).state).toBe('pending')
+      expect(f.submit).toHaveBeenCalledTimes(1)
+    } finally {
+      await f.driver.close()
+    }
+  })
+
+  it('still invalidates automatic quotes when policy changes', async () => {
+    const f = await setup()
+    try {
+      const q = await f.service.quote({ poolId: 'rail:onchain', amountSats: 5000, requestKey: 'automatic-stale' })
+      await f.store.save({ ...q, origin: 'automatic' })
       await f.service.setPolicy({ ...policy, reserveSats: 2000 })
       await expect(f.service.submit(q.id)).rejects.toThrow(/policy/)
       expect(f.submit).not.toHaveBeenCalled()
@@ -307,6 +648,7 @@ describe('only the live daemon recovers rebalance state — a one-shot build is 
       expect((await f.store.get('rb-1'))?.state).toBe('submitting')
       expect(f.deps.source.reserve).not.toHaveBeenCalled()
       expect(protectDeposits).toHaveBeenCalledOnce()
+      expect(f.postNotice).not.toHaveBeenCalled()
     } finally {
       await f.driver.close()
     }
@@ -320,6 +662,7 @@ describe('only the live daemon recovers rebalance state — a one-shot build is 
       await RebalanceService.create(f.deps, 'active')
       expect((await f.store.get('rb-1'))?.state).toBe('needs_reconciliation')
       expect(f.deps.source.reserve).toHaveBeenCalledTimes(1)
+      expect(f.postNotice.mock.calls[0]?.[0]).toContain('Rebalance needs checking')
     } finally {
       await f.driver.close()
     }

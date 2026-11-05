@@ -43,11 +43,17 @@ describe('rebalance journal', () => {
   })
 
   it('reopens complete recovery data and persists amounts as exact decimal strings', async () => {
-    const row = transfer('1', { state: 'needs_reconciliation', chargedAt: 110, fundingTxid: 'bb'.repeat(32) })
+    const row = transfer('1', {
+      state: 'needs_reconciliation',
+      chargedAt: 110,
+      fundingTxid: 'bb'.repeat(32),
+      receivingFeeAllowanceSats: 1000,
+    })
     await store.create(row)
     const raw = await driver.get<{ data: string }>('SELECT data FROM rebalance_transfer WHERE id = ?', [row.id])
     expect(JSON.parse(raw!.data).netSats).toBe('1000')
     expect(JSON.parse(raw!.data).inputs[0].value).toBe('2000')
+    expect(JSON.parse(raw!.data).receivingFeeAllowanceSats).toBe('1000')
     await driver.close()
     driver = betterSqliteDriver(join(dir, 'swaps.sqlite'))
     store = await RebalanceStore.open(driver)

@@ -722,8 +722,8 @@ export const ACTIONS: Record<string, ActionDefinition> = {
       'NOT channel liquidity — that is the wallet the onchain corridors fund from, so withdrawing leaves less to ' +
       'fund them with. On the arkade float an Arkade address is paid offchain at once, while a bitcoin address ' +
       'is paid by collaborative exit at the server’s next batch — so the request can take a minute. Either way ' +
-      'the float withdrawal holds every free coin until it settles, so swaps cannot be funded from the float ' +
-      'meanwhile, and it leaves less float to fund them with afterwards. NOT SAFE TO REPEAT: each attempt is a separate payment, so a ' +
+      'the float withdrawal reserves only the inputs needed for the amount and fees until it settles, ' +
+      'and it leaves less float to fund swaps afterwards. NOT SAFE TO REPEAT: each attempt is a separate payment, so a ' +
       'withdrawal that times out must be checked against the chain before you try again.',
     run: async (services, body) => {
       const source = requireFundSource(fundSources(services), body.source)

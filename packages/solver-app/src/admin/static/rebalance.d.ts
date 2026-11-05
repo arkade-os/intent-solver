@@ -1,5 +1,9 @@
 export declare class RebalancePanel {
-  constructor(api: (path: string, options?: { method: string; body: string }) => Promise<any>, redraw: () => void)
+  constructor(
+    api: (path: string, options?: { method: string; body: string }) => Promise<any>,
+    redraw: () => void,
+    explorers?: () => { arkade: string; onchain: string } | null | undefined,
+  )
   data: any
   policy: any
   draft: Record<string, string>

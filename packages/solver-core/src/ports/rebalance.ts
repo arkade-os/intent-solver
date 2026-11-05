@@ -58,6 +58,7 @@ export interface RebalanceTransfer {
   debitSats: number
   feeSats: number
   policyRevision: string
+  receivingFeeAllowanceSats?: number
   createdAt: number
   updatedAt: number
   expiresAt: number
