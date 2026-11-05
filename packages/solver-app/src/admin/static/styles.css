@@ -1889,6 +1889,18 @@ tr.note td:first-child {
   gap: 12px;
 }
 
+.wallet-transfer-badges {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.wallet-transfer-origin {
+  color: var(--text-dim);
+  font: 600 12px/1.6 var(--sans);
+}
+
 .wallet-transfer-route {
   font-size: 15px;
 }

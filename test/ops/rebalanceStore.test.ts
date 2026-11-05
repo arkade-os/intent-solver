@@ -72,17 +72,48 @@ describe('rebalance journal', () => {
     await expect(store.save(transfer('missing'))).rejects.toThrow()
   })
 
-  it('atomically rejects a second active transfer, including quote promotion', async () => {
+  it('permits pending transfers but atomically rejects a second critical submission', async () => {
     const first = transfer('1', { state: 'submitting', chargedAt: 110 })
     const second = transfer('2')
+    const pendingSecond = { ...second, state: 'pending' as const, chargedAt: 120, fundingTxid: 'bb'.repeat(32) }
     await store.create(first)
     await store.create(second)
-    await expect(store.save({ ...second, state: 'pending', chargedAt: 120 })).rejects.toThrow()
+    await store.save(pendingSecond)
     await expect(store.create(transfer('3', { state: 'needs_reconciliation', chargedAt: 120 }))).rejects.toThrow()
-    expect(await store.get(second.id)).toEqual(second)
-    await store.save({ ...first, state: 'refunded' })
-    await store.save({ ...second, state: 'needs_reconciliation', chargedAt: 120 })
-    expect((await store.active()).map((row) => row.id)).toEqual(['2'])
+    await expect(store.save({ ...pendingSecond, state: 'needs_reconciliation' })).rejects.toThrow()
+    expect((await store.get(second.id))?.state).toBe('pending')
+    await store.save({ ...first, state: 'pending', fundingTxid: 'aa'.repeat(32) })
+    await store.save({ ...pendingSecond, state: 'needs_reconciliation' })
+    expect((await store.active()).map((row) => row.id).sort()).toEqual(['1', '2'])
+  })
+
+  it('migrates a journal with the legacy one-active index without a uniqueness gap', async () => {
+    const pending = transfer('old', { state: 'pending', chargedAt: 110, fundingTxid: 'aa'.repeat(32) })
+    await store.create(pending)
+    await driver.exec(
+      "DROP INDEX idx_rebalance_critical_source; CREATE UNIQUE INDEX idx_rebalance_active_source ON rebalance_transfer ((1)) WHERE state IN ('submitting', 'pending', 'needs_reconciliation')",
+    )
+    await driver.close()
+    driver = betterSqliteDriver(join(dir, 'swaps.sqlite'))
+    store = await RebalanceStore.open(driver)
+    await store.create(transfer('new', { state: 'pending', chargedAt: 120, fundingTxid: 'bb'.repeat(32) }))
+    expect((await store.active()).map((row) => row.id).sort()).toEqual(['new', 'old'])
+    await store.create(transfer('critical', { state: 'submitting', chargedAt: 130 }))
+    await expect(
+      store.create(transfer('uncertain', { state: 'needs_reconciliation', chargedAt: 140 })),
+    ).rejects.toThrow()
+  })
+
+  it('keeps charged terminal input protections durable until a source snapshot clears them', async () => {
+    await store.create(transfer('credited', { state: 'completed', chargedAt: 110, fundingTxid: 'aa'.repeat(32) }))
+    await store.create(transfer('returned', { state: 'refunded', chargedAt: 120, fundingTxid: 'bb'.repeat(32) }))
+    await store.create(transfer('cleared', { state: 'completed', chargedAt: 130, sourceInputsClearedAt: 140 }))
+    await store.create(transfer('unsubmitted', { state: 'cancelled' }))
+    expect((await store.protectedTerminalInputs()).map((row) => row.id).sort()).toEqual(['credited', 'returned'])
+    await driver.close()
+    driver = betterSqliteDriver(join(dir, 'swaps.sqlite'))
+    store = await RebalanceStore.open(driver)
+    expect((await store.protectedTerminalInputs()).map((row) => row.id).sort()).toEqual(['credited', 'returned'])
   })
 
   it('charges uncertain and refunded transfers but releases definite pre-spend failures', async () => {

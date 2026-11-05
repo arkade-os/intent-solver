@@ -123,6 +123,126 @@ describe('rebalance wallet panel', () => {
       { method: 'POST', body: JSON.stringify({ id: 'quote-1', confirm: 'quote-1' }) },
     ])
   })
+  it('requires explicit opt-in and includes the pending transfer ID in a new reviewed quote and send', async () => {
+    const pending = { ...historyTransfer('pending-1', 10, 'pending'), fundingTxid: 'a'.repeat(64) }
+    const quote = {
+      ...historyTransfer('quote-2', 20, 'quoted'),
+      overridePendingIds: ['pending-1'],
+      expiresAt: 2_000_000_000,
+    }
+    const api = vi
+      .fn()
+      .mockResolvedValueOnce({ ...overview, transfers: [pending] })
+      .mockResolvedValueOnce({ result: quote })
+      .mockResolvedValueOnce({ ...overview, transfers: [quote, pending] })
+      .mockResolvedValueOnce({ result: { ...quote, state: 'pending' } })
+      .mockResolvedValueOnce({ ...overview, transfers: [{ ...quote, state: 'pending' }, pending] })
+    const panel = new RebalancePanel(api, vi.fn())
+    await panel.refresh()
+    panel.draft.amount = '100'
+    let tree = panel.render(h)
+    const reviewButton = () => nodesIn(tree).find((node) => node.children[1] === 'Review quote')!
+    expect(reviewButton().children[0].disabled).toBe(true)
+    expect(panel.quoteBody()).not.toHaveProperty('overridePendingIds')
+    const checkbox = nodesIn(tree).find(
+      (node) =>
+        node.tag === 'label.wallet-toggle' && node.children[1] === 'Start another transfer while this one is pending',
+    )!
+    expect(checkbox.children[0].children[0].checked).toBe(false)
+    checkbox.children[0].children[0].onchange({ target: { checked: true } })
+    tree = panel.render(h)
+    expect(reviewButton().children[0].disabled).toBe(false)
+    expect(panel.quoteBody().overridePendingIds).toEqual(['pending-1'])
+    expect(JSON.stringify(tree)).toContain('#wallet-transfer-pending-1')
+    await reviewButton().children[0].onclick()
+    expect(JSON.parse(api.mock.calls[1]![1].body).overridePendingIds).toEqual(['pending-1'])
+    tree = panel.render(h)
+    const quotedReview = nodesIn(tree).find((node) => node.tag === 'section.wallet-quote')!
+    expect(JSON.stringify(quotedReview)).toContain('Maximum total fees')
+    expect(JSON.stringify(quotedReview)).toContain('BTC loss and recovery alerts may wait')
+    await nodesIn(quotedReview)
+      .find((node) => node.children[1] === 'Send')!
+      .children[0].onclick()
+    expect(JSON.parse(api.mock.calls[3]![1].body)).toEqual({
+      id: 'quote-2',
+      confirm: 'quote-2',
+      overridePendingIds: ['pending-1'],
+    })
+    expect(nodesIn(panel.render(h)).find((node) => node.children[1] === 'Review quote')!.children[0].disabled).toBe(
+      true,
+    )
+  })
+  it.each([
+    { transfers: [{ ...historyTransfer('unfunded', 1, 'pending') }], reason: 'recorded funding' },
+    {
+      transfers: [
+        { ...historyTransfer('first', 2, 'pending'), fundingTxid: 'a'.repeat(64) },
+        { ...historyTransfer('second', 1, 'pending'), fundingTxid: 'b'.repeat(64) },
+      ],
+      reason: 'Two transfers are already in progress',
+    },
+    { transfers: [historyTransfer('uncertain', 1, 'needs_reconciliation')], reason: 'needs checking' },
+  ])('does not offer overlap for unsafe active history: $reason', async ({ transfers, reason }) => {
+    const panel = new RebalancePanel(vi.fn().mockResolvedValue({ ...overview, transfers }), vi.fn())
+    await panel.refresh()
+    const tree = panel.render(h)
+    expect(JSON.stringify(tree)).toContain(reason)
+    expect(nodesIn(tree).find((node) => node.children[1] === 'Review quote')!.children[0].disabled).toBe(true)
+    expect(JSON.stringify(tree)).not.toContain('Start another transfer while this one is pending')
+  })
+  it('does not treat an older unsubmitted quote as a transfer in progress', async () => {
+    const panel = new RebalancePanel(
+      vi.fn().mockResolvedValue({ ...overview, transfers: [historyTransfer('old-quote', 1, 'quoted')] }),
+      vi.fn(),
+    )
+    await panel.refresh()
+    const tree = panel.render(h)
+    expect(nodesIn(tree).find((node) => node.children[1] === 'Review quote')!.children[0].disabled).toBe(false)
+    expect(JSON.stringify(tree)).not.toContain('Another transfer is in progress')
+  })
+  it('drops an opted-in quote when the pending transfer changes before Send', async () => {
+    const first = { ...historyTransfer('pending-1', 10, 'pending'), fundingTxid: 'a'.repeat(64) }
+    const replacement = { ...historyTransfer('pending-2', 11, 'pending'), fundingTxid: 'b'.repeat(64) }
+    const quote = { ...historyTransfer('quote-2', 20, 'quoted'), overridePendingIds: ['pending-1'], expiresAt: 2e9 }
+    const api = vi
+      .fn()
+      .mockResolvedValueOnce({ ...overview, transfers: [first] })
+      .mockResolvedValueOnce({ ...overview, transfers: [quote, first] })
+      .mockResolvedValueOnce({ ...overview, transfers: [quote, replacement] })
+    const panel = new RebalancePanel(api, vi.fn())
+    await panel.refresh()
+    const checkbox = nodesIn(panel.render(h)).find(
+      (node) => node.children[1] === 'Start another transfer while this one is pending',
+    )!
+    checkbox.children[0].children[0].onchange({ target: { checked: true } })
+    panel.quote = quote
+    await panel.refresh()
+    expect(nodesIn(panel.render(h)).some((node) => node.children[1] === 'Send')).toBe(true)
+    await panel.refresh()
+    expect(panel.quote).toBeNull()
+    expect(panel.quoteBody()).not.toHaveProperty('overridePendingIds')
+    expect(nodesIn(panel.render(h)).some((node) => node.children[1] === 'Send')).toBe(false)
+  })
+  it('does not submit a stale Send click after the operator revokes overlap approval', async () => {
+    const pending = { ...historyTransfer('pending-1', 10, 'pending'), fundingTxid: 'a'.repeat(64) }
+    const quote = { ...historyTransfer('quote-2', 20, 'quoted'), overridePendingIds: ['pending-1'], expiresAt: 2e9 }
+    const api = vi.fn().mockResolvedValue({ ...overview, transfers: [quote, pending] })
+    const panel = new RebalancePanel(api, vi.fn())
+    await panel.refresh()
+    const optIn = nodesIn(panel.render(h)).find(
+      (node) => node.children[1] === 'Start another transfer while this one is pending',
+    )!
+    optIn.children[0].children[0].onchange({ target: { checked: true } })
+    panel.quote = quote
+    const staleSend = nodesIn(panel.render(h)).find((node) => node.children[1] === 'Send')!
+    const checkbox = nodesIn(panel.render(h)).find(
+      (node) => node.children[1] === 'Start another transfer while this one is pending',
+    )!
+    checkbox.children[0].children[0].onchange({ target: { checked: false } })
+    expect(panel.quote).toBeNull()
+    await staleSend.children[0].onclick()
+    expect(api).toHaveBeenCalledTimes(1)
+  })
   it.each([
     ['Minimum credit (sat)', 'oninput'],
     ['Destination pool', 'onchange'],
@@ -445,6 +565,7 @@ describe('rebalance wallet panel', () => {
     )
     await panel.refresh()
     const row = nodesIn(panel.render(h)).find((node) => node.tag === 'li.wallet-transfer')!
+    expect(nodesIn(row).find((node) => node.tag === 'span.wallet-transfer-origin')!.children[0]).toBe('Automatic')
     const rendered = JSON.stringify(row)
     expect(rendered).toContain('Arkade wallet')
     expect(rendered).toContain('shared pool')
@@ -482,6 +603,9 @@ describe('rebalance wallet panel', () => {
     const panel = new RebalancePanel(vi.fn().mockResolvedValue({ ...overview, transfers: [transfer] }), vi.fn())
     await panel.refresh()
     const row = () => JSON.stringify(nodesIn(panel.render(h)).find((node) => node.tag === 'li.wallet-transfer'))
+    expect(nodesIn(panel.render(h)).find((node) => node.tag === 'span.wallet-transfer-origin')!.children[0]).toBe(
+      'Manual',
+    )
     for (const state of ['quoted', 'cancelled', 'failed']) {
       transfer.state = state
       expect(row()).toContain('Manual quote created')

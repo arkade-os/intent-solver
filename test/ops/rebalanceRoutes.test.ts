@@ -431,6 +431,32 @@ describe('Arkade rebalance source routes', () => {
     expect(admission.outstandingInventorySats('arkade')).toBe(0)
   })
 
+  it('keeps submitted inputs pinned without charging inventory while a later quote uses another coin', async () => {
+    const row = rowFrom(await source.quote(deposit, policy, 'manual'))
+    expect(() => source.pinPendingInputs({ ...row, inputs: [] })).toThrow(/no valid source inputs/)
+    const releaseFull = await source.reserve(row, policy)
+    const releasePending = source.pinPendingInputs(row)
+    releaseFull()
+    expect(admission.outstandingInventorySats('arkade')).toBe(0)
+    expect(services.arkade.reservations.reserved().has(`${row.inputs[0]!.txid}:0`)).toBe(true)
+    expect((await source.quote(deposit, policy, 'manual')).inputs[0]!.txid).not.toBe(row.inputs[0]!.txid)
+    releasePending()
+    expect(services.arkade.reservations.reserved().size).toBe(0)
+  })
+
+  it('keeps a terminal source input protected until a fresh wallet snapshot omits it', async () => {
+    const row = rowFrom(await source.quote(deposit, policy, 'manual'))
+    const other = { ...row, id: 'other', inputs: [{ txid: 'ff'.repeat(32), vout: 0, value: 1000 }] }
+    vi.mocked(services.arkade.wallet.getSpendableVtxos).mockClear()
+    const absent = await source.inputsAbsent([row, other])
+    expect([...absent]).toEqual(['other'])
+    expect(services.arkade.wallet.getSpendableVtxos).toHaveBeenCalledTimes(1)
+    coins = coins.filter((coin) => coin.txid !== row.inputs[0]!.txid)
+    expect((await source.inputsAbsent([row])).has(row.id)).toBe(true)
+    vi.mocked(services.arkade.wallet.getSpendableVtxos).mockRejectedValueOnce(new Error('indexer offline'))
+    await expect(source.inputsAbsent([row])).rejects.toThrow('indexer offline')
+  })
+
   it('refuses higher fees and missing inputs without an unnamed top-up', async () => {
     const row = rowFrom(await source.quote(deposit, policy))
     sourceFee = 11
@@ -477,6 +503,7 @@ describe('Arkade rebalance source routes', () => {
     expect(await source.reconcile(row)).toEqual({ state: 'submitted', fundingTxid: txid })
     outputs.push({ txid: 'dd'.repeat(32), vout: 0, valueSats: deposit.amountSats, confirmations: 0 })
     expect(await source.reconcile(row)).toEqual({ state: 'unknown' })
+    expect(await source.reconcile({ ...row, fundingTxid: txid })).toEqual({ state: 'submitted', fundingTxid: txid })
   })
 
   it('rejects self counterparties, invoice amounts, and invoice networks before requesting', async () => {

@@ -68,6 +68,8 @@ export interface RebalanceTransfer {
   inputs: { txid: string; vout: number; value: number }[]
   routeData?: Record<string, unknown>
   fundingTxid?: string
+  overridePendingIds?: string[]
+  sourceInputsClearedAt?: number
   error?: string
   creditedSats?: number
 }
