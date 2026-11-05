@@ -464,9 +464,10 @@ const settleBoardedSats = async (services: Services, warn: (message: string) => 
 }
 
 /** Why an automatic mint did not spend, when it declined to. */
-export type AutoMintSkip = 'disabled' | 'shape_is_fine'
+export type AutoMintSkip = string
 
-export type AutoMintOutcome = { minted: false; skipped: AutoMintSkip } | { minted: true; result: unknown }
+export type AutoMintOutcome =
+  { minted: false; skipped: AutoMintSkip } | { minted: false; refused: string } | { minted: true; result: unknown }
 
 /**
  * Reshape the float only when its SHAPE needs it — the automatic half of minting.
@@ -492,5 +493,10 @@ export const maybeMintPool = async (
   // swaps; `reason` says why when it is. Either way there is nothing to spend
   // a fee on, and this is the ordinary answer rather than a failure.
   if (plan.outputs.length === 0) return { minted: false, skipped: 'shape_is_fine' }
-  return { minted: true, result: await deps.mint(services) }
+  const result = await deps.mint(services)
+  if (result && typeof result === 'object') {
+    if ('refused' in result && typeof result.refused === 'string') return { minted: false, refused: result.refused }
+    if ('skipped' in result && typeof result.skipped === 'string') return { minted: false, skipped: result.skipped }
+  }
+  return { minted: true, result }
 }

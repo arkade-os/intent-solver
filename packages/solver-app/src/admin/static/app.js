@@ -1440,7 +1440,12 @@ const walletView = () => {
                 h('b', `${pool.pieces.length} coins `),
                 h('span.faint.mono', pool.pieces.slice(0, 12).map(sats).join('  ')),
               ),
-              h('p.muted', pool.plan.reason),
+              h(
+                'p.muted',
+                pool.plan.outputs.length
+                  ? `Plan preview: ${pool.plan.reason}. Select Reshape… above to attempt a fresh plan.`
+                  : `No pool transaction planned: ${pool.plan.reason}`,
+              ),
               /* assets: begin — why the pieces above add up to less than the balance */
               pool.assetEncumberedSats
                 ? h(
@@ -3548,7 +3553,18 @@ const runAction = async (name, body) => {
     // characters, which is enough to show `{` and lose the verdict.
     // The swap it was pressed ON, not whichever pane is open when it lands: a
     // verdict for one swap shown in another's pane picks that swap's refund.
-    state.result = { name, result: result.result, forSwap: state.running.forSwap }
+    const answer = result.result
+    const displayed =
+      name === 'pool-mint' && answer?.skipped
+        ? answer.skipped === 'inputs-pinned'
+          ? 'Pool reshape is waiting because the selected coins are in use. Try again after the current operation finishes.'
+          : answer.skipped === 'nothing-to-do'
+            ? 'No pool transaction could be planned. No coins were moved.'
+            : `Pool reshape skipped: ${answer.skipped}. No coins were moved.`
+        : name === 'pool-mint' && Array.isArray(answer?.minted)
+          ? `Pool reshape created ${answer.minted.length} new ${answer.minted.length === 1 ? 'coin' : 'coins'}. Transaction: ${answer.txid}`
+          : answer
+    state.result = { name, result: displayed, forSwap: state.running.forSwap }
     await load(state.view)
     // A refunded or parked row leaves the live set, so no stream event will ever name it.
     if (state.detail) await openDetail(state.detail.swap, true)

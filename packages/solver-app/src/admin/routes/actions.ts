@@ -44,7 +44,6 @@ interface ActionBody {
   /** Which corridor's store owns {@link id} — see `requireCorridor`. */
   corridor?: unknown
   confirm?: unknown
-  force?: unknown
   /** `claim-now` only: an operator's own preimage, where the backend has none. */
   preimage?: unknown
   /** `park-swap` only: why this row is being stopped. Required, and recorded. */
@@ -562,9 +561,9 @@ export const ACTIONS: Record<string, ActionDefinition> = {
     expectedConfirm: () => 'MINT',
     warning:
       'Spends: reshapes the float in one Arkade transaction to the solver’s own address — splitting it into pool ' +
-      'pieces, or merging small coins into them once it holds too many. Refused while any corridor has a ' +
-      'non-terminal swap, because coin reservations are process-local and a concurrent provider could be holding them.',
-    run: (services, body) => mintPool(services, { force: body.force === true }),
+      'pieces, or merging small coins into them once it holds too many. Uses this provider’s coin reservations; ' +
+      'other providers must not share its wallet.',
+    run: (services) => mintPool(services, { inProviderProcess: true }),
   },
 
   // Armed though it moves no money: it stops the process driving the ones that
@@ -803,6 +802,16 @@ export const registerActionRoutes = (app: Hono, deps: AdminDeps): void => {
       // 500 with a readable body rather than a thrown fault: the operator needs
       // the reason, and the action WAS attempted, unlike a confirm failure.
       return c.json({ ok: false, error: 'action_failed', message: messageOf(error) }, 500)
+    }
+    if (
+      name === 'pool-mint' &&
+      result &&
+      typeof result === 'object' &&
+      'refused' in result &&
+      typeof result.refused === 'string'
+    ) {
+      await record('error', JSON.stringify(result).slice(0, 500))
+      return c.json({ ok: false, error: 'pool_mint_refused', message: result.refused, result }, 409)
     }
     await record('ok', JSON.stringify(result).slice(0, 500))
     return c.json({ ok: true, result })

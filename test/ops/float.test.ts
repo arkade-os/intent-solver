@@ -118,6 +118,29 @@ describe('maybeMintPool', () => {
     })
     await expect(maybeMintPool(servicesWith([900_000]), { enabled: true, mint })).rejects.toThrow(/provider busy/)
   })
+
+  it('reports a refused mint and retries when commitments clear on a later pass', async () => {
+    const mint = vi
+      .fn()
+      .mockResolvedValueOnce({ refused: '9758 sat committed across non-terminal swaps.', committedSats: 9758 })
+      .mockResolvedValueOnce({ minted: [100_000, 100_000], txid: 'reshaped' })
+    const services = servicesWith([900_000])
+    expect(await maybeMintPool(services, { enabled: true, mint })).toEqual({
+      minted: false,
+      refused: '9758 sat committed across non-terminal swaps.',
+    })
+    expect((await maybeMintPool(services, { enabled: true, mint })).minted).toBe(true)
+    expect(mint).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not report a pinned-input skip as a completed mint', async () => {
+    expect(
+      await maybeMintPool(servicesWith([900_000]), {
+        enabled: true,
+        mint: async () => ({ skipped: 'inputs-pinned' }),
+      }),
+    ).toEqual({ minted: false, skipped: 'inputs-pinned' })
+  })
 })
 
 /**

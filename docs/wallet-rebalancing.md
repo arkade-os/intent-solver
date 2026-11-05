@@ -28,11 +28,16 @@ Unsupported deployments show rebalancing as unavailable.
    expected or confirmed credit, and links to available Arkade and Bitcoin
    transaction evidence. Lightning invoices are not sent to an explorer.
 
+Transfer history stays in a scrollable card. It shows active transfers and the
+newest entries first; **Load older** reveals more entries and fetches older pages
+on demand.
+
 All amounts are whole satoshis. The backend creates the receive address or
 fixed-amount plain Lightning invoice; the browser cannot supply a replacement
 destination. Quotes expire within 60 seconds, or earlier if the route or invoice
-expires. Sending rechecks the selected Arkade inputs and reviewed debit bound;
-prepare a new quote if either changed.
+expires. The review counts down and disables Send at expiry; a fresh quote may
+show different fees and must be reviewed again. Sending rechecks the selected
+Arkade inputs and reviewed debit bound; prepare a new quote if either changed.
 An unsubmitted quote can be cancelled from transfer history.
 
 Submission retries for the same transfer do not create another source spend.
@@ -74,6 +79,10 @@ from the backend and skips unreadable or invalid readings. Among eligible
 positive thresholds, the lowest `balance / minimum` is considered first.
 The target is a refill goal: source surplus, fees and remaining debit allowance
 may require a smaller transfer. Amounts below the configured minimum are skipped.
+Before persisting a quote, the source compares bounded input sets using the
+quoted total cost. This can use older, cheaper coins instead of paying an
+early-spend fee on the largest coin. Automatic fee and debit limits still
+apply; an unavailable or unaffordable quote does not send funds.
 The panel's **Automatic refill** message explains why an attempt was skipped
 or refused and, during cooldown, when the next attempt can begin. A failed
 quote does not send funds. The attempt still starts the configured cooldown.

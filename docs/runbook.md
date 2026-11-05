@@ -795,12 +795,20 @@ the reasons to take one.
 
 - **Hundreds of coins in the float.** Swap proceeds and refunds land as
   separate coins, so a busy solver fragments between renewals. `cli balances`
-  and the console's pool line then read `consolidating M of N coins…`. Each
+  and the console's pool plan preview may propose consolidating them. Each
   `cli pool --mint` (or console `pool-mint`) merges up to 50 of them into the
   pool's pieces plus one remainder, in one Arkade transaction and at no intent
-  fee; repeat until the reason stops saying `consolidating`. With
-  `rails.arkade.poolAutoMint: true` the watch loop does one pass per lifecycle cadence
-  while no swap is in flight.
+  fee. If the server rejects an oversized proof before accepting it, the
+  planner retries a smaller complete set. It never sends a partial plan or
+  retries an uncertain submission. Repeat until the reason stops saying
+  `consolidating`. With
+  `rails.arkade.poolAutoMint: true` the watch loop does one pass per five-minute
+  lifecycle cadence. The console and watch loop share the provider's coin
+  reservations, so they can reshape unreserved coins while swaps remain open.
+  A separate `cli pool --mint` process cannot see those reservations and refuses
+  while any non-terminal swap has committed funds. Its aggregate committed
+  amount does not identify safe coins. Keep one process per wallet; do not use
+  `--force` while another provider may be spending from that wallet.
 
 - **Exposure**: `cli balances` shows current exposed sats vs the cap. The cap
   counts every non-terminal swap including bare quotes, and quote creation is

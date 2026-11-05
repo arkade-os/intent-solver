@@ -42,6 +42,7 @@ const transferState = {
   failed: ['Failed', 'quiet', 'This transfer did not complete.'],
   cancelled: ['Cancelled', 'quiet', 'Cancelled before sending.'],
 }
+const inProgressStates = new Set(['quoted', 'submitting', 'pending', 'needs_reconciliation'])
 
 export class RebalancePanel {
   constructor(api, redraw, explorers = () => null) {
@@ -55,19 +56,67 @@ export class RebalancePanel {
     this.draft = { poolId: '', amount: '', kind: '', receivingFeeAllowanceSats: '1000' }
     this.policy = null
     this.requestKey = null
+    this.historyCache = []
+    this.historyVisibleCount = 10
+    this.historyNextCursor = undefined
+    this.historyPageFetched = false
+    this.historyLoading = false
+    this.historyError = null
   }
 
   async refresh() {
     if (this.busy) return
     this.loaded = true
     try {
-      this.data = await this.api('/api/rebalance')
+      const fresh = await this.api('/api/rebalance')
+      const currentIds = new Set((fresh.transfers ?? []).map((row) => row.id))
+      this.historyCache = this.historyRows().filter((row) => !inProgressStates.has(row.state) || currentIds.has(row.id))
+      this.data = fresh
+      if (this.historyNextCursor === undefined || (!this.historyPageFetched && this.historyNextCursor === null))
+        this.historyNextCursor = fresh.transfersNextCursor ?? null
       if (!this.policy) this.policy = structuredClone(this.data.policy)
       if (!this.draft.poolId) this.draft.poolId = this.data.pools[0]?.id ?? ''
     } catch (error) {
       this.error = error.message
     }
     this.redraw()
+  }
+
+  historyRows() {
+    const rows = new Map(this.historyCache.map((row) => [row.id, row]))
+    for (const row of this.data?.transfers ?? []) rows.set(row.id, row)
+    const time = (row) => (Number.isSafeInteger(row.createdAt) ? row.createdAt : 0)
+    return [...rows.values()].sort((a, b) => time(b) - time(a) || b.id.localeCompare(a.id))
+  }
+
+  async loadOlder() {
+    if (this.historyLoading) return
+    const cached = this.historyRows()
+    if (this.historyVisibleCount < cached.length) {
+      this.historyVisibleCount += 20
+      this.redraw()
+      return
+    }
+    if (!this.historyNextCursor) return
+    this.historyLoading = true
+    this.historyError = null
+    this.redraw()
+    try {
+      const page = await this.api(
+        `/api/rebalance/transfers?before=${encodeURIComponent(this.historyNextCursor)}&limit=20`,
+      )
+      const currentIds = new Set((this.data?.transfers ?? []).map((row) => row.id))
+      const pageRows = page.transfers.filter((row) => !inProgressStates.has(row.state) || currentIds.has(row.id))
+      this.historyCache = [...this.historyRows(), ...pageRows]
+      this.historyNextCursor = page.nextCursor
+      this.historyPageFetched = true
+      this.historyVisibleCount += 20
+    } catch (error) {
+      this.historyError = `Could not load older transfers. ${error.message}`
+    } finally {
+      this.historyLoading = false
+      this.redraw()
+    }
   }
 
   async act(action, body) {
@@ -121,6 +170,7 @@ export class RebalancePanel {
   }
 
   render(h) {
+    clearTimeout(this.quoteTimer)
     if (!this.loaded) void this.refresh()
     const field = (label, object, key, type = 'text') =>
       h(
@@ -227,12 +277,19 @@ export class RebalancePanel {
         ),
       ),
     )
-    const transfers = this.data.transfers
+    const transfers = this.historyRows()
     const quote = transfers.find((t) => t.id === this.quote?.id) ?? this.quote
     if (quote?.state === 'quoted') {
       const destination = pools.find((pool) => pool.id === quote.poolId)?.label ?? 'Backend wallet'
       const kind = quote.deposit?.kind ?? quote.kind
-      const expired = Number.isSafeInteger(quote.expiresAt) && quote.expiresAt <= Date.now() / 1000
+      const remaining = Number.isSafeInteger(quote.expiresAt)
+        ? Math.max(0, Math.ceil(quote.expiresAt - Date.now() / 1000))
+        : 0
+      const expired = remaining === 0
+      if (!expired) {
+        this.quoteTimer = setTimeout(() => this.redraw(), Math.min(1000, quote.expiresAt * 1000 - Date.now()))
+        this.quoteTimer.unref?.()
+      }
       children.push(
         h(
           'section.wallet-quote',
@@ -263,7 +320,7 @@ export class RebalancePanel {
             'p.muted',
             expired
               ? 'This quote has expired. Review a new quote to continue.'
-              : `Quote valid until ${time(quote.expiresAt)}.`,
+              : `Expires in ${remaining} ${remaining === 1 ? 'second' : 'seconds'} · valid until ${time(quote.expiresAt)}.`,
           ),
           h(
             'div.wallet-confirm',
@@ -271,10 +328,19 @@ export class RebalancePanel {
               'button.act',
               {
                 disabled: this.busy || expired,
-                onclick: () => this.act('submit', { id: quote.id, confirm: quote.id }),
+                onclick: () => {
+                  if (quote.expiresAt <= Date.now() / 1000) return this.redraw()
+                  return this.act('submit', { id: quote.id, confirm: quote.id })
+                },
               },
               'Send',
             ),
+            expired
+              ? button('Review a fresh quote', () => {
+                  this.requestKey = null
+                  return this.act('quote', this.quoteBody())
+                })
+              : null,
           ),
           h('p.wallet-transfer-id', 'Quote ID ', h('code', quote.id)),
         ),
@@ -357,18 +423,38 @@ export class RebalancePanel {
         t.state === 'quoted' ? button('Cancel', () => this.act('cancel', { id: t.id, confirm: t.id })) : null,
       )
     }
+    const visibleTransfers = transfers.filter(
+      (row, index) => index < this.historyVisibleCount || inProgressStates.has(row.state),
+    )
+    const hasOlder = transfers.length > this.historyVisibleCount || Boolean(this.historyNextCursor)
     children.push(
       h(
-        'div.wallet-history',
-        h('h3', 'Transfer history'),
+        'section.wallet-history',
+        h('h3', { id: 'wallet-transfer-history' }, 'Transfer history'),
         transfers.length === 0
           ? h('p.wallet-empty', 'No transfers yet. Review a quote to start a transfer.')
-          : h('ol.wallet-transfer-list', transfers.map(transfer)),
+          : h(
+              'ol.wallet-transfer-list',
+              { tabindex: 0, 'aria-labelledby': 'wallet-transfer-history' },
+              visibleTransfers.map(transfer),
+            ),
+        this.historyError ? h('p.banner', { role: 'alert' }, this.historyError) : null,
+        hasOlder
+          ? h(
+              'div.wallet-history-footer',
+              h('span.muted', `Showing ${visibleTransfers.length} transfers`),
+              h(
+                'button.act',
+                { disabled: this.historyLoading, onclick: () => this.loadOlder() },
+                this.historyLoading ? 'Loading…' : 'Load older transfers',
+              ),
+            )
+          : null,
       ),
     )
     const policy = this.policy
     const policyChildren = [
-      h('p.notice', 'These limits also govern manual transfers.'),
+      h('p.notice', 'These limits govern automatic transfers. Manual transfers use the reviewed quote.'),
       h(
         'label.wallet-toggle',
         h('input', {

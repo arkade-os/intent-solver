@@ -1828,12 +1828,36 @@ tr.note td:first-child {
 
 .wallet-history {
   margin: 28px 0;
+  padding: 20px;
+  min-width: 0;
+  background: var(--raised);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+}
+
+.wallet-history h3 {
+  margin: 0 0 12px;
+}
+
+.wallet-history-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
 }
 
 .wallet-transfer-list {
   margin: 0;
   padding: 0;
   list-style: none;
+  max-height: min(65vh, 42rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .wallet-empty {
@@ -1846,6 +1870,10 @@ tr.note td:first-child {
   padding: 18px 0;
   border-bottom: 1px solid var(--line);
   overflow-wrap: anywhere;
+}
+
+.wallet-transfer:last-child {
+  border-bottom: 0;
 }
 
 .wallet-transfer-heading,
@@ -1927,6 +1955,7 @@ tr.note td:first-child {
   .wallet-manual,
   .wallet-quote,
   .wallet-policy,
+  .wallet-history,
   .wallet-fieldset {
     padding: 16px;
   }

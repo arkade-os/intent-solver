@@ -15,6 +15,7 @@ const transfer = {
 const setup = () => {
   const service = {
     overview: vi.fn().mockResolvedValue({ pools: [], policy: {}, transfers: [transfer] }),
+    transfersPage: vi.fn().mockResolvedValue({ transfers: [transfer], nextCursor: null }),
     quote: vi.fn().mockResolvedValue(transfer),
     submit: vi.fn().mockResolvedValue(transfer),
     cancel: vi.fn().mockResolvedValue(transfer),
@@ -41,6 +42,18 @@ describe('rebalance administration', () => {
     expect(await response.text()).not.toMatch(/private-destination|secret|routeData/)
     expect(service.tick).not.toHaveBeenCalled()
     expect(service.submit).not.toHaveBeenCalled()
+  })
+  it('pages safe transfer summaries and rejects malformed page requests', async () => {
+    const { app, service } = setup()
+    const cursor = Buffer.from(JSON.stringify([100, 'q1'])).toString('base64url')
+    const response = await app.request(`/api/rebalance/transfers?limit=20&before=${cursor}`)
+    expect(response.status).toBe(200)
+    expect(service.transfersPage).toHaveBeenCalledWith(20, { createdAt: 100, id: 'q1' })
+    expect(await response.text()).not.toMatch(/private-destination|secret|routeData/)
+    for (const query of ['limit=0', 'limit=101', 'limit=1.5', 'before=bad', 'before=%21%21%21']) {
+      expect((await app.request(`/api/rebalance/transfers?${query}`)).status).toBe(400)
+    }
+    expect(service.transfersPage).toHaveBeenCalledTimes(1)
   })
   it.each(['submit', 'cancel', 'policy'])('requires explicit confirmation for %s', async (action) => {
     const { post, service, recordAction } = setup()
@@ -181,6 +194,23 @@ describe('rebalance administration', () => {
     expect(response.status).toBe(400)
     expect(recordAction).toHaveBeenCalledWith(expect.objectContaining({ target: 'unknown', outcome: 'error' }))
     expect(await response.text()).not.toContain('secret')
+    expect(JSON.stringify(recordAction.mock.calls)).not.toContain('secret')
+  })
+  it.each([
+    ['source selection cannot cover this transfer within the 50 input limit', 'input limit'],
+    ['TX_TOO_LARGE: proof weight exceeds limit', 'transaction size'],
+  ])('explains the selection refusal %s without leaking details', async (error, expected) => {
+    const { post, service, recordAction } = setup()
+    service.quote.mockRejectedValue(new Error(`${error}; secret invoice`))
+    const response = await post('quote', {
+      poolId: 'rail:shared',
+      amount: '2000000',
+      requestKey: '11111111-1111-4111-8111-111111111111',
+    })
+    expect(response.status).toBe(400)
+    const message = ((await response.json()) as { message: string }).message
+    expect(message).toContain(expected)
+    expect(message).not.toContain('secret')
     expect(JSON.stringify(recordAction.mock.calls)).not.toContain('secret')
   })
 })
