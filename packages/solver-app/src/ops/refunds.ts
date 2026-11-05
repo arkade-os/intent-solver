@@ -41,9 +41,8 @@ export const refundNow = async (services: Services, id: string): Promise<RefundO
   if (!row.refundPkScript || !row.emulatorPubkey) {
     throw new Error(`swap ${id} is not a covenant swap: missing refund destination or emulator key`)
   }
-  // The gate this bypasses exists because refunding a lockup we may already have paid out
-  // over Lightning pays the client twice. `stuck`/`refused` are safe (the payout failed or
-  // never started); an EXPOSED or `claimed` row is the double payout itself.
+  // An exposed or claimed row may have paid the client already; the backend
+  // verdict below must also prove a refund is safe for any other state.
   if (EXPOSED.includes(row.state) || row.state === 'claimed') {
     throw new Error(
       `swap ${id} is ${row.state}: the Lightning payout is in flight or done, so refunding the lockup now would pay the client twice — resolve the payment, do not refund`,
@@ -58,6 +57,18 @@ export const refundNow = async (services: Services, id: string): Promise<RefundO
   }
   const script = covenantScriptFromRow(row)
   const pkScript = hex.encode(script.pkScript)
+  const claimRefund = async (found: readonly { value: number }[]) => {
+    if (row.state === 'refused') return
+    // Claim before spending so a funded tick cannot start paying after the verdict.
+    const observed = found.reduce((total, output) => total + output.value, 0)
+    // Persist the observed value so the deadline sweep can retry a failed send.
+    if (
+      !(await services.store.transition(row.id, row.state, 'refused', {
+        lockup_value: Math.max(row.lockupValue ?? 0, observed),
+      }))
+    )
+      throw new Error(`swap ${id} state changed while preparing refund; recheck before retry`)
+  }
   const outputs = await findLockups(services.arkade, pkScript)
   // A SWEPT lockup is invisible to `findLockups` and unspendable offchain, so
   // it goes through a batch round. Unattended, the float pass does the same
@@ -66,6 +77,7 @@ export const refundNow = async (services: Services, id: string): Promise<RefundO
     const swept = await findSweptLockups(services.arkade, pkScript)
     if (swept.length === 0) return { skipped: NOTHING_AT_SCRIPT }
     await services.store.noteFundings(row.id, swept)
+    await claimRefund(swept)
     const txid = await refundSweptSwapScript(
       services.arkade,
       services.config.emulatorUrl,
@@ -74,7 +86,6 @@ export const refundNow = async (services: Services, id: string): Promise<RefundO
       hex.decode(row.refundPkScript),
     )
     await services.store.patch(row.id, { refund_outcome: 'pushed', refund_ark_txid: txid })
-    if (row.state === 'stuck') await services.store.transition(row.id, 'stuck', 'refused')
     return { txid }
   }
 
@@ -84,6 +95,7 @@ export const refundNow = async (services: Services, id: string): Promise<RefundO
   // swept by the refund below and otherwise leaves no trace. `noteFundings` skips
   // outpoints already recorded, so re-running is free.
   await services.store.noteFundings(row.id, outputs)
+  await claimRefund(outputs)
 
   const txid = await refundSwapScript(
     services.arkade,
@@ -92,17 +104,7 @@ export const refundNow = async (services: Services, id: string): Promise<RefundO
     outputs,
     hex.decode(row.refundPkScript),
   )
-  // Recorded BEFORE the row is closed. If the process dies between the two, the order
-  // that survives must be the one with the txid on disk: a closed row with no recorded
-  // refund is evidence nobody can reconstruct.
   await services.store.patch(row.id, { refund_outcome: 'pushed', refund_ark_txid: txid })
-
-  // A refunded `stuck` row is finished, so take it out of the queue that state means.
-  // Only from `stuck` — this also runs against `refused` rows and from the sweep, where
-  // a blind transition would turn a successful refund into a reported failure.
-  // Compare-and-swap, so a row that moved in flight is left as it is. Nothing is closed
-  // on the `nothing-at-script` path, where no refund happened.
-  if (row.state === 'stuck') await services.store.transition(row.id, 'stuck', 'refused')
 
   return { txid }
 }

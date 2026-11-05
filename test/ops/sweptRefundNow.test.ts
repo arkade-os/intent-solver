@@ -36,7 +36,12 @@ const SWEPT = [{ txid: 'a'.repeat(64), vout: 0, value: 1976 }]
 
 const servicesWith = (state: string) => {
   const patch = vi.fn(async () => {})
-  const transition = vi.fn(async () => true)
+  let currentState = state
+  const transition = vi.fn(async (_id: string, from: string, to: string) => {
+    if (currentState !== from) return false
+    currentState = to
+    return true
+  })
   const noteFundings = vi.fn(async () => {})
   const services = {
     arkade: {},
@@ -45,7 +50,7 @@ const servicesWith = (state: string) => {
     store: {
       get: async () => ({
         id: 'swap-1',
-        state,
+        state: currentState,
         paymentHash: 'ab'.repeat(32),
         paymentId: null,
         paymentBackend: null,
@@ -58,7 +63,7 @@ const servicesWith = (state: string) => {
       transition,
     },
   }
-  return { services, patch, transition, noteFundings }
+  return { services, patch, transition, noteFundings, stateNow: () => currentState }
 }
 
 describe('refundNow reaches a swept lockup', () => {
@@ -87,7 +92,19 @@ describe('refundNow reaches a swept lockup', () => {
     const { services, transition } = servicesWith('stuck')
 
     await refundNow(services as never, 'swap-1')
-    expect(transition).toHaveBeenCalledWith('swap-1', 'stuck', 'refused')
+    expect(transition).toHaveBeenCalledWith('swap-1', 'stuck', 'refused', { lockup_value: 1976 })
+  })
+
+  it('claims funded before sending a swept refund', async () => {
+    findSweptLockups.mockResolvedValue(SWEPT)
+    const { services, stateNow, transition } = servicesWith('funded')
+    refundSweptSwapScript.mockImplementationOnce(async () => {
+      expect(stateNow()).toBe('refused')
+      return 'batch-txid'
+    })
+
+    expect(await refundNow(services as never, 'swap-1')).toEqual({ txid: 'batch-txid' })
+    expect(transition).toHaveBeenCalledWith('swap-1', 'funded', 'refused', { lockup_value: 1976 })
   })
 
   it('still answers nothing-at-script when the swept read is empty too', async () => {
