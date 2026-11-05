@@ -876,6 +876,7 @@ describe('withdrawing from the arkade float — both rails out, routed by the de
   })
 
   it.each([
+    // The SDK's rail id, which the refusal quotes: `arkRail().id`.
     { rail: 'ark', spend: 'send', address: TESTNET_ARKADE_ADDRESS },
     { rail: 'onchain', spend: 'settle', address: REGTEST_ADDRESS },
   ])('refuses a $rail spend that settles without a transaction id', async ({ rail, spend, address }) => {

@@ -278,6 +278,8 @@ correlation. The receive record splits preparation, hold-invoice creation,
 and persistence; the relay record splits quote handling and reply publish.
 Neither record includes invoices, payment hashes, preimages, or wallet keys.
 Funding already logs `receive_fund_call_timing` and `receive_fund_timing`.
+The wallet logs `arkade_submit_timing` and `arkade_finalize_timing` for its
+submit and finalize calls to the operator, on any process with the setting on.
 
 That script defaults to `scripts/mock-relay.mjs`, which needs no relay running
 but speaks a broker framing (`{op:'sub'}`) that only it understands. To prove
