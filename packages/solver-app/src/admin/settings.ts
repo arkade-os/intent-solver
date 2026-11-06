@@ -25,11 +25,15 @@ import { CORRIDORS, FREE, type Corridor, type Fee } from '@arkade-os/solver-core
 import { descriptorFor } from '@arkade-os/solver-corridors/corridors/index.js'
 import { MAX_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/send.js'
 import { assetMarketKey } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import { log } from '@arkade-os/solver-core/util/poll.js'
+import { lightningRailFor } from '../ops/rails.js'
 
-export type KnobSource = 'env' | 'override'
+export type KnobSource = 'config' | 'override'
 
 export interface KnobView {
   key: string
+  /** Where the config document holds it; the setting id where the document has no path. */
+  path: string
   value: string | number | boolean
   envValue?: string | number | boolean
   source: KnobSource
@@ -92,7 +96,7 @@ const GLOBAL_KEYS = ['MAX_EXPOSED_SATS', 'LOCKUP_TIMEOUT_SECONDS', 'ASSET_CARRIE
  * TRAP for whoever widens it: `services.ts`'s `float.fundingFeeSats` closes over the BOOT `const policy`, and
  * `replacePolicy` ASSIGNS a field rather than rebinding a const, so such a reader stays FROZEN ON BOOT.
  */
-export const LIVE_KEYS: ReadonlySet<string> = new Set(['ASSET_CARRIER_PRICING'])
+export const LIVE_KEYS: ReadonlySet<string> = new Set(['ASSET_CARRIER_PRICING', 'REBALANCE_POLICY'])
 
 /** Every key the console may write. Derived from the corridor list so it cannot drift from it. */
 export const editableKeys = (): string[] => [
@@ -205,8 +209,8 @@ export const validateOverride = (config: Config, key: string, value: string): vo
     // nothing, which is worse than refusing it.
     if (value === 'true' && !config.corridorEnabled[corridor]) {
       throw new Error(
-        `${corridor} is disabled in the environment and cannot be enabled from the console; ` +
-          'no service was constructed for it. Set its _ENABLED variable and restart.',
+        `${corridor} is disabled in the config and cannot be enabled from the console; ` +
+          `no service was constructed for it. Set corridors["${corridor}"].enabled to true and restart.`,
       )
     }
     return
@@ -332,8 +336,9 @@ export const describeSettings = (
   const values = editableKnobValues(effective)
   const envValues = editableKnobValues(config)
   const waiting = new Set(pending)
-  const sourceOf = (key: string): KnobSource => (overrides[key] === undefined ? 'env' : 'override')
-  const knob = (key: string, editable = true): KnobView => ({
+  const sourceOf = (key: string): KnobSource => (overrides[key] === undefined ? 'config' : 'override')
+  const path = (key: string): string => config.configPaths?.get(key) ?? key
+  const knob = (key: string, editable = true): Omit<KnobView, 'path'> => ({
     key,
     value: values[key]!,
     envValue: envValues[key]!,
@@ -343,7 +348,7 @@ export const describeSettings = (
     ...(waiting.has(key) ? { pending: true } : {}),
   })
 
-  const knobs: KnobView[] = []
+  const knobs: Omit<KnobView, 'path'>[] = []
   for (const corridor of CORRIDORS) {
     const stem = stemOf(corridor)
     knobs.push(
@@ -364,11 +369,11 @@ export const describeSettings = (
     // Read-only below: everything a restart would be needed for anyway, and
     // nothing carrying key material. Secrets are never surfaced at all — not
     // redacted, simply absent, so there is no field for a bug to un-redact.
-    { key: 'SWAP_NETWORK', value: config.network, source: 'env', editable: false },
+    { key: 'SWAP_NETWORK', value: config.network, source: 'config', editable: false },
     // `'unset'` rather than an omitted row: no rail is a real deployment state
     // (it serves no BTC corridor), and a missing row would read as a console
     // that failed to look rather than as an answer.
-    { key: 'LN_BACKEND', value: config.lnBackend ?? 'unset', source: 'env', editable: false },
+    { key: 'LN_BACKEND', value: config.lnBackend ?? 'unset', source: 'config', editable: false },
     // Surfaced BECAUSE it is dangerous, not despite it. This is the one knob
     // here that accepts a loss, so an operator auditing a deployment has to be
     // able to see whether it is on without reading the unit's environment.
@@ -377,18 +382,18 @@ export const describeSettings = (
     {
       key: 'LN_RECEIVE_ACCEPT_UNILATERAL_GAP',
       value: config.lnReceiveAcceptUnilateralGap,
-      source: 'env',
+      source: 'config',
       editable: false,
     },
-    { key: 'ARK_SERVER_URL', value: config.arkade.arkServerUrl, source: 'env', editable: false },
-    { key: 'EMULATOR_URL', value: config.emulatorUrl, source: 'env', editable: false },
+    { key: 'ARKADE_OPERATOR_URL', value: config.arkade.operatorUrl, source: 'config', editable: false },
+    { key: 'EMULATOR_URL', value: config.emulatorUrl, source: 'config', editable: false },
     // Both RESOLVED, which is what an operator needs from this page: `DB_DIR`
     // places them unless one of the two path knobs names a file, so the raw
     // directory is not the answer to "which files is this process using" — and
     // a `DB_DIR` that lost to an explicit path would read as though it had won.
-    { key: 'SWAP_DB_PATH', value: config.swapDbPath, source: 'env', editable: false },
-    { key: 'ARK_DB_PATH', value: config.arkade.databasePath, source: 'env', editable: false },
-    { key: 'SWEEP_CONCURRENCY', value: config.sweepConcurrency, source: 'env', editable: false },
+    { key: 'SWAP_DB_PATH', value: config.swapDbPath, source: 'config', editable: false },
+    { key: 'WALLET_DB_PATH', value: config.arkade.databasePath, source: 'config', editable: false },
+    { key: 'SWEEP_CONCURRENCY', value: config.sweepConcurrency, source: 'config', editable: false },
     // On this page for the same reason `LN_RECEIVE_ACCEPT_UNILATERAL_GAP` is:
     // a WRONG entry here is a fund-risk rather than a lost swap — a real
     // channel listed is priced out of a refund deadline a route can still take
@@ -399,7 +404,7 @@ export const describeSettings = (
     {
       key: 'LN_SEND_HINT_SCID_DENYLIST',
       value: Array.from(config.sendHintScidDenylist).join(', ') || '(empty)',
-      source: 'env',
+      source: 'config',
       editable: false,
     },
     // Whether a configured market is filled by ANYTHING, and the only place an
@@ -409,23 +414,39 @@ export const describeSettings = (
     {
       key: 'OFFER_MARKETS',
       value: config.offerMarkets.map((market) => assetMarketKey(market.a, market.b)).join(', ') || '(empty)',
-      source: 'env',
+      source: 'config',
       editable: false,
     },
-    // As the environment spells it, so it can be pasted back.
     {
       key: 'ASSET_MARKETS',
       value: config.assetRfqTokens.map((token) => `${token.symbol}:${token.assetId}`).join(', ') || '(empty)',
-      source: 'env',
+      source: 'config',
       editable: false,
     },
     // READ-ONLY unlike its RFQ twin: the packet path RE-GATES an already-admitted intent
     // (`tickAllInner` re-runs `withinTolerance` live), so a flip would fail fills already accepted.
-    { key: 'OFFER_CHARGE_CARRIER', value: config.offerChargesDeliveredCarrier, source: 'env', editable: false },
-    { key: 'RELAY_URL', value: config.relayUrl ?? '(unset)', source: 'env', editable: false },
-    { key: 'RELAY_PROTOCOL', value: config.relayProtocol, source: 'env', editable: false },
-    { key: 'OPEN_RFQ_MAX_BIDS_PER_MIN', value: config.openRfqMaxBidsPerMinute, source: 'env', editable: false },
+    { key: 'OFFER_CHARGE_CARRIER', value: config.offerChargesDeliveredCarrier, source: 'config', editable: false },
+    { key: 'RELAY_URL', value: config.relayUrl ?? '(unset)', source: 'config', editable: false },
+    { key: 'RELAY_PROTOCOL', value: config.relayProtocol, source: 'config', editable: false },
+    { key: 'OPEN_RFQ_MAX_BIDS_PER_MIN', value: config.openRfqMaxBidsPerMinute, source: 'config', editable: false },
   )
+  const rail = config.lnBackend ? lightningRailFor(config.lnBackend) : undefined
+  let railRows: ReadonlyArray<{ path: string; value: string | number | boolean }> = []
+  try {
+    railRows = rail?.consoleSettings?.(config) ?? []
+  } catch (error) {
+    // Out-of-repo code handed the whole config: one row says it failed, and the log never repeats its message.
+    log(
+      `console: rail ${config.lnBackend} could not list its settings (${error instanceof Error ? error.name : typeof error})`,
+    )
+    railRows = [{ path: `rails.lightning["${config.lnBackend}"]`, value: '(could not be listed: see the log)' }]
+  }
+  const taken = new Set(knobs.flatMap((knob) => [knob.key, path(knob.key)]))
+  for (const { path: where, value } of railRows) {
+    if (taken.has(where) || taken.has(path(where))) continue
+    taken.add(where).add(path(where))
+    knobs.push({ key: where, value, source: 'config', editable: false })
+  }
 
-  return knobs
+  return knobs.map((knob) => ({ ...knob, path: path(knob.key) }))
 }

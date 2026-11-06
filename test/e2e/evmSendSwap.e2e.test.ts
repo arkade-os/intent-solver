@@ -54,6 +54,7 @@ import {
   WETH,
   evmChainReady,
   evmRpc,
+  pinAnvilClock,
   sendFrom,
   fundWithWeth,
   installContracts,
@@ -114,6 +115,7 @@ beforeAll(async () => {
   }
 
   rpc = evmRpc()
+  await pinAnvilClock(rpc)
   await installContracts(rpc, SWAP_RUNTIME, WETH_RUNTIME)
   const solver = addressFromPrivateKey(SOLVER_KEY)
   await setEth(rpc, solver, 10n ** 20n)

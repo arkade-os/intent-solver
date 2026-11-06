@@ -31,7 +31,7 @@
 
 import { describe, it, expect } from 'vitest'
 import { hex } from '@scure/base'
-import { onchainHtlcScript } from '@arkade-os/swap'
+import { onchainHtlcScript } from '@arkade-os/swap/protocol'
 import { buildOnchainHtlc, ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import type { SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
 

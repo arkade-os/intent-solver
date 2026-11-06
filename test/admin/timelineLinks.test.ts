@@ -15,7 +15,7 @@
  * and they claimed it yet no txs are shown and linked."
  *
  * So the test that matters is not "does field X link" — it is COMPLETENESS.
- * These read the field names out of the four row types and require each one to
+ * These read the field names out of the three row types and require each one to
  * be linked or exempted by name, which is what makes adding a corridor, or a
  * field, fail here rather than in production.
  */
@@ -28,12 +28,11 @@ const read = (rel: string): string => readFileSync(fileURLToPath(new URL(rel, im
 
 const appSource = read('../../packages/solver-app/src/admin/static/app.js')
 
-/** The four corridor row types, and the file each lives in. */
+/** The three corridor row types, and the file each lives in. */
 const ROW_SOURCES = {
   'arkade:BTC->lightning:BTC': '../../packages/solver-corridors/src/db/swaps.ts',
   'lightning:BTC->arkade:BTC': '../../packages/solver-corridors/src/db/receiveSwaps.ts',
   'arkade:BTC->onchain:BTC': '../../packages/solver-corridors/src/db/onchainSwaps.ts',
-  'onchain:BTC->arkade:BTC': '../../packages/solver-corridors/src/db/onchainReceiveSwaps.ts',
 } as const
 
 /**
@@ -116,12 +115,11 @@ describe('notes that name a transaction', () => {
     expect(allowed()).toEqual(['arkade:BTC->lightning:BTC', 'lightning:BTC->arkade:BTC'])
   })
 
-  it('still refuses the onchain corridors, where a bare txid is ambiguous', () => {
-    // Those corridors move on two chains and a note's 64 hex characters do not
+  it('still refuses the onchain corridor, where a bare txid is ambiguous', () => {
+    // That corridor moves on two chains and a note's 64 hex characters do not
     // say which. Guessing sends an operator to an explorer that answers "not
     // found" about someone else's chain — worse than no link at all.
     expect(allowed()).not.toContain('arkade:BTC->onchain:BTC')
-    expect(allowed()).not.toContain('onchain:BTC->arkade:BTC')
   })
 
   it('actually gates on that list rather than naming it and ignoring it', () => {

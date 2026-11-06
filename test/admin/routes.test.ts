@@ -28,14 +28,13 @@ const fakeServices = (over: Record<string, unknown> = {}) => {
     store: store(),
     receiveStore: store(),
     onchainStore: store(),
-    onchainReceiveStore: store(),
     ...over,
   }
   const config = {
     network: 'regtest',
     lnBackend: 'fake',
     emulatorUrl: 'http://emulator.test',
-    arkade: { arkServerUrl: 'http://ark.test' },
+    arkade: { operatorUrl: 'http://arkade.test' },
     maxExposedSats: 300_000,
     // The global outer bound each corridor is narrowed from. Present on the
     // real Config, so a double without it reads `undefined.maxSats` and 500s
@@ -49,19 +48,16 @@ const fakeServices = (over: Record<string, unknown> = {}) => {
       'arkade:BTC->lightning:BTC': true,
       'lightning:BTC->arkade:BTC': true,
       'arkade:BTC->onchain:BTC': true,
-      'onchain:BTC->arkade:BTC': true,
     },
     corridorFees: {
       'arkade:BTC->lightning:BTC': { bps: 0, flatSats: 0 },
       'lightning:BTC->arkade:BTC': { bps: 0, flatSats: 0 },
       'arkade:BTC->onchain:BTC': { bps: 0, flatSats: 0 },
-      'onchain:BTC->arkade:BTC': { bps: 0, flatSats: 0 },
     },
     corridorLimits: {
       'arkade:BTC->lightning:BTC': { minSats: 1_000, maxSats: 100_000 },
       'lightning:BTC->arkade:BTC': { minSats: 1_000, maxSats: 100_000 },
       'arkade:BTC->onchain:BTC': { minSats: 1_000, maxSats: 100_000 },
-      'onchain:BTC->arkade:BTC': { minSats: 1_000, maxSats: 100_000 },
     },
   }
   return {
@@ -193,6 +189,18 @@ describe('GET /api/swaps', () => {
     }
     expect(body.swaps.map((s) => s.id)).toEqual(['new', 'old'])
   })
+
+  it('carries what the sweep keeps failing on, on that swap row', async () => {
+    const row = { id: 'c', state: 'claiming', createdAt: 1, updatedAt: 1, amountSats: 1, paymentHash: 'a' }
+    const send = store({
+      page: vi.fn().mockResolvedValue({ rows: [{ ...row, failureReason: null }], nextCursor: null }),
+    })
+    const failing = { id: 'c', message: 'INVALID_SIGNATURE (18): invalid signature in checkpoint tx', count: 7 }
+    const body = (await (await get('/api/swaps', { store: send, tickErrors: { failing: [failing] } })).json()) as {
+      swaps: { failing?: unknown }[]
+    }
+    expect(body.swaps[0]!.failing).toEqual({ message: failing.message, count: 7 })
+  })
 })
 
 describe('GET /api/swaps/:corridor/:id', () => {
@@ -223,6 +231,16 @@ describe('GET /api/swaps/:corridor/:id', () => {
       swap: { id: 'a', phase: 'done', state: 'claimed' },
       history: [{ to: 'quoted' }],
     })
+  })
+
+  it('carries what the sweep keeps failing on', async () => {
+    const row = { id: 'a', state: 'claiming', createdAt: 1, updatedAt: 2, amountSats: 1_000, paymentHash: 'aa' }
+    const withRow = store({ get: vi.fn().mockResolvedValue({ ...row, failureReason: null }) })
+    const tickErrors = { failing: [{ id: 'a', message: 'INVALID_SIGNATURE (18)', count: 3 }] }
+    const body = await (
+      await get('/api/swaps/arkade%3ABTC-%3Elightning%3ABTC/a', { store: withRow, tickErrors })
+    ).json()
+    expect(body).toMatchObject({ swap: { failing: { message: 'INVALID_SIGNATURE (18)', count: 3 } } })
   })
 })
 
@@ -285,9 +303,9 @@ describe('GET /api/overview', () => {
     expect(await response.json()).toMatchObject({ balances: { lightningSats: null, lightningError: 'down' } })
   })
 
-  it('lists all four corridors with their effective policy', async () => {
+  it('lists all three corridors with their effective policy', async () => {
     const body = (await (await get('/api/overview')).json()) as { corridors: { corridor: string }[] }
-    expect(body.corridors).toHaveLength(4)
+    expect(body.corridors).toHaveLength(3)
   })
 
   // A repair an operator is never told about leaves a healthy deployment and one

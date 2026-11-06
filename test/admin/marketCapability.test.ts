@@ -15,7 +15,11 @@ const OTHER = 'bb'.repeat(34)
 const KEY = assetMarketKey(null, USDT)
 
 const btcUsdt = { base: null, quote: USDT }
-const token = (assetId: string) => ({ symbol: 'USDT', assetId, enabled: { sell_base: true, buy_base: true } })
+const token = (assetId: string) => ({
+  symbol: 'USDT',
+  assetId,
+  enabled: { clientGivesAsset: true, clientGetsAsset: true },
+})
 const serving = (over: Partial<ServingRuntime> = {}): ServingRuntime => ({
   assetOffers: null,
   liveOfferMarkets: [],
@@ -189,7 +193,7 @@ const settingsConfig = (over: Record<string, unknown> = {}) =>
     relayProtocol: 'nostr',
     openRfqMaxBidsPerMinute: 30,
     emulatorUrl: 'http://emulator.test',
-    arkade: { arkServerUrl: 'http://ark.test', databasePath: '.data/ark.sqlite' },
+    arkade: { operatorUrl: 'http://arkade.test', databasePath: '.data/ark.sqlite' },
     maxExposedSats: 300_000,
     lockupTimeoutSeconds: 600,
     sendHintScidDenylist: new Set<string>(),
@@ -199,19 +203,16 @@ const settingsConfig = (over: Record<string, unknown> = {}) =>
       'arkade:BTC->lightning:BTC': { minSats: 1, maxSats: 2 },
       'lightning:BTC->arkade:BTC': { minSats: 1, maxSats: 2 },
       'arkade:BTC->onchain:BTC': { minSats: 1, maxSats: 2 },
-      'onchain:BTC->arkade:BTC': { minSats: 1, maxSats: 2 },
     },
     corridorFees: {
       'arkade:BTC->lightning:BTC': { bps: 0, flatSats: 0 },
       'lightning:BTC->arkade:BTC': { bps: 0, flatSats: 0 },
       'arkade:BTC->onchain:BTC': { bps: 0, flatSats: 0 },
-      'onchain:BTC->arkade:BTC': { bps: 0, flatSats: 0 },
     },
     corridorEnabled: {
       'arkade:BTC->lightning:BTC': true,
       'lightning:BTC->arkade:BTC': true,
       'arkade:BTC->onchain:BTC': true,
-      'onchain:BTC->arkade:BTC': true,
     },
     ...over,
   }) as never
@@ -224,7 +225,7 @@ describe('the settings page shows what decides whether a market is filled', () =
     expect(knob({ offerMarkets: [{ a: null, b: USDT }] }, 'OFFER_MARKETS')).toMatchObject({
       value: KEY,
       editable: false,
-      source: 'env',
+      source: 'config',
     })
   })
 
@@ -269,7 +270,6 @@ const overview = async (policy: Record<string, unknown>, rows: unknown[] = [mark
       store: swapStore(),
       receiveStore: swapStore(),
       onchainStore: swapStore(),
-      onchainReceiveStore: swapStore(),
       adminStore: {
         getOverrides: vi.fn().mockResolvedValue({}),
         listMarkets: vi.fn().mockResolvedValue(rows),

@@ -38,7 +38,6 @@ const corridorMap = <T>(value: T) => ({
   'arkade:BTC->lightning:BTC': value,
   'lightning:BTC->arkade:BTC': value,
   'arkade:BTC->onchain:BTC': value,
-  'onchain:BTC->arkade:BTC': value,
 })
 
 /** A balance shaped as the SDK returns one — asset amounts as `bigint`. */
@@ -48,7 +47,7 @@ const balanceWith = (assets: { assetId: string; amount: bigint }[], available = 
   preconfirmed: 0,
   available: 250_000,
   gated: 0,
-  intentLocked: 0,
+  pendingSettlement: 0,
   recoverable: 0,
   pendingRecovery: 0,
   unrolled: 0,
@@ -62,13 +61,12 @@ const fakeServices = (over: { balance?: unknown; assetManager?: unknown; vtxos?:
     store: store(),
     receiveStore: store(),
     onchainStore: store(),
-    onchainReceiveStore: store(),
   }
   const config = {
     network: 'regtest',
     lnBackend: 'fake',
     emulatorUrl: 'http://emulator.test',
-    arkade: { arkServerUrl: 'http://ark.test' },
+    arkade: { operatorUrl: 'http://arkade.test' },
     maxExposedSats: 300_000,
     limits: { minSats: 1_000, maxSats: 100_000 },
     offerMarkets: [],

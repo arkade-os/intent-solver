@@ -38,7 +38,11 @@
 # Declared before the first FROM so both stages can read it; ARGs above the
 # first FROM are global, and one declared inside a stage would not be visible
 # to the other stage's FROM.
-ARG NODE_VERSION=22
+#
+# Pinned to a patch release because a builder that caches `node:22-slim` keeps
+# building on it and never picks up a security release. 22.23.4 carries the
+# October 2026 fixes; bump it for each Node security release.
+ARG NODE_VERSION=22.23.4
 
 FROM node:${NODE_VERSION}-slim AS build
 RUN corepack enable
@@ -69,9 +73,9 @@ COPY scripts ./scripts
 # package resolves its dependencies through their `exports` maps to dist/, so
 # the app compiles last, after everything it imports exists.
 RUN pnpm build
-# Drop dev dependencies; keep the compiled native module.
+# Reinstall each workspace's runtime dependencies; root-only prune drops package-local links.
 #
-# CI=true is REQUIRED since the workspace split, not decoration. Pruning a
+# CI=true is REQUIRED since the workspace split, not decoration. Reinstalling a
 # workspace makes pnpm remove and rebuild node_modules wholesale rather than
 # unlinking a few packages, and it refuses to delete a modules directory
 # without a TTY unless told it is running unattended:
@@ -80,7 +84,7 @@ RUN pnpm build
 #
 # A local `docker build` can hide this by reusing a cached layer from before
 # the workspace existed, so it first appeared on the CI run.
-RUN CI=true pnpm prune --prod
+RUN CI=true pnpm install --frozen-lockfile --prod
 
 FROM node:${NODE_VERSION}-slim
 ENV NODE_ENV=production
@@ -121,18 +125,17 @@ COPY --from=build /app/packages/solver-app/src/admin/static ./packages/solver-ap
 COPY --from=build /app/scripts ./scripts
 
 # Durable state lives on a volume: the swap DB is the money-critical file.
-# DB_DIR places every database file this service opens itself; the heartbeat is
-# not one — the HEALTHCHECK below reads that exact path — so it is named
-# separately.
-RUN mkdir -p /data && chown node:node /data /app
-ENV DB_DIR=/data \
-    RELAY_HEALTH_PATH=/data/relay-health
+# storage.dir and relay.healthPath default to .data/… relative to /app, and
+# /app/.data IS the volume, so a document that sets neither lands on it. Linked
+# rather than set in an ENV block: any setting left in the environment stops
+# the solver at startup.
+RUN mkdir -p /data && chown node:node /data /app && ln -s /data /app/.data
 VOLUME /data
 
 USER node
 
 # Health, for a container with no port to probe: `relay` touches the mtime of
-# RELAY_HEALTH_PATH every 10s, but ONLY while the relay socket is up. Reconnect
+# relay.healthPath every 10s, but ONLY while the relay socket is up. Reconnect
 # is automatic and unbounded, so a process check reports a disconnected solver
 # healthy for as long as it stays deaf — which is how one shipped.
 #
@@ -158,19 +161,21 @@ USER node
 # probe instead. The `swap-provider-http` service in docker-compose.yml carries
 # the override verbatim; keeping one copy means one thing to change.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=2 \
-  CMD test $(( $(date +%s) - $(stat -c %Y "${RELAY_HEALTH_PATH:-/data/relay-health}" 2>/dev/null || echo 0) )) -lt 60
+  CMD test $(( $(date +%s) - $(stat -c %Y /data/relay-health 2>/dev/null || echo 0) )) -lt 60
 
-# The admin console, when ADMIN_PORT is set. Not published by default and not
+# The admin console, when admin.port is set. Not published by default and not
 # EXPOSEd with a fixed number, because there is deliberately no default port:
 # the console is opt-in, and a declared port on an image whose console is off
 # would advertise something that is not listening.
 #
 # THERE IS NO AUTHENTICATION ON THAT PORT. Anything that can reach it can move
-# money. In a container ADMIN_HOST must be 0.0.0.0 to be reachable at all, so
+# money. In a container admin.host must be 0.0.0.0 to be reachable at all, so
 # publish it only behind a reverse proxy that adds auth — never with a bare
 # `-p 8788:8788` on a public host. See docs/runbook.md.
 
-# Secrets come from the environment (docker secrets / --env-file), never from
-# the image. `relay` additionally needs RELAY_URL.
+# Configuration, secrets included, is one JSON document: mount it and set
+# SOLVER_CONFIG to its path, or pass SOLVER_CONFIG_JSON. Never baked into the
+# image. `relay` additionally needs relay.url. Keep relay.healthPath at its
+# default: the HEALTHCHECK above reads that path.
 ENTRYPOINT ["node", "--enable-source-maps", "--experimental-eventsource", "packages/solver-app/dist/cli.js"]
 CMD ["relay"]

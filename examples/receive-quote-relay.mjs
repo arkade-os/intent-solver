@@ -18,7 +18,8 @@
 import { randomBytes } from 'node:crypto'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { hex } from '@scure/base'
-import { createArkadeContext, deriveNostrIdentity, loadConfig } from '../packages/solver-app/dist/index.js'
+import { createArkadeContext, deriveNostrIdentity } from '../packages/solver-app/dist/index.js'
+import { configFromKnobs } from '../packages/solver-app/dist/config.js'
 // Sealing and the request shape live in the library, so the two cannot drift.
 import { buildReceiveRequest, sealToCovclaimd } from './lib/receive-client.mjs'
 import { newRfqId, nostrRelayTransport } from './lib/swap-client.mjs'
@@ -30,7 +31,7 @@ if (!relayUrl || !solverPubkey) {
 }
 const amountSats = Number(amountArg ?? 5000)
 
-const config = loadConfig()
+const config = configFromKnobs(process.env)
 const arkade = await createArkadeContext(config.arkade)
 
 let transport

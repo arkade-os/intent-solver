@@ -13,8 +13,11 @@
  */
 
 import { hex } from '@scure/base'
-import { findLockups, refundSwapScript } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { findLockups, findSweptLockups, refundSwapScript } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { refundSweptSwapScript } from '@arkade-os/solver-arkade/arkade/sweptRefund.js'
 import { covenantScriptFromRow } from '@arkade-os/solver-corridors/send/arkadeOps.js'
+import { EXPOSED } from '@arkade-os/solver-corridors/db/swaps.js'
+import { paymentVerdict } from './paymentVerdict.js'
 import type { Services } from './services.js'
 
 /** A pushed refund, or the reason nothing was pushed. */
@@ -38,9 +41,53 @@ export const refundNow = async (services: Services, id: string): Promise<RefundO
   if (!row.refundPkScript || !row.emulatorPubkey) {
     throw new Error(`swap ${id} is not a covenant swap: missing refund destination or emulator key`)
   }
+  // An exposed or claimed row may have paid the client already; the backend
+  // verdict below must also prove a refund is safe for any other state.
+  if (EXPOSED.includes(row.state) || row.state === 'claimed') {
+    throw new Error(
+      `swap ${id} is ${row.state}: the Lightning payout is in flight or done, so refunding the lockup now would pay the client twice — resolve the payment, do not refund`,
+    )
+  }
+  // The row state is only the fast guard; the payment is the authority. @see paymentVerdict.ts
+  const { verdict } = await paymentVerdict(services, row)
+  if (verdict !== 'not-paid-refund-is-safe' && verdict !== 'never-submitted') {
+    throw new Error(
+      `swap ${id}: payment verdict is ${verdict}, so refunding the lockup now could pay the client twice — resolve the payment, do not refund`,
+    )
+  }
   const script = covenantScriptFromRow(row)
-  const outputs = await findLockups(services.arkade, hex.encode(script.pkScript))
-  if (outputs.length === 0) return { skipped: NOTHING_AT_SCRIPT }
+  const pkScript = hex.encode(script.pkScript)
+  const claimRefund = async (found: readonly { value: number }[]) => {
+    if (row.state === 'refused') return
+    // Claim before spending so a funded tick cannot start paying after the verdict.
+    const observed = found.reduce((total, output) => total + output.value, 0)
+    // Persist the observed value so the deadline sweep can retry a failed send.
+    if (
+      !(await services.store.transition(row.id, row.state, 'refused', {
+        lockup_value: Math.max(row.lockupValue ?? 0, observed),
+      }))
+    )
+      throw new Error(`swap ${id} state changed while preparing refund; recheck before retry`)
+  }
+  const outputs = await findLockups(services.arkade, pkScript)
+  // A SWEPT lockup is invisible to `findLockups` and unspendable offchain, so
+  // it goes through a batch round. Unattended, the float pass does the same
+  // off the recovery guard. @see arkade/sweptRefund.ts
+  if (outputs.length === 0) {
+    const swept = await findSweptLockups(services.arkade, pkScript)
+    if (swept.length === 0) return { skipped: NOTHING_AT_SCRIPT }
+    await services.store.noteFundings(row.id, swept)
+    await claimRefund(swept)
+    const txid = await refundSweptSwapScript(
+      services.arkade,
+      services.config.emulatorUrl,
+      script,
+      swept,
+      hex.decode(row.refundPkScript),
+    )
+    await services.store.patch(row.id, { refund_outcome: 'pushed', refund_ark_txid: txid })
+    return { txid }
+  }
 
   // Record what is ACTUALLY at the script before spending it — the force-check a second
   // funding needs. A lockup can be funded more than once, the lifecycle has only one
@@ -48,6 +95,7 @@ export const refundNow = async (services: Services, id: string): Promise<RefundO
   // swept by the refund below and otherwise leaves no trace. `noteFundings` skips
   // outpoints already recorded, so re-running is free.
   await services.store.noteFundings(row.id, outputs)
+  await claimRefund(outputs)
 
   const txid = await refundSwapScript(
     services.arkade,
@@ -56,17 +104,7 @@ export const refundNow = async (services: Services, id: string): Promise<RefundO
     outputs,
     hex.decode(row.refundPkScript),
   )
-  // Recorded BEFORE the row is closed. If the process dies between the two, the order
-  // that survives must be the one with the txid on disk: a closed row with no recorded
-  // refund is evidence nobody can reconstruct.
   await services.store.patch(row.id, { refund_outcome: 'pushed', refund_ark_txid: txid })
-
-  // A refunded `stuck` row is finished, so take it out of the queue that state means.
-  // Only from `stuck` — this also runs against `refused` rows and from the sweep, where
-  // a blind transition would turn a successful refund into a reported failure.
-  // Compare-and-swap, so a row that moved in flight is left as it is. Nothing is closed
-  // on the `nothing-at-script` path, where no refund happened.
-  if (row.state === 'stuck') await services.store.transition(row.id, 'stuck', 'refused')
 
   return { txid }
 }
@@ -142,42 +180,4 @@ export const receiveRefundNow = async (services: Services, id: string): Promise<
   const txid = await services.receiveService.refundNow(id)
   if (!txid) return { skipped: NOTHING_AT_SCRIPT }
   return { txid }
-}
-
-/** {@link receiveRefundNow} for the onchain receive leg. Same money, same direction. */
-export const onchainReceiveRefundNow = async (services: Services, id: string): Promise<RefundOutcome> => {
-  if (!services.onchainReceiveService) {
-    throw new Error(
-      'the onchain:BTC->arkade:BTC service is not available; build Services with allCorridors, or wait for LND to answer',
-    )
-  }
-  await services.onchainReceiveStore.get(id)
-  const txid = await services.onchainReceiveService.refundNow(id)
-  if (!txid) return { skipped: NOTHING_AT_SCRIPT }
-  return { txid }
-}
-
-/**
- * NOT a refund — the onchain receive leg's fee-dust retry (TLA+ F4). It lives here
- * because this is where the operator overrides live.
- *
- * A row at `claimed` has already paid the client out; if the fee then made the L1 claim
- * uneconomic, the solver is out the payout and holding a `stuck` row it cannot collect
- * on. The fee rate is the one lever, and this is it. `refused` is a normal outcome
- * carrying both numbers, so an operator knows to come back later.
- *
- * Distinct from {@link onchainReceiveRefundNow} in direction as well as leg: that
- * recovers the solver's Arkade lockup, which on a `claimed` row is already gone.
- */
-export const onchainReceiveClaimNow = async (
-  services: Services,
-  id: string,
-): Promise<{ txid: string } | { refused: string }> => {
-  if (!services.onchainReceiveService) {
-    throw new Error(
-      'the onchain:BTC->arkade:BTC service is not available; build Services with allCorridors, or wait for LND to answer',
-    )
-  }
-  await services.onchainReceiveStore.get(id)
-  return services.onchainReceiveService.claimNow(id)
 }

@@ -72,6 +72,30 @@ Needs per-repo work:
   backend-specific; each repo keeps only the backends it ships.
 - **`package-sets` CI job.** Collapses to the single set that repo contains.
 
+## Docker architectures
+
+The release workflow publishes `linux/amd64` and `linux/arm64` images under the
+same tags. Docker selects the matching image for the host automatically. To
+build and load just the ARM64 image locally:
+
+```sh
+docker buildx build --platform linux/arm64 --load \
+  -f packages/solver-app/Dockerfile -t intent-solver:arm64 .
+```
+
+On an `amd64` host the ARM64 build runs under emulation, so the Docker engine
+needs ARM64 binfmt support. A standalone Docker Engine may need QEMU registered
+first, as the CI job does with `docker/setup-qemu-action`:
+
+```sh
+docker run --privileged --rm tonistiigi/binfmt --install arm64
+```
+
+The `docker` CI job builds the image for both architectures on each supported
+Node major, amd64 natively and ARM64 under QEMU, and smoke-tests each by running
+`list`. That opens the swap database, so the native `better-sqlite3` module has
+to load.
+
 ## Extending, rather than forking
 
 A consumer defines a corridor and hands it to the shipped daemon:
@@ -96,14 +120,24 @@ import { registerLightningRail } from '@arkade-os/solver-...'
 registerLightningRail('my-rail', { create: async (config) => ({ ln, onchain }) })
 ```
 
-`LN_BACKEND=my-rail` then selects it, because `loadConfig` asks the registry what
-exists (`packages/solver-app/src/ops/rails.ts`). A rail is a PAIR — one wallet
+`rails.lightning.backend: "my-rail"` then selects it, because `loadConfig` asks the
+registry what exists (`packages/solver-app/src/ops/rails.ts`). The rail's own
+settings go under `rails.lightning["my-rail"]` and reach it as
+`config.lightningRailBlock`, for the rail to check itself; `consoleSettings(config)` lists what the
+console shows of them, read-only, a credential left out rather than redacted. A rail that read environment
+variables before the document names them in `legacyEnv`: boot refuses any left set, and
+`cli config-from-env` writes `legacyEnv.toBlock(env)` as its block. A rail is a PAIR — one wallet
 answering both the Lightning and the onchain port — so a vendor with no onchain
 facility still answers that port with a backend that refuses, rather than
 leaving two corridors unservable. Registration is module-level state read once
 at `loadConfig`, so it has to happen at import time, above the entrypoint; and a
 name already taken, built-in or not, is refused at registration rather than
 silently shadowed.
+
+A deployment **profile**, its own defaults and refusals applied to the document
+before it is validated, goes the same way: `registerConfigProfile(profile)` at import
+time, above the entrypoint. Every `loadConfig` passed no profile applies it, including
+the check `config-from-env` runs on its export.
 
 `test/packaging/corridorInjection.test.ts` and `sdkSurface.test.ts` pin this.
 

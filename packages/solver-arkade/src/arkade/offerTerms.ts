@@ -12,7 +12,7 @@
  */
 import { asset, type RelativeTimelock } from '@arkade-os/sdk'
 import { isEncodableRelativeDelay, relativeDelayFrom } from '@arkade-os/solver-core/core/timelocks.js'
-import { offerVtxoScript, type Offer } from '@arkade-os/swap'
+import { offerVtxoScript, type Offer } from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
 
 /**
@@ -45,7 +45,7 @@ export interface OfferDerivation {
 }
 
 /** The exit closure a client's `createOffer` defaults to, from swap 0.0.12 on.
- * The ADVERTISED delay, never `ARK_UNILATERAL_EXIT_DELAY`, which a client cannot
+ * The ADVERTISED delay, never `ARKADE_UNILATERAL_EXIT_DELAY`, which a client cannot
  * see. Agreement pinned by `offerAddressAgreement.test.ts`. */
 export const offerExitDelay = (advertisedExitDelay: number): RelativeTimelock => {
   if (!Number.isInteger(advertisedExitDelay) || advertisedExitDelay <= 0) {

@@ -61,12 +61,9 @@ describe('the lockup subscription', () => {
    * here: a second filter in the loop would be a corridor dropped from the fast
    * path for a reason nothing else in the process agrees with.
    */
-  it.each(['services.store', 'services.onchainStore', 'services.receiveStore', 'services.onchainReceiveStore'])(
-    'no longer singles out %s',
-    (store) => {
-      expect(resyncBody()).not.toContain(store)
-    },
-  )
+  it.each(['services.store', 'services.onchainStore', 'services.receiveStore'])('no longer singles out %s', (store) => {
+    expect(resyncBody()).not.toContain(store)
+  })
 
   it('applies no filter of its own to the registry', () => {
     expect(resyncBody()).not.toMatch(/services\.corridors[\s\S]{0,40}\.filter\(/)

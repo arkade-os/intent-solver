@@ -21,26 +21,23 @@
  */
 
 import type { Hono } from 'hono'
-import {
-  refundNow,
-  onchainRefundNow,
-  reclaimL1Htlc,
-  receiveRefundNow,
-  onchainReceiveRefundNow,
-  onchainReceiveClaimNow,
-} from '../../ops/refunds.js'
+import { randomUUID } from 'node:crypto'
+import { refundNow, onchainRefundNow, reclaimL1Htlc, receiveRefundNow } from '../../ops/refunds.js'
 import { hex } from '@scure/base'
-import { claimNow } from '../../ops/claims.js'
+import { claimNow, onchainClaimNow } from '../../ops/claims.js'
 import { planExitForSwap } from '../../ops/unilateralExit.js'
 import { requireLn } from '../../ops/rails.js'
-import { capabilityRefusal, fundSources, requireFundSource, summarise } from '../../ops/fundSources.js'
+import { capabilityRefusal, fundSources, parseWholeSats, requireFundSource, summarise } from '../../ops/fundSources.js'
+import { ARKADE_FUND_SOURCE_ID } from '../../ops/arkadeFunds.js'
+import { balanceCheckpointScope } from '../../ops/balanceCheckpoints.js'
 import { committedAcrossCorridors, mintPool, poolPlan } from '../../ops/pool.js'
 import { runFloatLifecycle } from '../../ops/float.js'
+import { paymentVerdict } from '../../ops/paymentVerdict.js'
 import { requestRestart } from '../../ops/restart.js'
 import type { Services } from '../../ops/services.js'
 import type { AdminDeps } from '../server.js'
 import { clampLimit } from '@arkade-os/solver-core/core/page.js'
-import { messageOf } from '@arkade-os/solver-core/util/poll.js'
+import { log, messageOf } from '@arkade-os/solver-core/util/poll.js'
 import { CORRIDORS, isCorridor, type Corridor } from '@arkade-os/solver-core/core/corridorPolicy.js'
 
 export type ActionTier = 'safe' | 'armed'
@@ -50,14 +47,13 @@ interface ActionBody {
   /** Which corridor's store owns {@link id} — see `requireCorridor`. */
   corridor?: unknown
   confirm?: unknown
-  force?: unknown
   /** `claim-now` only: an operator's own preimage, where the backend has none. */
   preimage?: unknown
   /** `park-swap` only: why this row is being stopped. Required, and recorded. */
   reason?: unknown
   /** The `fund-*` actions: which source of the solver's own liquidity this is about. */
   source?: unknown
-  /** `fund-withdraw` only: where the money goes. Also what must be typed back. */
+  /** `fund-withdraw` only: where the money goes. Also what the confirmation must echo. */
   address?: unknown
   /**
    * `fund-withdraw` only: how much leaves, as a decimal STRING in the source's
@@ -69,6 +65,20 @@ interface ActionBody {
    * source and silently truncate the first token one.
    */
   amount?: unknown
+}
+
+class UncertainWithdrawalError extends Error {
+  readonly withdrawalId: string
+  readonly sendError: string
+
+  constructor(withdrawalId: string, cause: unknown) {
+    const sendError = messageOf(cause)
+    super(
+      `Withdrawal ${withdrawalId} may have gone out. Check the wallet and chain before retrying. Send error: ${sendError}`,
+    )
+    this.withdrawalId = withdrawalId
+    this.sendError = sendError
+  }
 }
 
 /**
@@ -157,7 +167,7 @@ const requireAddress = (body: ActionBody): string => {
 }
 
 /**
- * The confirmation a withdrawal must carry: the destination address, typed back.
+ * The confirmation a withdrawal must carry: the destination address, echoed back.
  *
  * Trimmed on BOTH sides through {@link requireAddress}, so what is compared is
  * what will be paid. Null when the body carries no address at all — the route
@@ -300,125 +310,11 @@ export const ACTIONS: Record<string, ActionDefinition> = {
       if (corridor !== 'arkade:BTC->lightning:BTC') {
         throw new Error(`read-payment is for the Lightning send corridor; ${corridor} pays over a different rail`)
       }
-      // Read once: this action is entirely about the Lightning send corridor,
-      // which cannot exist without a rail, so a missing one is a refusal here
-      // rather than five null checks below.
-      const ln = requireLn(services.ln)
-      const row = await services.store.get(id)
-      if (!row.paymentId) {
-        // A missing id is NOT proof that nothing was submitted, and reading it
-        // that way is a double payout waiting to happen. A backend can commit
-        // our funds against the payment hash one call BEFORE the call that
-        // mints the id — observed on a production rail — so a failure in
-        // between leaves sats committed with no id naming them, which is the
-        // exact row an operator reads this action for. Ask by hash first.
-        const probe = ln.getSendHtlcState
-        if (!probe) {
-          // A backend that cannot be asked. Kept as the old answer because on a
-          // backend with no commit-before-id gap it is the true one, but the
-          // caveat is reported rather than hidden.
-          return { paymentId: null, commitment: 'probe-unavailable' as const, verdict: 'never-submitted' as const }
-        }
-        let committed
-        try {
-          committed = await probe.call(ln, row.paymentHash)
-        } catch {
-          // Could not tell. That is not "nothing committed", and must not
-          // authorise a refund.
-          return { paymentId: null, commitment: 'probe-failed' as const, verdict: 'undecided-push-nothing' as const }
-        }
-        if (committed === null) {
-          // Now earned: the backend holds nothing against this hash, so nothing
-          // was ever taken.
-          return { paymentId: null, commitment: 'none' as const, verdict: 'never-submitted' as const }
-        }
-        const seenByHash = {
-          paymentId: null,
-          commitment: committed.status,
-          hasPreimage: Boolean(committed.preimage),
-        }
-        // A commitment the payee revealed against IS settlement, with or
-        // without an id to name it.
-        if (committed.status === 'settled') return { ...seenByHash, verdict: 'paid-do-not-refund' as const }
-        if (committed.status === 'returned') return { ...seenByHash, verdict: 'not-paid-refund-is-safe' as const }
-        // `committed`: the sats are at stake and the payee has not revealed.
-        return { ...seenByHash, verdict: 'undecided-push-nothing' as const }
-      }
-      // Before blaming the backend: was this payment even made from the wallet
-      // we are running? A payment id is meaningful only to the backend that
-      // minted it, pointed at the seed it was minted from — and after a
-      // provider or seed change the lookup fails EXACTLY like a sick database.
-      // Reporting that as `undecided` sends an operator to debug a backend that
-      // is working perfectly.
-      //
-      // Null on either side is UNKNOWN, never a match: rows written before this
-      // was recorded must not be claimed as ours.
-      const running = await ln.walletFingerprint?.().catch(() => undefined)
-      const foreignWallet = Boolean(running && row.paymentWallet && row.paymentWallet !== running)
-      const foreignBackend = Boolean(row.paymentBackend && row.paymentBackend !== services.config.lnBackend)
-      if (foreignWallet || foreignBackend) {
-        return {
-          paymentId: row.paymentId,
-          paidBy: { backend: row.paymentBackend, wallet: row.paymentWallet },
-          runningNow: { backend: services.config.lnBackend, wallet: running ?? null },
-          verdict: 'other-wallet-push-nothing' as const,
-        }
-      }
-
-      let payment
-      try {
-        payment = await ln.getPayment(row.paymentId)
-      } catch (error) {
-        // The id was allocated but the backend has no record of it — one of the
-        // exact rows this action exists for, since `submitPayment` can fail
-        // between allocating an id and persisting it. NOT proof nothing was
-        // sent, though: a backend that has forgotten a payment looks identical
-        // from here. So no verdict that authorises a push.
-        return {
-          paymentId: row.paymentId,
-          error: error instanceof Error ? error.message : String(error),
-          verdict: 'undecided-push-nothing' as const,
-        }
-      }
-      const hasPreimage = Boolean(payment.preimage)
-      // Spelled out rather than left to the reader: this is the decision the
-      // operator is about to make with real money, and "succeeded" next to a
-      // refund button has been misread before.
-      const seen = { paymentId: row.paymentId, status: payment.status, hasPreimage }
-      // A preimage IS settlement, whatever the status word says.
-      if (payment.status === 'succeeded' || hasPreimage) {
-        return { ...seen, verdict: 'paid-do-not-refund' as const }
-      }
-      if (payment.status !== 'failed') return { ...seen, verdict: 'undecided-push-nothing' as const }
-
-      // A payer-side "failed" is not enough ON ITS OWN, and this is the case
-      // that parks in `stuck` — so it is the case an operator most often reads
-      // this action for. `refundProvenSelfPayment` withholds the refund when our
-      // OWN node holds an armed or settled htlc for this invoice, because the
-      // payee side may still collect. Answering `not-paid-refund-is-safe` here
-      // would steer the operator into exactly the double payout that withhold
-      // exists to prevent, so run the same probe and mirror its rule.
-      const probeOwnInvoice = ln.getOwnInvoiceState
-      let own = null
-      // Reported verbatim, because "we could not check" is a different fact
-      // from "we checked and it is not ours", and only one of them means the
-      // operator should go and look at the node themselves.
-      let probe: string
-      if (probeOwnInvoice === undefined) probe = 'probe-unavailable'
-      else {
-        try {
-          own = (await probeOwnInvoice.call(ln, row.paymentHash)) ?? null
-          probe = own === null ? 'not-ours' : own.status
-        } catch {
-          // Same as the orchestrator: a probe that could not run teaches nothing
-          // about the payee side, so the terminal-failure rule stands alone.
-          probe = 'probe-failed'
-        }
-      }
-      if (own !== null && own.status !== 'pending' && own.status !== 'cancelled') {
-        return { ...seen, ownInvoice: probe, verdict: 'self-payment-do-not-refund' as const }
-      }
-      return { ...seen, ownInvoice: probe, verdict: 'not-paid-refund-is-safe' as const }
+      // Only for the console's standard no-rail refusal; the verdict reads the rail itself.
+      requireLn(services.ln)
+      // Shared with the float pass's reconciler, which makes the same money
+      // decision; the response shape is unchanged. @see ops/paymentVerdict.ts
+      return paymentVerdict(services, await services.store.get(id))
     },
   },
 
@@ -585,6 +481,18 @@ export const ACTIONS: Record<string, ActionDefinition> = {
     run: (services, body) => onchainRefundNow(services, requireId(body)),
   },
 
+  'onchain-claim-now': {
+    tier: 'armed',
+    confirmKind: 'swap-id',
+    expectedConfirm: bodyId,
+    target: bodyId,
+    warning:
+      'For a `stuck` arkade:BTC->onchain:BTC row the solver ALREADY PAID the client on L1 and still holds the ' +
+      'preimage. Returns the row to claiming so the sweep claims the Arkade lockup the solver is owed. The opposite ' +
+      'of onchain-refund-now, which on such a row is the DOUBLE-PAYOUT. Refuses a row carrying no preimage.',
+    run: (services, body) => onchainClaimNow(services, requireId(body)),
+  },
+
   /**
    * The two RECEIVE legs, and the reason they read less alarming than the send
    * ones above: this money is the solver's own. The receive corridors fund the
@@ -606,37 +514,6 @@ export const ACTIONS: Record<string, ActionDefinition> = {
       'output out from under them and their held payment fails back to the payer, killing a live swap. Read the ' +
       'row first; on a `stuck` row this is the only way out.',
     run: (services, body) => receiveRefundNow(services, requireId(body)),
-  },
-
-  'onchain-receive-refund-now': {
-    tier: 'armed',
-    confirmKind: 'swap-id',
-    expectedConfirm: bodyId,
-    target: bodyId,
-    warning:
-      "RECOVERS THE SOLVER'S OWN Arkade lockup on the onchain:BTC->arkade:BTC leg. Same direction and same caveat " +
-      'as receive-refund-now: our money, but refunding under a client who can still claim kills a live swap.',
-    run: (services, body) => onchainReceiveRefundNow(services, requireId(body)),
-  },
-
-  /**
-   * The fee-dust retry, and the one operator action here that carries no
-   * judgement call at all: every attempt spends the SAME output, so a
-   * redundant broadcast is a double-spend the network rejects. Armed anyway,
-   * because it is a broadcast — but the warning says what it is rather than
-   * inventing a hazard.
-   */
-  'onchain-receive-claim-now': {
-    tier: 'armed',
-    confirmKind: 'swap-id',
-    expectedConfirm: bodyId,
-    target: bodyId,
-    warning:
-      "Retries the solver's own claim of the CLIENT's L1 HTLC at today's fee rate, for a row that parked in " +
-      '`stuck` because the fee once left less than dust. Safe to repeat — every attempt spends the same output, ' +
-      'so a redundant broadcast is a double-spend the network rejects, never a second payout. Refuses with both ' +
-      'numbers if the fee still eats the payout.',
-    run: (services, body) => onchainReceiveClaimNow(services, requireId(body)),
   },
 
   'reclaim-l1-htlc': {
@@ -701,9 +578,9 @@ export const ACTIONS: Record<string, ActionDefinition> = {
     expectedConfirm: () => 'MINT',
     warning:
       'Spends: reshapes the float in one Arkade transaction to the solver’s own address — splitting it into pool ' +
-      'pieces, or merging small coins into them once it holds too many. Refused while any corridor has a ' +
-      'non-terminal swap, because coin reservations are process-local and a concurrent provider could be holding them.',
-    run: (services, body) => mintPool(services, { force: body.force === true }),
+      'pieces, or merging small coins into them once it holds too many. Uses this provider’s coin reservations; ' +
+      'other providers must not share its wallet.',
+    run: (services) => mintPool(services, { inProviderProcess: true }),
   },
 
   // Armed though it moves no money: it stops the process driving the ones that
@@ -715,7 +592,7 @@ export const ACTIONS: Record<string, ActionDefinition> = {
     expectedConfirm: () => 'RESTART',
     warning:
       'Stops this process so a supervisor starts a new one, which is how a stored override or market edit takes ' +
-      'effect. In-flight swaps are picked up again by recovery on boot. Requires ADMIN_RESTART_ENABLED=true AND a ' +
+      'effect. In-flight swaps are picked up again by recovery on boot. Requires admin.restartEnabled = true AND a ' +
       'supervisor that restarts the solver — without one this stops it and nothing brings it back.',
     // Before the shutdown is armed, so the audit row carries the real exposure.
     run: async (services) => {
@@ -833,10 +710,9 @@ export const ACTIONS: Record<string, ActionDefinition> = {
    *    memory; a confirmation that differs per request cannot, and it puts the
    *    exact string the money is going to in front of the operator at the moment
    *    they commit.
-   *  - the console adds a second gate on top (`armDialog`'s override checkbox,
-   *    naming the source, amount and destination) — but that is a convenience,
-   *    and this comparison is the boundary, checked before `run` for a bare
-   *    `fetch` too.
+   *  - the console's confirmation names the source, amount and full destination
+   *    and echoes this value — a convenience; this comparison is the boundary,
+   *    checked before `run` for a bare `fetch` too.
    *  - the SOURCE then applies its own checks before it touches a backend. The
    *    rail decodes the address against this deployment's network and bounds the
    *    amount by the confirmed balance, because a wrong-chain address is
@@ -862,15 +738,61 @@ export const ACTIONS: Record<string, ActionDefinition> = {
       'NOT channel liquidity — that is the wallet the onchain corridors fund from, so withdrawing leaves less to ' +
       'fund them with. On the arkade float an Arkade address is paid offchain at once, while a bitcoin address ' +
       'is paid by collaborative exit at the server’s next batch — so the request can take a minute. Either way ' +
-      'the float withdrawal holds every free coin until it settles, so swaps cannot be funded from the float ' +
-      'meanwhile, and it leaves less float to fund them with afterwards. NOT SAFE TO REPEAT: each attempt is a separate payment, so a ' +
+      'the float withdrawal reserves only the inputs needed for the amount and fees until it settles, ' +
+      'and it leaves less float to fund swaps afterwards. NOT SAFE TO REPEAT: each attempt is a separate payment, so a ' +
       'withdrawal that times out must be checked against the chain before you try again.',
     run: async (services, body) => {
       const source = requireFundSource(fundSources(services), body.source)
       if (!source.withdraw) {
         throw capabilityRefusal(source, 'withdraw', 'it has no way to pay an arbitrary destination')
       }
-      return source.withdraw({ address: requireAddress(body), amount: requireAmount(body) })
+      const address = requireAddress(body)
+      const amount = requireAmount(body)
+      if (source.id !== ARKADE_FUND_SOURCE_ID) return source.withdraw({ address, amount })
+
+      const id = randomUUID()
+      await services.adminStore.createOperatorWithdrawal({
+        id,
+        scope: balanceCheckpointScope(services),
+        source: source.id,
+        address,
+        amountSats: parseWholeSats(amount),
+      })
+      let sending = false
+      try {
+        const result = await source.withdraw({
+          address,
+          amount,
+          onSending: async (feeSats) => {
+            await services.adminStore.transitionOperatorWithdrawal(id, 'preparing', 'sending', { feeSats })
+            sending = true
+          },
+        })
+        try {
+          await services.adminStore.transitionOperatorWithdrawal(
+            id,
+            sending ? 'sending' : 'preparing',
+            sending ? 'sent' : 'uncertain',
+            { reference: result.reference },
+          )
+        } catch (error) {
+          log(`operator withdrawal ${id}: completion journal failed`, messageOf(error))
+        }
+        if (!sending) log(`operator withdrawal ${id}: send boundary was not reported`)
+        return result
+      } catch (error) {
+        try {
+          await services.adminStore.transitionOperatorWithdrawal(
+            id,
+            sending ? 'sending' : 'preparing',
+            sending ? 'uncertain' : 'failed',
+          )
+        } catch (journalError) {
+          log(`operator withdrawal ${id}: failure journal failed`, messageOf(journalError))
+        }
+        if (sending) throw new UncertainWithdrawalError(id, error)
+        throw error
+      }
     },
   },
 }
@@ -925,28 +847,49 @@ export const registerActionRoutes = (app: Hono, deps: AdminDeps): void => {
     // secret, but recording the ceremony alongside the action is noise.
     const params = JSON.stringify({ ...body, confirm: undefined })
 
+    // Best-effort: the action may have moved money, so a failed audit write must not
+    // decide the HTTP result — a 500 reads as failure and invites a retry (a second pay).
+    const record = async (outcome: 'ok' | 'error', detail: string): Promise<void> => {
+      try {
+        await deps.services.adminStore.recordAction({ action: name, target, params, outcome, detail })
+      } catch (error) {
+        log(`admin action ${name}: audit record failed`, messageOf(error))
+      }
+    }
+
+    let result: unknown
     try {
-      const result = await definition.run(deps.services, body)
-      await deps.services.adminStore.recordAction({
-        action: name,
-        target,
-        params,
-        outcome: 'ok',
-        detail: JSON.stringify(result).slice(0, 500),
-      })
-      return c.json({ ok: true, result })
+      result = await definition.run(deps.services, body)
     } catch (error) {
-      await deps.services.adminStore.recordAction({
-        action: name,
-        target,
-        params,
-        outcome: 'error',
-        detail: messageOf(error),
-      })
+      await record('error', messageOf(error))
+      if (error instanceof UncertainWithdrawalError) {
+        return c.json(
+          {
+            ok: false,
+            error: 'withdrawal_uncertain',
+            withdrawalId: error.withdrawalId,
+            message: error.message,
+            cause: error.sendError,
+          },
+          409,
+        )
+      }
       // 500 with a readable body rather than a thrown fault: the operator needs
       // the reason, and the action WAS attempted, unlike a confirm failure.
       return c.json({ ok: false, error: 'action_failed', message: messageOf(error) }, 500)
     }
+    if (
+      name === 'pool-mint' &&
+      result &&
+      typeof result === 'object' &&
+      'refused' in result &&
+      typeof result.refused === 'string'
+    ) {
+      await record('error', JSON.stringify(result).slice(0, 500))
+      return c.json({ ok: false, error: 'pool_mint_refused', message: result.refused, result }, 409)
+    }
+    await record('ok', JSON.stringify(result).slice(0, 500))
+    return c.json({ ok: true, result })
   })
 
   app.get('/api/audit', async (c) => {

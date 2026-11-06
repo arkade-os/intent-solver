@@ -1,7 +1,7 @@
 # TLA+ models of the swap corridors
 
-Formal models of the solver's six corridors — LightningSend, LightningReceive,
-OnchainSend, OnchainReceive, EvmSend, EvmReceive — checked with TLC. Each module
+Formal models of the solver's five corridors — LightningSend, LightningReceive,
+OnchainSend, EvmSend, EvmReceive — checked with TLC. Each module
 models the corridor's row as a state machine with N concurrent workers, each
 Worker's read separated from its write, and Worker crashes between the store CAS
 and the irreversible side effect. The claim under test is the one the TypeScript
@@ -18,11 +18,11 @@ planners' numbered `RULE`s. Several modules bind a short name once in their
 header (`plan`, `orchestrator`, `broadcast`) and use it throughout.
 
 A path may also be written relative to a `packages/<pkg>/src/` heading in the
-module's own header table — `arkade/wallet.ts` in `OnchainReceive.tla` resolves
+module's own header table — `arkade/wallet.ts` in `OnchainSend.tla` resolves
 against the `packages/solver-arkade/src/` heading near the top of that file. The
 rule that makes this safe rather than merely short is: **every bare relative
 path in a module sits under a group that module's header declares.** That holds
-for all 55 of them today, and it is checkable — take each bare `a/b.ts`, join it
+for all of them today, and it is checkable — take each bare `a/b.ts`, join it
 to each `packages/*/src/` heading in the same file, and one of them must exist.
 A citation that cannot be resolved that way is the bug; add the group to the
 header rather than leaving the path dangling.
@@ -38,10 +38,10 @@ loudly under `grep` rather than pointing somewhere plausible and wrong.
 | `SwapCore.tla` | Shared machinery: the CAS, the worker/crash model, the clock, the contested-outpoint chain. Header documents traps T1–T4. |
 | `LightningSend.tla` | quoted → funded → paying → paid → claiming |
 | `LightningReceive.tla` | quoted → armed → funded → claimed → settled |
-| `OnchainSend.tla` | The L1 HTLC leg and its mempool race. Timing invariants are conditional on the `(A2) Urgent` assumption — read that note before trusting any timing pass. The send-time `refunded` record is FIXED, so `OnchainSend_UnconfirmedRefund.cfg` mutates a guard the code really ships; `OnchainSend_MempoolRace.cfg` is kept as the residual RBF race, which the fix makes loud rather than silent. |
-| `OnchainReceive.tla` | The confirmation policy and the two-sided exposure. `settled` now records a CONFIRMATION rather than a broadcast, so `Collected()` no longer counts an unopposed broadcast as collection and chain progress became a stated liveness assumption — read the fairness note. |
+| `OnchainSend.tla` | The L1 HTLC leg and its mempool race. Timing invariants are conditional on the `(A2) Urgent` assumption — read that note before trusting any timing pass. The send-time `refunded` record is FIXED, so `OnchainSend_UnconfirmedRefund.cfg` mutates a guard the code really ships; `OnchainSend_MempoolRace.cfg` is kept as the residual RBF race, which the fix makes loud rather than silent. Funding pre-commits: the signed tx is recorded with a CAS before broadcast, so the shipped cfgs are green with `FundIsIdempotent = FALSE` and the fund lease has a TTL — `OnchainSend_LeaseStrand.cfg` is green. `_RecordNotCas` and `_RefuseRecorded` show the TTL is safe only while every write that can end `funding_onchain` also requires `funding_tx IS NULL`. |
 | `EvmSend.tla` | The planner/shell split and the height-vs-wall margin. F2, F3, F5 and F6 are FIXED, so `EvmSend_BlindScan`, `EvmSend_NoReceipt`, `EvmSend_LockStrand` and `EvmSend_LostRefund` all mutate guards the code really ships. F4, the late lock, is the one still open — `LockLandsPromptly` is an assumption, not a guard, so read the findings before trusting a pass. The shipped watch on a closed row makes a late lock an operator event rather than a silent one; it does not move `NoNetLoss`, and `EvmSend_LateLock.cfg` still fires it. |
 | `EvmReceive.tla` | The mirror corridor: the solver funds against a lock it does not control. The parked `refunding_arkade` with an unspent covenant (F4) is a double loss under a patient client. |
+| `OfferFill.tla` | Not a corridor and not on `SwapCore`: the fill both asset loops share, fillable (or funded) → filling → filled, with the `fill_phase` latch that makes a walk-back out of `filling` safe and the sweep that resolves a crashed attempt. One row, two processes, crashes, and a process still on the version before `fill_phase`. See [OfferFill](#offerfill-the-fill-latch). |
 
 Bugs the models prove in the shipped TypeScript are named F1... per module in
 the module comments (each module numbers its own findings); the ones ranked
@@ -77,8 +77,7 @@ java -XX:+UseParallelGC -cp /path/to/tla2tools.jar tlc2.TLC -config LightningSen
   violated **invariant name**, not the numbers. `LightningSend.tla`'s
   checkpoint comment shows the spread that measuring this produced.
 - `-coverage 1` after a green run prints how many times each action fired —
-  the check that no action is dead spec. (`OnchainReceive.cfg`'s checkpoint
-  comment records what its coverage run found.)
+  the check that no action is dead spec.
 - TLC writes its state queue and fingerprints to `states/` in the cwd —
   gitignored, and safe to delete at any time; it regenerates on every run.
 - Syntax-check a module without model checking:
@@ -108,20 +107,21 @@ shipped — plus scenario and mutation cfgs:
 Every mutation cfg states its expected verdict in its header — normally an
 `EXPECTED RESULT` line, though `OnchainSend_RefundTiming.cfg` says `EXPECTED
 TO STAY GREEN` on its first line instead; the per-module green cfgs also say
-so in their first line. The full set is 58 cfgs — 17 green, 41 expected
+so in their first line. The full set is 66 cfgs — 18 green, 48 expected
 violations — and the green modules' checkpoint comments record the per-cfg
 results. That split is a count of the files as they stand, so re-count it from
 the headers rather than trusting this line after cfgs are added or removed.
 After touching a module or any of its cfgs, re-run the module's full set and
 confirm every result still matches its header.
 
-**A suffixed cfg is not automatically an expected violation.** Six carry
+**A suffixed cfg is not automatically an expected violation.** Seven carry
 neither the bare module name nor `Control` in the filename and are still
 documented GREEN — `OnchainSend_RefundTiming`, `OnchainSend_Liveness`,
+`OnchainSend_LeaseStrand`,
 `LightningReceive_Censored`, `LightningReceive_SettleNotIdempotent`,
 `EvmSend_LostPatch` and `EvmReceive_LostSpend`. The last two are controls in
 everything but the name. Sweeping the set on the rule "suffix ⇒ must violate"
-raises a false alarm on all six; read the header, not the filename.
+raises a false alarm on all seven; read the header, not the filename.
 
 ## Reading the results
 
@@ -134,7 +134,7 @@ raises a false alarm on all six; read the header, not the filename.
   says so — do not "fix" the spec until it goes away; fix the guard in the
   TypeScript, or accept the finding and track it.
 - **Compare the invariant NAME, not just green-vs-red.** Because TLC stops at
-  the first violated invariant, and 20 of the 21 cfgs whose header expects
+  the first violated invariant, and 24 of the 25 cfgs whose header expects
   `NoNetLoss` list `NoSilentLoss` above it in `INVARIANTS`, a regression can
   change WHICH invariant fires while the verdict stays `VIOLATED` and the
   sweep still looks healthy. `EvmSend_LateLock.cfg`'s header records that
@@ -167,8 +167,7 @@ Do not, under any circumstances:
 - Add `SYMMETRY` — unsound together with the per-swap fairness conditions;
   produces counterexamples whose cycle exists only in the quotient graph
   (trap T4, verified on LightningSend).
-- Merge or reorder fairness groups — the merged-variant liveness failure for
-  OnchainReceive is recorded in its module comment; the split exists for a
+- Merge or reorder fairness groups — the split exists for a
   real reason (trap T2).
 - Raise the swap/worker counts to look thorough — every finding lives in the
   read / side-effect / CAS interleaving, which is fully reachable with two
@@ -179,3 +178,44 @@ When the TypeScript changes a guard the specs cite, update the model, the
 cfg headers' references, and the checkpoint comment in the same commit. If
 you rename a cited function, `grep` the symbol across `spec/tla/` — that is
 what the anchors are for.
+
+## OfferFill: the fill latch
+
+`fill_phase` marks how far an attempt holding a `filling` row got: `selecting`
+(nothing sent), `submitting` (set by one compare-and-swap right before
+`fillOffer`, after which arkd may have the fill), or NULL (written by a version
+that predates the column). A walk-back and the sweep's recovery move only a
+`selecting` row and clear the phase; anything else is escalated to `stuck`.
+
+```mermaid
+stateDiagram-v2
+    state "filling · selecting" as selecting
+    state "filling · submitting" as submitting
+    state "filling · no phase" as legacy
+    [*] --> ready
+    ready --> selecting: Claim [CAS state = ready]
+    selecting --> submitting: Mark [CAS phase = selecting]
+    selecting --> ready: revertUnsubmitted [CAS phase = selecting, clears it]
+    selecting --> stuck: fail [plain throw, or the budget is spent]
+    submitting --> filled: Finish [after Submit]
+    submitting --> stuck: fail [fillOffer threw] / Recover [crash]
+    legacy --> stuck: Recover [an older version may have sent]
+    ready --> refused: Expire
+    filled --> [*]
+    stuck --> [*]
+    refused --> [*]
+```
+
+`NoDoubleFill` fails if any one of these is removed: the phase condition on the
+latch (`_NoLatch`), the phase condition on the walk-back (`_RevertGuard`),
+clearing the phase on a walk-back while an older process is still running
+(`_RevertReset`, with `_RevertResetControl` green), and escalating rather than
+walking back a phase-less row (`_LegacyReverted`, with `_Upgrade` green).
+`_NoRecovery` is the hole the recovery closes: a process that dies between the
+claim and the walk-back leaves the row `filling` forever (`FillingResolves`).
+`_LateTypedControl` stays green: once the walk-back requires `selecting`, a
+typed refusal raised after the submission finds nothing to move.
+
+The cfgs carry `EXPECTED RESULT` headers that the tla-model skill's `sweep`
+also reads; run them from this directory like any other module, or sweep a
+directory holding only the `OfferFill*` files.

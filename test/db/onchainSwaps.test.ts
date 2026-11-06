@@ -1,11 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import Database from 'better-sqlite3'
-import {
-  OnchainSendSwapStore,
-  OWES_PAYOUT,
-  NON_TERMINAL,
-  EXPOSED,
-} from '@arkade-os/solver-corridors/db/onchainSwaps.js'
+import { OnchainSendSwapStore } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
+import { OnchainSendMachine } from '@arkade-os/solver-corridors/machines/onchainSend.js'
 import type { SqlDriver } from '@arkade-os/solver-corridors/db/driver.js'
 
 let now = 1_000_000
@@ -139,6 +135,19 @@ describe('OnchainSendSwapStore', () => {
   })
 })
 
+describe('findRefundable()', () => {
+  it('returns a refused row at once, its refund leaf having no timelock', async () => {
+    await store.insertQuote(baseQuote)
+    await store.fail('swap-1', 'quoted', 'lockup timeout')
+    expect(now).toBeLessThan(baseQuote.refundLocktime)
+
+    expect((await store.findRefundable(now)).map((r) => r.id)).toEqual(['swap-1'])
+
+    await store.patch('swap-1', { refund_outcome: 'pushed' })
+    expect(await store.findRefundable(baseQuote.refundLocktime)).toEqual([])
+  })
+})
+
 describe('OnchainSendSwapStore — migration', () => {
   /** Minimal SqlDriver over a pre-populated better-sqlite3 handle — same shape betterSqliteDriver wraps, without its file-pragma side effects. */
   const driverOver = (db: Database.Database): SqlDriver => ({
@@ -243,6 +252,11 @@ describe('OnchainSendSwapStore — migration', () => {
     const fresh = await migrated.get('swap-1')
     expect(fresh.clientRefundPubkey).toBe(baseQuote.clientRefundPubkey)
     expect(fresh.receiverPkScript).toBe(baseQuote.receiverPkScript)
+
+    // No client refund key, so no untimelocked leaf: the deadline really gates this one.
+    await migrated.fail('pre-existing-row', 'quoted', 'lockup timeout')
+    expect(await migrated.findRefundable(1_000_000)).toEqual([])
+    expect((await migrated.findRefundable(1_000_000 + 3600)).map((r) => r.id)).toEqual(['pre-existing-row'])
     await migrated.close()
   })
 
@@ -290,8 +304,9 @@ describe('owedPayoutSats()', () => {
 
   // Pinned: a live state that does not owe has already spent.
   it('splits the live states at the funding boundary', () => {
-    expect(NON_TERMINAL.filter((state) => !OWES_PAYOUT.includes(state))).toEqual(
-      EXPOSED.filter((state) => state !== 'funding_onchain'),
+    const owes = OnchainSendMachine.where('owesPayout')
+    expect(OnchainSendMachine.live.filter((state) => !owes.includes(state))).toEqual(
+      OnchainSendMachine.exposed.filter((state) => state !== 'funding_onchain'),
     )
   })
 })

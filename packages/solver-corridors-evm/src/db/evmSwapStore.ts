@@ -171,6 +171,14 @@ export abstract class EvmSwapStore<Row, State extends string> {
     return rows[0] ? this.shape.toRow(rows[0]) : null
   }
 
+  async findByPkScript(pkScript: string): Promise<Row | null> {
+    const rows = (await this.driver.all(
+      `SELECT * FROM ${this.shape.table} WHERE pk_script = ? ORDER BY created_at DESC`,
+      [pkScript],
+    )) as Raw[]
+    return rows[0] ? this.shape.toRow(rows[0]) : null
+  }
+
   /** Non-terminal, not exposed-only: a quote binds until `valid_until`. One table backs every
    * token, so a corridor passes its own `token_address`; a caller summing whole STORES omits it. */
   async committedSats(tokenAddress?: string): Promise<number> {

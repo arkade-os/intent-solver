@@ -257,7 +257,8 @@ export const evmMarkets = (
     // rather than reported as an undecidable feed.
     validatePricePath(pricePath)
     if (pricePath === '' && defaultPricePath(priceFeed) === null) {
-      throw new Error(stem + '_PRICE_PATH is required: it cannot be derived from ' + JSON.stringify(priceFeed))
+      // Not the feed itself: its URL can carry an API key, and this message reaches logs and Sentry.
+      throw new Error(stem + '_PRICE_PATH is required: no default is known for this feed')
     }
     return { token, priceFeed, pricePath }
   })

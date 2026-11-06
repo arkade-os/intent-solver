@@ -37,17 +37,11 @@ import type { CorridorRfqOutcome as RfqOutcome, QuoteOptions } from '@arkade-os/
 import type { SendSwapService } from '../send/orchestrator.js'
 import type { OnchainSendSwapService } from '../send/onchainOrchestrator.js'
 import type { ReceiveSwapService } from '../receive/orchestrator.js'
-import type { OnchainReceiveSwapService } from '../receive/onchainOrchestrator.js'
 import {
   LightningReceiveRfqRequest,
   lightningReceiveRfqQuotePayload,
   RFQ_PAIR_RECEIVE,
 } from '../wire/lightningReceivePayloads.js'
-import {
-  OnchainReceiveRfqRequest,
-  onchainReceiveRfqQuotePayload,
-  RFQ_PAIR_ONCHAIN_RECEIVE,
-} from '../wire/onchainReceivePayloads.js'
 import type { SwapStore } from '../db/swaps.js'
 import type { OnchainSendSwapStore } from '../db/onchainSwaps.js'
 import { RFQ_PAIR_SEND, RfqRequest, rfqQuotePayload, rfqRefusalPayload } from '../wire/payloads.js'
@@ -123,38 +117,6 @@ export const respondToLightningReceiveRfqRequest = async (
     return {
       kind: 'quote',
       payload: lightningReceiveRfqQuotePayload(outcome.swap, outcome.validUntil, request.rfq_id),
-    }
-  }
-  return { kind: 'refused', payload: rfqRefusalPayload(request.rfq_id, outcome.reason), detail: outcome.reason }
-}
-
-/** `onchain:BTC->arkade:BTC`. Same shape as the Lightning receive arm above. */
-export const respondToOnchainReceiveRfqRequest = async (
-  service: OnchainReceiveSwapService,
-  payload: unknown,
-  options?: QuoteOptions,
-): Promise<RfqOutcome> => {
-  const parsed = parseRfq(OnchainReceiveRfqRequest, payload, RFQ_PAIR_ONCHAIN_RECEIVE)
-  if ('invalid' in parsed) return parsed.invalid
-  const { request } = parsed
-
-  const outcome = await service.quote({
-    paymentHash: request.profile.payment_hash,
-    amountSats: request.amount,
-    amountSide: request.amount_side,
-    claimPacket: request.profile.claim_packet ?? null,
-    refundPubkey: request.profile.refund_pubkey,
-    payoutAddress: request.profile.payout_address,
-    payoutPubkey: request.profile.payout_pubkey,
-    rfqId: request.rfq_id,
-    minFromSats: request.min_from_amount,
-    maxFromSats: request.max_from_amount,
-    requesterKey: options?.requesterKey,
-  })
-  if (outcome.accepted) {
-    return {
-      kind: 'quote',
-      payload: onchainReceiveRfqQuotePayload(outcome.swap, outcome.lockupDeadline, request.rfq_id),
     }
   }
   return { kind: 'refused', payload: rfqRefusalPayload(request.rfq_id, outcome.reason), detail: outcome.reason }

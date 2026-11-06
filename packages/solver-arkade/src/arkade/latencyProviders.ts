@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { RestArkProvider, RestIndexerProvider } from '@arkade-os/sdk'
 import { json, log } from '@arkade-os/solver-core/util/poll.js'
+import { latencyDiagnosticsEnabled } from '@arkade-os/solver-core/util/diagnostics.js'
 
 export interface ProviderTimingScope {
   fundRef: string
@@ -13,7 +14,7 @@ export interface ProviderTimingScope {
 const timingScope = new AsyncLocalStorage<ProviderTimingScope>()
 
 export const withProviderTimingScope = <T>(scope: ProviderTimingScope, operation: () => Promise<T>): Promise<T> =>
-  process.env.SOLVER_LATENCY_DIAGNOSTICS === '1' ? timingScope.run(scope, operation) : operation()
+  latencyDiagnosticsEnabled() ? timingScope.run(scope, operation) : operation()
 
 const span = (from: number | undefined, to: number | undefined): number | undefined =>
   from === undefined || to === undefined ? undefined : Math.round(to - from)
@@ -51,8 +52,35 @@ const timed = async <T>(
   }
 }
 
-export class TimedIndexerProvider extends RestIndexerProvider {
-  override async getVtxos(options?: Parameters<RestIndexerProvider['getVtxos']>[0]) {
+type VtxoQuery = Parameters<RestIndexerProvider['getVtxos']>[0]
+
+/**
+ * Concurrent identical WINDOWED reads share one request: `after` marks the SDK's contract
+ * sync, which shares nothing in flight, so every caller finding the snapshot stale starts
+ * its own. Unwindowed reads stay unshared: an event-driven re-read must not get an answer
+ * asked for before the event.
+ */
+export class SharedSyncIndexerProvider extends RestIndexerProvider {
+  private readonly syncs = new Map<string, ReturnType<RestIndexerProvider['getVtxos']>>()
+
+  override getVtxos(options?: VtxoQuery) {
+    if (options?.after === undefined) return this.readVtxos(options)
+    const key = JSON.stringify(options)
+    let read = this.syncs.get(key)
+    if (!read) {
+      read = this.readVtxos(options).finally(() => this.syncs.delete(key))
+      this.syncs.set(key, read)
+    }
+    return read.then((result) => structuredClone(result))
+  }
+
+  protected readVtxos(options?: VtxoQuery) {
+    return super.getVtxos(options)
+  }
+}
+
+export class TimedIndexerProvider extends SharedSyncIndexerProvider {
+  protected override async readVtxos(options?: VtxoQuery) {
     const request = {
       fundRef: timingScope.getStore()?.fundRef,
       scripts: options?.scripts?.length ?? 0,
@@ -66,18 +94,18 @@ export class TimedIndexerProvider extends RestIndexerProvider {
     return timed(
       'indexer_vtxos_timing',
       request,
-      () => super.getVtxos(options),
+      () => super.readVtxos(options),
       (result) => ({ rows: result.vtxos.length }),
     )
   }
 }
 
-export class TimedArkProvider extends RestArkProvider {
+export class TimedArkadeProvider extends RestArkProvider {
   override async submitTx(...args: Parameters<RestArkProvider['submitTx']>) {
     const scope = timingScope.getStore()
     if (scope) scope.submitStarted = performance.now()
     try {
-      return await timed('ark_submit_timing', { fundRef: scope?.fundRef }, () => super.submitTx(...args))
+      return await timed('arkade_submit_timing', { fundRef: scope?.fundRef }, () => super.submitTx(...args))
     } finally {
       if (scope) scope.submitFinished = performance.now()
     }
@@ -87,7 +115,7 @@ export class TimedArkProvider extends RestArkProvider {
     const scope = timingScope.getStore()
     if (scope) scope.finalizeStarted = performance.now()
     try {
-      return await timed('ark_finalize_timing', { fundRef: scope?.fundRef }, () => super.finalizeTx(...args))
+      return await timed('arkade_finalize_timing', { fundRef: scope?.fundRef }, () => super.finalizeTx(...args))
     } finally {
       if (scope) scope.finalizeFinished = performance.now()
     }

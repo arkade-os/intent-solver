@@ -40,6 +40,7 @@ export interface AdmissionRequest {
    * both — two reservations per quote multiply the release paths.
    */
   float?: FloatRequirement
+  inventory?: FloatRequirement & { poolId: string }
   /** Which ceiling refused. Uncalled leaves the caller reporting the cap, as before. */
   onRefused?: (ceiling: 'exposure' | 'float') => void
 }

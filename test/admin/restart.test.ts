@@ -21,7 +21,7 @@ describe('requestRestart', () => {
   it('refuses when disabled, naming the variable and why it exists', () => {
     const c = capture()
     expect(() => requestRestart({ ...c.deps, enabled: false })).toThrow(RestartDisabledError)
-    expect(() => requestRestart({ ...c.deps, enabled: false })).toThrow(/ADMIN_RESTART_ENABLED/)
+    expect(() => requestRestart({ ...c.deps, enabled: false })).toThrow(/admin\.restartEnabled/)
     expect(() => requestRestart({ ...c.deps, enabled: false })).toThrow(/nothing brings it back/)
   })
 

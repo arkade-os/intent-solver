@@ -12,6 +12,7 @@
 import type { UnilateralDelays } from '@arkade-os/solver-core/core/timelocks.js'
 import type { FundedOutput, LockupSpendEvidence } from './wallet.js'
 import type { CovenantScriptRow } from './covenantRow.js'
+import type { SaveUnrolledSpend, UnrolledSpendRecord, UnrolledSpendStep } from './unrolledSpend.js'
 
 /** The Arkade operations the send-side orchestrators need, shaped for injection. */
 export interface ArkadeOps {
@@ -45,8 +46,30 @@ export interface ArkadeOps {
   lockupSpendEvidence(pkScriptHex: string): Promise<LockupSpendEvidence>
   /** Spend the claim leaf of the script the row describes, revealing the preimage. */
   claim(row: CovenantScriptRow, outputs: FundedOutput[], preimageHex: string): Promise<string>
+  /** Finalize our claim arkd accepted without finalizing; its Arkade txid, or null when the lockup's spend is not that. */
+  finalizePendingClaim?(row: CovenantScriptRow, preimageHex: string): Promise<string | null>
   /** Push the covenant refund of the script the row describes. Needs no keys of ours. */
   refund(row: CovenantScriptRow, outputs: FundedOutput[]): Promise<string>
+  findLockupOutpoints?(
+    pkScriptHex: string,
+  ): Promise<{ txid: string; vout: number; spent: boolean; unrolled: boolean }[]>
+  /** The preimage revealed by whatever spent `outpoints`, verified against the hash, or null — lets a claim that landed before a crash be recognised as ours. */
+  findClaimPreimage?(
+    outpoints: readonly { txid: string; vout: number }[],
+    paymentHashHex: string,
+  ): Promise<Uint8Array | null>
+  /** One step of the co-signed L1 claim of one output the client unrolled. Absent: it waits for the operator. */
+  claimUnrolled?(
+    row: CovenantScriptRow,
+    lockup: { txid: string; vout: number },
+    record: UnrolledSpendRecord | null,
+    save: SaveUnrolledSpend,
+    preimageHex: string,
+  ): Promise<UnrolledSpendStep>
+  /** The SWEPT outputs `spendableOnly` excludes. OPTIONAL with {@link refundSwept}: a build on the earlier interface — a fork, a test's fake — must still work. */
+  findSweptLockups?(pkScriptHex: string): Promise<FundedOutput[]>
+  /** Through a BATCH, the one shape reaching a swept input; it costs a whole round, so only the operator refunds and the float pass call it. */
+  refundSwept?(row: CovenantScriptRow, swept: readonly FundedOutput[]): Promise<string>
 }
 
 /**
@@ -85,16 +108,28 @@ export interface ReceiveArkadeOps {
    * The spend-aware read `findLockups` cannot be: it is `spendableOnly`, so a
    * lockup that was funded and then claimed vanishes from it — and on THIS leg
    * that blind spot is a double-spend of the provider's own capital, because
-   * the funding decision is made against it. See `whenArmed`.
+   * the funding decision is made against it. See `whenArmed`. `unrolled`: spent on
+   * BITCOIN, so a claim of it reveals `P` in an L1 witness only.
    */
-  findLockupOutpoints(pkScriptHex: string): Promise<{ txid: string; vout: number; value: number; spent: boolean }[]>
+  findLockupOutpoints(
+    pkScriptHex: string,
+  ): Promise<{ txid: string; vout: number; value: number; spent: boolean; unrolled: boolean }[]>
   /** Pay `amountSats` from the solver's own Arkade balance to `address` — funds the lockup. @returns the Arkade txid. */
   fund(address: string, amountSats: number, stamp?: ClaimPacketStamp): Promise<string>
   /** Push the covenant refund of the script the row describes, back to the solver's own address. Needs no client keys. */
   refund(row: CovenantScriptRow, outputs: readonly FundedOutput[]): Promise<string>
+  /** Finalize our refund arkd accepted or already finalized; its Arkade txid, or null when the lockup's spend is not that. */
+  finalizePendingRefund?(row: CovenantScriptRow): Promise<string | null>
   /** Read the preimage back out of whichever transaction claimed one of `outpoints`, verified against `paymentHashHex`. */
   findClaimPreimage(
     outpoints: readonly { txid: string; vout: number }[],
     paymentHashHex: string,
   ): Promise<Uint8Array | null>
+  /** One step of the co-signed L1 refund of a lockup the client unrolled. Absent: it waits for the operator. */
+  refundUnrolled?(
+    row: CovenantScriptRow,
+    lockup: { txid: string; vout: number },
+    record: UnrolledSpendRecord | null,
+    save: SaveUnrolledSpend,
+  ): Promise<UnrolledSpendStep>
 }

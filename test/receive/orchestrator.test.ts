@@ -34,6 +34,7 @@ import type { ReceiveArkadeOps } from '@arkade-os/solver-corridors/receive/arkad
 import { FundNotSubmittedError } from '@arkade-os/solver-corridors/receive/fundLockup.js'
 import type { CovclaimdClient } from '@arkade-os/solver-corridors/receive/covclaimd.js'
 import type { FundedOutput } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import type { UnrolledSpendRecord, UnrolledSpendStep } from '@arkade-os/solver-arkade/arkade/unrolledSpend.js'
 
 const keyBytes = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
 const p2tr = (program: Uint8Array): Uint8Array => Uint8Array.from([0x51, 0x20, ...program])
@@ -82,6 +83,8 @@ interface FakeArkadeState {
    * spendable world it meant to.
    */
   spentOutputs: FundedOutput[]
+  /** Outputs a unilateral exit took onto Bitcoin: a claim of one reveals `P` only on L1. */
+  unrolledOutputs: FundedOutput[]
   fundCalls: { address: string; amountSats: number; stamp?: { packet: Uint8Array; tapTree: Uint8Array } }[]
   refundCalls: number
   claimPreimage: Uint8Array | null
@@ -102,6 +105,7 @@ const buildFakeArkade = (): { ops: ReceiveArkadeOps; state: FakeArkadeState } =>
   const state: FakeArkadeState = {
     outputs: [],
     spentOutputs: [],
+    unrolledOutputs: [],
     fundCalls: [],
     refundCalls: 0,
     claimPreimage: null,
@@ -119,8 +123,9 @@ const buildFakeArkade = (): { ops: ReceiveArkadeOps; state: FakeArkadeState } =>
     // spent. The real helper answers from one indexer read; the fake keeps the
     // two lists apart and unions them here.
     findLockupOutpoints: async () => [
-      ...state.outputs.map((o) => ({ ...o, spent: false })),
-      ...state.spentOutputs.map((o) => ({ ...o, spent: true })),
+      ...state.outputs.map((o) => ({ ...o, spent: false, unrolled: false })),
+      ...state.spentOutputs.map((o) => ({ ...o, spent: true, unrolled: false })),
+      ...state.unrolledOutputs.map((o) => ({ ...o, spent: true, unrolled: true })),
     ],
     fund: async (address, amountSats, stamp) => {
       state.fundCalls.push({ address, amountSats, ...(stamp ? { stamp } : {}) })
@@ -186,6 +191,10 @@ let store: ReceiveSwapStore
 let arkade: ReturnType<typeof buildFakeArkade>
 let covclaimd: ReturnType<typeof buildFakeCovclaimd>
 let service: ReceiveSwapService
+/** L1 spend witnesses by `txid:vout`, as `onchain.findSpendWitness` answers them. */
+let l1Witnesses: Map<string, Uint8Array[]>
+/** `txid:vout`s whose L1 read throws, as a chain API that cannot answer does. */
+let l1Unreadable: Set<string>
 
 const LIMITS = { minSats: 1_000, maxSats: 1_000_000 }
 
@@ -199,12 +208,20 @@ beforeEach(async () => {
   store = await ReceiveSwapStore.open(driver, clock)
   arkade = buildFakeArkade()
   covclaimd = buildFakeCovclaimd()
+  l1Witnesses = new Map()
+  l1Unreadable = new Set()
   service = new ReceiveSwapService({
     acceptUnilateralGap: false,
     store,
     ln,
     backendName: 'probe-backend',
     arkade: arkade.ops,
+    onchain: {
+      findSpendWitness: async ({ txid, vout }) => {
+        if (l1Unreadable.has(`${txid}:${vout}`)) throw new Error('chain API cannot name the spender')
+        return l1Witnesses.get(`${txid}:${vout}`) ?? null
+      },
+    },
     covclaimd: covclaimd.client,
     limits: LIMITS,
     maxExposedSats: 1_000_000,
@@ -1443,6 +1460,182 @@ describe('ReceiveSwapService.tick — claim detection and settlement', () => {
     await expect(ln.getHoldState(paymentHash)).resolves.toMatchObject({ status: 'settled' })
   })
 
+  describe('a lockup the client unrolled onto Bitcoin', () => {
+    const unroll = (funded: { id: string }, witness?: Uint8Array[]) => {
+      arkade.state.unrolledOutputs = arkade.state.outputs
+      arkade.state.outputs = []
+      const [lockup] = arkade.state.unrolledOutputs
+      if (lockup && witness) l1Witnesses.set(`${lockup.txid}:${lockup.vout}`, witness)
+      return funded.id
+    }
+
+    it('settles on P read off the L1 claim witness', async () => {
+      const id = unroll(await armAndFund(), [new Uint8Array(64), P, new Uint8Array(40)])
+
+      const row = await service.tick(id)
+      expect(row.state).toBe('settled')
+      expect(row.preimage).toBe(hex.encode(P))
+    })
+
+    it('settles from refunding when the L1 claim lands before E', async () => {
+      const funded = await armAndFund()
+      const id = unroll(funded)
+      now = funded.refundLocktime
+      expect((await service.tick(id)).state).toBe('refunding')
+
+      const [lockup] = arkade.state.unrolledOutputs
+      l1Witnesses.set(`${lockup!.txid}:${lockup!.vout}`, [P])
+      expect((await service.tick(id)).state).toBe('settled')
+    })
+
+    it('reads every unrolled outpoint, not only the first', async () => {
+      const id = unroll(await armAndFund(), [new Uint8Array(64)])
+      arkade.state.unrolledOutputs = [...arkade.state.unrolledOutputs, { txid: 'sibling', vout: 1, value: 1_000 }]
+      l1Witnesses.set('sibling:1', [P])
+
+      expect((await service.tick(id)).state).toBe('settled')
+    })
+
+    it('does not let one unreadable outpoint hide P in another', async () => {
+      const id = unroll(await armAndFund())
+      const [lockup] = arkade.state.unrolledOutputs
+      l1Unreadable.add(`${lockup!.txid}:${lockup!.vout}`)
+      arkade.state.unrolledOutputs = [...arkade.state.unrolledOutputs, { txid: 'sibling', vout: 1, value: 1_000 }]
+      l1Witnesses.set('sibling:1', [P])
+
+      expect((await service.tick(id)).state).toBe('settled')
+    })
+
+    it('still retries when an outpoint cannot be read and none reveals P', async () => {
+      const id = unroll(await armAndFund())
+      const [lockup] = arkade.state.unrolledOutputs
+      l1Unreadable.add(`${lockup!.txid}:${lockup!.vout}`)
+
+      await expect(service.tick(id)).rejects.toThrow('chain API cannot name the spender')
+    })
+
+    it('takes nothing from a witness item that does not open the payment hash', async () => {
+      const id = unroll(await armAndFund(), [new Uint8Array(32).fill(7)])
+
+      const row = await service.tick(id)
+      expect(row.state).toBe('funded')
+      expect(row.preimage).toBeNull()
+    })
+
+    it('with no L1 reader, reports the unroll and keeps waiting rather than throwing', async () => {
+      const reports: unknown[] = []
+      const blind = new ReceiveSwapService({
+        acceptUnilateralGap: false,
+        store,
+        ln,
+        arkade: arkade.ops,
+        limits: LIMITS,
+        maxExposedSats: 1_000_000,
+        totalCommitted: () => store.committedSats(),
+        admission: new AdmissionControl(),
+        now: clock,
+      })
+      blind.onTickError = (_id, error) => reports.push(error)
+      const id = unroll(await armAndFund())
+
+      expect((await blind.tick(id)).state).toBe('funded')
+      expect(reports).toHaveLength(1)
+    })
+
+    it('reports the unroll once, not on every tick of the wait', async () => {
+      const reports: unknown[] = []
+      service.onTickError = (_id, error) => reports.push(error)
+      const id = unroll(await armAndFund())
+
+      await service.tick(id)
+      await service.tick(id)
+      expect(reports).toHaveLength(1)
+    })
+
+    describe('its refund on L1 through arkd', () => {
+      let steps: UnrolledSpendStep[]
+      let calls: { lockup: { txid: string; vout: number }; record: UnrolledSpendRecord | null }[]
+      const record: UnrolledSpendRecord = {
+        txid: 'ab'.repeat(32),
+        tx: null,
+        feeRate: 10,
+        broadcastAt: 1,
+        cpfpTxid: null,
+      }
+
+      beforeEach(() => {
+        steps = []
+        calls = []
+        arkade.ops.refundUnrolled = async (_row, lockup, previous) => {
+          calls.push({ lockup: { txid: lockup.txid, vout: lockup.vout }, record: previous })
+          return steps.shift() ?? { kind: 'waiting' }
+        }
+      })
+
+      const refunding = async () => {
+        const funded = await armAndFund()
+        const id = unroll(funded)
+        now = funded.refundLocktime
+        expect((await service.tick(id)).state).toBe('refunding')
+        return { ...funded, id }
+      }
+
+      it('records each step and settles as refunded once the L1 refund confirms', async () => {
+        const { id, arkadeLockupTxid, arkadeLockupVout } = await refunding()
+        steps.push({ kind: 'pending', record }, { kind: 'confirmed', record })
+
+        expect((await service.tick(id)).unrolledRefund).toBe(JSON.stringify(record))
+        const row = await service.tick(id)
+
+        expect(row.state).toBe('refunded')
+        expect(new Set(calls.map((c) => `${c.lockup.txid}:${c.lockup.vout}`))).toEqual(
+          new Set([`${arkadeLockupTxid}:${arkadeLockupVout}`]),
+        )
+        expect(calls.at(-1)!.record).toEqual(record)
+      })
+
+      it('never records refunded over it on the strength of an offchain sibling', async () => {
+        const { id } = await refunding()
+        arkade.state.outputs = [{ txid: 'dust', vout: 0, value: 1_000 }]
+
+        expect((await service.tick(id)).state).toBe('refunding')
+        expect(arkade.state.refundCalls).toBe(0)
+      })
+
+      it('escalates a spend it cannot explain only once E has passed', async () => {
+        const { id, htlcExpiresAt } = await refunding()
+        steps.push({ kind: 'spent' }, { kind: 'spent' })
+
+        expect((await service.tick(id)).state).toBe('refunding')
+        now = htlcExpiresAt!
+        const row = await service.tick(id)
+        expect(row.state).toBe('stuck')
+        expect(row.failureReason).toMatch(/unrolled lockup spent on L1/)
+      })
+
+      it('keeps a record saved before arkd answered, when the step then throws', async () => {
+        const { id } = await refunding()
+        arkade.ops.refundUnrolled = async (_row, _lockup, _previous, save) => {
+          await save(record)
+          throw new Error('arkd broadcast it, and the reply never arrived')
+        }
+
+        await expect(service.tick(id)).rejects.toThrow('reply never arrived')
+        expect((await store.get(id)).unrolledRefund).toBe(JSON.stringify(record))
+      })
+
+      it('names the solo exit once arkd will no longer co-sign', async () => {
+        const { id, htlcExpiresAt } = await refunding()
+        now = htlcExpiresAt!
+        steps.push({ kind: 'closed', reason: 'input 0 has an available exit closure' })
+
+        const row = await service.tick(id)
+        expect(row.state).toBe('stuck')
+        expect(row.failureReason).toMatch(/available exit closure — server-independent recourse/)
+      })
+    })
+  })
+
   /**
    * The false-negative `stuck` the TLA+ model names in
    * `spec/tla/LightningReceive_SettleNotIdempotent.cfg`.
@@ -1838,6 +2031,20 @@ describe('ReceiveSwapService.tick — refund path', () => {
     expect(arkade.state.refundCalls).toBe(0)
   })
 
+  it('records our own refund as refunded when the lockup is gone because its response never reached us', async () => {
+    const funded = await armAndFund()
+    const row0 = await store.get(funded.id)
+    now = row0.refundLocktime
+    arkade.state.outputs = []
+    arkade.state.claimPreimage = null
+    arkade.ops.finalizePendingRefund = async () => 'pending-refund-ark-txid'
+
+    const row = await service.tick(funded.id)
+    expect(row.state).toBe('refunded')
+    expect(row.refundArkTxid).toBe('pending-refund-ark-txid')
+    expect(arkade.state.refundCalls).toBe(0)
+  })
+
   it('still escalates to stuck when the claim never becomes readable, however many ticks it takes', async () => {
     const funded = await armAndFund()
     const row0 = await store.get(funded.id)
@@ -2000,8 +2207,12 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
       findLockups: async (pkScriptHex) => (pkScriptHex === SEND_PKSCRIPT ? sendLockups : arkade.state.outputs),
       findLockupOutpoints: async (pkScriptHex) =>
         (pkScriptHex === SEND_PKSCRIPT ? sendLockups : arkade.state.outputs)
-          .map((o) => ({ ...o, spent: false }))
-          .concat(pkScriptHex === SEND_PKSCRIPT ? [] : arkade.state.spentOutputs.map((o) => ({ ...o, spent: true }))),
+          .map((o) => ({ ...o, spent: false, unrolled: false }))
+          .concat(
+            pkScriptHex === SEND_PKSCRIPT
+              ? []
+              : arkade.state.spentOutputs.map((o) => ({ ...o, spent: true, unrolled: false })),
+          ),
     }
     return new ReceiveSwapService({
       acceptUnilateralGap: false,
@@ -2033,6 +2244,34 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
     const row = await svc.tick(swap.id)
 
     expect(row.state).toBe('quoted')
+    expect(arkade.state.fundCalls).toHaveLength(0)
+  })
+
+  it('refuses and retires a coupled payout once the coupled send is refused, rather than waiting in quoted forever', async () => {
+    const svc = coupledService()
+    const swap = await quotedCoupled(svc)
+    // A funded refusal still answers findLiveByPaymentHash, but it will never reach `funded`.
+    sendRow = coupledSendRow('refused')
+    let cancelled = false
+    ln.cancelHold = async () => {
+      cancelled = true
+    }
+
+    const row = await svc.tick(swap.id)
+
+    expect(row.state).toBe('refused')
+    expect(row.failureReason).toContain('refused')
+    expect(cancelled).toBe(true)
+    expect(arkade.state.fundCalls).toHaveLength(0)
+  })
+
+  it('does not fund against a coupled send lockup whose sats sit on an asset vtxo', async () => {
+    const svc = coupledService()
+    const swap = await quotedCoupled(svc)
+    sendRow = coupledSendRow('funded')
+    sendLockups = [{ txid: 's1', vout: 0, value: SEND_AMOUNT, assets: [{ assetId: 'ab'.repeat(34), amount: 1n }] }]
+
+    expect((await svc.tick(swap.id)).state).toBe('quoted')
     expect(arkade.state.fundCalls).toHaveLength(0)
   })
 
@@ -2630,5 +2869,59 @@ describe('the CLTV headroom note at the armed edge', () => {
     const detail = await noteOn(row.id)
     expect(detail).toMatch(/^cltv headroom -?\d+s — -?\d+s spare$/)
     for (const secret of [hex.encode(P), paymentHash, invoice]) expect(detail).not.toContain(secret)
+  })
+})
+
+describe('ReceiveSwapService.refundNow', () => {
+  const quoted = async () => {
+    const outcome = await service.quote(quoteRequest())
+    if (!outcome.accepted) throw new Error(`expected acceptance, got ${outcome.reason}`)
+    return outcome.swap
+  }
+
+  it('refuses on a resolved row rather than refunding a stray output and restarting its grace', async () => {
+    const swap = await quoted()
+    await store.transition(swap.id, 'quoted', 'refused')
+    arkade.state.outputs = [{ txid: 'stray', vout: 0, value: 5_000 }]
+
+    await expect(service.refundNow(swap.id)).rejects.toThrow(/refused/)
+    expect(arkade.state.refundCalls).toBe(0)
+    expect((await store.get(swap.id)).refundArkTxid).toBeNull()
+  })
+
+  it('still refunds the solver’s own lockup on a stuck row', async () => {
+    const swap = await quoted()
+    await store.transition(swap.id, 'quoted', 'armed')
+    await store.transition(swap.id, 'armed', 'funded')
+    await store.transition(swap.id, 'funded', 'stuck')
+    arkade.state.outputs = [{ txid: 'lk', vout: 0, value: 5_000 }]
+
+    await expect(service.refundNow(swap.id)).resolves.toBe('refund-ark-txid')
+    expect(arkade.state.refundCalls).toBe(1)
+  })
+})
+
+describe('ReceiveSwapService.whenArmed — a lost funding response', () => {
+  const armedWithLostFunding = async () => {
+    const outcome = await service.quote(quoteRequest())
+    if (!outcome.accepted) throw new Error(`expected acceptance, got ${outcome.reason}`)
+    await store.transition(outcome.swap.id, 'quoted', 'armed')
+    // A fund attempt ran and its response was lost: the lease stamped fund_started_at but
+    // nothing was ever adopted. Written directly — no store method produces this combination.
+    await driver.run('UPDATE receive_swap SET fund_started_at = ? WHERE id = ?', [now, outcome.swap.id])
+    arkade.state.outputs = []
+    return outcome.swap
+  }
+
+  it('keeps waiting in armed past invoice expiry, so a lagging funding can still be adopted', async () => {
+    const swap = await armedWithLostFunding()
+    now = swap.invoiceExpiresAt + 1
+    expect((await service.tick(swap.id)).state).toBe('armed')
+  })
+
+  it('escalates to stuck at the refund deadline, instead of holding exposure in armed forever', async () => {
+    const swap = await armedWithLostFunding()
+    now = swap.refundLocktime + 1
+    expect((await service.tick(swap.id)).state).toBe('stuck')
   })
 })

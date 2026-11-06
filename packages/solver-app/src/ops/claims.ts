@@ -44,7 +44,8 @@ export const claimNow = async (services: Services, id: string, preimageHex?: str
     throw new Error(`swap ${id} is ${row.state}, not stuck; only a stuck row is recovered by hand`)
   }
 
-  const preimage = preimageHex ?? (await requireLn(services.ln).getSendHtlcState?.(row.paymentHash))?.preimage
+  const preimage =
+    preimageHex ?? row.preimage ?? (await requireLn(services.ln).getSendHtlcState?.(row.paymentHash))?.preimage
   if (!preimage) {
     throw new Error(
       `swap ${id} has no preimage: none was given and the backend holds none for ${row.paymentHash}. ` +
@@ -60,6 +61,43 @@ export const claimNow = async (services: Services, id: string, preimageHex?: str
   // as `claimWithPreimage` does it: from `claiming` on, the claim needs nothing
   // external, so a crash between here and the push still resolves.
   if (!(await services.store.transition(id, 'stuck', 'claiming', { preimage }))) {
+    throw new Error(`swap ${id} moved out of stuck while being recovered; re-read it before trying again`)
+  }
+  return { state: 'claiming' }
+}
+
+/**
+ * At boot, back onto the claim path: rows parked because their lockup read spent mid-claim, which is
+ * also what an arkd-accepted, never-finalized claim of ours looks like. The claim tick finalizes that
+ * one and parks any other spend again.
+ */
+export const rearmPendingClaims = async (store: Pick<Services['store'], 'findByStates' | 'transition'>) => {
+  const rearmed: string[] = []
+  for (const row of await store.findByStates(['stuck'])) {
+    if (!row.failureReason?.includes('while claiming; no claim txid recorded')) continue
+    if (!row.preimage || !preimageMatchesHash(row.preimage, row.paymentHash)) continue
+    if (await store.transition(row.id, 'stuck', 'claiming', {})) rearmed.push(row.id)
+  }
+  return rearmed
+}
+
+// {@link claimNow} for the onchain leg; the row stuck mid-claim so the preimage is already on it. Refusing
+// one that carries none (or a mismatched one) is what keeps the `stuck -> claiming` edge sound.
+export const onchainClaimNow = async (services: Services, id: string): Promise<ClaimOutcome> => {
+  const row = await services.onchainStore.get(id)
+  if (row.state !== 'stuck') {
+    throw new Error(`swap ${id} is ${row.state}, not stuck; only a stuck row is recovered by hand`)
+  }
+  if (!row.preimage) {
+    throw new Error(
+      `swap ${id} has no preimage on the row: nothing proves the client revealed P, so this is not a claim to ` +
+        'recover. If the client never claimed the onchain HTLC, the refund paths are onchain-refund-now and reclaim-l1-htlc.',
+    )
+  }
+  if (!preimageMatchesHash(row.preimage, row.paymentHash)) {
+    throw new Error(`the preimage on swap ${id} does not hash to its payment hash (${row.paymentHash})`)
+  }
+  if (!(await services.onchainStore.transition(id, 'stuck', 'claiming', {}))) {
     throw new Error(`swap ${id} moved out of stuck while being recovered; re-read it before trying again`)
   }
   return { state: 'claiming' }

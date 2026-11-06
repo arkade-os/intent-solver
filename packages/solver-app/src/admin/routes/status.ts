@@ -20,22 +20,18 @@ import { probeBackends } from '../probes.js'
 import { assetSource, consoleBalance, describeAssetId } from '../assets.js'
 import { ASSET_ID_HEX } from '@arkade-os/solver-core/core/marketKey.js'
 import { marketServingDivergence } from '../../ops/marketDivergence.js'
+import { balanceCheckpointScope } from '../../ops/balanceCheckpoints.js'
 import { poolPlan } from '../../ops/pool.js'
 import { requireLn, requireOnchain } from '../../ops/rails.js'
 import { attempt } from '../../ops/attempt.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import type { AdminSwap } from '@arkade-os/solver-core/core/swapView.js'
-import {
-  projectSend,
-  projectReceive,
-  projectOnchainSend,
-  projectOnchainReceive,
-} from '@arkade-os/solver-corridors/corridors/projections.js'
+import { projectSend, projectReceive, projectOnchainSend } from '@arkade-os/solver-corridors/corridors/projections.js'
 import { liveSwaps } from '../projection.js'
 import type { AdminDeps } from '../server.js'
 
 /**
- * Every swap parked in `stuck`, across all four corridors.
+ * Every swap parked in `stuck`, across all three corridors.
  *
  * A separate read from {@link liveSwaps} because `stuck` is TERMINAL: it is
  * excluded from `findRecoverable`, from every sweep, and from `findRefundable`
@@ -89,23 +85,16 @@ const stuckSwaps = async (deps: AdminDeps): Promise<{ rows: AdminSwap[]; total: 
   // the ones an operator is most likely to be looking for — below a cap that
   // fills with the oldest.
   const page = { limit: STUCK_PER_CORRIDOR, newestFirst: true } as const
-  const [send, receive, onchainSend, onchainReceive, ...counts] = await Promise.all([
+  const [send, receive, onchainSend, ...counts] = await Promise.all([
     services.store.findByStates(['stuck'], page),
     services.receiveStore.findByStates(['stuck'], page),
     services.onchainStore.findByStates(['stuck'], page),
-    services.onchainReceiveStore.findByStates(['stuck'], page),
     services.store.countByStates(['stuck']),
     services.receiveStore.countByStates(['stuck']),
     services.onchainStore.countByStates(['stuck']),
-    services.onchainReceiveStore.countByStates(['stuck']),
   ])
   return {
-    rows: [
-      ...send.map(projectSend),
-      ...receive.map(projectReceive),
-      ...onchainSend.map(projectOnchainSend),
-      ...onchainReceive.map(projectOnchainReceive),
-    ],
+    rows: [...send.map(projectSend), ...receive.map(projectReceive), ...onchainSend.map(projectOnchainSend)],
     total: counts.reduce((sum, n) => sum + n, 0),
   }
 }
@@ -136,7 +125,6 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
       services.store.committedSats(),
       services.receiveStore.committedSats(),
       services.onchainStore.committedSats(),
-      services.onchainReceiveStore.committedSats(),
     ])
     const committedSats = committed.reduce((sum, value) => sum + value, 0)
 
@@ -155,18 +143,24 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
         services.bootPolicy,
         effective,
         pendingRestartKeys(services.bootOverrides, overrides),
-      ).filter((item) => !LIVE_KEYS.has(item.key)),
+      )
+        .filter((item) => !LIVE_KEYS.has(item.key))
+        .map((item) => ({ ...item, path: services.config.configPaths?.get(item.key) ?? item.key })),
       restartEnabled: services.config.adminRestartEnabled,
       providerPubkey: services.providerPubkey,
       markets: marketCards(storedMarkets, services),
       servingDivergence: [
         // The boot repairs first: a row this process REWROTE outranks a row it
-        // merely disagrees with the environment about.
+        // merely disagrees with the config about.
         ...services.adminStore.repairedServing,
-        ...marketServingDivergence(storedMarkets, {
-          offerMarkets: services.config.offerMarkets,
-          tokens: services.config.assetRfqTokens,
-        }),
+        ...marketServingDivergence(
+          storedMarkets,
+          {
+            offerMarkets: services.config.offerMarkets,
+            tokens: services.config.assetRfqTokens,
+          },
+          services.config.configPaths,
+        ),
       ],
       corridors: CORRIDORS.map((corridor) => ({
         corridor,
@@ -231,6 +225,16 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
       return c.json({ error: 'bad_request', message: 'not a lowercase 68-character asset id' }, 400)
     }
     return c.json(await describeAssetId(assetId, assetSource(deps.services.arkade.wallet)))
+  })
+
+  app.get('/api/balance-checkpoints', async (c) => {
+    const raw = c.req.query('limit') ?? '100'
+    const limit = Number(raw)
+    if (!/^\d+$/.test(raw) || !Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
+      return c.json({ error: 'invalid_limit', message: 'limit must be an integer between 1 and 200' }, 400)
+    }
+    const scope = balanceCheckpointScope(deps.services)
+    return c.json({ scope, checkpoints: await deps.services.adminStore.listBalanceCheckpoints(scope, limit) })
   })
 
   app.get('/api/wallet', async (c) => {

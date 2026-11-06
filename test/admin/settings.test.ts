@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import {
   applyOverrides,
   validateOverride,
@@ -7,6 +7,7 @@ import {
   LIVE_KEYS,
 } from '@arkade-os/solver-app/admin/settings.js'
 import type { Config } from '@arkade-os/solver-app/config.js'
+import { registerLightningRail } from '@arkade-os/solver-app/ops/rails.js'
 
 const config = {
   network: 'regtest',
@@ -17,27 +18,24 @@ const config = {
   relayProtocol: 'nostr',
   openRfqMaxBidsPerMinute: 30,
   emulatorUrl: 'http://emulator.test',
-  arkade: { arkServerUrl: 'http://ark.test', databasePath: '.data/ark.sqlite' },
+  arkade: { operatorUrl: 'http://arkade.test', databasePath: '.data/ark.sqlite' },
   limits: { minSats: 1_000, maxSats: 100_000 },
   maxExposedSats: 300_000,
   corridorLimits: {
     'arkade:BTC->lightning:BTC': { minSats: 1_000, maxSats: 100_000 },
     'lightning:BTC->arkade:BTC': { minSats: 1_000, maxSats: 100_000 },
     'arkade:BTC->onchain:BTC': { minSats: 1_000, maxSats: 100_000 },
-    'onchain:BTC->arkade:BTC': { minSats: 1_000, maxSats: 100_000 },
   },
   corridorFees: {
     'arkade:BTC->lightning:BTC': { bps: 0, flatSats: 0 },
     'lightning:BTC->arkade:BTC': { bps: 0, flatSats: 0 },
     'arkade:BTC->onchain:BTC': { bps: 0, flatSats: 0 },
-    'onchain:BTC->arkade:BTC': { bps: 0, flatSats: 0 },
   },
   corridorEnabled: {
     'arkade:BTC->lightning:BTC': true,
     'lightning:BTC->arkade:BTC': true,
     // Disabled in the environment on purpose: the console must not enable it.
     'arkade:BTC->onchain:BTC': false,
-    'onchain:BTC->arkade:BTC': true,
   },
   // Rendered in the read-only block, which iterates it — an absent set throws
   // rather than showing empty.
@@ -57,7 +55,7 @@ describe('the editable key set', () => {
     // every key in here, and the port has no authentication of its own, so
     // growing this surface should cost a deliberate edit here.
     //
-    expect(editableKeys()).toHaveLength(4 * 5 + 3)
+    expect(editableKeys()).toHaveLength(3 * 5 + 3)
   })
 
   it('admits the globals by name, so the count above cannot pass on the wrong set', () => {
@@ -70,12 +68,12 @@ describe('the editable key set', () => {
     // The console has no authentication of its own, so an editable path knob
     // would let whatever reaches that port relocate the money-critical database.
     for (const key of [
-      'ARK_MNEMONIC',
+      'WALLET_MNEMONIC',
       'LN_MNEMONIC',
       'SWAP_DB_PATH',
-      'ARK_DB_PATH',
+      'WALLET_DB_PATH',
       'DB_DIR',
-      'ARK_SERVER_URL',
+      'ARKADE_OPERATOR_URL',
       'LN_BACKEND',
     ]) {
       expect(editableKeys()).not.toContain(key)
@@ -177,7 +175,7 @@ describe('corridor toggles', () => {
   })
 
   it('refuses to enable a corridor the environment disabled — no service exists for it', () => {
-    expect(() => validateOverride(config, 'ONCHAIN_SEND_ENABLED', 'true')).toThrow(/disabled in the environment/i)
+    expect(() => validateOverride(config, 'ONCHAIN_SEND_ENABLED', 'true')).toThrow(/disabled in the config/i)
   })
 
   it('still allows re-enabling one the console itself disabled', () => {
@@ -193,7 +191,7 @@ describe('corridor toggles', () => {
 
 describe('non-editable keys', () => {
   it('refuses anything outside the editable set', () => {
-    expect(() => validateOverride(config, 'ARK_MNEMONIC', 'hunter2')).toThrow(/not editable/i)
+    expect(() => validateOverride(config, 'WALLET_MNEMONIC', 'hunter2')).toThrow(/not editable/i)
     expect(() => validateOverride(config, 'LN_BACKEND', 'lnd')).toThrow(/not editable/i)
   })
 
@@ -205,17 +203,30 @@ describe('non-editable keys', () => {
 })
 
 describe('describeSettings', () => {
-  it('marks a knob as overridden once it is set, and env otherwise', () => {
+  it('marks a knob as overridden once it is set, and config otherwise', () => {
     const knobs = describeSettings(config, { LN_SEND_FEE_BPS: '25' })
     expect(knobs.find((k) => k.key === 'LN_SEND_FEE_BPS')).toMatchObject({ value: 25, source: 'override' })
-    expect(knobs.find((k) => k.key === 'LN_SEND_FEE_FLAT_SATS')).toMatchObject({ source: 'env' })
+    expect(knobs.find((k) => k.key === 'LN_SEND_FEE_FLAT_SATS')).toMatchObject({ source: 'config' })
+  })
+
+  it('labels each knob by where the config document holds it', () => {
+    const path = 'corridors["arkade:BTC->lightning:BTC"].feeBps'
+    const withPaths = { ...config, configPaths: new Map([['LN_SEND_FEE_BPS', path]]) } as unknown as Config
+    expect(describeSettings(withPaths, {}).find((k) => k.key === 'LN_SEND_FEE_BPS')).toMatchObject({
+      key: 'LN_SEND_FEE_BPS',
+      path,
+      source: 'config',
+    })
+    expect(describeSettings(withPaths, {}).find((k) => k.key === 'SWAP_NETWORK')).toMatchObject({
+      path: 'SWAP_NETWORK',
+    })
   })
 
   it('reports every editable knob as restart-required EXCEPT the ones a seam now reaches', () => {
     for (const knob of describeSettings(config, {}).filter((k) => k.editable)) {
       expect(knob.restartRequired, `${knob.key}`).toBe(!LIVE_KEYS.has(knob.key))
     }
-    expect([...LIVE_KEYS]).toEqual(['ASSET_CARRIER_PRICING'])
+    expect([...LIVE_KEYS]).toEqual(['ASSET_CARRIER_PRICING', 'REBALANCE_POLICY'])
   })
 
   it('never marks a read-only knob restart-required — there is nothing to restart for', () => {
@@ -248,6 +259,62 @@ describe('describeSettings', () => {
     // question the console has to be able to answer on its own.
     const knobs = describeSettings(config, {})
     expect(knobs.find((k) => k.key === 'SWAP_DB_PATH')?.value).toBe('.data/swaps.sqlite')
-    expect(knobs.find((k) => k.key === 'ARK_DB_PATH')?.value).toBe('.data/ark.sqlite')
+    expect(knobs.find((k) => k.key === 'WALLET_DB_PATH')?.value).toBe('.data/ark.sqlite')
+  })
+})
+
+describe("a registered rail's own settings", () => {
+  const STORAGE = 'rails.lightning["console-rail"].storageDir'
+  const never = async () => {
+    throw new Error('never built here')
+  }
+  registerLightningRail('console-rail', {
+    create: never,
+    consoleSettings: (railConfig) => [
+      { path: STORAGE, value: `.data/${railConfig.network}` },
+      { path: STORAGE, value: 'listed twice by the rail' },
+      { path: 'SWAP_NETWORK', value: 'claimed by the rail' },
+      { path: 'network', value: 'claimed by the rail' },
+    ],
+  })
+  registerLightningRail('throwing-rail', {
+    create: never,
+    consoleSettings: () => {
+      throw new Error('block unreadable: mnemonic secret words')
+    },
+  })
+  const selected = (backend: string): Config =>
+    ({ ...config, lnBackend: backend, configPaths: new Map([['SWAP_NETWORK', 'network']]) }) as unknown as Config
+
+  it('are listed read-only, under the label the rail gives them, when that rail is selected', () => {
+    const rows = describeSettings({ ...config, lnBackend: 'console-rail' } as Config, {}).filter(
+      (knob) => knob.key === STORAGE,
+    )
+    expect(rows).toEqual([{ key: STORAGE, path: STORAGE, value: '.data/regtest', source: 'config', editable: false }])
+  })
+
+  it('never displace a setting the list already holds, by its key or by the label it is shown under', () => {
+    const network = describeSettings(selected('console-rail'), {}).filter((knob) => knob.path === 'network')
+    expect(network).toEqual([expect.objectContaining({ key: 'SWAP_NETWORK', value: 'regtest' })])
+  })
+
+  it('cost the list one row, not the page, and the log no word of what the rail threw', () => {
+    const logged = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      const knobs = describeSettings(selected('throwing-rail'), {})
+      expect(knobs.find((knob) => knob.key === 'SWAP_NETWORK')?.value).toBe('regtest')
+      expect(knobs.find((knob) => knob.key === 'rails.lightning["throwing-rail"]')?.value).toBe(
+        '(could not be listed: see the log)',
+      )
+      const lines = logged.mock.calls.map((call) => call.join(' '))
+      expect(lines.some((line) => line.includes('throwing-rail could not list its settings (Error)'))).toBe(true)
+      expect(lines.join('\n')).not.toContain('secret words')
+    } finally {
+      logged.mockRestore()
+    }
+  })
+
+  it('are absent while another backend is selected', () => {
+    expect(describeSettings(config, {}).some((knob) => knob.key === STORAGE)).toBe(false)
   })
 })

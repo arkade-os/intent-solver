@@ -75,7 +75,7 @@ export interface KnownContract {
  * The spend facts of a VTXO as the funded gate needs them, typed structurally
  * rather than as the SDK's `VirtualCoin` so the interface names exactly what
  * it reads. Mirrors the SDK's `isVtxoSpent` (`isSpent || spentBy || settledBy`,
- * checked against SDK 0.4.77): the wire contract permits `isSpent: true` with
+ * checked against SDK 0.5.0-rc.25): the wire contract permits `isSpent: true` with
  * an empty `spentBy`, so all three facts are consulted — and a SWEPT output
  * is deliberately absent, so a batch-swept lockup still reads as funded and
  * stays protected until recovery drains it. Duplicated rather than imported

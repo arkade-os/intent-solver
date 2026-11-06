@@ -91,7 +91,7 @@ export const assetSource = (wallet: unknown): AssetDetailSource | undefined => {
  * value once read cannot go stale — nothing invalidates this because nothing can.
  *
  * The cost it avoids is real: `getAssetDetails` is an uncached
- * `GET /v1/indexer/asset/{id}` (pinned SDK `dist/chunk-X3VEMUVV.js:1791`) and the SDK
+ * `GET /v1/indexer/asset/{id}` (SDK `RestIndexerProvider.getAssetDetails`) and the SDK
  * retries a failed GET with backoff. `/api/wallet` and `/api/overview` are re-fetched
  * on every SSE `swaps` event, so an uncached lookup would turn a status page into
  * per-swap-event load on the indexer, and a slow indexer into a slow console.

@@ -19,7 +19,7 @@
  * loop that was iterating.
  */
 import { Extension, Transaction } from '@arkade-os/sdk'
-import { decodeOffer, OFFER_PACKET_TYPE, type Offer } from '@arkade-os/swap'
+import { decodeOffer, OFFER_PACKET_TYPE, type Offer } from '@arkade-os/swap/protocol'
 import { base64, hex } from '@scure/base'
 
 /** A decoded offer, funded at a known outpoint of the transaction that carried it. */
@@ -51,14 +51,14 @@ export interface DiscoveredOfferTx {
  * packet whose deposit is somewhere else, and recording it would key a row to
  * an outpoint that is not the deposit.
  *
- * @param rawArkTx the transaction as base64 PSBT, which is the encoding both
+ * @param rawArkadeTx the transaction as base64 PSBT, which is the encoding both
  * `streamOfferTxs` and `indexerProvider.getVirtualTxs` hand back.
  */
-export const offerFromFundingTx = (rawArkTx: string): DiscoveredOfferTx | null => {
+export const offerFromFundingTx = (rawArkadeTx: string): DiscoveredOfferTx | null => {
   let tx: Transaction
   let offer: Offer
   try {
-    tx = Transaction.fromPSBT(base64.decode(rawArkTx))
+    tx = Transaction.fromPSBT(base64.decode(rawArkadeTx))
     const packet = Extension.fromTx(tx).getPacketByType(OFFER_PACKET_TYPE)
     if (packet === null) return null
     offer = decodeOffer(packet.serialize())

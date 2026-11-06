@@ -1,6 +1,6 @@
 # Building a corridor
 
-A corridor is a pair the solver quotes and settles. The four built-in ones are
+A corridor is a pair the solver quotes and settles. The three built-in ones are
 implementations of the same interface you implement — nothing about them is
 privileged, and a corridor this build never compiled against is served by the
 same host, driven by the same sweep and answered for by the same status route.
@@ -55,9 +55,9 @@ Required:
 Optional, and the omission **is** the contract — a corridor claiming a capability
 it cannot honour is worse than one that says nothing:
 
-`liveLockups()` · `tickHot()` · `refundSweep()` · `refundNow(id)` · `claimNow(id)`
+`liveLockups()` · `tickHot()` · `refundSweep()` · `refundNow(id)`
 
-Only Lightning-send has `tickHot`; only onchain-receive has `claimNow`.
+Only Lightning-send has `tickHot`.
 
 ## Quoting
 

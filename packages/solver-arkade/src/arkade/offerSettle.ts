@@ -28,7 +28,7 @@ import { hex } from '@scure/base'
 import type { ArkadeContext } from './wallet.js'
 import { offerFromFundingTx } from './offerPacket.js'
 import { heldOf, offerFillInputFrom } from './offerFill.js'
-import { fulfillOffer } from './offerFulfill.js'
+import { fulfillOffer, type FulfillOptions } from './offerFulfill.js'
 import { liveOfferOutpoints, type OfferOutpoint } from './offerOutpoints.js'
 
 /**
@@ -77,14 +77,16 @@ const indexerTxSource =
  * Bind a settle port to this deployment's wallet and emulator.
  *
  * Curried rather than a four-argument call because `AssetOfferDeps.settle` is a
- * one-argument port: the row is the only thing that varies per fill.
+ * narrow port: the row is what varies per fill, and `options` per attempt.
  */
-export const offerSettleFor = (deps: OfferSettleDeps): ((intent: OfferFillIntent) => Promise<string>) => {
+export const offerSettleFor = (
+  deps: OfferSettleDeps,
+): ((intent: OfferFillIntent, options?: FulfillOptions) => Promise<string>) => {
   const fetchTx = deps.fetchTx ?? indexerTxSource(deps.ctx)
   const outpointsAt = deps.outpointsAt ?? ((pkScript: string) => liveOfferOutpoints(deps.ctx, pkScript))
   const fulfill = deps.fulfill ?? fulfillOffer
 
-  return async (intent) => {
+  return async (intent, options) => {
     const raw = await fetchTx(intent.offerTxid)
     if (raw === null || raw === '') {
       throw new Error(`no funding transaction for ${intent.offerTxid}: the offer cannot be rebuilt to fill it`)
@@ -160,11 +162,17 @@ export const offerSettleFor = (deps: OfferSettleDeps): ((intent: OfferFillIntent
       }
     }
 
-    return fulfill(deps.ctx, deps.emulatorUrl, found.offer, {
-      txid: found.txid,
-      vout: found.vout,
-      value: found.value,
-      assetAmount,
-    })
+    return fulfill(
+      deps.ctx,
+      deps.emulatorUrl,
+      found.offer,
+      {
+        txid: found.txid,
+        vout: found.vout,
+        value: found.value,
+        assetAmount,
+      },
+      options,
+    )
   }
 }

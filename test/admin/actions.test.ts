@@ -15,6 +15,7 @@ import { ripemd160 } from '@noble/hashes/legacy.js'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
 import { ACTIONS } from '@arkade-os/solver-app/admin/routes/actions.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
 
 const adminStore = () => ({
   recordAction: vi.fn().mockResolvedValue(undefined),
@@ -142,6 +143,60 @@ describe('the confirmation gate', () => {
 })
 
 describe('auditing', () => {
+  it('keeps a refused pool reshape visible as a conflict and audits the refusal', async () => {
+    const services = fakeServices()
+    const run = vi.spyOn(ACTIONS['pool-mint']!, 'run').mockResolvedValue({
+      refused: '9758 sat committed across non-terminal swaps.',
+      committedSats: 9758,
+    })
+    try {
+      const response = await post('pool-mint', { confirm: 'MINT' }, services)
+      expect(response.status).toBe(409)
+      expect(await response.json()).toMatchObject({
+        ok: false,
+        error: 'pool_mint_refused',
+        message: '9758 sat committed across non-terminal swaps.',
+      })
+      expect(services.adminStore.recordAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'pool-mint',
+          outcome: 'error',
+          detail: expect.stringContaining('9758 sat committed'),
+        }),
+      )
+    } finally {
+      run.mockRestore()
+    }
+  })
+
+  it('allows a confirmed in-provider reshape despite old committed rows while excluding pinned coins', async () => {
+    const send = vi.fn().mockResolvedValue('reshaped-tx')
+    const ledger = createReservationLedger()
+    ledger.reserve([{ txid: 'busy', vout: 0 }])
+    const services = fakeServices({
+      config: { limits: { maxSats: 100_000 }, maxExposedSats: 300_000 },
+      readers: new Set([{ committedSats: vi.fn().mockResolvedValue(9_758) }]),
+      arkade: {
+        reservations: ledger,
+        wallet: {
+          arkProvider: { getInfo: vi.fn().mockResolvedValue({ dust: 330 }) },
+          getSpendableVtxos: vi.fn().mockResolvedValue([
+            { txid: 'busy', vout: 0, value: 300_000 },
+            { txid: 'free', vout: 0, value: 250_000 },
+          ]),
+          getAddress: vi.fn().mockResolvedValue('tark1solver'),
+          send,
+        },
+      },
+    })
+    const response = await post('pool-mint', { confirm: 'MINT' }, services)
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ ok: true, result: { txid: 'reshaped-tx', committedSats: 9_758 } })
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(send.mock.calls[0]![0].selectedVtxos.map((coin: { txid: string }) => coin.txid)).toEqual(['free'])
+    expect([...ledger.reserved()]).toEqual(['busy:0'])
+  })
+
   it('records a SUCCESSFUL action', async () => {
     const services = fakeServices({
       arkade: { wallet: {} },
@@ -175,6 +230,38 @@ describe('auditing', () => {
     await post('tick', { id: 'swap-1' }, services)
     const call = services.adminStore.recordAction.mock.calls[0]![0] as { params: string }
     expect(call.params).not.toContain('confirm')
+  })
+
+  // The money-mover already ran; a 500 here reads as "it failed" and invites a
+  // retry — which, for fund-withdraw, is a second irreversible payment.
+  const brokenAudit = () => ({
+    recordAction: vi.fn().mockRejectedValue(new Error('database is locked')),
+    listActions: vi.fn().mockResolvedValue([]),
+    getOverrides: vi.fn().mockResolvedValue({}),
+  })
+
+  it('still reports success when the action ran but writing the audit row failed', async () => {
+    const tick = vi.fn().mockResolvedValue(undefined)
+    const services = fakeServices({
+      adminStore: brokenAudit(),
+      arkade: { wallet: {} },
+      store: { get: vi.fn(), patch: vi.fn() },
+      corridors: oneCorridor('arkade:BTC->lightning:BTC', tick, { id: 'swap-1', state: 'claimed' }),
+    })
+    const response = await post('tick', { id: 'swap-1', corridor: 'arkade:BTC->lightning:BTC' }, services)
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ ok: true })
+    expect(tick).toHaveBeenCalledTimes(1)
+  })
+
+  it('still fails loudly when the action failed, even if recording the failure also throws', async () => {
+    const services = fakeServices({
+      adminStore: brokenAudit(),
+      corridors: oneCorridor('arkade:BTC->lightning:BTC', vi.fn().mockRejectedValue(new Error('indexer unreachable'))),
+    })
+    const response = await post('tick', { id: 'swap-1', corridor: 'arkade:BTC->lightning:BTC' }, services)
+    expect(response.status).toBe(500)
+    expect(await response.json()).toMatchObject({ ok: false, message: 'indexer unreachable' })
   })
 })
 
@@ -259,7 +346,7 @@ describe('tick across corridors', () => {
     // Every corridor is optional by design, so absent is a normal answer.
     const response = await post(
       'tick',
-      { id: 'swap-1', corridor: 'onchain:BTC->arkade:BTC' },
+      { id: 'swap-1', corridor: 'arkade:BTC->onchain:BTC' },
       fakeServices({ corridors: corridorSet({}) }),
     )
     expect(response.status).toBe(500)
@@ -398,19 +485,18 @@ describe('confirmKind is declared, not inferred', () => {
 })
 
 /**
- * The receive legs' operator refund — TLA+ findings F4 and F5 both need
- * a way to act on a row that has stopped moving, and until these existed there
- * was none: `stuck` is terminal, excluded from every sweep, and no action
- * touched either receive store.
+ * The receive leg's operator refund — a way to act on a row that has stopped
+ * moving: `stuck` is terminal, excluded from every sweep, and until this
+ * existed no action touched the receive store.
  *
  * The direction is the thing these pin. `refund-now` and `onchain-refund-now`
  * return the CLIENT's lockup on the two SEND corridors and can pay twice; the
- * receive corridors fund out of the solver's own float, so these recover OUR
+ * receive corridor funds out of the solver's own float, so this recovers OUR
  * sats. A future edit that got that backwards would be a double payout wearing
  * a safe-sounding name.
  */
-describe('the receive legs’ operator refund', () => {
-  for (const name of ['receive-refund-now', 'onchain-receive-refund-now']) {
+describe('the receive leg’s operator refund', () => {
+  for (const name of ['receive-refund-now']) {
     it(`${name} is armed and confirms on a swap id`, () => {
       // Armed not because it can double-pay — it cannot — but because it can
       // kill a live swap by spending the output the client was about to claim.
@@ -435,41 +521,6 @@ describe('the receive legs’ operator refund', () => {
   it('refuses without the confirmation, like every other armed action', async () => {
     const body = await (await post('receive-refund-now', { id: 'swap-1', confirm: 'nope' })).json()
     expect(body).toMatchObject({ error: 'confirm_required' })
-  })
-})
-
-/**
- * TLA+ finding F4 — the fee-dust retry, and the correction that came
- * with it.
- *
- * F4's row is at `claimed`: the client already took the Arkade lockup and
- * revealed `P`, so the solver has PAID OUT and merely cannot collect the L1
- * HTLC economically. The Arkade lockup is gone, which is why the refund
- * actions above do not answer this — a fact worth pinning, because "receive
- * leg is stuck, use the receive refund" is the wrong reach and an expensive
- * one to make at 3am.
- */
-describe('the onchain receive leg’s fee-dust claim retry', () => {
-  it('is armed and confirms on a swap id', () => {
-    const action = ACTIONS['onchain-receive-claim-now']
-    expect(action?.tier).toBe('armed')
-    if (action?.tier !== 'armed') throw new Error('not armed')
-    expect(action.confirmKind).toBe('swap-id')
-  })
-
-  it('says it is safe to repeat, because it is', () => {
-    // Every attempt spends the SAME output, so a redundant broadcast is a
-    // double-spend the network rejects. This is the one operator action here
-    // with no judgement call in it, and the warning must not imply otherwise.
-    const warning = ACTIONS['onchain-receive-claim-now']?.warning ?? ''
-    expect(warning).toMatch(/same output/i)
-    expect(warning).not.toMatch(/DOUBLE-PAYOUT/i)
-  })
-
-  it("claims the CLIENT's L1 HTLC, and says so — not the solver's lockup", () => {
-    // The direction is the whole distinction from `onchain-receive-refund-now`.
-    const warning = ACTIONS['onchain-receive-claim-now']?.warning ?? ''
-    expect(warning).toMatch(/CLIENT'S L1 HTLC|CLIENT’S L1 HTLC/i)
   })
 })
 

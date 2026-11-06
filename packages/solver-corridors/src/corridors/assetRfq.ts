@@ -22,9 +22,6 @@
  *   there is no refund it could push on a client's behalf — the client
  *   withdraws its own unfilled deposit whenever it likes. An operator button
  *   here would be one that cannot work.
- * - No `claimNow`. There is no claim: `fulfill` pays the client and takes the
- *   deposit in one transaction, so the only forced action worth having is
- *   `park`, which every corridor has.
  * - No `tickHot`. Latency here is dominated by waiting for a client deposit,
  *   which the ordinary sweep observes.
  * - No `liveLockups`/`lockupFor`. Those report ARKADE LOCKUPS OF OURS that the
@@ -136,6 +133,15 @@ export const projectAssetRfq = (row: AssetRfqSwapRow): AdminSwap => ({
   failureReason: row.failureReason,
 })
 
+const jsonSafeBigints = (value: unknown): unknown => {
+  if (typeof value === 'bigint') return value.toString()
+  if (Array.isArray(value)) return value.map(jsonSafeBigints)
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, v]) => [key, jsonSafeBigints(v)]))
+  }
+  return value
+}
+
 export const assetRfqReader = (descriptor: CorridorDescriptor, store: AssetRfqSwapStore): CorridorReader => ({
   descriptor,
   statusFor: async (rfqId) => {
@@ -171,7 +177,9 @@ export const assetRfqReader = (descriptor: CorridorDescriptor, store: AssetRfqSw
     try {
       const raw = await store.get(id)
       if (raw.pair !== descriptor.pair) return null
-      return { raw, swap: projectAssetRfq(raw), history: await store.history(id) }
+      // The console ships `raw` as JSON and JSON.stringify throws on a bigint, so the row's
+      // atomic amounts (and any nested mantissa) leave as strings, like projectAssetRfq's do.
+      return { raw: jsonSafeBigints(raw), swap: projectAssetRfq(raw), history: await store.history(id) }
     } catch {
       return null
     }

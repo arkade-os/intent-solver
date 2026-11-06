@@ -37,15 +37,17 @@ describe('createServices — corridor enablement', () => {
   })
 
   // Built lazily, as LND may be down at boot: the guard opens the builder and the `new` may not leave it.
-  it.each([
-    ['arkade:BTC->onchain:BTC', 'OnchainSendSwapService'],
-    ['onchain:BTC->arkade:BTC', 'OnchainReceiveSwapService'],
-  ])('builds %s only when enabled', (corridor, serviceClass) => {
-    const escaped = corridor.replace(/[:>]/g, (c) => `\\${c}`)
-    expect(createServicesBody()).toMatch(
-      new RegExp(`if \\(!enabled\\('${escaped}'\\)[^\\n]*return\\n(?:(?!\\n  \\})[\\s\\S])*?= new ${serviceClass}\\(`),
-    )
-  })
+  it.each([['arkade:BTC->onchain:BTC', 'OnchainSendSwapService']])(
+    'builds %s only when enabled',
+    (corridor, serviceClass) => {
+      const escaped = corridor.replace(/[:>]/g, (c) => `\\${c}`)
+      expect(createServicesBody()).toMatch(
+        new RegExp(
+          `if \\(!enabled\\('${escaped}'\\)[^\\n]*return\\n(?:(?!\\n  \\})[\\s\\S])*?= new ${serviceClass}\\(`,
+        ),
+      )
+    },
+  )
 
   it('keeps the operator recovery commands able to unwind a disabled corridor’s rows', () => {
     // refund / onchain-refund-now / reclaim-l1-htlc open no ingress, so the

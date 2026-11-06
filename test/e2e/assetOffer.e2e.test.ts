@@ -16,7 +16,7 @@ import { createServer, type Server } from 'node:http'
 import { randomBytes } from 'node:crypto'
 import { join } from 'node:path'
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { createOffer, decodeOffer, OFFER_PACKET_TYPE, type Offer } from '@arkade-os/swap'
+import { createOffer, decodeOffer, OFFER_PACKET_TYPE, type Offer } from '@arkade-os/swap/protocol'
 import { asset, Extension } from '@arkade-os/sdk'
 import { base64, hex } from '@scure/base'
 import { Transaction } from '@scure/btc-signer'
@@ -38,13 +38,13 @@ import { poll } from '@arkade-os/solver-core/util/poll.js'
 import { assetMarketPolicy, DEFAULT_SERVING } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { AssetOfferService, parseAssetMarkets } from '@arkade-os/solver-app/ops/assetOffers.js'
 import { createServices } from '@arkade-os/solver-app/ops/services.js'
-import { loadConfig } from '@arkade-os/solver-app/config.js'
+import { configFromKnobs } from '@arkade-os/solver-app/config.js'
 import { marketCapability } from '@arkade-os/solver-app/admin/marketCapability.js'
 import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
 import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
 import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
 
-const ARKD_URL = process.env.ARK_SERVER_URL ?? 'http://localhost:7070'
+const ARKD_URL = process.env.ARKADE_OPERATOR_URL ?? 'http://localhost:7070'
 /** Two deposits and the maker payment, with room for fees. */
 const NEEDED_SATS = 40_000
 
@@ -93,7 +93,7 @@ describe('e2e arkade offers — publish, discover, settle', () => {
       // arkd matches on arrival, so an offer funded first is simply missed.
       await new Promise((resolve) => setTimeout(resolve, 3_000))
 
-      const offer = await createOffer(arkade.ctx.wallet, ARKD_URL, {
+      const offer = await createOffer(arkade.ctx.wallet, {
         wantAmount,
         wantAsset: asset.AssetId.fromString(held.assetId),
       })
@@ -187,7 +187,7 @@ describe('e2e arkade offers — bounds, refused legibly and accepted at the edge
     feedUrl = `http://127.0.0.1:${bound.port}/price`
     dir = tempStoreDir()
 
-    const offer = await createOffer(arkade.ctx.wallet, ARKD_URL, {
+    const offer = await createOffer(arkade.ctx.wallet, {
       wantAmount: WANT_UNITS,
       wantAsset: asset.AssetId.fromString(assetId),
     })
@@ -398,7 +398,7 @@ describe('e2e arkade offers — what OFFER_MARKETS actually builds', () => {
     }
   })
 
-  // Its own `SWAP_DB_PATH`/`ARK_DB_PATH`, sharing no handle with the wallet this
+  // Its own `SWAP_DB_PATH`/`WALLET_DB_PATH`, sharing no handle with the wallet this
   // suite already holds open. A fresh path has no suffixed sibling, so
   // `resolveDbLayout` is consolidated and this IS the admin store boot reads.
   const boot = async (offerMarkets: string | undefined) => {
@@ -423,11 +423,11 @@ describe('e2e arkade offers — what OFFER_MARKETS actually builds', () => {
     await admin.close()
 
     setEnv('SWAP_DB_PATH', swapDbPath)
-    setEnv('ARK_DB_PATH', join(dir, `ark-${randomBytes(6).toString('hex')}.sqlite`))
+    setEnv('WALLET_DB_PATH', join(dir, `ark-${randomBytes(6).toString('hex')}.sqlite`))
     setEnv('OFFER_MARKETS', offerMarkets)
     setEnv('OFFER_MIN_FILL_AMOUNT', '1')
     setEnv('OFFER_MAX_FILL_AMOUNT', '1000000000000')
-    return createServices(loadConfig())
+    return createServices(configFromKnobs(process.env))
   }
 
   it(

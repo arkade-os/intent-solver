@@ -297,7 +297,7 @@ export interface SendFeeEstimate {
    * exceed `feeSats`: this only separates price from cost; it does not create a
    * larger margin or weaken the payment cap. The send orchestrator persists
    * `feeSats` as {@link PayInvoiceParams.maxFeeSats} and uses this field only to
-   * calculate the lockup amount.
+   * calculate the lockup amount, raised to `feeSats` less its own bps cut when lower.
    */
   billableFeeSats?: number
 }

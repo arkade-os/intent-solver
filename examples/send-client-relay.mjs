@@ -10,11 +10,12 @@
 // on-chain and claims; this client watches the vtxo disappear as its
 // completion signal (an rfq_status_request over the relay also works).
 //
-// Env: this client's own ARK_MNEMONIC / ARK_SERVER_URL / EMULATOR_URL /
+// Env: this client's own WALLET_MNEMONIC / ARKADE_OPERATOR_URL / EMULATOR_URL /
 // SWAP_NETWORK — its own view of every service, never taken from the solver.
 
 import { hex } from '@scure/base'
-import { createArkadeContext, deriveNostrIdentity, loadConfig } from '../packages/solver-app/dist/index.js'
+import { createArkadeContext, deriveNostrIdentity } from '../packages/solver-app/dist/index.js'
+import { configFromKnobs } from '../packages/solver-app/dist/config.js'
 import { lockupSpent, nostrRelayTransport, relayTransport, sendToLightning } from './lib/swap-client.mjs'
 
 const [relayUrl, solverPubkey, bolt11] = process.argv.slice(2)
@@ -23,7 +24,7 @@ if (!relayUrl || !solverPubkey || !bolt11) {
   process.exit(1)
 }
 
-const config = loadConfig()
+const config = configFromKnobs(process.env)
 const arkade = await createArkadeContext(config.arkade)
 const me = hex.encode(await arkade.identity.xOnlyPublicKey())
 // Which framing to speak. `dev` is scripts/mock-relay.mjs's broker shape, and
@@ -55,7 +56,7 @@ try {
     bolt11,
     onEvent: (name, data) => {
       if (name === 'decoded') console.log(`sending ${data.amountSats} sats, payment hash ${data.paymentHash}`)
-      if (name === 'funded') console.log(`funded ${data.amountSats} sats at own derivation, arkTxid ${data.fundTxid}`)
+      if (name === 'funded') console.log(`funded ${data.amountSats} sats at own derivation, arkadeTxid ${data.fundTxid}`)
     },
   })
 } catch (error) {

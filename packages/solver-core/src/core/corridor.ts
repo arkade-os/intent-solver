@@ -86,6 +86,7 @@ export interface CorridorSwapView {
  */
 export interface CorridorReader {
   readonly descriptor: CorridorDescriptor
+  outstandingArkadeSats?(): Promise<number>
 
   /**
    * This corridor's status payload for an rfq id, or null when the id is not
@@ -279,9 +280,6 @@ export interface Corridor extends CorridorReader {
 
   /** Operator-forced refund. Absent means the console offers no such button. */
   refundNow?(id: string): Promise<string | null>
-
-  /** Operator-forced claim. Absent means the console offers no such button. */
-  claimNow?(id: string): Promise<{ txid: string } | { refused: string }>
 }
 
 export interface CorridorSet extends Iterable<Corridor> {

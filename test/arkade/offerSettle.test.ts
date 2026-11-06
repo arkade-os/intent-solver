@@ -19,7 +19,7 @@
  */
 import { describe, it, expect, vi } from 'vitest'
 import { Extension, UnknownPacket, asset, type ExtensionPacket } from '@arkade-os/sdk'
-import { encodeOffer, OFFER_PACKET_TYPE, type Offer } from '@arkade-os/swap'
+import { encodeOffer, OFFER_PACKET_TYPE, type Offer } from '@arkade-os/swap/protocol'
 import { Transaction } from '@scure/btc-signer'
 import { base64, hex } from '@scure/base'
 import { offerSettleFor, type OfferFillIntent } from '@arkade-os/solver-arkade/arkade/offerSettle.js'
@@ -109,6 +109,17 @@ describe('offerSettleFor — the fill it submits', () => {
     expect(hex.encode(filled.swapPkScript)).toBe(SWAP_SCRIPT_HEX)
     expect(filled.makerPkScript).toEqual(MAKER_SCRIPT)
     expect(deposit).toEqual({ txid: txidOf(raw), vout: 0, value: DEPOSIT_SATS, assetAmount: 900n })
+  })
+
+  it('forwards the submission latch, which is what keeps a walk-back sound', async () => {
+    const published = offer()
+    const raw = fundingTx(published)
+    const { settle, fulfill } = build(raw)
+    const options = { markSubmitting: async () => true }
+
+    await settle(intentFor(published, raw), options)
+
+    expect((fulfill.mock.calls[0]! as unknown as unknown[])[4]).toBe(options)
   })
 
   it('carries no asset amount when the deposit is sats', async () => {

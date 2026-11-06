@@ -16,10 +16,20 @@ const CARRIER = { dustSats: 330n, pricedByDefault: false }
 const USDA = 'aa'.repeat(34)
 const OTHER = 'bb'.repeat(34)
 const NAMED = [
-  { symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: true }, approvalThresholdUnits: null },
+  {
+    symbol: 'USDA',
+    assetId: USDA,
+    enabled: { clientGivesAsset: true, clientGetsAsset: true },
+    approvalThresholdUnits: null,
+  },
 ]
 const BOTH_CLOSED = [
-  { symbol: 'USDA', assetId: USDA, enabled: { sell_base: false, buy_base: false }, approvalThresholdUnits: null },
+  {
+    symbol: 'USDA',
+    assetId: USDA,
+    enabled: { clientGivesAsset: false, clientGetsAsset: false },
+    approvalThresholdUnits: null,
+  },
 ]
 // Shares USDA's derived stem: `rfqSymbolFor` reads only the first 7 and last 4 hex.
 const TWIN = 'aaaaaaa' + 'b'.repeat(57) + 'aaaa'
@@ -36,9 +46,24 @@ const LEG_A = 'ee'.repeat(34)
 const LEG_B = 'ff'.repeat(34)
 // Named/unnamed x both-open/one-closed/both-closed, plus an asset on both legs.
 const SHAPES = [
-  { symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: true }, approvalThresholdUnits: null },
-  { symbol: 'USDB', assetId: ONE_CLOSED, enabled: { sell_base: true, buy_base: false }, approvalThresholdUnits: null },
-  { symbol: 'USDC', assetId: OTHER, enabled: { sell_base: false, buy_base: false }, approvalThresholdUnits: null },
+  {
+    symbol: 'USDA',
+    assetId: USDA,
+    enabled: { clientGivesAsset: true, clientGetsAsset: true },
+    approvalThresholdUnits: null,
+  },
+  {
+    symbol: 'USDB',
+    assetId: ONE_CLOSED,
+    enabled: { clientGivesAsset: false, clientGetsAsset: true },
+    approvalThresholdUnits: null,
+  },
+  {
+    symbol: 'USDC',
+    assetId: OTHER,
+    enabled: { clientGivesAsset: false, clientGetsAsset: false },
+    approvalThresholdUnits: null,
+  },
 ]
 
 // An INSERT from a binary predating the serving columns: it names none of them.
@@ -170,6 +195,80 @@ describe('the action audit log', () => {
   })
 })
 
+describe('operator withdrawals', () => {
+  const input = { id: 'withdraw-1', scope: 'scope-a', source: 'arkade', address: 'bc1-test', amountSats: 2_000_000 }
+
+  it('persists the prepared, sending and sent states across an opener', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    try {
+      const first = await AdminStore.open(driver, clock)
+      expect(await first.createOperatorWithdrawal(input)).toEqual({
+        ...input,
+        feeSats: null,
+        reference: null,
+        state: 'preparing',
+        createdAt: now,
+        updatedAt: now,
+      })
+      now += 1
+      await first.transitionOperatorWithdrawal(input.id, 'preparing', 'sending', { feeSats: 9_275 })
+      const reopened = await AdminStore.open(driver, clock)
+      now += 1
+      expect(
+        await reopened.transitionOperatorWithdrawal(input.id, 'sending', 'sent', { reference: 'tx-1' }),
+      ).toMatchObject({
+        id: input.id,
+        state: 'sent',
+        reference: 'tx-1',
+        feeSats: 9_275,
+        createdAt: 1_000_000,
+        updatedAt: 1_000_002,
+      })
+      expect(await reopened.listOperatorWithdrawals('scope-a', 1_000_000)).toHaveLength(1)
+      expect(await reopened.listOperatorWithdrawals('scope-b', 0)).toEqual([])
+    } finally {
+      await driver.close()
+    }
+  })
+
+  it('keeps older uncertain sends visible and validates transitions', async () => {
+    await store.createOperatorWithdrawal(input)
+    await store.transitionOperatorWithdrawal(input.id, 'preparing', 'sending', { feeSats: 0 })
+    now += 20
+    await store.transitionOperatorWithdrawal(input.id, 'sending', 'uncertain')
+    expect((await store.listOperatorWithdrawals('scope-a', now)).map((row) => row.id)).toEqual([input.id])
+    await expect(
+      store.transitionOperatorWithdrawal(input.id, 'sending', 'sent', { reference: 'tx-1' }),
+    ).rejects.toThrow(/not sending/)
+    await expect(store.transitionOperatorWithdrawal(input.id, 'uncertain', 'sent')).rejects.toThrow(/requires fee and/)
+    expect((await store.getOperatorWithdrawal(input.id))?.state).toBe('uncertain')
+    await store.transitionOperatorWithdrawal(input.id, 'uncertain', 'sent', { reference: 'tx-1' })
+    expect(await store.listOperatorWithdrawals('scope-a', now + 1)).toEqual([])
+    await expect(store.transitionOperatorWithdrawal(input.id, 'sent', 'failed')).rejects.toThrow(/invalid/)
+  })
+
+  it('rejects invalid amounts and duplicate ids without changing the first record', async () => {
+    await expect(store.createOperatorWithdrawal({ ...input, amountSats: Number.MAX_SAFE_INTEGER + 1 })).rejects.toThrow(
+      /safe integer/,
+    )
+    await expect(store.createOperatorWithdrawal({ ...input, amountSats: 0 })).rejects.toThrow(/positive/)
+    await store.createOperatorWithdrawal(input)
+    await expect(store.createOperatorWithdrawal(input)).rejects.toThrow()
+    expect((await store.getOperatorWithdrawal(input.id))?.amountSats).toBe(2_000_000)
+  })
+
+  it('adds the journal to a database created by an older binary', async () => {
+    const driver = await preUpgradeDriver()
+    try {
+      const reopened = await AdminStore.open(driver, clock)
+      await reopened.createOperatorWithdrawal(input)
+      expect((await reopened.listOperatorWithdrawals(input.scope, 0))[0]?.id).toBe(input.id)
+    } finally {
+      await driver.close()
+    }
+  })
+})
+
 describe('admin_market gains the serving columns', () => {
   it('adds them to a table that shipped without them', async () => {
     const driver = betterSqliteDriver(':memory:')
@@ -213,7 +312,12 @@ describe('the one-shot serving seed', () => {
   const seed = {
     offerMarkets: [{ a: null, b: USDA }],
     tokens: [
-      { symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: false }, approvalThresholdUnits: null },
+      {
+        symbol: 'USDA',
+        assetId: USDA,
+        enabled: { clientGivesAsset: false, clientGetsAsset: true },
+        approvalThresholdUnits: null,
+      },
     ],
   }
 
@@ -298,7 +402,7 @@ describe('the one-shot serving seed', () => {
         {
           symbol: rfqSymbolFor(USDA),
           assetId: OTHER,
-          enabled: { sell_base: true, buy_base: true },
+          enabled: { clientGivesAsset: true, clientGetsAsset: true },
           approvalThresholdUnits: null,
         },
       ],
@@ -498,7 +602,12 @@ describe('an incoherent serving row cannot brick startup', () => {
     const store = await AdminStore.open(driver, () => 2_000, {
       offerMarkets: [],
       tokens: [
-        { symbol: 'USDA', assetId: USDA, enabled: { sell_base: true, buy_base: false }, approvalThresholdUnits: null },
+        {
+          symbol: 'USDA',
+          assetId: USDA,
+          enabled: { clientGivesAsset: false, clientGetsAsset: true },
+          approvalThresholdUnits: null,
+        },
       ],
     })
     const rows = await store.listMarkets()
@@ -520,7 +629,7 @@ describe('an incoherent serving row cannot brick startup', () => {
     const driver = await rolledBack()
     const store = await AdminStore.open(driver, () => 2_000)
     expect(store.repairedServing[0]).toContain(`wrote symbol = ${rfqSymbolFor(USDA)}`)
-    expect(store.repairedServing[0]).toContain('ASSET_MARKETS named no token')
+    expect(store.repairedServing[0]).toContain('the config named no asset')
   })
 
   it('says what it wrote to the row when it fails closed, never that the market stopped quoting', async () => {

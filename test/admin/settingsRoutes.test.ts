@@ -23,26 +23,23 @@ const baseConfig = {
   relayProtocol: 'nostr',
   openRfqMaxBidsPerMinute: 30,
   emulatorUrl: 'http://emulator.test',
-  arkade: { arkServerUrl: 'http://ark.test', databasePath: '.data/ark.sqlite' },
+  arkade: { operatorUrl: 'http://arkade.test', databasePath: '.data/ark.sqlite' },
   limits: { minSats: 1_000, maxSats: 100_000 },
   maxExposedSats: 300_000,
   corridorLimits: {
     'arkade:BTC->lightning:BTC': { minSats: 1_000, maxSats: 100_000 },
     'lightning:BTC->arkade:BTC': { minSats: 1_000, maxSats: 100_000 },
     'arkade:BTC->onchain:BTC': { minSats: 1_000, maxSats: 100_000 },
-    'onchain:BTC->arkade:BTC': { minSats: 1_000, maxSats: 100_000 },
   },
   corridorFees: {
     'arkade:BTC->lightning:BTC': { bps: 0, flatSats: 0 },
     'lightning:BTC->arkade:BTC': { bps: 0, flatSats: 0 },
     'arkade:BTC->onchain:BTC': { bps: 0, flatSats: 0 },
-    'onchain:BTC->arkade:BTC': { bps: 0, flatSats: 0 },
   },
   corridorEnabled: {
     'arkade:BTC->lightning:BTC': true,
     'lightning:BTC->arkade:BTC': true,
     'arkade:BTC->onchain:BTC': false,
-    'onchain:BTC->arkade:BTC': true,
   },
   // Rendered in the read-only block, which iterates it.
   sendHintScidDenylist: new Set<string>(),
@@ -223,7 +220,7 @@ describe('PATCH /api/settings', () => {
 
   it('refuses a non-editable key', async () => {
     const { app, setOverrideWithAudit } = build()
-    expect((await patch(app, { key: 'ARK_MNEMONIC', value: 'hunter2' })).status).toBe(400)
+    expect((await patch(app, { key: 'WALLET_MNEMONIC', value: 'hunter2' })).status).toBe(400)
     expect(setOverrideWithAudit).not.toHaveBeenCalled()
   })
 
@@ -231,7 +228,7 @@ describe('PATCH /api/settings', () => {
     const { app, setOverrideWithAudit } = build()
     const response = await patch(app, { key: 'ONCHAIN_SEND_ENABLED', value: 'true' })
     expect(response.status).toBe(400)
-    expect(((await response.json()) as { message: string }).message).toMatch(/disabled in the environment/i)
+    expect(((await response.json()) as { message: string }).message).toMatch(/disabled in the config/i)
     expect(setOverrideWithAudit).not.toHaveBeenCalled()
   })
 

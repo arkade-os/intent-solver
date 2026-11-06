@@ -68,10 +68,14 @@ describe('.github/e2e-groups.json', () => {
     }
   })
 
-  it('runs blockTimelocks, and only blockTimelocks, on a block-typed arkd', () => {
+  it('runs blockTimelocks on a block-typed arkd, and buys no block-typed stack without a reason', () => {
     const blockTyped = groups.filter((group) => group.arkdTimelocks === 'blocks')
     expect(blockTyped.flatMap((group) => group.files)).toContain('blockTimelocks.e2e.test.ts')
-    expect(blockTyped.length, 'a second block-typed group buys a stack for nothing').toBe(1)
+    // `swept-refund` mines past the batch expiry, which sweeps the whole float a neighbour would fund from.
+    expect(
+      blockTyped.map((group) => group.name).sort(),
+      'each block-typed group is a stack of its own; add one only for a file that cannot share',
+    ).toEqual(['lifecycle', 'swept-refund'])
   })
 
   it('asks for covclaimd wherever a file needs it', () => {

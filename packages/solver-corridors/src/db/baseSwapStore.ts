@@ -77,8 +77,15 @@ export const assertColumns = (columns: string[], allowed: ReadonlySet<string>, m
 /** A nullable column; `undefined` (a column this database predates) reads as null too. */
 export const text = (value: unknown): string | null => (value === null || value === undefined ? null : String(value))
 
+/** NULL, a claim from before this column, escalates like `submitting`: that version may have submitted. */
+export type FillPhase = 'selecting' | 'submitting'
+
 export const numberOrNull = (value: unknown): number | null =>
   value === null || value === undefined ? null : Number(value)
+
+/** A space-separated txid column: the earlier versions of a spend this row has replaced, oldest last. */
+export const txidList = (value: unknown): string[] =>
+  value === null || value === undefined ? [] : String(value).split(' ').filter(Boolean)
 
 /** Additive migration: `CREATE TABLE IF NOT EXISTS` never alters an existing table. */
 const SQL_IDENTIFIER = /^[a-z_][a-z0-9_]*$/
@@ -143,6 +150,15 @@ export abstract class BaseSwapStore<Row, State extends string> {
     const raw = await this.driver.get<RawRow>(
       `SELECT * FROM ${this.shape.table} WHERE rfq_id = ? ORDER BY created_at DESC LIMIT 1`,
       [rfqId],
+    )
+    return raw ? this.shape.toRow(raw) : null
+  }
+
+  /** Newest first for `findByRfqId`'s reason: two rows share a script only through a re-quote against one secret, and then the live row is the later. */
+  async findByPkScript(pkScript: string): Promise<Row | null> {
+    const raw = await this.driver.get<RawRow>(
+      `SELECT * FROM ${this.shape.table} WHERE pk_script = ? ORDER BY created_at DESC LIMIT 1`,
+      [pkScript],
     )
     return raw ? this.shape.toRow(raw) : null
   }
@@ -299,13 +315,25 @@ export abstract class BaseSwapStore<Row, State extends string> {
     to: State,
     fields: Partial<Record<string, unknown>> = {},
   ): Promise<boolean> {
+    return this.transitionWhere(id, from, to, fields, '')
+  }
+
+  /** {@link transition}, won only where `guard` (an SQL condition on the row) also holds. */
+  protected async transitionWhere(
+    id: string,
+    from: State,
+    to: State,
+    fields: Partial<Record<string, unknown>>,
+    guard: string,
+  ): Promise<boolean> {
     if (!this.shape.legalEdges[from].includes(to)) {
       throw new Error(`illegal transition ${from} -> ${to}: not an edge of the ${this.shape.lifecycleLabel}`)
     }
     const columns = Object.keys(fields)
     assertColumns(columns, this.shape.transitionColumns, 'transition()')
     const assignments = ['state = ?', 'updated_at = ?', ...columns.map((c) => `${c} = ?`)].join(', ')
-    const result = await this.driver.run(`UPDATE ${this.shape.table} SET ${assignments} WHERE id = ? AND state = ?`, [
+    const where = `id = ? AND state = ?${guard ? ` AND ${guard}` : ''}`
+    const result = await this.driver.run(`UPDATE ${this.shape.table} SET ${assignments} WHERE ${where}`, [
       to,
       this.now(),
       ...columns.map((c) => fields[c]),
@@ -349,14 +377,15 @@ export abstract class BaseSwapStore<Row, State extends string> {
 
   /**
    * Won by ONE caller before it spends; the `transition` CAS after gates only recording.
-   * No TTL: an expiry lets a second worker pay while the first is in flight. Protected
-   * because `send_swap` has no `fund_started_at`; stores with the column widen it.
+   * No TTL unless `staleBefore` is given: an expiry lets a second worker pay while the first is
+   * in flight, so only a store whose payment cannot be repeated passes one. Protected because
+   * `send_swap` has no `fund_started_at`; stores with the column widen it.
    */
-  protected async claimFundLease(id: string, from: State): Promise<boolean> {
+  protected async claimFundLease(id: string, from: State, staleBefore?: number): Promise<boolean> {
     const result = await this.driver.run(
       `UPDATE ${this.shape.table} SET fund_started_at = ?, updated_at = ?
-       WHERE id = ? AND state = ? AND fund_started_at IS NULL`,
-      [this.now(), this.now(), id, from],
+       WHERE id = ? AND state = ? AND (fund_started_at IS NULL OR fund_started_at <= ?)`,
+      [this.now(), this.now(), id, from, staleBefore ?? -1],
     )
     return result.changes === 1
   }

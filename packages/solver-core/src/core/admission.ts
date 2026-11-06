@@ -39,11 +39,14 @@ const releasing = (undo: readonly (() => void)[]): Reservation => {
 }
 
 export class AdmissionControl implements AdmissionStrategy {
+  constructor(private readonly inventoryFor?: (request: AdmissionRequest) => Promise<AdmissionRequest['inventory']>) {}
   /** Sats claimed by quotes that have passed the cap check but not yet landed. */
   private reserved = 0
 
   /** The same against the WALLET, apart from `reserved` because it is a different ceiling. */
   private reservedFloat = 0
+  private readonly inventory = new Map<string, number>()
+  private inventoryGeneration = 0n
 
   /**
    * Serialises read-modify-write on both counters. A promise chain rather than a lock
@@ -86,6 +89,40 @@ export class AdmissionControl implements AdmissionStrategy {
     }
   }
 
+  outstandingInventorySats(poolId: string): number {
+    return this.inventory.get(poolId) ?? 0
+  }
+
+  restoreInventory(poolId: string, requiredSats: number): Reservation {
+    if (!poolId || !Number.isSafeInteger(requiredSats) || requiredSats <= 0)
+      throw new RangeError('invalid inventory reservation')
+    const next = this.outstandingInventorySats(poolId) + requiredSats
+    if (!Number.isSafeInteger(next)) throw new RangeError('inventory reservation exceeds safe integer range')
+    this.inventory.set(poolId, next)
+    // Release-only: a new hold is counted by outstandingInventorySats inside the queue.
+    return releasing([
+      () => {
+        this.inventory.set(poolId, this.outstandingInventorySats(poolId) - requiredSats)
+        this.inventoryGeneration++
+      },
+    ])
+  }
+
+  reserveInventory(
+    poolId: string,
+    requiredSats: number,
+    available: number,
+    owed: () => Promise<number>,
+  ): Promise<Reservation | null> {
+    return this.serialise(async () => {
+      const obligations = await owed()
+      if (!Number.isSafeInteger(available) || available < 0 || !Number.isSafeInteger(obligations) || obligations < 0)
+        throw new RangeError('invalid inventory balance or obligations')
+      if (obligations + this.outstandingInventorySats(poolId) + requiredSats > available) return null
+      return this.restoreInventory(poolId, requiredSats)
+    })
+  }
+
   /**
    * {@link AdmissionStrategy}'s shape over {@link reserve}.
    *
@@ -95,29 +132,63 @@ export class AdmissionControl implements AdmissionStrategy {
    * involved at all.
    */
   async admit(request: AdmissionRequest): Promise<Reservation | null> {
+    if (!(request.giveSats > 0)) throw new RangeError(`admit() needs a positive size, got ${request.giveSats}`)
+    const generation = this.inventoryGeneration
+    const guardedInventory = request.inventory ?? (await this.inventoryFor?.(request))
     return this.serialise(async (): Promise<Reservation | null> => {
-      if (!(request.giveSats > 0)) throw new RangeError(`admit() needs a positive size, got ${request.giveSats}`)
       const exposure = this.claimExposure(request.giveSats, request.capSats, await request.committedSats())
       if (exposure === null) {
         request.onRefused?.('exposure')
         return null
       }
       const float = request.float
-      if (float === undefined) return releasing([exposure])
-      // Missing includes the window after a withdrawal invalidates the held
-      // balance. Treating it as unlimited could quote against already-spent sats.
-      if (float.available === null) {
-        exposure()
-        request.onRefused?.('float')
-        return null
+      const undo: Array<() => void> = [exposure]
+      try {
+        const inventory = guardedInventory
+        if (inventory) {
+          const owed = await inventory.owedSats()
+          if (
+            !Number.isSafeInteger(owed) ||
+            owed < 0 ||
+            !Number.isSafeInteger(inventory.requiredSats) ||
+            inventory.requiredSats <= 0 ||
+            (inventory.available !== null &&
+              (!Number.isSafeInteger(inventory.available.sats) || inventory.available.sats < 0))
+          ) {
+            throw new RangeError('invalid inventory requirement')
+          }
+          if (
+            // A released source hold may already have spent the balance read outside this queue.
+            generation !== this.inventoryGeneration ||
+            inventory.available === null ||
+            owed + this.outstandingInventorySats(inventory.poolId) + inventory.requiredSats > inventory.available.sats
+          ) {
+            exposure()
+            request.onRefused?.('float')
+            return null
+          }
+          const held = this.restoreInventory(inventory.poolId, inventory.requiredSats)
+          undo.push(() => held.release())
+        }
+        if (float === undefined) return releasing(undo)
+        // Missing includes the window after a withdrawal invalidates the held
+        // balance. Treating it as unlimited could quote against already-spent sats.
+        if (float.available === null) {
+          undo.forEach((release) => release())
+          request.onRefused?.('float')
+          return null
+        }
+        const claimed = this.claimFloat(float.requiredSats, float.available.sats, await float.owedSats())
+        if (claimed === null) {
+          undo.forEach((release) => release())
+          request.onRefused?.('float')
+          return null
+        }
+        return releasing([...undo, claimed])
+      } catch (error) {
+        undo.forEach((release) => release())
+        throw error
       }
-      const claimed = this.claimFloat(float.requiredSats, float.available.sats, await float.owedSats())
-      if (claimed === null) {
-        exposure()
-        request.onRefused?.('float')
-        return null
-      }
-      return releasing([exposure, claimed])
     })
   }
 

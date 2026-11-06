@@ -24,6 +24,8 @@ export interface Notifier {
 
 export interface NotifierOptions {
   sinks: readonly NotifySink[]
+  /** Heads every message, so several solvers can share one channel. */
+  label?: string
   attempts?: number
   maxQueue?: number
   baseDelayMs?: number
@@ -35,12 +37,20 @@ const DEFAULT_ATTEMPTS = 3
 const DEFAULT_MAX_QUEUE = 100
 const DEFAULT_BASE_DELAY_MS = 500
 
+export const limitNotification = (text: string): string => {
+  const limit = 4000
+  if (text.length <= limit) return text
+  const cut = `… (message cut at ${limit} characters)`
+  return text.slice(0, limit - cut.length) + cut
+}
+
 export const createNotifier = (options: NotifierOptions): Notifier => {
   const { sinks, onDeliveryFailed } = options
   const attempts = options.attempts ?? DEFAULT_ATTEMPTS
   const maxQueue = options.maxQueue ?? DEFAULT_MAX_QUEUE
   const baseDelayMs = options.baseDelayMs ?? DEFAULT_BASE_DELAY_MS
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
+  const tag = options.label
 
   const queue: string[] = []
   const stats: NotifyStats = { sent: 0, failed: 0, dropped: 0 }
@@ -97,7 +107,7 @@ export const createNotifier = (options: NotifierOptions): Notifier => {
         queue.shift()
         stats.dropped += 1
       }
-      queue.push(text)
+      queue.push(limitNotification(tag ? `*[${tag}]* ${text}` : text))
       schedule()
     },
     stats: () => ({ ...stats }),

@@ -19,12 +19,11 @@ import { economicsOf, type SwapEconomics } from '@arkade-os/solver-core/analytic
 import { phaseOfStates } from '@arkade-os/solver-core/core/swapView.js'
 import { amountSatsOf } from '@arkade-os/solver-core/invoice/decode.js'
 import type { CorridorDescriptor } from '@arkade-os/solver-core/core/corridorDescriptor.js'
-import { LN_SEND, LN_RECEIVE, ONCHAIN_SEND, ONCHAIN_RECEIVE } from './index.js'
+import { LN_SEND, LN_RECEIVE, ONCHAIN_SEND } from './index.js'
 import { presentedState } from './projections.js'
 import type { SendSwapRow } from '../db/swaps.js'
 import type { ReceiveSwapRow } from '../db/receiveSwaps.js'
 import type { OnchainSendSwapRow } from '../db/onchainSwaps.js'
-import type { OnchainReceiveSwapRow } from '../db/onchainReceiveSwaps.js'
 import type { AssetRfqSwapRow } from '../db/assetRfqSwaps.js'
 
 /**
@@ -168,24 +167,6 @@ export const onchainSendEconomics = (row: OnchainSendSwapRow): SwapEconomics =>
     // lifecycle is the evidence. @see fundedByLifecycle
     inbound: sats(fundedByLifecycle(row.state, row.refundOutcome) ? row.amountSats : null),
     outbound: sats(row.payoutSats),
-  })
-
-/**
- * Onchain receive, read from the AMENDED pair when there is one.
- *
- * `fundedValueSats`/`fundedPayoutSats` record what the client's output actually
- * held and the payout re-derived against it, and they must be read TOGETHER:
- * mixing the amended intake with the quoted payout invents a spread neither
- * number describes. Absence means the swap was never amended, so the quoted
- * pair is the fact.
- */
-export const onchainReceiveEconomics = (row: OnchainReceiveSwapRow): SwapEconomics =>
-  economicsOf({
-    ...common(ONCHAIN_RECEIVE, row),
-    // `fundingTxid` is the CLIENT's HTLC — the solver's own broadcast is
-    // `arkadeFundTxid` — so it is exact evidence that the intake arrived.
-    inbound: sats(row.fundingTxid === null ? null : (row.fundedValueSats ?? row.amountSats)),
-    outbound: sats(row.fundedPayoutSats ?? row.payoutSats),
   })
 
 /**

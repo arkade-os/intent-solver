@@ -63,6 +63,8 @@ export interface FundFigure {
   amount: string | null
   /** Why it could not be read, or a caveat that has to travel with the number. */
   note?: string
+  /** Routine at zero (pending, unconfirmed, swept), so the chat report omits it then. If every readable figure is quiet zero, the report says `nothing held`. */
+  quietWhenZero?: boolean
 }
 
 export interface FundBalance {
@@ -195,7 +197,11 @@ export interface FundSource extends FundSourceInfo {
    * rounding: this is the money path, and a rounded withdrawal is a wrong number
    * nobody typed.
    */
-  withdraw?(params: { address: string; amount: string }): Promise<FundWithdrawal>
+  withdraw?(params: {
+    address: string
+    amount: string
+    onSending?: (feeSats: number) => Promise<void>
+  }): Promise<FundWithdrawal>
 }
 
 /** Which of the three optional operations a source actually offers. */

@@ -537,7 +537,8 @@ describe('experimental provider-funded receiver against real ERC20Swap runtime',
       }
       await expect(backend.activate('no-factory', receiverAddress(terms), terms)).rejects.toThrow('factory')
       const before = await tokenBalance(WETH, terms.lock.refundAddress)
-      await backend.recover('no-factory-recovery', receiverAddress(terms), terms)
+      const recovered = await backend.recover('no-factory-recovery', receiverAddress(terms), terms)
+      expect((await receiptFor(recovered.hash)).status).toBe('0x1')
       expect(await tokenBalance(WETH, terms.lock.refundAddress)).toBe(before + AMOUNT)
     } finally {
       await driver.close()

@@ -30,6 +30,12 @@ import {
 import { EVM_SEND_EXPOSED } from '@arkade-os/solver-core/core/evmSwapState.js'
 import type { Erc20SwapLock } from '@arkade-os/solver-rails-evm/evm/erc20Swap.js'
 import type { ArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
+import {
+  refundColumnsOnly,
+  refundSweptLockupFor,
+  sweptOpsFrom,
+  type SweptLockupRefund,
+} from '@arkade-os/solver-arkade/arkade/sweptLockupRefund.js'
 import { provenDepth } from '@arkade-os/solver-rails-evm/evm/lockDepth.js'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
@@ -73,7 +79,7 @@ export interface EvmSendServiceDeps {
   acceptingQuotes?: () => boolean
   /** Is the client's Arkade lockup funded for the quoted amount? */
   arkadeLockupFunded(row: EvmSendSwapRow): Promise<boolean>
-  /** Claim the Arkade lockup with the revealed preimage; resolves to the ark txid. */
+  /** Claim the Arkade lockup with the revealed preimage; resolves to the Arkade txid. */
   claimArkade(row: EvmSendSwapRow, preimage: string): Promise<string>
   /** The lock as the contract keys it - built from the ROW, never from live config. */
   lockFor(row: EvmSendSwapRow): Erc20SwapLock
@@ -946,5 +952,20 @@ export class EvmSendSwapService {
       }
     }
     return pushed
+  }
+
+  /**
+   * `refused` rows only, and no verdict hook: an exposed row here means an EVM
+   * payout is out, which the chain answers rather than a Lightning rail.
+   */
+  async refundSweptLockup(pkScript: string): Promise<SweptLockupRefund> {
+    const { store, arkade } = this.deps
+    const ops = sweptOpsFrom(arkade, evmSendCovenantRowFor)
+    if (!ops) return null
+    return refundSweptLockupFor(pkScript, {
+      ...ops,
+      find: (script) => store.findByPkScript(script),
+      record: (row, fields) => store.patch(row.id, refundColumnsOnly(fields)),
+    })
   }
 }
