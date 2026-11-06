@@ -4,7 +4,7 @@ import type { SaveUnrolledSpend, UnrolledSpendStep } from '@arkade-os/solver-ark
 import type { BaseSwapStore } from './db/baseSwapStore.js'
 import { outpointKey, uncollected, type AdoptedOutput } from './legs/arkadeLockup.js'
 
-const SPENT_BY_ANOTHER = 'spent on L1 by a transaction that is not ours'
+const SPENT_BY_ANOTHER = 'spent on L1 by an unrecognized transaction; destination needs review'
 
 /**
  * Both receive legs' handling of one co-signed L1 refund step. `spent` and `closed` escalate
@@ -113,7 +113,11 @@ export const settleUnrolledClaims = async <S extends string>(
     return false
   }
   if (claims.lost.length === 0) return store.transition(id, edge.from, edge.to, {})
-  await store.fail(id, edge.from, `L1 claim of the unrolled lockup lost: ${claims.lost.join('; ')} — ${recourse()}`)
+  await store.fail(
+    id,
+    edge.from,
+    `L1 claim of the unrolled lockup needs review: ${claims.lost.join('; ')} — ${recourse()}`,
+  )
   return false
 }
 

@@ -15,17 +15,19 @@ import {
   setArkPsbtField,
   Transaction,
   VtxoTaprootTree,
+  type ExitPackage,
   type OnchainProvider,
   type TapLeafScript,
 } from '@arkade-os/sdk'
 import { base64, hex } from '@scure/base'
 import { ONCHAIN_DUST_SATS } from '@arkade-os/solver-core/core/onchainSend.js'
+import type { RelativeDelay } from '@arkade-os/solver-core/core/timelocks.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import type { CovenantSwapScript } from './covenant.js'
+import type { CovenantScriptRow } from './covenantRow.js'
 import type { ArkadeContext } from './wallet.js'
 
-/** What the row keeps between ticks. */
-export interface UnrolledSpendRecord {
+interface CoSignedSpendRecord {
   txid: string
   /** The final transaction, hex, once an explorer has it. */
   tx: string | null
@@ -35,6 +37,13 @@ export interface UnrolledSpendRecord {
   cpfpTxid: string | null
   /** The final child, hex, once an explorer has it: arkd co-signs one, so a dropped one is resent. */
   cpfpTx?: string | null
+}
+
+/** What the row keeps between ticks. */
+export interface UnrolledSpendRecord extends CoSignedSpendRecord {
+  soloPackage?: ExitPackage
+  priorCosigned?: CoSignedSpendRecord
+  confirmedTxid?: string
 }
 
 /** Persists a record before arkd is asked to co-sign it, so a lost reply cannot lose arkd's one signature. */
@@ -56,9 +65,9 @@ export type UnrolledSpend = {
   script: CovenantSwapScript
   txid: string
   vout: number
-  /** The script's shortest CSV, seconds: arkd stops co-signing as it nears. */
-  exitDelaySeconds: number
-} & ({ refundLocktime: number } | { preimage: Uint8Array })
+  /** The script's shortest CSV: arkd stops co-signing as it matures. */
+  exitDelay: RelativeDelay
+} & ({ refundLocktime: number } | { preimage: Uint8Array; claimRow?: CovenantScriptRow })
 
 export interface UnrolledSpendDeps {
   chain: Pick<
@@ -70,6 +79,11 @@ export interface UnrolledSpendDeps {
   cosign(psbtBase64: string): Promise<string>
   /** The wallet's boarding script: the spend lands back in the float. */
   boarding: { pkScript: Uint8Array; forfeit(): TapLeafScript; encode(): Uint8Array }
+  solo?: {
+    prepare(lockup: UnrolledSpend): Promise<ExitPackage>
+    progress(pkg: ExitPackage): Promise<{ kind: 'pending' | 'confirmed' } | { kind: 'failed'; reason: string }>
+    ownsSpend?(lockup: UnrolledSpend, txid: string): Promise<boolean>
+  }
   now(): number
   pause?: (ms: number) => Promise<void>
 }
@@ -181,7 +195,12 @@ export class UnrolledSpender {
     const now = this.deps.now()
     if (now - (this.lastAdvance.get(key) ?? -Infinity) < ADVANCE_INTERVAL_SECONDS) return { kind: 'waiting' }
     this.lastAdvance.set(key, now)
-    return record ? this.track(lockup, record, save) : this.start(lockup, save)
+    if (!record) return this.start(lockup, save)
+    if (record.soloPackage) return this.trackSolo(lockup, record)
+    if ('preimage' in lockup && this.deps.solo && (await this.cosignWindowClosed(lockup))) {
+      return this.transitionToSolo(lockup, record, save)
+    }
+    return this.track(lockup, record, save)
   }
 
   private async start(lockup: UnrolledSpend, save: SaveUnrolledSpend): Promise<UnrolledSpendStep> {
@@ -195,6 +214,9 @@ export class UnrolledSpender {
     if (out?.spent) {
       const ours = out.txid === undefined ? null : await this.adopt(out.txid)
       return ours ? this.track(lockup, ours, save) : { kind: 'spent' }
+    }
+    if ('preimage' in lockup && this.deps.solo && (await this.cosignWindowClosed(lockup))) {
+      return this.startSolo(lockup, save)
     }
     const saved: { record?: UnrolledSpendRecord } = {}
     const keep: SaveUnrolledSpend = async (record) => {
@@ -214,12 +236,108 @@ export class UnrolledSpender {
     }
   }
 
+  private async transitionToSolo(
+    lockup: UnrolledSpend,
+    record: UnrolledSpendRecord,
+    save: SaveUnrolledSpend,
+  ): Promise<UnrolledSpendStep> {
+    const status = await this.deps.chain.getTxStatus(record.txid).catch(() => null)
+    if (status?.confirmed) return { kind: 'confirmed', record }
+    const out = (await this.deps.chain.getTxOutspends(lockup.txid))[lockup.vout]
+    if (out?.spent && out.txid === record.txid) return { kind: 'pending', record }
+    if (out?.spent && out.txid !== undefined) {
+      const ours = await this.adopt(out.txid)
+      return ours ? this.track(lockup, ours, save) : { kind: 'spent' }
+    }
+    if (out?.spent) return { kind: 'pending', record }
+    return this.startSolo(lockup, save, record)
+  }
+
+  private async startSolo(
+    lockup: UnrolledSpend,
+    save: SaveUnrolledSpend,
+    priorCosigned?: UnrolledSpendRecord,
+  ): Promise<UnrolledSpendStep> {
+    const solo = this.deps.solo!
+    const parent = Transaction.fromRaw(await this.deps.chain.getRawTransaction(lockup.txid))
+    if (outputScript(parent, lockup.vout) !== hex.encode(lockup.script.pkScript)) {
+      throw new Error(`${lockup.txid}:${lockup.vout} does not pay the lockup script`)
+    }
+    const value = Number(parent.getOutput(lockup.vout).amount)
+    const pkg = await solo.prepare(lockup)
+    const sweep = pkg.steps[0]
+    if (
+      pkg.steps.length !== 1 ||
+      sweep?.kind !== 'sweep' ||
+      sweep.vtxo !== `${lockup.txid}:${lockup.vout}` ||
+      sweep.dependsOnTxid !== lockup.txid ||
+      pkg.vtxos.length !== 1 ||
+      pkg.vtxos[0]?.value !== value
+    ) {
+      throw new Error('unrolled unilateral claim package does not spend the selected output')
+    }
+    const record: UnrolledSpendRecord = {
+      txid: sweep.txid,
+      tx: sweep.hex,
+      feeRate: pkg.feeRate,
+      broadcastAt: this.deps.now(),
+      cpfpTxid: null,
+      soloPackage: pkg,
+      ...(priorCosigned ? { priorCosigned } : {}),
+    }
+    await save(record)
+    return this.trackSolo(lockup, record)
+  }
+
+  private async trackSolo(lockup: UnrolledSpend, record: UnrolledSpendRecord): Promise<UnrolledSpendStep> {
+    const pkg = record.soloPackage
+    const sweep = pkg?.steps[0]
+    if (
+      !pkg ||
+      pkg.steps.length !== 1 ||
+      sweep?.kind !== 'sweep' ||
+      sweep.txid !== record.txid ||
+      sweep.vtxo !== `${lockup.txid}:${lockup.vout}` ||
+      sweep.dependsOnTxid !== lockup.txid
+    ) {
+      throw new Error('stored unrolled unilateral claim does not match the lockup')
+    }
+    const status = await this.deps.chain.getTxStatus(record.txid).catch(() => null)
+    if (record.priorCosigned) {
+      const priorStatus = await this.deps.chain.getTxStatus(record.priorCosigned.txid).catch(() => null)
+      if (priorStatus?.confirmed) {
+        return { kind: 'confirmed', record: { ...record, confirmedTxid: record.priorCosigned.txid } }
+      }
+    }
+    if (status?.confirmed) return { kind: 'confirmed', record: { ...record, confirmedTxid: record.txid } }
+    const out = (await this.deps.chain.getTxOutspends(lockup.txid))[lockup.vout]
+    if (out?.spent && out.txid !== undefined && out.txid !== record.txid) {
+      if (out.txid === record.priorCosigned?.txid) return { kind: 'pending', record }
+      const ours = await this.adopt(out.txid)
+      if (!ours && !(await this.deps.solo?.ownsSpend?.(lockup, out.txid))) return { kind: 'spent' }
+      const adoptedStatus = await this.deps.chain.getTxStatus(out.txid).catch(() => null)
+      return adoptedStatus?.confirmed
+        ? { kind: 'confirmed', record: { ...record, confirmedTxid: out.txid } }
+        : { kind: 'pending', record }
+    }
+    if (out?.spent) return { kind: 'pending', record }
+    const result = await this.deps.solo!.progress(pkg)
+    if (result.kind === 'failed') throw new Error(`unrolled unilateral claim failed: ${result.reason}`)
+    if (result.kind === 'confirmed') {
+      const confirmed = await this.deps.chain.getTxStatus(record.txid).catch(() => null)
+      if (confirmed?.confirmed) return { kind: 'confirmed', record: { ...record, confirmedTxid: record.txid } }
+    }
+    return { kind: 'pending', record }
+  }
+
   private async cosignWindowClosed(lockup: UnrolledSpend): Promise<boolean> {
     const unroll = await this.deps.chain.getTxStatus(lockup.txid).catch(() => null)
-    return (
-      unroll?.confirmed === true &&
-      this.deps.now() >= unroll.blockTime + lockup.exitDelaySeconds - COSIGN_EXIT_MARGIN_SECONDS
-    )
+    if (!unroll?.confirmed) return false
+    if (lockup.exitDelay.unit === 'blocks') {
+      const tip = await this.deps.chain.getChainTip()
+      return tip.height >= unroll.blockHeight + lockup.exitDelay.value
+    }
+    return this.deps.now() >= unroll.blockTime + lockup.exitDelay.value - COSIGN_EXIT_MARGIN_SECONDS
   }
 
   private async push(lockup: UnrolledSpend, save: SaveUnrolledSpend): Promise<UnrolledSpendRecord> {
@@ -419,11 +537,12 @@ export const cosignOnchainTx = async (operatorUrl: string, psbtBase64: string): 
   return txid
 }
 
-export const unrolledSpenderFor = (ctx: ArkadeContext): UnrolledSpender =>
+export const unrolledSpenderFor = (ctx: ArkadeContext, solo?: UnrolledSpendDeps['solo']): UnrolledSpender =>
   new UnrolledSpender({
     chain: ctx.wallet.onchainProvider,
     signer: ctx.identity,
     cosign: (psbt) => cosignOnchainTx(ctx.operatorUrl, psbt),
     boarding: ctx.wallet.boardingTapscript,
+    solo,
     now: nowSeconds,
   })

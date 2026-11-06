@@ -2889,7 +2889,7 @@ describe('tick: failure and recovery', () => {
       l1.confirmed.add('u2:1')
       const done = await service.tick(row.id)
       expect(done.state).toBe('stuck')
-      expect(done.failureReason).toContain('u1:0 spent on L1 by a transaction that is not ours')
+      expect(done.failureReason).toContain('u1:0 spent on L1 by an unrecognized transaction; destination needs review')
       expect(done.failureReason).toContain('unilateralClaim')
     })
   })

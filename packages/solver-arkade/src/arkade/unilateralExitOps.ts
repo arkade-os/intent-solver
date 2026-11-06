@@ -9,9 +9,16 @@
  * context or is one SDK constructor call.
  */
 
-import { OnchainWallet, UnilateralExit, type NetworkName } from '@arkade-os/sdk'
+import { OnchainWallet, Transaction, UnilateralExit, type ExitPackage, type NetworkName } from '@arkade-os/sdk'
+import { hex } from '@scure/base'
 import { findLockups, type ArkadeContext } from './wallet.js'
-import type { ExitContractAccess, UnilateralExitDeps } from './unilateralExit.js'
+import {
+  planUnilateralExit,
+  prepareUnrolledClaim,
+  type ExitContractAccess,
+  type UnilateralExitDeps,
+} from './unilateralExit.js'
+import type { UnrolledSpendDeps } from './unrolledSpend.js'
 
 /**
  * The `NetworkName` the exit package is stamped with, read off the wallet's own
@@ -80,3 +87,76 @@ export const unilateralExitDepsFor = async (ctx: ArkadeContext): Promise<Unilate
     findLockups: (pkScriptHex) => findLockups(ctx, pkScriptHex),
   }
 }
+
+export const paysSolverOnchain = (
+  raw: Uint8Array,
+  outpoint: { txid: string; vout: number },
+  solverScript: Uint8Array,
+): boolean => {
+  const tx = Transaction.fromRaw(raw)
+  if (tx.inputsLength !== 1 || tx.outputsLength !== 1) return false
+  const input = tx.getInput(0)
+  const output = tx.getOutput(0)
+  return (
+    input.txid !== undefined &&
+    hex.encode(input.txid) === outpoint.txid &&
+    input.index === outpoint.vout &&
+    output.script !== undefined &&
+    hex.encode(output.script) === hex.encode(solverScript) &&
+    output.amount !== undefined &&
+    output.amount > 0n
+  )
+}
+
+export const unrolledClaimFallbackFor = (
+  ctx: ArkadeContext,
+  providerPubkey: string,
+): NonNullable<UnrolledSpendDeps['solo']> => ({
+  prepare: async (lockup) => {
+    if (!('preimage' in lockup) || !lockup.claimRow) throw new Error('unrolled claim lacks its swap row')
+    const status = await ctx.wallet.onchainProvider.getTxStatus(lockup.txid)
+    if (!status?.confirmed) throw new Error('unrolled claim output is not confirmed')
+    const plan = planUnilateralExit(lockup.claimRow, {
+      solverPubkey: providerPubkey,
+      preimage: hex.encode(lockup.preimage),
+    })
+    return prepareUnrolledClaim(await unilateralExitDepsFor(ctx), plan, {
+      txid: lockup.txid,
+      vout: lockup.vout,
+    })
+  },
+  progress: async (pkg: ExitPackage) => {
+    if (pkg.network !== exitNetworkName(ctx.wallet.network.bech32)) {
+      return { kind: 'failed', reason: 'unrolled claim package network differs from the wallet' }
+    }
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 1_500)
+    try {
+      const executor = new UnilateralExit.Executor(pkg, ctx.wallet.onchainProvider, {
+        signal: controller.signal,
+        pollIntervalMs: 500,
+      })
+      for await (const event of executor) {
+        if (event.status === 'failed') return { kind: 'failed', reason: event.reason ?? 'exit step failed' }
+        if (event.kind === 'sweep' && event.status === 'confirmed') return { kind: 'confirmed' }
+        if (event.status === 'warning') continue
+        return { kind: 'pending' }
+      }
+      return { kind: 'pending' }
+    } catch (error) {
+      if (controller.signal.aborted) return { kind: 'pending' }
+      throw error
+    } finally {
+      clearTimeout(timer)
+    }
+  },
+  ownsSpend: async (lockup, txid) => {
+    const raw = await ctx.wallet.onchainProvider.getRawTransaction(txid)
+    const onchainWallet = await OnchainWallet.create(
+      ctx.identity,
+      exitNetworkName(ctx.wallet.network.bech32),
+      ctx.wallet.onchainProvider,
+    )
+    return paysSolverOnchain(raw, lockup, onchainWallet.onchainP2TR.script)
+  },
+})
