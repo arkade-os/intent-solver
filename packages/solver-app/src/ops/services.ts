@@ -62,6 +62,7 @@ import {
   findLockupOutpoints,
   type ArkadeContext,
 } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { createCsvWindowFacts } from '@arkade-os/solver-arkade/arkade/csvWindowProvider.js'
 import type { LightningBackend } from '@arkade-os/solver-core/ports/lightning.js'
 import { FakeLightningBackend } from '@arkade-os/solver-rails-fake/ln/fake/backend.js'
 import { LndLightningBackendAdapter } from '@arkade-os/solver-rails-lnd/ln/lnd/adapter.js'
@@ -1060,6 +1061,7 @@ export const createServices = async (
         chainTip,
         ln: rail!.ln,
         arkade: arkadeOps,
+        csvWindow: createCsvWindowFacts(config.arkade.operatorUrl),
         backendName: config.lnBackend ?? undefined,
         limits: policy.corridorLimits['arkade:BTC->lightning:BTC'],
         fee: policy.corridorFees['arkade:BTC->lightning:BTC'],
