@@ -39,7 +39,6 @@
  */
 
 import { buildApp } from '@arkade-os/solver-transport/http/server.js'
-import { capture, unwrap } from '@arkade-os/solver-core/util/capture.js'
 import { corridorSetFromDeps, readerSetFromDeps } from './ops/corridorSet.js'
 import type { SendSwapService } from '@arkade-os/solver-corridors/send/orchestrator.js'
 import type { OnchainSendSwapService } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
@@ -130,21 +129,15 @@ export const buildWorker = (deps: WorkerDeps): Worker => {
       // Fan-out: one message per swap so a slow Lightning poll on one swap
       // cannot eat the whole cron budget, plus one sweep job.
       const queue = deps.driveQueue
-      // Captured so one store's outage cannot cancel the OTHER corridor's dispatch.
-      const [lightning, onchain] = await Promise.all([
-        capture(deps.store.findRecoverable()),
-        capture(deps.onchainStore.findRecoverable()),
+      // Each leg dispatches on its OWN read, so one store failing or hanging cannot hold up the other.
+      const dispatch = async (leg: 'lightning' | 'onchain', rows: Promise<{ id: string }[]>): Promise<void> => {
+        await Promise.all((await rows).map((row) => queue.send({ v: 1, type: 'tick_swap', leg, swap_id: row.id })))
+      }
+      const legs = await Promise.allSettled([
+        dispatch('lightning', deps.store.findRecoverable()),
+        dispatch('onchain', deps.onchainStore.findRecoverable()),
       ])
-      await Promise.all([
-        ...(lightning.ok ? lightning.value : []).map((row) =>
-          queue.send({ v: 1, type: 'tick_swap', leg: 'lightning', swap_id: row.id }),
-        ),
-        ...(onchain.ok ? onchain.value : []).map((row) =>
-          queue.send({ v: 1, type: 'tick_swap', leg: 'onchain', swap_id: row.id }),
-        ),
-      ])
-      unwrap(lightning)
-      unwrap(onchain)
+      for (const leg of legs) if (leg.status === 'rejected') throw leg.reason
       await queue.send({ v: 1, type: 'refund_sweep' })
     },
 

@@ -239,6 +239,28 @@ describe('scheduled, with a queue binding', () => {
     await expect(worker.scheduled()).rejects.toThrow('onchain store outage')
     expect(sent).toContainEqual({ v: 1, type: 'tick_swap', leg: 'lightning', swap_id: swap.id })
   })
+
+  it('dispatches Lightning jobs while the onchain store read is still pending', async () => {
+    const swap = await quoted()
+    const sent: DriveJob[] = []
+    let release!: () => void
+    const recoverable = onchainStore.findRecoverable.bind(onchainStore)
+    onchainStore.findRecoverable = () => new Promise((resolve) => (release = () => resolve(recoverable())))
+    const worker = buildWorker({
+      service,
+      store,
+      onchainService,
+      onchainStore,
+      network: 'bitcoin',
+      driveQueue: { send: async (job) => void sent.push(job) },
+    })
+
+    const run = worker.scheduled()
+    await expect.poll(() => sent).toContainEqual({ v: 1, type: 'tick_swap', leg: 'lightning', swap_id: swap.id })
+    release()
+    await run
+    expect(sent).toContainEqual({ v: 1, type: 'refund_sweep' })
+  })
 })
 
 describe('queue consumer', () => {
