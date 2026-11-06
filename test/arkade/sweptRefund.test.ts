@@ -3,7 +3,15 @@ import { schnorr } from '@noble/curves/secp256k1.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { ripemd160 } from '@noble/hashes/legacy.js'
 import { base64, hex } from '@scure/base'
-import { ArkAddress, Extension, MnemonicIdentity, MultisigTapscript, Transaction, VtxoScript } from '@arkade-os/sdk'
+import {
+  ArkAddress,
+  Extension,
+  MnemonicIdentity,
+  MultisigTapscript,
+  SettlementEventType,
+  Transaction,
+  VtxoScript,
+} from '@arkade-os/sdk'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import type { ArkadeContext, FundedOutput } from '@arkade-os/solver-arkade/arkade/wallet.js'
@@ -85,6 +93,9 @@ const stack = (options: {
   outputFee?: string
   floatCoins?: { txid: string; vout: number; value: number; isSwept?: boolean }[]
   duringFloatRead?: (reservations: ReturnType<typeof createReservationLedger>) => void
+  beforeStreamStarted?: () => Promise<void>
+  omitStreamStarted?: boolean
+  streamError?: Error
 }): Stack => {
   const virtualTxs = new Map<string, string>()
   for (const output of options.swept) virtualTxs.set(output.txid, sourceTx(output.vout, BigInt(output.value)).b64)
@@ -131,7 +142,11 @@ const stack = (options: {
         },
         getEventStream: (_signal: AbortSignal, subscribed: string[]) => {
           topics.push(subscribed)
-          return (async function* () {})()
+          return (async function* () {
+            await options.beforeStreamStarted?.()
+            if (options.streamError) throw options.streamError
+            if (!options.omitStreamStarted) yield { type: SettlementEventType.StreamStarted, id: 'stream-1' }
+          })()
         },
       },
       indexerProvider: {
@@ -168,6 +183,60 @@ describe('swept claim intent fees', () => {
     await claimSweptSwapScript(ctx, swapScript(), swept, new Uint8Array(32).fill(7), 1976)
 
     expect(proofOf(registered).getOutput(1).amount).toBe(49_999n)
+  })
+})
+
+describe('swept claim event subscription', () => {
+  const swept: FundedOutput[] = [{ txid: sourceTx(0, 1976n).id, vout: 0, value: 1976 }]
+
+  it('waits for the stream acknowledgment before registering the intent', async () => {
+    let acknowledge!: () => void
+    const streamReady = new Promise<void>((resolve) => {
+      acknowledge = resolve
+    })
+    const { ctx, registered, topics } = stack({ swept, beforeStreamStarted: () => streamReady })
+    const prepared = vi.fn(async () => undefined)
+    const claim = claimSweptSwapScript(
+      ctx,
+      swapScript(),
+      swept,
+      new Uint8Array(32).fill(7),
+      1976,
+      undefined,
+      undefined,
+      prepared,
+    )
+
+    await vi.waitFor(() => expect(topics).toHaveLength(1))
+    expect(registered).toHaveLength(0)
+    expect(prepared).not.toHaveBeenCalled()
+    acknowledge()
+    await expect(claim).resolves.toBe('commitment-txid')
+    expect(prepared).toHaveBeenCalledOnce()
+    expect(registered).toHaveLength(1)
+  })
+
+  it.each([
+    {
+      name: 'closes without an acknowledgment',
+      options: { omitStreamStarted: true },
+      message: 'subscription was acknowledged',
+    },
+    {
+      name: 'fails before an acknowledgment',
+      options: { streamError: new Error('stream unavailable') },
+      message: 'stream unavailable',
+    },
+  ])('$name', async ({ options, message }) => {
+    const { ctx, registered } = stack({ swept, ...options })
+    const prepared = vi.fn(async () => undefined)
+
+    await expect(
+      claimSweptSwapScript(ctx, swapScript(), swept, new Uint8Array(32).fill(7), 1976, undefined, undefined, prepared),
+    ).rejects.toThrow(message)
+    expect(prepared).not.toHaveBeenCalled()
+    expect(registered).toHaveLength(0)
+    expect(ctx.reservations.reserved().size).toBe(0)
   })
 })
 

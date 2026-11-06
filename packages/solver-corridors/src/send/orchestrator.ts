@@ -2000,7 +2000,7 @@ export class SendSwapService {
     const reservedKeys = new Set<string>()
     const pendingBatches: SweptClaimJournal[] = []
     let batchError: unknown
-    let currentSwept = seenSwept
+    const currentSwept = seenSwept
     for (let index = 0; index < batches.length;) {
       const batch = batches[index]!
       if (
@@ -2016,7 +2016,6 @@ export class SendSwapService {
         return false
       }
       if (!batch.commitmentTxid && this.now() - batch.registeredAt >= (2 * SWEPT_REFUND_BATCH_TIMEOUT_MS) / 1000) {
-        // Covers a prepared journal too: arkd matches the delete proof without an intent id we never learned.
         const label = batch.intentId ?? `prepared batch ${batch.proofTxid}`
         if (!batch.deleteProof) {
           await store.fail(row.id, 'claiming', `batch claim ${label} has no signed cancellation proof; needs review`)
@@ -2024,25 +2023,14 @@ export class SendSwapService {
         }
         try {
           await arkade.deleteSweptClaim!(batch.deleteProof)
-          currentSwept = await arkade.findSweptLockups!(row.pkScript)
-          const recovered = matchingLockups(batch.fundingOutpoints, currentSwept)
-          const history = await arkade.findLockupOutpoints(row.pkScript)
-          const stillUnspent = batch.fundingOutpoints.every((point) =>
-            history.some((output) => outpointKey(output) === outpointKey(point) && !output.spent && !output.unrolled),
-          )
-          if (!recovered || !stillUnspent) {
-            throw new Error(`swap ${row.id}: batch ${label} cancelled but exact swept funding is unverified`)
-          }
-          batches.splice(index, 1)
-          await persistBatches()
-          continue
         } catch (error) {
           batchError ??= error
-          for (const point of batch.fundingOutpoints) reservedKeys.add(outpointKey(point))
-          pendingBatches.push(batch)
-          index += 1
-          continue
         }
+        batchError ??= new Error(`swap ${row.id}: batch ${label} cancellation is unverified; needs review`)
+        for (const point of batch.fundingOutpoints) reservedKeys.add(outpointKey(point))
+        pendingBatches.push(batch)
+        index += 1
+        continue
       }
       for (const point of batch.fundingOutpoints) reservedKeys.add(outpointKey(point))
       const evidence = await arkade.verifySweptClaim!(batch)

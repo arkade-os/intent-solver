@@ -8,6 +8,7 @@ import {
   getNetwork,
   Intent,
   isArkError,
+  SettlementEventType,
   Transaction,
   withPrevTxs,
   type ExtendedVirtualCoin,
@@ -163,14 +164,14 @@ export const deleteSweptClaimIntent = async (ctx: ArkadeContext, deleteProof: st
     await ctx.wallet.arkProvider.deleteIntent({ proof: deleteProof, message: DELETE_MESSAGE })
   } catch (error) {
     if (isArkError(error, ArkErrorName.INVALID_INTENT_PROOF) && error.message.includes('no matching intents found'))
-      return
+      throw new Error('swept claim cancellation is unverified: intent may already be selected', { cause: error })
     throw error
   }
 }
 
 /**
- * Precondition, NOT enforced here: the Service must reject intents selecting a CSV tapleaf
- * (ArkLabsHQ/arkd#203), or a matured sibling refund leaf can race this claim after Lightning is paid.
+ * Requires Arkd to reject competing batch intents selecting a mature CSV leaf
+ * (ArkLabsHQ/arkd#203). Signed forfeits protect an accepted batch, not registration before it.
  */
 export const claimSweptSwapScript = async (
   ctx: ArkadeContext,
@@ -229,16 +230,22 @@ export const claimSweptSwapScript = async (
         throw new Error(`swept claim proof input ${vin} lost its preimage witness`)
       }
     }
-    await onPrepared?.({ proofTxid: proof.id, deleteProof })
     const abort = new AbortController()
     const timer = setTimeout(() => abort.abort(), SWEPT_REFUND_BATCH_TIMEOUT_MS)
     const stream = ctx.wallet.arkProvider.getEventStream(abort.signal, [
       cosigner,
       ...[...swept, ...(feeCoin ? [feeCoin] : [])].map((output) => `${output.txid}:${output.vout}`),
     ])
-    const firstEvent = stream.next()
-    void firstEvent.catch(() => undefined)
     try {
+      let event = await stream.next()
+      if (event.done) throw new Error('swept claim event stream closed before subscription was acknowledged')
+      const buffered = [event.value]
+      while (event.value.type !== SettlementEventType.StreamStarted) {
+        event = await stream.next()
+        if (event.done) throw new Error('swept claim event stream closed before subscription was acknowledged')
+        buffered.push(event.value)
+      }
+      await onPrepared?.({ proofTxid: proof.id, deleteProof })
       let intentId: string
       try {
         intentId = await ctx.wallet.arkProvider.registerIntent({
@@ -278,9 +285,7 @@ export const claimSweptSwapScript = async (
       })
       return await Batch.join(
         (async function* () {
-          const first = await firstEvent
-          if (first.done) return
-          yield first.value
+          yield* buffered
           yield* stream
         })(),
         handler,

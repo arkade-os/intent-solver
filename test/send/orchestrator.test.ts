@@ -1444,32 +1444,29 @@ describe('tick: refusals before money moves', () => {
       expect(JSON.parse((await store.get(row.id)).claimBatch!)).toHaveLength(2)
     })
 
-    it('cancels and retries a registered intent with no commitment after two batch timeouts', async () => {
+    it('keeps a registered journal when delete succeeds but selection may have raced it', async () => {
       const batch = batchClaimFake()
       const row = await claimingAdopted([first])
       arkade.sweptLockups = [first]
-      const healthyClaim = arkade.claimSwept!
       arkade.claimSwept = async (_row, _outputs, _preimage, _expected, onRegistered) => {
         await onRegistered({ intentId: 'registered-only', proofTxid: 'a'.repeat(64), deleteProof: 'ZGVsZXRl' })
         throw new Error('stream ended before batch commitment')
       }
       await expect(service.tick(row.id)).rejects.toThrow('stream ended')
 
-      arkade.claimSwept = healthyClaim
       clock += 8 * 60
-      const done = await service.tick(row.id)
-      expect(done.state).toBe('claimed')
+      await expect(service.tick(row.id)).rejects.toThrow('cancellation is unverified')
       expect(batch.deleteCalls).toEqual(['ZGVsZXRl'])
-      expect(batch.calls).toHaveLength(1)
-      expect(JSON.parse(done.claimBatch!)).toHaveLength(1)
-      expect(done.claimBatch).not.toContain('registered-only')
+      expect(batch.calls).toHaveLength(0)
+      const pending = await store.get(row.id)
+      expect(pending.state).toBe('claiming')
+      expect(pending.claimBatch).toContain('registered-only')
     })
 
-    it('keeps an unknown registration reserved until cancellation proves the funding is still ours', async () => {
+    it('keeps an unknown registration reserved after an ambiguous delete response', async () => {
       const batch = batchClaimFake()
       const row = await claimingAdopted([first])
       arkade.sweptLockups = [first]
-      const healthyClaim = arkade.claimSwept!
       arkade.claimSwept = async (_row, _outputs, _preimage, _expected, _registered, _committed, onPrepared) => {
         await onPrepared?.({ proofTxid: 'a'.repeat(64), deleteProof: 'ZGVsZXRl' })
         throw new Error('registration reply lost')
@@ -1477,16 +1474,16 @@ describe('tick: refusals before money moves', () => {
       await expect(service.tick(row.id)).rejects.toThrow('registration reply lost')
       expect(JSON.parse((await store.get(row.id)).claimBatch!)).toMatchObject([{ intentId: null }])
 
-      arkade.claimSwept = healthyClaim
       expect((await service.tick(row.id)).state).toBe('claiming')
       expect(batch.calls).toHaveLength(0)
       expect(batch.deleteCalls).toHaveLength(0)
       clock += 8 * 60
-      const done = await service.tick(row.id)
-      expect(done.state).toBe('claimed')
+      await expect(service.tick(row.id)).rejects.toThrow('cancellation is unverified')
       expect(batch.deleteCalls).toEqual(['ZGVsZXRl'])
-      expect(batch.calls).toHaveLength(1)
-      expect(JSON.parse(done.claimBatch!)).toHaveLength(1)
+      expect(batch.calls).toHaveLength(0)
+      const pending = await store.get(row.id)
+      expect(pending.state).toBe('claiming')
+      expect(JSON.parse(pending.claimBatch!)).toMatchObject([{ intentId: null }])
     })
 
     it('keeps a prepared batch reserved when its cancellation cannot be confirmed', async () => {
@@ -1574,7 +1571,7 @@ describe('tick: refusals before money moves', () => {
       expect(batch.calls).toHaveLength(0)
     })
 
-    it('keeps the journal when cancellation succeeds but the exact swept input is missing', async () => {
+    it('keeps the journal when deletion succeeds but the swept input is no longer visible', async () => {
       const batch = batchClaimFake()
       const row = await claimingAdopted([first])
       arkade.sweptLockups = [first]
@@ -1586,7 +1583,7 @@ describe('tick: refusals before money moves', () => {
       clock += 8 * 60
       arkade.sweptLockups = []
 
-      await expect(service.tick(row.id)).rejects.toThrow('exact swept funding is unverified')
+      await expect(service.tick(row.id)).rejects.toThrow('cancellation is unverified')
       expect(batch.deleteCalls).toEqual(['ZGVsZXRl'])
       expect((await store.get(row.id)).claimBatch).toContain('registered-only')
     })
