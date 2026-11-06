@@ -68,6 +68,7 @@ describe('an unrolled send lockup is claimed without arkd co-signing', () => {
         maxExposedSats: arkade.maxExposedSats,
         totalCommitted: () => store.committedSats(),
         admission: new AdmissionControl(),
+        chainTip: { height: async () => (await ctx.wallet.onchainProvider.getChainTip()).height },
       })
       const claimDelay = relativeDelayFrom(ctx.unilateralDelays.unilateralClaimDelay)
       if (claimDelay.unit !== 'blocks') throw new Error('unrolled claim requires a block-typed arkd')
