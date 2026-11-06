@@ -1768,6 +1768,37 @@ describe('ReceiveSwapService.tick — claim detection and settlement', () => {
     expect(row.state).toBe('funded')
   })
 
+  it('settles a claim even when a stray dust output still sits on the lockup script', async () => {
+    const funded = await armAndFund()
+    const row0 = await store.get(funded.id)
+    const recorded = { txid: row0.arkadeLockupTxid!, vout: row0.arkadeLockupVout! }
+    arkade.state.outputs = [{ txid: 'attacker-dust', vout: 7, value: 1 }]
+    arkade.state.spentOutputs = [{ ...recorded, value: row0.payoutSats }]
+    arkade.state.claimOn = recorded
+    arkade.state.claimPreimage = P
+
+    const row = await service.tick(funded.id)
+    expect(row.state).toBe('settled')
+    expect(row.preimage).toBe(hex.encode(P))
+  })
+
+  it('escalates rather than booking refunded when dust hides a funded output a claim already took', async () => {
+    const funded = await armAndFund()
+    const row0 = await store.get(funded.id)
+    const recorded = { txid: row0.arkadeLockupTxid!, vout: row0.arkadeLockupVout! }
+    arkade.state.outputs = [{ txid: 'attacker-dust', vout: 7, value: 1 }]
+    arkade.state.spentOutputs = [{ ...recorded, value: row0.payoutSats }]
+    arkade.state.claimPreimage = null // the claim's witness is not fetchable yet
+    now = funded.refundLocktime
+
+    expect((await service.tick(funded.id)).state).toBe('refunding')
+    expect(arkade.state.refundCalls).toBe(0)
+
+    arkade.state.claimOn = recorded
+    arkade.state.claimPreimage = P
+    expect((await service.tick(funded.id)).state).toBe('settled')
+  })
+
   /**
    * Places a row directly into `claimed` via the store, bypassing tick()'s
    * own chaining (which — correctly — would drive a `claimed` row with a
