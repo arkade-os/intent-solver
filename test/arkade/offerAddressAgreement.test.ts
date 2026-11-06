@@ -76,6 +76,7 @@ const clientOffer = async (unilateralExitDelay: number) => {
     wantAmount: terms.wantAmount,
     wantAsset: asset.AssetId.fromString(USDA),
     emulatorPubkey: '02' + hex.encode(EMULATOR),
+    generation: 'previous', // a 0.0.12 client derives v2; the SDK default is now v3
   })
 }
 
@@ -109,7 +110,7 @@ describe('offer address agreement with a 0.0.12 client', () => {
     const rebuilt = offerFromTerms(terms, xOnlyPubkey(EMULATOR), exitDelay)
     const theirs = await clientOffer(605_184)
 
-    expect(hex.encode(offerVtxoScript(rebuilt, SERVER).pkScript)).toBe(hex.encode(theirs.swapPkScript))
+    expect(hex.encode(offerVtxoScript(rebuilt, SERVER, 'previous').pkScript)).toBe(hex.encode(theirs.swapPkScript))
   })
 
   it('moves the address when the advertised delay does', async () => {

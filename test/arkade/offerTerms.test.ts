@@ -16,12 +16,14 @@ import { asset } from '@arkade-os/sdk'
 import { offerVtxoScript } from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
 import {
+  assetOfferGeneration,
   offerExitDelay,
   offerFromTerms,
   offerScriptFrom,
   xOnlyPubkey,
   type QuotedOfferTerms,
 } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
+import { RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_V3 } from '@arkade-os/solver-core/core/rfqCovenant.js'
 
 const xonly = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
 const SERVER = xonly(2)
@@ -46,6 +48,7 @@ const derive = offerScriptFrom(derivation)
 
 describe('offerScriptFrom', () => {
   it('compiles the same covenant the SDK does from the equivalent offer', () => {
+    // 'previous' = the v2 baseline; the SDK default is now v3. @see assetOfferGeneration
     const direct = offerVtxoScript(
       {
         wantAmount: 1_000n,
@@ -56,6 +59,7 @@ describe('offerScriptFrom', () => {
         exitDelay: EXIT,
       },
       SERVER,
+      'previous',
     )
     expect(derive(terms()).pkScript).toBe(hex.encode(direct.pkScript))
     expect(derive(terms()).address).toBe(direct.address('tark', SERVER).encode())
@@ -109,6 +113,40 @@ describe('offerScriptFrom', () => {
     expect(offerScriptFrom({ ...derivation, serverPubkey: xonly(9) })(terms()).pkScript).not.toBe(
       derive(terms()).pkScript,
     )
+  })
+})
+
+describe('covenant version', () => {
+  const sdk = (generation: 'current' | 'previous'): string =>
+    hex.encode(
+      offerVtxoScript(
+        {
+          wantAmount: 1_000n,
+          wantAsset: asset.AssetId.fromString(USDA),
+          makerPkScript: hex.decode(MAKER_SCRIPT),
+          makerPublicKey: MAKER_KEY,
+          emulatorPubkey: EMULATOR,
+          exitDelay: EXIT,
+        },
+        SERVER,
+        generation,
+      ).pkScript,
+    )
+
+  it('maps v3 to the current tree and everything else to the previous one', () => {
+    expect(assetOfferGeneration(RFQ_ASSET_SWAP_V3)).toBe('current')
+    expect(assetOfferGeneration(RFQ_ASSET_SWAP_V2)).toBe('previous')
+    expect(assetOfferGeneration(undefined)).toBe('previous')
+  })
+
+  it('derives v2 for the baseline and v3 only when it is named', () => {
+    expect(derive(terms()).pkScript).toBe(sdk('previous'))
+    expect(derive(terms(), RFQ_ASSET_SWAP_V2).pkScript).toBe(sdk('previous'))
+    expect(derive(terms(), RFQ_ASSET_SWAP_V3).pkScript).toBe(sdk('current'))
+  })
+
+  it('puts a v3 deposit at a different address than a v2 one', () => {
+    expect(derive(terms(), RFQ_ASSET_SWAP_V3).pkScript).not.toBe(derive(terms()).pkScript)
   })
 })
 
