@@ -6,15 +6,16 @@ import type { CorridorDescriptor } from '@arkade-os/solver-core/core/corridorDes
 // `noun` and `lifecycleLabel` are NOT here: they live on `StoreShape` in
 // `db/baseSwapStore.ts`, which is a corridor's persistence concern rather than
 // something the host reads.
-const descriptor = (pair: string, envStem: string): CorridorDescriptor => ({
+const descriptor = (pair: string, envStem: string, covenantVersion = 'test-v1'): CorridorDescriptor => ({
   pair,
   envStem,
+  covenantVersion,
   payoutRail: 'arkade',
   states: { live: ['quoted'], exposed: [], delivered: ['settled'] },
 })
 
-const stub = (pair: string, envStem: string): Corridor => ({
-  descriptor: descriptor(pair, envStem),
+const stub = (pair: string, envStem: string, covenantVersion = 'test-v1'): Corridor => ({
+  descriptor: descriptor(pair, envStem, covenantVersion),
   quote: async () => ({ kind: 'refused', payload: {} }),
   statusFor: async () => null,
   tick: async () => {},
@@ -71,6 +72,122 @@ describe('createCorridorSet', () => {
 
   it('reports how many corridors it holds', () => {
     expect(createCorridorSet([stub('a->b', 'A'), stub('c->d', 'C')]).size).toBe(2)
+  })
+
+  it('refuses an RFQ whose corridor covenant version is not enabled', async () => {
+    const set = createCorridorSet([stub('a->b', 'A', 'example-v1')], {
+      supportedCovenantVersions: new Set(['other-v1']),
+    })
+    const outcome = await set.get('a->b')!.quote({ v: 1, type: 'rfq_request', rfq_id: 'a'.repeat(64) })
+    expect(outcome.kind).toBe('refused')
+    expect(outcome.payload).toMatchObject({ v: 1, type: 'rfq_refusal', reason: 'unsupported_pair' })
+    expect(outcome.detail).toContain('example-v1')
+  })
+
+  it('passes an enabled RFQ covenant version through to the corridor', async () => {
+    const set = createCorridorSet([stub('a->b', 'A', 'example-v1')], {
+      supportedCovenantVersions: new Set(['example-v1']),
+    })
+    const outcome = await set.get('a->b')!.quote({ v: 1, type: 'rfq_request', rfq_id: 'a'.repeat(64) })
+    expect(outcome.kind).toBe('refused')
+    expect(outcome.detail).toBeUndefined()
+  })
+})
+
+describe('covenant negotiation', () => {
+  const RFQ = { v: 1, type: 'rfq_request', rfq_id: 'a'.repeat(64), pair: 'a->b' }
+  const quoting = () => {
+    const seen: unknown[] = []
+    const corridor: Corridor = {
+      ...stub('a->b', 'A', 'example-v1'),
+      quote: async (payload) => {
+        seen.push(payload)
+        return { kind: 'quote', payload: { v: 1, type: 'rfq_quote', rfq_id: RFQ.rfq_id } }
+      },
+    }
+    return { corridor, seen }
+  }
+
+  it('hands a request naming no covenant_versions to the corridor untouched, and quotes it unchanged', async () => {
+    const { corridor, seen } = quoting()
+    const outcome = await createCorridorSet([corridor]).get('a->b')!.quote(RFQ)
+    expect(seen[0]).toBe(RFQ)
+    expect(outcome.payload).toEqual({ v: 1, type: 'rfq_quote', rfq_id: RFQ.rfq_id })
+  })
+
+  it('strips covenant_versions before the corridor and names the version it quoted', async () => {
+    const { corridor, seen } = quoting()
+    const set = createCorridorSet([corridor], { supportedCovenantVersions: new Set(['example-v1']) })
+    const outcome = await set.get('a->b')!.quote({ ...RFQ, covenant_versions: ['example-v2', 'example-v1'] })
+    expect(seen[0]).toEqual(RFQ)
+    expect(outcome).toMatchObject({ kind: 'quote', payload: { covenant_version: 'example-v1' } })
+  })
+
+  it.each([
+    ['the client cannot derive it', ['example-v2'], new Set(['example-v1'])],
+    ['the operator disabled it', ['example-v1'], new Set(['example-v2'])],
+  ])('refuses without quoting when %s', async (_, listed, supported) => {
+    const { corridor, seen } = quoting()
+    const set = createCorridorSet([corridor], { supportedCovenantVersions: supported })
+    const outcome = await set.get('a->b')!.quote({ ...RFQ, covenant_versions: listed })
+    expect(seen).toEqual([])
+    expect(outcome.kind).toBe('refused')
+    expect(outcome.payload).toEqual({
+      v: 1,
+      type: 'rfq_refusal',
+      rfq_id: RFQ.rfq_id,
+      reason: 'unsupported_payload',
+      error_code: 'covenant_version_unsupported',
+      field: 'covenant_versions',
+    })
+  })
+
+  it.each([[[]], ['example-v1'], [['example-v1', 'example-v1']], [['a,b']], [null]])(
+    'refuses a malformed covenant_versions %j as unsupported_payload',
+    async (listed) => {
+      const { corridor, seen } = quoting()
+      const outcome = await createCorridorSet([corridor])
+        .get('a->b')!
+        .quote({ ...RFQ, covenant_versions: listed })
+      expect(seen).toEqual([])
+      expect(outcome).toMatchObject({ kind: 'invalid', payload: { reason: 'unsupported_payload' } })
+    },
+  )
+
+  it('keeps a class-based corridor whole, prototype methods and private fields included', async () => {
+    class Counted {
+      readonly descriptor = descriptor('a->b', 'A', 'example-v1')
+      #ticks = 0
+      async tickAll() {
+        return ++this.#ticks
+      }
+      async quote() {
+        return { kind: 'quote' as const, payload: {} }
+      }
+    }
+    const corridor = createCorridorSet([new Counted() as unknown as Corridor]).get('a->b')!
+    expect(await corridor.tickAll()).toBe(1)
+    expect(await corridor.quote({ ...RFQ, covenant_versions: ['example-v1'] })).toMatchObject({
+      payload: { covenant_version: 'example-v1' },
+    })
+  })
+
+  it('keeps the policy a rebuilt set negotiated under when it replaces the serve list', async () => {
+    const rebuilt = createCorridorSet([stub('a->b', 'A', 'example-v1')], {
+      supportedCovenantVersions: new Set(['example-v1']),
+    })
+    const live = createCorridorSet([], { supportedCovenantVersions: new Set(['other-v1']) })
+    live.replace([...rebuilt])
+    expect((await live.get('a->b')!.quote(RFQ)).detail).toBeUndefined()
+  })
+
+  it('keeps the echoed version through the ingress wire contract', async () => {
+    const { corridor } = quoting()
+    const outcome = await respondToRfqRequest(createCorridorSet([corridor]), {
+      ...RFQ,
+      covenant_versions: ['example-v1'],
+    })
+    expect(outcome).toMatchObject({ kind: 'quote', payload: { covenant_version: 'example-v1' } })
   })
 })
 
@@ -232,6 +349,7 @@ describe('a corridor the host has never compiled against', () => {
     descriptor: {
       pair: 'arkade:BTC->fake:BTC',
       envStem: 'FAKE',
+      covenantVersion: 'fake-v1',
       payoutRail: 'arkade',
       states: { live: ['dreaming'], exposed: ['dreaming'], delivered: ['woken'] },
     },

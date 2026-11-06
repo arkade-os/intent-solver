@@ -136,6 +136,7 @@ describe('the asset stores announce their transitions', () => {
       offerTxid: 'a'.repeat(64),
       offerVout: 0,
       offerPkScript: '5120' + 'dd'.repeat(32),
+      covenantVersion: 'offer-v1',
       wantAssetId: null,
       wantAmount: 1_000n,
       offerAssetId: 'asset-1',

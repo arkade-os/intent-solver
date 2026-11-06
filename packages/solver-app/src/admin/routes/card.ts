@@ -13,6 +13,8 @@ import type { Services } from '../../ops/services.js'
 import { publishStateOf } from '../publishState.js'
 import type { AdminDeps } from '../server.js'
 import { assetCardMarketsFromPolicy } from '../../ops/assetRfqMarkets.js'
+import { descriptorFor } from '@arkade-os/solver-corridors/corridors/index.js'
+import { RFQ_ASSET_SWAP_V2, rfqCovenantEnabled } from '@arkade-os/solver-core/core/rfqCovenant.js'
 
 /** `RELAY_URL` then `SOLVER_CARD_RELAYS`. */
 export const advertisedRelays = (relayUrl: string | null, extra: readonly string[]): string[] =>
@@ -37,25 +39,41 @@ export type CardSource = Pick<
 > & { arkade: { identity: Pick<Services['arkade']['identity'], 'signMessage'> } }
 
 /** ENABLED already — `assetMarketPolicy` drops a pause. */
-const assetMarketsOf = (source: CardSource) =>
+const assetMarketsOf = (
+  source: CardSource,
+  rfqServed = rfqCovenantEnabled(source.bootPolicy.rfqCovenantVersions, RFQ_ASSET_SWAP_V2),
+) =>
   publishableAssetMarkets(
     assetCardMarketsFromPolicy({
       pricing: source.assetMarkets,
       offerMarkets: source.liveOfferMarkets,
       // BOOT: `AssetOfferService` reads these off constructor deps. `rfqMarkets` below is LIVE by contrast.
       offerBounds: { min: source.bootPolicy.offerMinFillAmount, max: source.bootPolicy.offerMaxFillAmount },
-      rfqMarkets: source.assetRfqMarkets,
+      rfqMarkets: rfqServed ? source.assetRfqMarkets : [],
       chargesDeliveredCarrier: source.bootPolicy.offerChargesDeliveredCarrier,
     }),
     source.config.network,
   )
 
 export const cardOmissions = (source: CardSource): string[] => [
+  ...CORRIDORS.filter(
+    (corridor) =>
+      source.bootPolicy.corridorEnabled[corridor] &&
+      !rfqCovenantEnabled(source.bootPolicy.rfqCovenantVersions, descriptorFor(corridor).covenantVersion),
+  ).map(
+    (corridor) =>
+      `${corridor} is enabled but omitted: covenant ${descriptorFor(corridor).covenantVersion} is not in rfq.covenantVersions`,
+  ),
+  ...(source.assetRfqMarkets.length === 0 ||
+  rfqCovenantEnabled(source.bootPolicy.rfqCovenantVersions, RFQ_ASSET_SWAP_V2)
+    ? []
+    : ['asset RFQ markets are omitted: covenant asset-swap-v2 is not in rfq.covenantVersions']),
   // LIVE unlike the corridor map: `rebuild` builds the corridor set from `livePolicy.evmCorridors`.
   ...unpublishableCorridors(
     source.policy.evmCorridors.filter((corridor) => corridor.enabled).map((corridor) => corridor.corridor),
   ),
-  ...assetMarketsOf(source).omitted,
+  // As if asset-swap-v2 were on, so a market's own fault still shows beside the covenant note above.
+  ...assetMarketsOf(source, true).omitted,
 ]
 
 /**
@@ -81,7 +99,11 @@ export const deploymentCard = async (
   // BOOT, not live: the card is SIGNED, none of these three is in `LIVE_KEYS`, and each is snapshotted into a
   // `private readonly` deps at construction — so boot is what the corridor will honour.
   const served = Object.fromEntries(
-    CORRIDORS.filter((corridor) => bootPolicy.corridorEnabled[corridor]).map((corridor) => [
+    CORRIDORS.filter(
+      (corridor) =>
+        bootPolicy.corridorEnabled[corridor] &&
+        rfqCovenantEnabled(bootPolicy.rfqCovenantVersions, descriptorFor(corridor).covenantVersion),
+    ).map((corridor) => [
       corridor,
       { limits: bootPolicy.corridorLimits[corridor], fee: bootPolicy.corridorFees[corridor] },
     ]),

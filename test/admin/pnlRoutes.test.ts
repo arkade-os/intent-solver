@@ -319,6 +319,7 @@ describe('GET /api/pnl: a corridor that cannot answer', () => {
     descriptor: {
       pair: 'arkade:BTC->mute:BTC',
       envStem: 'MUTE',
+      covenantVersion: 'mute-v1',
       payoutRail: 'arkade',
       states: { live: ['quoted'], exposed: [], delivered: ['settled'] },
     },

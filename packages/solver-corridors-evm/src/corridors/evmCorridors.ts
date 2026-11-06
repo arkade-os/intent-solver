@@ -31,6 +31,7 @@ import {
   type CorridorSwapView,
 } from '@arkade-os/solver-core/core/corridor.js'
 import type { CorridorDescriptor } from '@arkade-os/solver-core/core/corridorDescriptor.js'
+import { RFQ_EVM_RECEIVE_V1, RFQ_EVM_SEND_V1 } from '@arkade-os/solver-core/core/rfqCovenant.js'
 import type { LedgerWindow, SwapEconomics } from '@arkade-os/solver-core/analytics/economics.js'
 import { evmSendEconomics, evmReceiveEconomics } from './evmEconomics.js'
 import type { PageOptions } from '@arkade-os/solver-core/core/page.js'
@@ -73,6 +74,7 @@ const EVM_RECEIVE_STATES: CorridorDescriptor<EvmReceiveSwapState>['states'] = {
 export const evmSendDescriptor = (token: EvmToken): CorridorDescriptor<EvmSendSwapState> => ({
   pair: evmCorridorFor(token.address, 'send'),
   envStem: evmEnvStem(token, 'send'),
+  covenantVersion: RFQ_EVM_SEND_V1,
   // The solver pays the token out on the EVM chain. No rail is registered for
   // it today, so the console reads UNKNOWN for this corridor's payout balance —
   // the honest answer, per rail.ts's contract, not zero.
@@ -83,6 +85,7 @@ export const evmSendDescriptor = (token: EvmToken): CorridorDescriptor<EvmSendSw
 export const evmReceiveDescriptor = (token: EvmToken): CorridorDescriptor<EvmReceiveSwapState> => ({
   pair: evmCorridorFor(token.address, 'receive'),
   envStem: evmEnvStem(token, 'receive'),
+  covenantVersion: RFQ_EVM_RECEIVE_V1,
   // The client is paid in SATS out of the Arkade float on this leg.
   payoutRail: 'arkade',
   states: EVM_RECEIVE_STATES,

@@ -6,6 +6,7 @@ import { describe, it, expect } from 'vitest'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
 import { createOfferRefusalTail } from '@arkade-os/solver-app/admin/offerRefusals.js'
 import { OfferFillStore, OFFER_FILL_STATES } from '@arkade-os/solver-corridors/db/offerFills.js'
+import { OFFER_COVENANT_V1 } from '@arkade-os/solver-core/core/offerCovenant.js'
 
 const USDT = 'aa'.repeat(34)
 
@@ -14,6 +15,7 @@ const record = (over: Record<string, unknown> = {}) => ({
   offerTxid: 'ab'.repeat(32),
   offerVout: 0,
   offerPkScript: 'cc'.repeat(20),
+  covenantVersion: OFFER_COVENANT_V1,
   wantAssetId: null,
   wantAmount: 5_000n,
   offerAssetId: USDT,
@@ -61,6 +63,7 @@ describe('GET /api/offers: a filled offer is visible', () => {
     const { body } = await get(app)
     expect(body.offers[0]).toMatchObject({
       outpoint: `${'ab'.repeat(32)}:0`,
+      covenantVersion: OFFER_COVENANT_V1,
       wantAssetId: null,
       wantAmount: '5000',
       offerAssetId: USDT,

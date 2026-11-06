@@ -10,6 +10,7 @@
 import {
   createCorridorReaderSet,
   createCorridorSet,
+  withQuote,
   type Corridor,
   type CorridorReader,
   type CorridorReaderSet,
@@ -17,6 +18,7 @@ import {
 } from '@arkade-os/solver-core/core/corridor.js'
 import type { EvmCorridorPolicy } from '@arkade-os/solver-core/core/evmCorridorConfig.js'
 import { extractRfqId, rfqRefusalPayload } from '@arkade-os/solver-core/core/rfqProtocol.js'
+import { RFQ_COVENANT_VERSIONS } from '@arkade-os/solver-core/core/rfqCovenant.js'
 import {
   lightningSendCorridor,
   lightningReceiveCorridor,
@@ -94,7 +96,16 @@ export interface FlatCorridorDeps {
   assetRfqMarkets?: readonly AssetRfqMarket[]
   /** Whether the three BTC corridors' LND answers. Unset means always. */
   railUp?: () => boolean
+  /** Covenant versions this deployment serves. Absent leaves the gate off for hand-built sets. */
+  rfqCovenantVersions?: ReadonlySet<string>
 }
+
+/** `rfq.covenantVersions` as served; unset adds each injected corridor's own version to this build's defaults. */
+export const servedCovenantVersions = (
+  configured: readonly string[] | null,
+  extra: readonly Corridor[],
+): ReadonlySet<string> =>
+  new Set(configured ?? [...RFQ_COVENANT_VERSIONS, ...extra.map((corridor) => corridor.descriptor.covenantVersion)])
 
 /**
  * One gate rather than each quote's own LND read: the onchain legs make none before the client has funded, so
@@ -103,17 +114,15 @@ export interface FlatCorridorDeps {
 const whileRailUp = (corridor: Corridor, railUp: (() => boolean) | undefined): Corridor =>
   railUp === undefined
     ? corridor
-    : {
-        ...corridor,
-        quote: async (payload, options) =>
-          railUp()
-            ? corridor.quote(payload, options)
-            : {
-                kind: 'refused',
-                payload: rfqRefusalPayload(extractRfqId(payload), 'pricing_unavailable'),
-                detail: 'LND unreachable',
-              },
-      }
+    : withQuote(corridor, async (payload, options) =>
+        railUp()
+          ? corridor.quote(payload, options)
+          : {
+              kind: 'refused',
+              payload: rfqRefusalPayload(extractRfqId(payload), 'pricing_unavailable'),
+              detail: 'LND unreachable',
+            },
+      )
 
 /** The same deps, narrowed to what a READER uses. Its extra entries come from
  * swap rows, which know a pair and no pricing: `AssetRfqMarket` here would make
@@ -172,7 +181,9 @@ export const corridorSetFromDeps = (deps: FlatCorridorDeps, extra: readonly Corr
   // Consumer corridors go THROUGH createCorridorSet, so a pair or stem
   // colliding with a built-in is refused at composition rather than shadowing
   // it at dispatch. Last, so they never delay a built-in's status answer.
-  return createCorridorSet([...corridors, ...extra])
+  return createCorridorSet([...corridors, ...extra], {
+    supportedCovenantVersions: deps.rfqCovenantVersions,
+  })
 }
 
 /**

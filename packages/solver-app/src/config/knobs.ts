@@ -19,7 +19,14 @@ export interface Flattened {
   railBlock: unknown | null
 }
 
-type Row = readonly [path: string, knob: string, encode?: (value: unknown) => string]
+type Row = readonly [
+  path: string,
+  knob: string,
+  encode?: (value: unknown) => string,
+  decode?: (value: string) => unknown,
+]
+
+const covenantVersions = (raw: string): unknown => raw.split(',').map((value) => value.trim())
 
 /** Ids renamed since the old `.env` files were written. Only `config-from-env` and the startup refusal read these. */
 const LEGACY_ENV_NAMES: Readonly<Record<string, string>> = {
@@ -64,6 +71,8 @@ export const PATHS: readonly Row[] = [
   ['limits.approvalThresholdSats', 'APPROVAL_THRESHOLD_SATS'],
   ['offers.minFillAmount', 'OFFER_MIN_FILL_AMOUNT'],
   ['offers.maxFillAmount', 'OFFER_MAX_FILL_AMOUNT'],
+  ['offers.covenantVersions', 'OFFER_COVENANT_VERSIONS', undefined, covenantVersions],
+  ['rfq.covenantVersions', 'RFQ_COVENANT_VERSIONS', undefined, covenantVersions],
   ['offers.chargeCarrier', 'OFFER_CHARGE_CARRIER'],
   ['offers.carrierPricing', 'ASSET_CARRIER_PRICING'],
   ['offers.quoteValiditySeconds', 'ASSET_QUOTE_VALIDITY_SECONDS'],

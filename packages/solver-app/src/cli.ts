@@ -86,6 +86,7 @@ import { AdminStore } from './admin/db.js'
 import { applyOverrides } from './admin/settings.js'
 import { GiveUp, json, log, messageOf, nowSeconds, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
 import { recordRfqRefusals } from './admin/rfqRefusals.js'
+import { RFQ_LIGHTNING_SEND_V2, rfqCovenantEnabled } from '@arkade-os/solver-core/core/rfqCovenant.js'
 import { createBidTail, recordBidsIn, type BidRecorder } from './admin/bids.js'
 import type { AdPublisher } from '@arkade-os/solver-transport/relay/adPublisher.js'
 import type { Services } from './ops/services.js'
@@ -1227,7 +1228,11 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     // corridor that then refuses the directed RFQ is worse than no bid.
     let bidder
     let bids: BidRecorder | undefined
-    if (config.openRfqMaxBidsPerMinute > 0 && services.service) {
+    if (
+      config.openRfqMaxBidsPerMinute > 0 &&
+      services.service &&
+      rfqCovenantEnabled(services.policy.rfqCovenantVersions, RFQ_LIGHTNING_SEND_V2)
+    ) {
       bids = createBidTail()
       bidder = new OpenRfqBidder({
         connection,

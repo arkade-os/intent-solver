@@ -16,6 +16,7 @@
 import { z } from 'zod'
 import { WIRE_AMOUNT } from './wireAmount.js'
 import { MAX_PAIR_LENGTH } from './marketKey.js'
+import { RFQ_COVENANT_VERSION_ID } from './rfqCovenant.js'
 export const RFQ_ID = z
   .string()
   .length(64)
@@ -28,6 +29,13 @@ export const AMOUNT_SIDE = z.enum(['from', 'to'])
 // § 2.1: a canonical decimal string of atomic units, with a JSON number
 // accepted only where it is provably lossless. @see ./wireAmount.ts
 export const RFQ_AMOUNT = WIRE_AMOUNT
+
+/** `rfq_request.covenant_versions` (§ 4.1): the covenants a client can derive, most preferred first. */
+export const RFQ_COVENANT_VERSIONS_FIELD = z
+  .array(z.string().regex(RFQ_COVENANT_VERSION_ID))
+  .min(1)
+  .max(16)
+  .refine((versions) => new Set(versions).size === versions.length)
 
 /**
  * Ask for the state of one negotiation by its correlation id.
@@ -123,6 +131,7 @@ export const isRfqRefusalReason = (value: string): value is RfqRefusalReason =>
 
 export const RFQ_REFUSAL_ERROR_CODE_VALUES = [
   'amount_side_unsupported',
+  'covenant_version_unsupported',
   'exact_out_unsupported',
   'invalid_amount',
   'invalid_payout_address',

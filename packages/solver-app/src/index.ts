@@ -209,6 +209,7 @@ export {
   type Corridor,
   type CorridorReader,
   type CorridorSet,
+  type CorridorSetOptions,
   type CorridorReaderSet,
   type CorridorRfqOutcome,
   type CorridorSwapView,
@@ -221,6 +222,16 @@ export {
   type CorridorRegistry,
   type PayoutRail,
 } from '@arkade-os/solver-core/core/corridorDescriptor.js'
+export {
+  RFQ_ASSET_SWAP_V2,
+  RFQ_COVENANT_VERSIONS,
+  RFQ_EVM_RECEIVE_V1,
+  RFQ_EVM_SEND_V1,
+  RFQ_LIGHTNING_RECEIVE_V2,
+  RFQ_LIGHTNING_SEND_V2,
+  RFQ_ONCHAIN_SEND_V2,
+  type RfqCovenantVersion,
+} from '@arkade-os/solver-core/core/rfqCovenant.js'
 
 /** Persist one: the generic store the four built-in corridors share. */
 export { BaseSwapStore, type StoreShape, type RawRow } from '@arkade-os/solver-corridors/db/baseSwapStore.js'

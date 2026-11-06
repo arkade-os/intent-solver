@@ -81,11 +81,22 @@ export const FULL_DOCUMENT = {
   },
   offers: {
     markets: ['BTC/USDA'],
+    covenantVersions: ['offer-v1', 'offer-v2'],
     minFillAmount: '1000',
     maxFillAmount: '500000000',
     chargeCarrier: false,
     carrierPricing: false,
     quoteValiditySeconds: 30,
+  },
+  rfq: {
+    covenantVersions: [
+      'lightning-send-v2',
+      'lightning-receive-v2',
+      'onchain-send-v2',
+      'asset-swap-v2',
+      'evm-send-v1',
+      'evm-receive-v1',
+    ],
   },
   relay: {
     url: 'wss://relay.example',

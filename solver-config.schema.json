@@ -306,6 +306,18 @@
             "type": "string"
           }
         },
+        "covenantVersions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "offer-v1",
+              "offer-v2"
+            ]
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
         "minFillAmount": {
           "description": "decimal string",
           "type": "string",
@@ -324,6 +336,21 @@
         },
         "quoteValiditySeconds": {
           "type": "number"
+        }
+      },
+      "additionalProperties": false
+    },
+    "rfq": {
+      "type": "object",
+      "properties": {
+        "covenantVersions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "minItems": 1,
+          "uniqueItems": true
         }
       },
       "additionalProperties": false

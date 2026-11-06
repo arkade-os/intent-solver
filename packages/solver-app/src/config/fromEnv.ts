@@ -76,12 +76,12 @@ export const envToDocument = (
     if (raw !== undefined) setAt(doc, segments, decodeAt(segments, raw))
   }
 
-  for (const [path, knob, encode] of PATHS) {
+  for (const [path, knob, encode, decode] of PATHS) {
     // A deployment's old file holds the legacy name; the regtest env files hold the id.
     const raw = read(knob) ?? read(legacyEnvName(knob))
     if (raw === undefined) continue
     const segments = path.split('.')
-    setAt(doc, segments, encode ? encode(true) === raw : decodeAt(segments, raw))
+    setAt(doc, segments, decode ? decode(raw) : encode ? encode(true) === raw : decodeAt(segments, raw))
   }
 
   const backend = read('LN_BACKEND')
