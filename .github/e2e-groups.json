@@ -39,6 +39,17 @@
     "arkdTimelocks": "blocks"
   },
   {
+    "name": "unrolled-claim",
+    "why": "Mines through the claim CSV of one unrolled send lockup and needs its own block-typed stack so the exit cannot change another corridor's wallet or chain state.",
+    "profiles": "emulator",
+    "files": ["unrolledSendClaim.e2e.test.ts"],
+    "mintAsset": false,
+    "lnd": false,
+    "covclaimdImage": "",
+    "evmChain": false,
+    "arkdTimelocks": "blocks"
+  },
+  {
     "name": "pool",
     "why": "Reshapes the solver's own float: it mints seventy coins and merges fifty, which would change what every corridor file's coin selection sees. Seconds-typed because the planner judges renewal by wall-clock expiry, and on a block-typed arkd every expiry is a height.",
     "profiles": "emulator",
