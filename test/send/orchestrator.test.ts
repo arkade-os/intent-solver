@@ -48,7 +48,6 @@ import {
 } from '@arkade-os/solver-corridors/send/orchestrator.js'
 import { rfqStateFromRow, rfqStatusPayload } from '@arkade-os/solver-corridors/wire/payloads.js'
 import { covenantScriptFromRow } from '@arkade-os/solver-corridors/send/arkadeOps.js'
-import type { CsvWindowFacts } from '@arkade-os/solver-corridors/send/csvWindow.js'
 import { rawDelaySeconds, relativeDelayFrom, secondsForBlockRung } from '@arkade-os/solver-core/core/timelocks.js'
 
 /**
@@ -1109,47 +1108,6 @@ describe('tick: refusals before money moves', () => {
     await expect(
       service.quote(INVOICE, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY }),
     ).resolves.toMatchObject({ accepted: false, reason: 'duplicate_swap' })
-  })
-
-  it('fails closed before Lightning when CSV origin evidence is unavailable', async () => {
-    const floor = {
-      originLowerBoundMtp: clock - 3_600,
-      tipHash: '01'.repeat(32),
-      tipHeight: 100_006,
-      ancestorHash: '02'.repeat(32),
-      ancestorHeight: 100_000,
-      ancestorMedianTimePast: clock - 3_600,
-      reorgBudgetBlocks: 6,
-    }
-    const csvWindow: CsvWindowFacts = {
-      futureOriginLowerBoundMtp: async () => floor,
-      origin: async () => {
-        throw new Error('Core txindex is unavailable')
-      },
-    }
-    const guarded = new SendSwapService({
-      store,
-      ln,
-      arkade,
-      limits: { minSats: 500, maxSats: 10_000 },
-      invoicePrefix: 'bc',
-      maxExposedSats: 5_000,
-      totalCommitted: () => store.committedSats(),
-      admission: new AdmissionControl(),
-      csvWindow,
-      now: () => clock,
-    })
-    const outcome = await guarded.quote(INVOICE, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
-    if (!outcome.accepted) throw new Error(`fixture quote refused: ${outcome.reason}`)
-    arkade.lockups = [{ txid: 'ab'.repeat(32), vout: 0, value: AMOUNT }]
-
-    await guarded.tick(outcome.swap.id)
-    const row = await guarded.tick(outcome.swap.id)
-
-    expect(row.state).toBe('refused')
-    expect(row.failureReason).toContain('client_solo_csv_window_unsafe')
-    expect(row.failureReason).toContain('Core txindex is unavailable')
-    expect(ln.payCalls).toHaveLength(0)
   })
 
   it('clamps the CLTV ceiling to what is left of the deadline when funding was slow', async () => {

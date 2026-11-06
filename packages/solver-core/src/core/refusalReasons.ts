@@ -48,7 +48,6 @@ type OrchestratorRefusal =
   | 'coupled_deadline_unsafe'
   | 'coupled_invoice_mismatch'
   | 'recourse_window_unservable'
-  | 'csv_window_unavailable'
   | 'payable_amount_unmatchable'
   | 'fee_consumes_swap'
   | 'payout_below_dust'
@@ -143,12 +142,6 @@ export const REFUSAL_EXPLANATIONS: Record<RefusalReason, RefusalExplanation> = {
       "The hold invoice's expiry cannot be pushed far enough out for the solver's own unilateral recourse to open before it, because this Arkade Service's exit delay is longer than the window a Lightning invoice allows. A property of the deployment, not of the request.",
     whatToDo:
       'Every quote on this corridor gets this answer until the operator lowers the unilateral exit delay, so a burst of these is a configuration alarm rather than traffic. Nothing about the client or their invoice will change it.',
-  },
-  csv_window_unavailable: {
-    meaning:
-      'The solver could not obtain authoritative Bitcoin chain facts to prove that the client’s solo CSV refund stays behind the scripted refund deadline plus its safety margin.',
-    whatToDo:
-      'This is an Arkd or Bitcoin Core evidence-service problem. Restore the authenticated origin API and synced chain data; the client cannot fix it by changing the invoice.',
   },
   payable_amount_unmatchable: {
     meaning:

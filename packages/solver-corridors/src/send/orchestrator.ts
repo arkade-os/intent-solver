@@ -36,14 +36,13 @@ import {
   hintCltvBlocks,
   unilateralLadderFor,
   refundWithoutReceiverDelayCovers,
-  REFUND_SAFETY_MARGIN,
   type SendAcceptanceRefusal,
 } from '@arkade-os/solver-core/core/send.js'
 import { maxRoutingFeeSats, type Limits } from '@arkade-os/solver-core/core/limits.js'
 import { askApproval, type ApprovalCheck } from '@arkade-os/solver-core/core/approvalGate.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { FREE, giveSatsFor, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
-import { LOCKTIME_THRESHOLD, type UnilateralDelays } from '@arkade-os/solver-core/core/timelocks.js'
+import type { UnilateralDelays } from '@arkade-os/solver-core/core/timelocks.js'
 import type { SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
 import type { ChainTipProvider } from '@arkade-os/solver-rails/onchain/chainTip.js'
 import { absoluteLocktimeFor, refundDeadlineReached, refundDeadlineSeconds } from '../chainClock.js'
@@ -80,7 +79,6 @@ export type { CovenantScriptRow }
 
 import type { ArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 export type { ArkadeOps }
-import { assertClientSoloCsvWindow, checkedFutureOriginLowerBoundMtp, type CsvWindowFacts } from './csvWindow.js'
 
 import {
   refundSweptLockupFor,
@@ -173,8 +171,6 @@ export interface SendServiceDeps {
   > &
     Pick<ReceiveBackend, 'getOwnInvoiceState' | 'getKnownInvoiceState'>
   arkade: ArkadeOps
-  /** Optional until the chain origin provider can prove both confirmed and virtual output origins. */
-  csvWindow?: CsvWindowFacts
   /**
    * Which backend implementation is wired in — `lnd`, for instance.
    *
@@ -364,8 +360,6 @@ export type QuoteRefusal =
   | 'insufficient_float'
   | 'invalid_refund_address'
   | 'rate_limited'
-  | 'csv_window_unavailable'
-  | 'recourse_window_unservable'
   // A coupled self-payment whose two refund deadlines are too close together
   // to be claimed safely. See `evaluateCouplingDeadlines`.
   | 'coupled_deadline_unsafe'
@@ -612,35 +606,13 @@ export class SendSwapService {
     // overflows a block-typed ladder the whole thing re-clocks to seconds,
     // and the script, the row and the absolute locktime below must all run
     // on the flipped clock — a rung taken from base here would mix units.
-    let csvWindow: { originLowerBoundMtp: number; marginSeconds: number } | undefined
-    if (this.deps.csvWindow) {
-      if (acceptance.refundLocktime < LOCKTIME_THRESHOLD) {
-        return {
-          accepted: false,
-          reason: 'recourse_window_unservable',
-          detail: 'CSV refund-window protection requires a seconds-based scripted refund deadline',
-        }
-      }
-      try {
-        csvWindow = {
-          originLowerBoundMtp: checkedFutureOriginLowerBoundMtp(await this.deps.csvWindow.futureOriginLowerBoundMtp()),
-          marginSeconds: REFUND_SAFETY_MARGIN,
-        }
-      } catch (error) {
-        return {
-          accepted: false,
-          reason: 'csv_window_unavailable',
-          detail: error instanceof Error ? error.message : String(error),
-        }
-      }
-    }
     let ladder: UnilateralDelays
     try {
-      ladder = unilateralLadderFor(arkade.delays, acceptance.refundLocktime, quotedAt, csvWindow)
+      ladder = unilateralLadderFor(arkade.delays, acceptance.refundLocktime, quotedAt)
     } catch (error) {
       return {
         accepted: false,
-        reason: csvWindow ? 'recourse_window_unservable' : 'cltv_too_large',
+        reason: 'cltv_too_large',
         detail: error instanceof Error ? error.message : String(error),
       }
     }
@@ -1586,21 +1558,6 @@ export class SendSwapService {
       else await store.fail(row.id, row.state, reason)
       return false
     }
-    if (this.deps.csvWindow) {
-      try {
-        await this.assertClientCsvWindow(row)
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error)
-        const reason = `refused to pay: client_solo_csv_window_unsafe: ${detail}`
-        if (nothingCommitted) {
-          await store.transition(row.id, row.state, 'refused', { failure_reason: reason })
-        } else {
-          await store.fail(row.id, row.state, reason)
-          this.onTickError?.(row.id, new Error(`CSV timing incident while payment outcome is unresolved: ${detail}`))
-        }
-        return false
-      }
-    }
     let result
     try {
       result = await ln.payInvoice({
@@ -1713,14 +1670,6 @@ export class SendSwapService {
       return deadline
     }
     return refundDeadline
-  }
-
-  private async assertClientCsvWindow(row: SendSwapRow): Promise<void> {
-    const facts = this.deps.csvWindow
-    if (!facts) return
-    const points = adoptedOutpoints(row)
-    if (!points) throw new Error('the lockup outpoints have not been durably recorded')
-    await assertClientSoloCsvWindow(row, points, facts)
   }
 
   private async refuseUnsubmittedPayment(row: SendSwapRow, detail: string): Promise<void> {
@@ -2129,17 +2078,6 @@ export class SendSwapService {
     if (sweptNow.length > 0) {
       const fundingOutpoints = sweptNow.map(({ txid, vout, value }) => ({ txid, vout, value }))
       const expectedSats = fundingOutpoints.reduce((sum, point) => sum + point.value, 0)
-      if (this.deps.csvWindow) {
-        try {
-          await assertClientSoloCsvWindow(row, fundingOutpoints, this.deps.csvWindow)
-        } catch (error) {
-          const detail = error instanceof Error ? error.message : String(error)
-          this.onTickError?.(
-            row.id,
-            new Error(`CSV timing incident after Lightning settlement; attempting immediate swept claim: ${detail}`),
-          )
-        }
-      }
       let journaledThisCall = false
       const onPrepared = async ({ proofTxid, deleteProof }: { proofTxid: string; deleteProof: string }) => {
         batches.push({
