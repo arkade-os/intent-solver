@@ -19,6 +19,10 @@ import type { CorridorSet, CorridorReaderSet } from '@arkade-os/solver-core/core
 import type { Corridor as CorridorPlugin } from '@arkade-os/solver-core/core/corridor.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { resolveDbLayout } from '@arkade-os/solver-corridors/db/layout.js'
+import {
+  findUndrainedOnchainReceive,
+  undrainedOnchainReceiveMessage,
+} from '@arkade-os/solver-corridors/db/onchainReceiveDrainGuard.js'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { disabledRebalancePolicy, validateRebalancePolicy } from '@arkade-os/solver-core/core/rebalancePolicy.js'
 import { RebalanceService } from './rebalance.js'
@@ -507,6 +511,13 @@ export const createServices = async (
   // Each store still gets its own `close()`; better-sqlite3's is a no-op after
   // the first, and `Services.close()` isolates each step anyway.
   const shared = layout.consolidated ? swapFile : undefined
+  // Refuse to drive money while a corridor #292 retired still has live rows this
+  // build cannot touch; the override lets an operator proceed and abandon them.
+  const undrained = await findUndrainedOnchainReceive(config.swapDbPath, swapFile)
+  if (undrained.count > 0 && !config.allowUndrainedOnchainReceive) {
+    await swapFile.close()
+    throw new Error(undrainedOnchainReceiveMessage(undrained))
+  }
   const store = await SwapStore.open(swapFile)
   const onchainStore = await OnchainSendSwapStore.open(shared ?? layout.onchainSend)
   const receiveStore = await ReceiveSwapStore.open(shared ?? layout.receive)

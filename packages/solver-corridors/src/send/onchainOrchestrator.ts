@@ -1129,7 +1129,10 @@ export class OnchainSendSwapService {
       // Like the normal path, never `claimed` while an adopted output is still out.
       const outpoints = (await arkade.findLockupOutpoints?.(row.pkScript)) ?? []
       const ours = outpoints.length > 0 && (await arkade.findClaimPreimage?.(outpoints, row.paymentHash))
-      if (ours && (await lockupLeftover(arkade, row, [], null)).length === 0) {
+      // A legacy row (null outpoints) has no adopted set, so `lockupLeftover` is
+      // vacuously empty — booking `claimed` off one claimed output would abandon
+      // the rest of a multi-output lockup. Send it to review instead.
+      if (ours && row.lockupOutpoints !== null && (await lockupLeftover(arkade, row, [], null)).length === 0) {
         return store.transition(row.id, 'claiming', 'claimed', { claim_ark_txid: null })
       }
       await store.fail(
