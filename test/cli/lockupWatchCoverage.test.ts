@@ -52,7 +52,9 @@ describe('the lockup subscription', () => {
     // DIFFERENT corridor would look like it worked — the sweep would finish
     // the swap either way. Substring rather than a whole line, so prettier's
     // wrapping is not part of the contract.
-    expect(resyncBody()).toMatch(/corridor\.findRecoverable\(\)[\s\S]{0,120}corridor\.tick\(id\)/)
+    expect(resyncBody()).toMatch(/rows: await corridor\.findRecoverable\(\)[\s\S]{0,120}corridor\.tick\(id\)/)
+    // The pair above still matches while `watch` is handed an empty list.
+    expect(resyncBody()).toContain('watch(rows, tick)')
   })
 
   /**

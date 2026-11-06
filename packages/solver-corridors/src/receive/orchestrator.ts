@@ -62,7 +62,6 @@ import type { CovclaimdClient } from './covclaimd.js'
 import type { LightningBackend } from '@arkade-os/solver-core/ports/lightning.js'
 import { EXPOSED, type ReceiveSwapRow, type ReceiveSwapStore } from '../db/receiveSwaps.js'
 import type { SendSwapRow } from '../db/swaps.js'
-import { capture, unwrap } from '@arkade-os/solver-core/util/capture.js'
 import { GiveUp, json, log, messageOf, nowSeconds, poll } from '@arkade-os/solver-core/util/poll.js'
 import { sweep } from '@arkade-os/solver-core/util/sweep.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
@@ -853,11 +852,7 @@ export class ReceiveSwapService {
     // crashed and whose invoice has since expired is failed at `armed` with capital
     // already moved and no outpoint for `whenRefunding` to act on.
     // `whenFunded` searches ALL historical outpoints for the preimage, so recording one loses neither.
-    // The hold read is in flight with the outpoints; adoption is still applied before any funding gate,
-    // including when the hold read fails — a thrown invoice lookup must not strand an already-funded lockup.
-    const outpointsP = arkade.findLockupOutpoints(row.pkScript)
-    const holdP = row.fundStartedAt === null ? capture(ln.getHoldState(row.paymentHash)) : null
-    const alreadyFunded = adoptFunding(await outpointsP, row.payoutSats)
+    const alreadyFunded = adoptFunding(await arkade.findLockupOutpoints(row.pkScript), row.payoutSats)
     if (alreadyFunded) {
       // Transition rather than wait in `armed`: `funded` already owns the
       // "learn P, or recover/refund past the deadline" obligation, whereas
@@ -889,13 +884,12 @@ export class ReceiveSwapService {
       }
       return false
     }
-    if (holdP === null) return false
 
     // Re-polled HERE, immediately before funding — not trusted from whenQuoted's
-    // observation, which can be minutes stale. Only 'armed' status's E is
+    // observation, nor sampled beside the adoption scan. Only 'armed' status's E is
     // trusted; any other status (cancelled, or a backend quirk) is treated as
     // "nothing real to fund against" for this gate.
-    const fresh = unwrap(await holdP)
+    const fresh = await ln.getHoldState(row.paymentHash)
     const htlcExpiresAt = fresh.status === 'armed' ? fresh.expiresAt : null
     // A coupled row has no `E` to bound anything against: nothing armed this
     // invoice and nothing will. `evaluateReceiveFunding`'s gates (b) and (c)
@@ -1071,9 +1065,6 @@ export class ReceiveSwapService {
   private async whenFunded(row: ReceiveSwapRow): Promise<boolean> {
     const { store, arkade } = this.deps
     const observeStarted = performance.now()
-    // Overlaps the indexer read on the still-funded branch. The empty-lockup branch
-    // re-asks after the preimage search: that read can outlast the deadline.
-    const deadlineP = capture(refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip))
     const outputs = await arkade.findLockups(row.pkScript)
 
     if (outputs.length > 0) {
@@ -1084,8 +1075,8 @@ export class ReceiveSwapService {
       // is that the provider's own refund path must open regardless of
       // whether settlement is still going well. Past the deadline there is
       // also no point revealing any more: `whenRefunding`'s own recheck still
-      // catches a claim that lands right at the boundary.
-      if (unwrap(await deadlineP)) {
+      // catches a claim that lands right at the boundary. Read AFTER the lockup.
+      if (await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip)) {
         return store.transition(row.id, 'funded', 'refunding', {})
       }
       // No covclaimd to reveal to, or no packet to reveal: nothing to do but

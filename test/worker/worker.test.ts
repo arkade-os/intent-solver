@@ -219,6 +219,26 @@ describe('scheduled, with a queue binding', () => {
     // Fan-out means the cron does not drive the swap itself.
     expect((await store.get(swap.id)).state).toBe('quoted')
   })
+
+  // One store's read failure must not go deaf on the corridor still readable.
+  it('still dispatches Lightning jobs when the onchain store cannot be read', async () => {
+    const swap = await quoted()
+    const sent: DriveJob[] = []
+    onchainStore.findRecoverable = async () => {
+      throw new Error('onchain store outage')
+    }
+    const worker = buildWorker({
+      service,
+      store,
+      onchainService,
+      onchainStore,
+      network: 'bitcoin',
+      driveQueue: { send: async (job) => void sent.push(job) },
+    })
+
+    await expect(worker.scheduled()).rejects.toThrow('onchain store outage')
+    expect(sent).toContainEqual({ v: 1, type: 'tick_swap', leg: 'lightning', swap_id: swap.id })
+  })
 })
 
 describe('queue consumer', () => {

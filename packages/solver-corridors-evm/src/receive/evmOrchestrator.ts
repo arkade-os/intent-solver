@@ -205,13 +205,15 @@ export class EvmReceiveSwapService {
       this.deps.timelockHeight(),
       this.claimOutcome(row),
     ])
-    // Only worth asking once the lockup exists to be claimed FROM.
-    const preimageP =
+    // Only worth asking once the lockup exists to be claimed FROM. Captured
+    // because the depth probe below is awaited first, and for as long as it runs.
+    const preimageP = capture(
       row.preimage !== null
         ? Promise.resolve(row.preimage)
         : funded
           ? this.deps.arkadePreimage(row)
-          : Promise.resolve(null)
+          : Promise.resolve(null),
+    )
     // PROVEN depth, not assumed — same probe as the send shell. On THIS leg it
     // is the only thing standing between a client lock that can still reorg
     // away and the solver's own sats, and the solver never sees that lock's
@@ -235,7 +237,7 @@ export class EvmReceiveSwapService {
       evmLockAgeSeconds: depth.ageSeconds,
       arkadeLockupFunded: funded,
       evmClaimOutcome: claimOutcome,
-      preimage: await preimageP,
+      preimage: unwrap(await preimageP),
       nowSeconds: this.now(),
       evmTimelockHeight: clock,
     }

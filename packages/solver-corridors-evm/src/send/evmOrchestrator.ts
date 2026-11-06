@@ -337,22 +337,25 @@ export class EvmSendSwapService {
     // deletes its flag on claim, so absence is exactly when a Claim exists.
     // Keyed on the state (its CAS precedes the broadcast), not `evmLockTxid`,
     // which is patched after it and so is null across a crash.
-    const preimageP = (async (): Promise<string | null> => {
-      if (row.preimage !== null || !(EVM_SEND_EXPOSED as readonly string[]).includes(row.state)) return row.preimage
-      // Reported and survived, as `provenDepth` treats its failed reads.
-      try {
-        const found = await this.deps.evm.findClaimPreimage(lock, await this.claimScanFloor(row, height), {
-          minConfirmations: row.minConfirmations,
-          minAgeSeconds: row.minAgeSeconds,
-          nowSeconds: this.now(),
-        })
-        return found === null ? null : Buffer.from(found).toString('hex')
-      } catch (error) {
-        if (error instanceof EvmClaimVerificationError) throw error
-        this.deps.onTickError?.(row.id, error)
-        return null
-      }
-    })()
+    // Captured because the depth probe below is awaited first, and for as long as it runs.
+    const preimageP = capture(
+      (async (): Promise<string | null> => {
+        if (row.preimage !== null || !(EVM_SEND_EXPOSED as readonly string[]).includes(row.state)) return row.preimage
+        // Reported and survived, as `provenDepth` treats its failed reads.
+        try {
+          const found = await this.deps.evm.findClaimPreimage(lock, await this.claimScanFloor(row, height), {
+            minConfirmations: row.minConfirmations,
+            minAgeSeconds: row.minAgeSeconds,
+            nowSeconds: this.now(),
+          })
+          return found === null ? null : Buffer.from(found).toString('hex')
+        } catch (error) {
+          if (error instanceof EvmClaimVerificationError) throw error
+          this.deps.onTickError?.(row.id, error)
+          return null
+        }
+      })(),
+    )
     // PROVEN depth, not assumed. Ask the contract whether this lock was already
     // there `minConfirmations` blocks back; if it was, it is at least that
     // deep, and the probe block's own timestamp bounds its age from below.
@@ -376,7 +379,7 @@ export class EvmSendSwapService {
       // zero for an absent or unproven lock, so it cannot advance.
       evmLockConfirmations: depth.confirmations,
       evmLockAgeSeconds: depth.ageSeconds,
-      preimage: await preimageP,
+      preimage: unwrap(await preimageP),
       nowSeconds: this.now(),
       evmTimelockHeight: clock,
     }

@@ -39,6 +39,7 @@
  */
 
 import { buildApp } from '@arkade-os/solver-transport/http/server.js'
+import { capture, unwrap } from '@arkade-os/solver-core/util/capture.js'
 import { corridorSetFromDeps, readerSetFromDeps } from './ops/corridorSet.js'
 import type { SendSwapService } from '@arkade-os/solver-corridors/send/orchestrator.js'
 import type { OnchainSendSwapService } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
@@ -129,14 +130,21 @@ export const buildWorker = (deps: WorkerDeps): Worker => {
       // Fan-out: one message per swap so a slow Lightning poll on one swap
       // cannot eat the whole cron budget, plus one sweep job.
       const queue = deps.driveQueue
+      // Captured so one store's outage cannot cancel the OTHER corridor's dispatch.
       const [lightning, onchain] = await Promise.all([
-        deps.store.findRecoverable(),
-        deps.onchainStore.findRecoverable(),
+        capture(deps.store.findRecoverable()),
+        capture(deps.onchainStore.findRecoverable()),
       ])
       await Promise.all([
-        ...lightning.map((row) => queue.send({ v: 1, type: 'tick_swap', leg: 'lightning', swap_id: row.id })),
-        ...onchain.map((row) => queue.send({ v: 1, type: 'tick_swap', leg: 'onchain', swap_id: row.id })),
+        ...(lightning.ok ? lightning.value : []).map((row) =>
+          queue.send({ v: 1, type: 'tick_swap', leg: 'lightning', swap_id: row.id }),
+        ),
+        ...(onchain.ok ? onchain.value : []).map((row) =>
+          queue.send({ v: 1, type: 'tick_swap', leg: 'onchain', swap_id: row.id }),
+        ),
       ])
+      unwrap(lightning)
+      unwrap(onchain)
       await queue.send({ v: 1, type: 'refund_sweep' })
     },
 
