@@ -378,6 +378,7 @@ export const unilateralLadderFor = (
   base: UnilateralDelays,
   refundLocktime: number,
   quotedAt: number,
+  csvWindow?: { originLowerBoundMtp: number; marginSeconds: number },
 ): UnilateralDelays => {
   const baseUnits = new Set(
     [base.unilateralClaimDelay, base.unilateralRefundDelay, base.unilateralRefundWithoutReceiverDelay].map(
@@ -387,7 +388,26 @@ export const unilateralLadderFor = (
   if (baseUnits.size !== 1) {
     throw new Error(`unilateral ladder base mixes units: ${JSON.stringify(base)}`)
   }
-  const horizon = Math.max(0, refundLocktime - quotedAt)
+  if (
+    csvWindow &&
+    (!Number.isSafeInteger(csvWindow.originLowerBoundMtp) ||
+      csvWindow.originLowerBoundMtp <= 0 ||
+      !Number.isSafeInteger(csvWindow.marginSeconds) ||
+      csvWindow.marginSeconds <= 0)
+  ) {
+    throw new Error('CSV window needs a valid future-origin MTP bound and positive safety margin')
+  }
+  if (csvWindow && baseUnits.has('blocks')) {
+    throw new Error('block CSV cannot guarantee a seconds-denominated safety margin')
+  }
+  const horizon = Math.max(
+    0,
+    refundLocktime -
+      (csvWindow?.originLowerBoundMtp ?? quotedAt) +
+      (csvWindow?.marginSeconds ?? 0) +
+      (csvWindow ? 1 : 0),
+  )
+  if (!Number.isSafeInteger(horizon)) throw new Error('CSV window horizon overflows')
   if (baseUnits.has('seconds')) {
     const solo = Math.max(base.unilateralRefundWithoutReceiverDelay, ceilToGranularity(horizon))
     if (!isEncodableDelay(solo) || solo > MAX_BIP68_SECONDS) {

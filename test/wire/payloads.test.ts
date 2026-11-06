@@ -81,6 +81,7 @@ describe('client-safe refusal details', () => {
 const QUOTE_REFUSALS = [
   'amount_out_of_range',
   'cltv_too_large',
+  'csv_window_unavailable',
   'coupled_deadline_unsafe',
   'coupled_invoice_mismatch',
   'duplicate_swap',
