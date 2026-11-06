@@ -168,6 +168,10 @@ export const deleteSweptClaimIntent = async (ctx: ArkadeContext, deleteProof: st
   }
 }
 
+/**
+ * Precondition, NOT enforced here: the Service must reject intents selecting a CSV tapleaf
+ * (ArkLabsHQ/arkd#203), or a matured sibling refund leaf can race this claim after Lightning is paid.
+ */
 export const claimSweptSwapScript = async (
   ctx: ArkadeContext,
   script: CovenantSwapScript,
