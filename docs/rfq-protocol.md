@@ -1849,6 +1849,7 @@ The reference implementation's internal refusal names map onto the closed set
 | `fee_consumes_swap`          | `pricing_unavailable` |
 | `payout_below_dust`          | `pricing_unavailable` |
 | `recourse_window_unservable` | `pricing_unavailable` |
+| `csv_window_unavailable`     | `pricing_unavailable` |
 | `payable_amount_unmatchable` | `pricing_unavailable` |
 | `duplicate_swap`             | `quote_conflict`      |
 | `provider_at_capacity`       | `exposure_cap`        |

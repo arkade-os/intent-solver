@@ -146,9 +146,9 @@ export const REFUSAL_EXPLANATIONS: Record<RefusalReason, RefusalExplanation> = {
   },
   csv_window_unavailable: {
     meaning:
-      'The solver could not obtain authoritative Bitcoin chain facts to prove that the client’s solo CSV refund stays behind the scripted refund deadline plus its safety margin.',
+      'The solver could not obtain authoritative Bitcoin chain facts to prove that all VHTLC CSV paths stay behind the scripted refund deadline plus its safety margin.',
     whatToDo:
-      'This is an Arkd or Bitcoin Core evidence-service problem. Restore the authenticated origin API and synced chain data; the client cannot fix it by changing the invoice.',
+      'This is an Arkd or Bitcoin Core evidence-service problem. Restore the CSV origin API and synced chain data; the client cannot fix it by changing the invoice.',
   },
   payable_amount_unmatchable: {
     meaning:
