@@ -110,9 +110,18 @@ describe('an unrolled send lockup is claimed without arkd co-signing', () => {
         whenExhausted: 'unroll fee wallet was not funded',
       })
       const session = await Unroll.sessionFor(ctx.wallet, { txid: funded.txid, vout: funded.vout }, feeWallet)
-      for await (const step of session) {
-        if (step.type === Unroll.StepType.WAIT || step.type === Unroll.StepType.UNROLL) await mineBlocks(1)
+      let unrollComplete = false
+      for (let stepIndex = 0; stepIndex < 20; stepIndex++) {
+        const step = await session.next()
+        if (step.type === Unroll.StepType.WAIT) await mineBlocks(1)
+        await step.do()
+        if (step.type === Unroll.StepType.UNROLL) await mineBlocks(1)
+        if (step.type === Unroll.StepType.DONE) {
+          unrollComplete = true
+          break
+        }
       }
+      expect(unrollComplete).toBe(true)
       await poll(
         async () => {
           const output = (await findLockupOutpoints(ctx, swap.pkScript)).find(
