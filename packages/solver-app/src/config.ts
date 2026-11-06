@@ -136,6 +136,8 @@ export interface Config {
   arkade: ArkadeWalletConfig
   /** Durable swap state. Separate file from the wallet's own database. */
   swapDbPath: string
+  /** Boot anyway when undrained onchain-receive rows (a corridor #292 removed) remain; see services.ts. */
+  allowUndrainedOnchainReceive: boolean
   /**
    * Per-corridor amount range, each already narrowed by `limits`.
    *
@@ -1018,6 +1020,7 @@ export const configFromKnobs = (env: Knobs): Config => {
     assetRfqTokens: parseAssetRfqTokens(env.ASSET_MARKETS, (name) => env[name]),
     assetQuoteValiditySeconds: intFromEnv(env, 'ASSET_QUOTE_VALIDITY_SECONDS', 30, 5, 900),
     swapDbPath: swapDbPath(env),
+    allowUndrainedOnchainReceive: env.ALLOW_UNDRAINED_ONCHAIN_RECEIVE?.trim() === 'true',
     poolAutoMint: poolAutoMintFromEnv(env),
     lnReceiveAcceptUnilateralGap: lnReceiveAcceptUnilateralGapFromEnv(env, raw),
     maxExposedSats,

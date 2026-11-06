@@ -52,6 +52,7 @@ const solverConfig = (): Config => {
       expectedArkdNetwork: 'regtest',
     },
     swapDbPath: ':memory:',
+    allowUndrainedOnchainReceive: false,
     // The four keys are written as PAIR STRINGS rather than through the union
     // that types them. `Record<Corridor, …>` cannot be written by name from the
     // entrypoint: the `Corridor` it exports is the corridor PLUGIN interface
