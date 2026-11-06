@@ -260,7 +260,7 @@ export class UnrolledSpender {
     const status = await this.deps.chain.getTxStatus(record.txid).catch(() => null)
     if (status?.confirmed) return { kind: 'confirmed', record }
     const out = (await this.deps.chain.getTxOutspends(lockup.txid))[lockup.vout]
-    if (out?.spent && out.txid === record.txid) return { kind: 'pending', record }
+    if (out?.spent && out.txid === record.txid) return this.track(lockup, record, save)
     if (out?.spent && out.txid !== undefined) {
       const ours = await this.adopt(out.txid)
       if (ours) return this.track(lockup, ours, save)

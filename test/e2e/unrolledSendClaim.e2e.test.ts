@@ -3,7 +3,7 @@ import { promisify } from 'node:util'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { Address, OutScript } from '@scure/btc-signer'
 import { hex } from '@scure/base'
-import { OnchainWallet, Transaction, Unroll } from '@arkade-os/sdk'
+import { OnchainWallet, Transaction, Unroll, type ExitPackage } from '@arkade-os/sdk'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { relativeDelayFrom } from '@arkade-os/solver-core/core/timelocks.js'
@@ -70,9 +70,6 @@ describe('an unrolled send lockup is claimed without arkd co-signing', () => {
         admission: new AdmissionControl(),
         chainTip: { height: async () => (await ctx.wallet.onchainProvider.getChainTip()).height },
       })
-      const claimDelay = relativeDelayFrom(ctx.unilateralDelays.unilateralClaimDelay)
-      if (claimDelay.unit !== 'blocks') throw new Error('unrolled claim requires a block-typed arkd')
-
       await assertArkadeSpendable(arkade, AMOUNT_SATS + 1_000)
       const { invoice } = ln.forgeInvoice(AMOUNT_SATS)
       const quote = await service.quote(invoice, await ctx.wallet.getAddress(), {
@@ -80,6 +77,8 @@ describe('an unrolled send lockup is claimed without arkd co-signing', () => {
       })
       if (!quote.accepted) throw new Error(`solver refused the quote: ${quote.reason}`)
       const swap = quote.swap
+      const claimDelay = relativeDelayFrom(swap.claimDelay)
+      if (claimDelay.unit !== 'blocks') throw new Error('unrolled claim requires a block-typed arkd')
       await (
         await ctx.wallet.getContractManager()
       ).createContract(lockupContractRegistration(covenantScriptFromRow(swap), swap.lockupAddress))
@@ -133,8 +132,10 @@ describe('an unrolled send lockup is claimed without arkd co-signing', () => {
         { attempts: 30, intervalMs: 2000, whenExhausted: 'funded lockup did not become unrolled' },
       )
       const parent = await ctx.wallet.onchainProvider.getTxStatus(funded.txid)
-      expect(parent?.confirmed).toBe(true)
-      expect(await mineBlocks(claimDelay.value + 2)).not.toBeNull()
+      if (!parent.confirmed) throw new Error('unrolled lockup parent is not confirmed')
+      const matureTip = await mineBlocks(claimDelay.value + 2)
+      expect(matureTip).not.toBeNull()
+      expect(matureTip!).toBeGreaterThanOrEqual(parent.blockHeight + claimDelay.value)
 
       revealPreimage = true
       const journaled = await poll(
@@ -149,14 +150,33 @@ describe('an unrolled send lockup is claimed without arkd co-signing', () => {
         { attempts: 45, intervalMs: 2000, whenExhausted: 'solo claim package was not journaled after CSV' },
       )
       expect(journaled.state).toBe('claiming')
-      const spender = await poll(
-        async () => {
-          await service.tick(swap.id)
-          const out = (await ctx.wallet.onchainProvider.getTxOutspends(funded.txid))[funded.vout]
-          return out?.spent && out.txid ? out.txid : null
-        },
-        { attempts: 45, intervalMs: 2000, whenExhausted: 'solo claim did not spend the lockup' },
-      )
+      const solo = (JSON.parse(journaled.unrolledClaim!) as Record<string, { record?: { soloPackage?: ExitPackage } }>)[
+        key
+      ]?.record?.soloPackage
+      const sweep = solo?.steps[0]
+      if (sweep?.kind !== 'sweep') throw new Error('solo claim journal has no sweep')
+      expect(sweep.delay).toEqual({ type: 'blocks', value: claimDelay.value })
+      let spender: string
+      try {
+        spender = await poll(
+          async () => {
+            await service.tick(swap.id)
+            const status = await ctx.wallet.onchainProvider.getTxStatus(sweep.txid).catch(() => null)
+            return status ? sweep.txid : null
+          },
+          { attempts: 45, intervalMs: 2000, whenExhausted: 'solo claim did not reach the mempool' },
+        )
+      } catch (error) {
+        const tip = await ctx.wallet.onchainProvider.getChainTip()
+        const status = await ctx.wallet.onchainProvider.getTxStatus(sweep.txid).catch(() => null)
+        const out = (await ctx.wallet.onchainProvider.getTxOutspends(funded.txid))[funded.vout]
+        const latest = await store.get(swap.id)
+        throw new Error(
+          `solo sweep absent: parent=${parent.blockHeight}, tip=${tip.height}, delay=${JSON.stringify(sweep.delay)}, ` +
+            `status=${JSON.stringify(status)}, out=${JSON.stringify(out)}, row=${latest.state}; ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
       expect(await mineBlocks(1)).not.toBeNull()
       const claimed = await poll(
         async () => {

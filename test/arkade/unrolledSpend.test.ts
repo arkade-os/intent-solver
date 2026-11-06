@@ -599,6 +599,14 @@ describe('UnrolledSpender', () => {
       })
       expect(await spender.advance(claim, record, save)).toEqual({ kind: 'pending', record })
       expect(prepares).toBe(0)
+      now += 20 * 60
+      chain.feeRate = 40
+      expect(await spender.advance(claim, record, save)).toMatchObject({
+        kind: 'pending',
+        record: { cpfpTxid: expect.any(String) },
+      })
+      expect(cosigned).toHaveLength(2)
+      expect(prepares).toBe(0)
     })
 
     it('rejects an indexer output value that disagrees with the confirmed lockup', async () => {

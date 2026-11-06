@@ -130,7 +130,7 @@ export const unrolledClaimFallbackFor = (
       return { kind: 'failed', reason: 'unrolled claim package network differs from the wallet' }
     }
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 1_500)
+    const timer = setTimeout(() => controller.abort(), 5_000)
     try {
       const executor = new UnilateralExit.Executor(pkg, ctx.wallet.onchainProvider, {
         signal: controller.signal,
