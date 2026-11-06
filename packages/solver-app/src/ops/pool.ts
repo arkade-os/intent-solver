@@ -68,12 +68,10 @@ export const poolPlan = async (services: Services, maxInputs = 50): Promise<Pool
   // cannot answer "what can this coin fund" differently. A coin worth no more than
   // dust funds nothing, so it is never a piece; it still counts toward the coin
   // ceiling, and a merge may take it, its asset riding the merge's change.
-  const [info, vtxos] = await Promise.all([
-    services.arkade.wallet.arkProvider.getInfo(),
-    services.arkade.wallet.getSpendableVtxos(),
-  ])
+  const info = await services.arkade.wallet.arkProvider.getInfo()
   const dustSats = Number(info.dust)
   const maxAmount = Number(info.vtxoMaxAmount ?? -1)
+  const vtxos = await services.arkade.wallet.getSpendableVtxos()
   const reserved = services.arkade.reservations.reserved()
   const unreserved = vtxos.filter((vtxo) => !reserved.has(outpointKey(vtxo.txid, vtxo.vout)))
   const usable = unreserved.map((vtxo) => Math.max(0, usableSatsOf(vtxo, dustSats)))
