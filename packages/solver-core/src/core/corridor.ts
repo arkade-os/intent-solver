@@ -192,18 +192,18 @@ export interface CorridorReader {
   close(): Promise<void>
 }
 
-/**
- * A corridor that is also SERVING — quoting, and driven by the sweep.
- *
- * Present iff this deployment enabled the corridor. Everything a reader can do,
- * plus the two things that need a live service behind them.
- */
 export type CorridorRevealOutcome =
   | { kind: 'accepted' }
   /** `detail` is for the log; the wire answer is the generic refusal. */
   | { kind: 'refused'; detail: string }
   | { kind: 'unknown' }
 
+/**
+ * A corridor that is also SERVING — quoting, and driven by the sweep.
+ *
+ * Present iff this deployment enabled the corridor. Everything a reader can do,
+ * plus the two things that need a live service behind them.
+ */
 export interface Corridor extends CorridorReader {
   /**
    * Validate an RFQ request and issue or refuse terms.
