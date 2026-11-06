@@ -190,20 +190,60 @@ export const createArkadeRebalanceSource = async (
     candidates: NormalizedExtendedVirtualCoin[],
   ) => {
     const minimumChange = Math.max(Number(services.arkade.dustSats ?? 330n), Number(services.arkade.vtxoMinSats ?? 0n))
-    const sorted = [...candidates].sort(
-      (a, b) => b.value - a.value || outpointKey(a.txid, a.vout).localeCompare(outpointKey(b.txid, b.vout)),
-    )
-    const selected: NormalizedExtendedVirtualCoin[] = []
-    for (const coin of sorted) {
-      selected.push(coin)
-      if (sum(selected) < amount) continue
-      const quote = await routerQuote(destination, amount, selected, kind)
-      wholeSats(quote.total)
-      if (quote.amount !== amount || quote.total < amount)
-        throw new Error('source rail quoted a different payment amount')
-      const change = sum(selected) - quote.total
-      if (change === 0 || change >= minimumChange) return { quote, selected }
+    const maxInputs = 50
+    const byValue = (a: NormalizedExtendedVirtualCoin, b: NormalizedExtendedVirtualCoin) =>
+      b.value - a.value || outpointKey(a.txid, a.vout).localeCompare(outpointKey(b.txid, b.vout))
+    const orderings = [
+      [...candidates].sort(byValue),
+      [...candidates].sort(
+        (a, b) =>
+          (a.expiresAt?.getTime() ?? Infinity) - (b.expiresAt?.getTime() ?? Infinity) ||
+          (a.expiresAtHeight ?? Infinity) - (b.expiresAtHeight ?? Infinity) ||
+          byValue(a, b),
+      ),
+    ]
+    const quotes = new Map<string, Promise<RouteQuote>>()
+    let best: { quote: RouteQuote; selected: NormalizedExtendedVirtualCoin[] } | undefined
+    let failure: unknown
+    for (const sorted of orderings) {
+      const selected: NormalizedExtendedVirtualCoin[] = []
+      for (const coin of sorted.slice(0, maxInputs)) {
+        selected.push(coin)
+        if (sum(selected) < amount) continue
+        const key = selected
+          .map((input) => outpointKey(input.txid, input.vout))
+          .sort()
+          .join(',')
+        let quote: RouteQuote
+        try {
+          let pending = quotes.get(key)
+          if (!pending) {
+            pending = routerQuote(destination, amount, [...selected], kind)
+            quotes.set(key, pending)
+          }
+          quote = await pending
+          wholeSats(quote.total)
+          if (quote.amount !== amount || quote.total < amount)
+            throw new Error('source rail quoted a different payment amount')
+        } catch (error) {
+          failure = error
+          break
+        }
+        const change = sum(selected) - quote.total
+        if (change !== 0 && change < minimumChange) continue
+        if (
+          !best ||
+          quote.total < best.quote.total ||
+          (quote.total === best.quote.total && selected.length < best.selected.length)
+        )
+          best = { quote, selected }
+        break
+      }
     }
+    if (best) return best
+    if (failure) throw failure
+    if (candidates.length > maxInputs)
+      throw new Error('source selection cannot cover this transfer within the 50 input limit')
     throw new Error('insufficient unreserved asset-free source inventory')
   }
 
@@ -282,7 +322,7 @@ export const createArkadeRebalanceSource = async (
   }
 
   return {
-    async quote(deposit: RebalanceDeposit, policy: RebalancePolicy) {
+    async quote(deposit: RebalanceDeposit, policy: RebalancePolicy, origin: RebalanceTransfer['origin'] = 'automatic') {
       let destination = deposit.destination
       let amount = deposit.amountSats
       let kind: 'onchain' | 'arkade' = 'onchain'
@@ -371,7 +411,10 @@ export const createArkadeRebalanceSource = async (
         const candidates = coins.filter((coin) => !pinned.has(outpointKey(coin.txid, coin.vout)))
         const { quote, selected } = await selectQuote(destination, amount, kind, candidates)
         if (
-          quote.total + policy.reserveSats + (await owed()) + admission.outstandingInventorySats('arkade') >
+          quote.total +
+            (origin === 'manual' ? 0 : policy.reserveSats) +
+            (await owed()) +
+            admission.outstandingInventorySats('arkade') >
           sum(candidates)
         )
           throw new Error('source reserve or outstanding payouts leave insufficient surplus')
@@ -400,8 +443,14 @@ export const createArkadeRebalanceSource = async (
           held.delete(row.id)
         }
       }
-      checkRebalanceFees(policy, row.netSats, row.debitSats)
-      if (row.debitSats > policy.maxDebitSats || row.feeSats !== row.debitSats - row.netSats)
+      wholeSats(row.netSats)
+      wholeSats(row.debitSats)
+      if (row.origin !== 'manual') checkRebalanceFees(policy, row.netSats, row.debitSats)
+      if (
+        (row.origin !== 'manual' && row.debitSats > policy.maxDebitSats) ||
+        row.debitSats < row.netSats ||
+        row.feeSats !== row.debitSats - row.netSats
+      )
         throw new Error('invalid approved source debit')
       const coins = await snapshot()
       const selected = exactInputs(row, coins)
@@ -412,7 +461,8 @@ export const createArkadeRebalanceSource = async (
       try {
         await currentQuote(row, selected)
         const available =
-          sum(coins.filter((coin) => !pinned.has(outpointKey(coin.txid, coin.vout)))) - policy.reserveSats
+          sum(coins.filter((coin) => !pinned.has(outpointKey(coin.txid, coin.vout)))) -
+          (row.origin === 'manual' ? 0 : policy.reserveSats)
         const balance = await admission.reserveInventory('arkade', row.debitSats, available, owed)
         if (!balance) throw new Error('source reserve or outstanding payouts leave insufficient surplus')
         held.set(row.id, selected)
@@ -425,6 +475,27 @@ export const createArkadeRebalanceSource = async (
         releaseInputs()
         throw error
       }
+    },
+
+    pinPendingInputs(row) {
+      if (
+        row.inputs.length === 0 ||
+        row.inputs.some((input) => !validTxid(input.txid) || !Number.isSafeInteger(input.vout) || input.vout < 0)
+      )
+        throw new Error('pending rebalance has no valid source inputs to protect')
+      return reservations.reserve(row.inputs)
+    },
+
+    async inputsAbsent(rows) {
+      const available = new Set((await snapshot()).map((coin) => outpointKey(coin.txid, coin.vout)))
+      return new Set(
+        rows
+          .filter(
+            (row) =>
+              row.inputs.length > 0 && row.inputs.every((input) => !available.has(outpointKey(input.txid, input.vout))),
+          )
+          .map((row) => row.id),
+      )
     },
 
     async submit(row) {
@@ -464,11 +535,13 @@ export const createArkadeRebalanceSource = async (
         if (!services.onchain) return { state: 'unknown' }
         const evidence = await inputEvidence(row)
         const outputs = (await services.onchain.findOutputs({ address: row.deposit.destination })).filter(
-          (output) => output.valueSats === row.deposit.amountSats && validTxid(output.txid),
+          (output) =>
+            output.valueSats === row.deposit.amountSats &&
+            validTxid(output.txid) &&
+            (!row.fundingTxid || output.txid === row.fundingTxid),
         )
         if (outputs.length !== 1) return { state: 'unknown' }
         const txid = outputs[0]!.txid
-        if (row.fundingTxid && row.fundingTxid !== txid) return { state: 'unknown' }
         if (!evidence.length || evidence.some((coin) => !coin || coin.settledBy !== txid)) return { state: 'unknown' }
         return { state: 'submitted', fundingTxid: txid }
       }

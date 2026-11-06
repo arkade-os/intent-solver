@@ -113,10 +113,11 @@ describe('mintPool (ops half)', () => {
     expect(body.indexOf('committedAcrossCorridors')).toBeLessThan(body.indexOf('wallet.send('))
   })
 
-  it('only an explicit force bypasses that check, never a missing option', () => {
+  it('keeps the standalone committed-swap gate unless explicitly forced', () => {
     const body = mintPoolBody()
     expect(body).toContain('opts.force !== true')
     expect(body.indexOf('opts.force !== true')).toBeLessThan(body.indexOf('wallet.send('))
+    expect(poolCommand()).not.toContain('inProviderProcess')
   })
 })
 

@@ -13,6 +13,7 @@
  */
 
 import { createCorridorReaderSet } from '@arkade-os/solver-core/core/corridor.js'
+import { ArkError } from '@arkade-os/sdk'
 import { describe, it, expect, vi } from 'vitest'
 import { mintPool, poolPlan, committedAcrossCorridors, resplitFloat } from '@arkade-os/solver-app/ops/pool.js'
 import { usableSatsOf } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
@@ -396,6 +397,16 @@ describe('mintPool — the spend gate', () => {
     expect(result).toMatchObject({ txid: 'ark-txid' })
   })
 
+  it('uses the provider ledger when in-process swaps remain committed', async () => {
+    const send = vi.fn().mockResolvedValue('ark-txid')
+    const services = servicesWith({ committed: 9_758, spendable: [300_000, 250_000], reserved: ['coin0:0'], send })
+    const result = await mintPool(services, { inProviderProcess: true })
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(send.mock.calls[0]![0].selectedVtxos.map((coin: { txid: string }) => coin.txid)).toEqual(['coin1'])
+    expect(result).toMatchObject({ txid: 'ark-txid', committedSats: 9_758 })
+    expect([...services.arkade.reservations.reserved()]).toEqual(['coin0:0'])
+  })
+
   it('spends exactly once — a split is one Arkade transaction, not one per piece', async () => {
     const send = vi.fn().mockResolvedValue('ark-txid')
     const result = await mintPool(servicesWith({ send }))
@@ -411,6 +422,92 @@ describe('mintPool — the spend gate', () => {
     expect(selectedVtxos).toHaveLength(50)
     expect(result).toMatchObject({ minted: recipients.map((r: { amount: number }) => r.amount) })
     expect(recipients.every((r: { address: string }) => r.address === 'tark1solver')).toBe(true)
+  })
+})
+
+describe('mintPool — bounded weight rejection retries', () => {
+  const tooLarge = () => new ArkError(46, 'ark tx weight is too high: 41000', 'TX_TOO_LARGE')
+
+  it('rebuilds the complete transaction with fewer inputs and bounded asset-safe outputs', async () => {
+    const coins = Array.from({ length: 70 }, (_, i) => ({
+      txid: `coin${i}`,
+      vout: 0,
+      value: 4_000,
+      assets: [{ assetId: ASSET_A, amount: 1n }],
+    }))
+    const send = vi.fn().mockRejectedValueOnce(tooLarge()).mockResolvedValue('smaller-txid')
+    const services = servicesWith({ coins, send, info: { dust: 330, vtxoMaxAmount: 30_000 } })
+    const result = await mintPool(services)
+    expect(send).toHaveBeenCalledTimes(2)
+    const attempts = send.mock.calls.map(([attempt]) => attempt)
+    expect(attempts.map((attempt) => attempt.selectedVtxos.length)).toEqual([50, 25])
+    for (const attempt of attempts) {
+      const amounts = attempt.recipients.map((recipient: { amount: number }) => recipient.amount)
+      const inputSats = attempt.selectedVtxos.reduce((sum: number, coin: { value: number }) => sum + coin.value, 0)
+      expect(amounts.reduce((sum: number, amount: number) => sum + amount, 0)).toBe(inputSats - 330)
+      expect(amounts.every((amount: number) => amount >= 330 && amount <= 30_000)).toBe(true)
+      expect(amounts.length + 1).toBeLessThanOrEqual(8)
+    }
+    expect(result).toMatchObject({
+      txid: 'smaller-txid',
+      minted: attempts[1].recipients.map((recipient: { amount: number }) => recipient.amount),
+      spent: attempts[1].selectedVtxos.map((coin: { txid: string }) => `${coin.txid}:0`),
+    })
+    expect(services.arkade.wallet.getSpendableVtxos).toHaveBeenCalledTimes(2)
+    expect(services.arkade.wallet.arkProvider.getInfo).toHaveBeenCalledTimes(2)
+  })
+
+  it('releases rejected pins and rereads both inventory and reservations before retrying', async () => {
+    const ledger = createReservationLedger()
+    const send = vi.fn().mockRejectedValueOnce(tooLarge()).mockResolvedValue('smaller-txid')
+    const services = servicesWith({ committed: 9_758, spendable: Array(70).fill(4_000), send, ledger })
+    const read = vi.mocked(services.arkade.wallet.getSpendableVtxos)
+    const coins = await read()
+    read.mockClear()
+    read.mockResolvedValueOnce(coins).mockImplementationOnce(async () => {
+      expect([...ledger.reserved()]).toEqual([])
+      ledger.reserve([{ txid: 'coin1', vout: 0 }])
+      return coins.filter((coin) => coin.txid !== 'coin0')
+    })
+    await mintPool(services, { inProviderProcess: true })
+    const selected = send.mock.calls[1]![0].selectedVtxos.map((coin: { txid: string }) => coin.txid)
+    expect(selected).not.toContain('coin0')
+    expect(selected).not.toContain('coin1')
+    expect([...ledger.reserved()]).toEqual(['coin1:0'])
+  })
+
+  it('rechecks aggregate commitments before a smaller attempt', async () => {
+    const committed = vi.fn().mockResolvedValueOnce(0).mockResolvedValue(9_758)
+    const send = vi.fn().mockRejectedValue(tooLarge())
+    const result = await mintPool(servicesWith({ spendable: Array(70).fill(4_000), send, committed }))
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(result).toMatchObject({ refused: expect.stringContaining('9758 sat committed'), committedSats: 9_758 })
+  })
+
+  it('reports deferred when progressively smaller complete plans cannot make progress', async () => {
+    const send = vi.fn().mockRejectedValue(tooLarge())
+    const result = await mintPool(servicesWith({ spendable: Array(70).fill(4_000), send }))
+    expect(send.mock.calls.map(([attempt]) => attempt.selectedVtxos.length)).toEqual([50, 25, 12, 6, 3])
+    expect(result).toMatchObject({ refused: expect.stringContaining('smaller plan cannot make progress') })
+  })
+
+  it('does not repeat an oversized single-input transaction', async () => {
+    const send = vi.fn().mockRejectedValue(tooLarge())
+    expect(await mintPool(servicesWith({ send }))).toMatchObject({
+      refused: expect.stringContaining('one-coin transaction'),
+    })
+    expect(send).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    new Error('request timed out'),
+    new Error('TX_TOO_LARGE (46): ark tx weight is too high: 41000'),
+    new ArkError(46, 'unknown rejection', 'TX_TOO_LARGE'),
+    new ArkError(47, 'ark tx weight is too high: 41000', 'TX_TOO_LARGE'),
+  ])('never retries ambiguous or unrecognized send errors: %s', async (error) => {
+    const send = vi.fn().mockRejectedValue(error)
+    await expect(mintPool(servicesWith({ spendable: Array(70).fill(4_000), send }))).rejects.toBe(error)
+    expect(send).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -445,9 +542,11 @@ describe('mintPool — named, pinned inputs', () => {
     const send = vi.fn()
     const committed = async () => {
       ledger.reserve([{ txid: 'coin0', vout: 0 }])
-      return 0
+      return 9_758
     }
-    expect(await mintPool(servicesWith({ ledger, send, committed }))).toEqual({ skipped: 'inputs-pinned' })
+    expect(await mintPool(servicesWith({ ledger, send, committed }), { inProviderProcess: true })).toEqual({
+      skipped: 'inputs-pinned',
+    })
     expect(send).not.toHaveBeenCalled()
   })
 

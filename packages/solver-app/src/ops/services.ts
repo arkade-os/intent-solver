@@ -258,6 +258,7 @@ export interface Services {
    */
   tickErrors: TickErrorTracker
   rebalance?: RebalanceService
+  rebalanceStore?: RebalanceStore
   /**
    * The BTC rail's two legs, or NULL on a deployment that serves no BTC corridor.
    *
@@ -1668,10 +1669,6 @@ export const createServices = async (
             return balanceReportInFlight
           },
         ],
-        // FIRST: `APPROVAL NEEDED` is the only signal a held swap gives, and every
-        // step below tears down what delivering it needs. Bounded by the sinks'
-        // own AbortSignal.timeout, so it cannot hang the shutdown it precedes.
-        ['notifier', () => notifier.flush()],
         [
           'rebalance',
           async () => {
@@ -1679,6 +1676,8 @@ export const createServices = async (
             await runtimeRebalance?.close()
           },
         ],
+        // An in-flight rebalance can post its final notice while closing.
+        ['notifier', () => notifier.flush()],
         ['railWatch', () => railWatch?.stop()],
         ['payoutFunding', () => payoutFundingRegistration?.close?.()],
         ['store', () => store.close()],
@@ -1708,6 +1707,7 @@ export const createServices = async (
     const rebalancePolicy =
       storedPolicy === undefined ? disabledRebalancePolicy() : validateRebalancePolicy(JSON.parse(storedPolicy))
     const rebalanceStore = await RebalanceStore.open(swapFile)
+    services.rebalanceStore = rebalanceStore
     // Only the long-lived daemon drives rebalancing; a one-shot CLI shares this db but must not
     // reserve coins or rewrite in-flight rows (both process-local) under the running daemon.
     const active = opts?.rebalance === 'active'
@@ -1724,6 +1724,10 @@ export const createServices = async (
         source,
         policy: rebalancePolicy,
         savePolicy: async (next) => adminStore.setOverride('REBALANCE_POLICY', JSON.stringify(next)),
+        postNotice: active ? (text) => notifier.post(text) : undefined,
+        overlapCheckpoint: active
+          ? () => adminStore.latestCompleteBalanceCheckpoint(balanceCheckpointScope(services))
+          : undefined,
       },
       active ? 'active' : 'passive',
     )

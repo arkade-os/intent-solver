@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RebalancePanel } from '../../packages/solver-app/src/admin/static/rebalance.js'
 
 const policy = {
@@ -17,12 +17,25 @@ const overview = {
   pools: [{ id: 'rail:shared', label: 'shared pool', balanceSats: 50, kinds: ['onchain', 'lightning'] }],
   transfers: [],
 }
+const historyTransfer = (id: string, createdAt: number, state = 'completed') => ({
+  id,
+  createdAt,
+  state,
+  origin: 'manual',
+  poolId: 'rail:shared',
+  netSats: 100,
+  feeSats: 1,
+  debitSats: 101,
+  kind: 'onchain',
+})
 const h = (tag: string, ...children: unknown[]) => ({ tag, children })
 const nodesIn = (tree: any): { tag: string; children: any[] }[] => {
   if (Array.isArray(tree)) return tree.flatMap(nodesIn)
   if (!tree?.tag) return []
   return [tree, ...tree.children.flatMap(nodesIn)]
 }
+
+afterEach(() => vi.useRealTimers())
 
 describe('rebalance wallet panel', () => {
   it('omits untouched automatic targets when saving a manual-only policy after rendering', async () => {
@@ -71,6 +84,7 @@ describe('rebalance wallet panel', () => {
     expect(panel.quoteBody()).toEqual(first)
     expect(first).not.toHaveProperty('destination')
     expect(first).not.toHaveProperty('kind')
+    expect(first.receivingFeeAllowanceSats).toBe('1000')
   })
   it('renders a fee preview before submitting and sends the quote id the server checks', async () => {
     const quote = {
@@ -79,7 +93,9 @@ describe('rebalance wallet panel', () => {
       netSats: 123,
       feeSats: 5,
       debitSats: 128,
+      poolId: 'rail:shared',
       kind: 'onchain',
+      deposit: { kind: 'onchain', feeSats: 2 },
       expiresAt: 2000000000,
     }
     const api = vi.fn().mockResolvedValue({ ...overview, transfers: [quote] })
@@ -87,7 +103,17 @@ describe('rebalance wallet panel', () => {
     await panel.refresh()
     panel.quote = quote
     const tree = panel.render(h)
-    expect(JSON.stringify(tree)).toContain('fee upper bound 5 sat; source debit 128 sat')
+    const review = nodesIn(tree).find((node) => node.tag === 'section.wallet-quote')!
+    expect(JSON.stringify(review)).toContain('Review this transfer')
+    expect(JSON.stringify(review)).toContain('Arkade wallet')
+    expect(JSON.stringify(review)).toContain('shared pool')
+    expect(JSON.stringify(review)).toContain('Maximum total fees')
+    expect(JSON.stringify(review)).toContain('5 sat')
+    expect(JSON.stringify(review)).toContain('Maximum Arkade debit')
+    expect(JSON.stringify(review)).toContain('128 sat')
+    expect(JSON.stringify(review)).toContain('Destination fee allowance')
+    expect(JSON.stringify(review)).toContain('2 sat')
+    expect(JSON.stringify(review)).toContain('No funds have been sent')
     expect(api).toHaveBeenCalledTimes(1)
     const nodes = nodesIn(tree)
     const send = nodes.find((node) => node.tag === 'button.act' && node.children[1] === 'Send')!
@@ -97,10 +123,131 @@ describe('rebalance wallet panel', () => {
       { method: 'POST', body: JSON.stringify({ id: 'quote-1', confirm: 'quote-1' }) },
     ])
   })
+  it('requires explicit opt-in and includes the pending transfer ID in a new reviewed quote and send', async () => {
+    const pending = { ...historyTransfer('pending-1', 10, 'pending'), fundingTxid: 'a'.repeat(64) }
+    const quote = {
+      ...historyTransfer('quote-2', 20, 'quoted'),
+      overridePendingIds: ['pending-1'],
+      expiresAt: 2_000_000_000,
+    }
+    const api = vi
+      .fn()
+      .mockResolvedValueOnce({ ...overview, transfers: [pending] })
+      .mockResolvedValueOnce({ result: quote })
+      .mockResolvedValueOnce({ ...overview, transfers: [quote, pending] })
+      .mockResolvedValueOnce({ result: { ...quote, state: 'pending' } })
+      .mockResolvedValueOnce({ ...overview, transfers: [{ ...quote, state: 'pending' }, pending] })
+    const panel = new RebalancePanel(api, vi.fn())
+    await panel.refresh()
+    panel.draft.amount = '100'
+    let tree = panel.render(h)
+    const reviewButton = () => nodesIn(tree).find((node) => node.children[1] === 'Review quote')!
+    expect(reviewButton().children[0].disabled).toBe(true)
+    expect(panel.quoteBody()).not.toHaveProperty('overridePendingIds')
+    const checkbox = nodesIn(tree).find(
+      (node) =>
+        node.tag === 'label.wallet-toggle' && node.children[1] === 'Start another transfer while this one is pending',
+    )!
+    expect(checkbox.children[0].children[0].checked).toBe(false)
+    checkbox.children[0].children[0].onchange({ target: { checked: true } })
+    tree = panel.render(h)
+    expect(reviewButton().children[0].disabled).toBe(false)
+    expect(panel.quoteBody().overridePendingIds).toEqual(['pending-1'])
+    expect(JSON.stringify(tree)).toContain('#wallet-transfer-pending-1')
+    await reviewButton().children[0].onclick()
+    expect(JSON.parse(api.mock.calls[1]![1].body).overridePendingIds).toEqual(['pending-1'])
+    tree = panel.render(h)
+    const quotedReview = nodesIn(tree).find((node) => node.tag === 'section.wallet-quote')!
+    expect(JSON.stringify(quotedReview)).toContain('Maximum total fees')
+    expect(JSON.stringify(quotedReview)).toContain('BTC loss and recovery alerts may wait')
+    await nodesIn(quotedReview)
+      .find((node) => node.children[1] === 'Send')!
+      .children[0].onclick()
+    expect(JSON.parse(api.mock.calls[3]![1].body)).toEqual({
+      id: 'quote-2',
+      confirm: 'quote-2',
+      overridePendingIds: ['pending-1'],
+    })
+    expect(nodesIn(panel.render(h)).find((node) => node.children[1] === 'Review quote')!.children[0].disabled).toBe(
+      true,
+    )
+  })
+  it.each([
+    { transfers: [{ ...historyTransfer('unfunded', 1, 'pending') }], reason: 'recorded funding' },
+    {
+      transfers: [
+        { ...historyTransfer('first', 2, 'pending'), fundingTxid: 'a'.repeat(64) },
+        { ...historyTransfer('second', 1, 'pending'), fundingTxid: 'b'.repeat(64) },
+      ],
+      reason: 'Two transfers are already in progress',
+    },
+    { transfers: [historyTransfer('uncertain', 1, 'needs_reconciliation')], reason: 'needs checking' },
+  ])('does not offer overlap for unsafe active history: $reason', async ({ transfers, reason }) => {
+    const panel = new RebalancePanel(vi.fn().mockResolvedValue({ ...overview, transfers }), vi.fn())
+    await panel.refresh()
+    const tree = panel.render(h)
+    expect(JSON.stringify(tree)).toContain(reason)
+    expect(nodesIn(tree).find((node) => node.children[1] === 'Review quote')!.children[0].disabled).toBe(true)
+    expect(JSON.stringify(tree)).not.toContain('Start another transfer while this one is pending')
+  })
+  it('does not treat an older unsubmitted quote as a transfer in progress', async () => {
+    const panel = new RebalancePanel(
+      vi.fn().mockResolvedValue({ ...overview, transfers: [historyTransfer('old-quote', 1, 'quoted')] }),
+      vi.fn(),
+    )
+    await panel.refresh()
+    const tree = panel.render(h)
+    expect(nodesIn(tree).find((node) => node.children[1] === 'Review quote')!.children[0].disabled).toBe(false)
+    expect(JSON.stringify(tree)).not.toContain('Another transfer is in progress')
+  })
+  it('drops an opted-in quote when the pending transfer changes before Send', async () => {
+    const first = { ...historyTransfer('pending-1', 10, 'pending'), fundingTxid: 'a'.repeat(64) }
+    const replacement = { ...historyTransfer('pending-2', 11, 'pending'), fundingTxid: 'b'.repeat(64) }
+    const quote = { ...historyTransfer('quote-2', 20, 'quoted'), overridePendingIds: ['pending-1'], expiresAt: 2e9 }
+    const api = vi
+      .fn()
+      .mockResolvedValueOnce({ ...overview, transfers: [first] })
+      .mockResolvedValueOnce({ ...overview, transfers: [quote, first] })
+      .mockResolvedValueOnce({ ...overview, transfers: [quote, replacement] })
+    const panel = new RebalancePanel(api, vi.fn())
+    await panel.refresh()
+    const checkbox = nodesIn(panel.render(h)).find(
+      (node) => node.children[1] === 'Start another transfer while this one is pending',
+    )!
+    checkbox.children[0].children[0].onchange({ target: { checked: true } })
+    panel.quote = quote
+    await panel.refresh()
+    expect(nodesIn(panel.render(h)).some((node) => node.children[1] === 'Send')).toBe(true)
+    await panel.refresh()
+    expect(panel.quote).toBeNull()
+    expect(panel.quoteBody()).not.toHaveProperty('overridePendingIds')
+    expect(nodesIn(panel.render(h)).some((node) => node.children[1] === 'Send')).toBe(false)
+  })
+  it('does not submit a stale Send click after the operator revokes overlap approval', async () => {
+    const pending = { ...historyTransfer('pending-1', 10, 'pending'), fundingTxid: 'a'.repeat(64) }
+    const quote = { ...historyTransfer('quote-2', 20, 'quoted'), overridePendingIds: ['pending-1'], expiresAt: 2e9 }
+    const api = vi.fn().mockResolvedValue({ ...overview, transfers: [quote, pending] })
+    const panel = new RebalancePanel(api, vi.fn())
+    await panel.refresh()
+    const optIn = nodesIn(panel.render(h)).find(
+      (node) => node.children[1] === 'Start another transfer while this one is pending',
+    )!
+    optIn.children[0].children[0].onchange({ target: { checked: true } })
+    panel.quote = quote
+    const staleSend = nodesIn(panel.render(h)).find((node) => node.children[1] === 'Send')!
+    const checkbox = nodesIn(panel.render(h)).find(
+      (node) => node.children[1] === 'Start another transfer while this one is pending',
+    )!
+    checkbox.children[0].children[0].onchange({ target: { checked: false } })
+    expect(panel.quote).toBeNull()
+    await staleSend.children[0].onclick()
+    expect(api).toHaveBeenCalledTimes(1)
+  })
   it.each([
     ['Minimum credit (sat)', 'oninput'],
     ['Destination pool', 'onchange'],
     ['Deposit route', 'onchange'],
+    ['Destination fee allowance (sat)', 'oninput'],
   ])('drops a reviewed quote and its Send once %s changes', async (label, event) => {
     const quote = { id: 'q1', state: 'quoted', netSats: 1, feeSats: 1, debitSats: 2, kind: 'onchain', expiresAt: 2e9 }
     const redraw = vi.fn()
@@ -125,6 +272,148 @@ describe('rebalance wallet panel', () => {
     expect(panel.data).toEqual(overview)
     expect(api.mock.calls[1]?.[0]).toBe('/api/rebalance')
   })
+  it.each([
+    ['submit', 'pending', 'On its way'],
+    ['cancel', 'cancelled', 'Cancelled before sending.'],
+  ])('keeps a successful %s result when the following refresh fails', async (action, state, label) => {
+    const quote = {
+      id: 'quote-1',
+      state: 'quoted',
+      poolId: 'rail:shared',
+      netSats: 123,
+      feeSats: 5,
+      debitSats: 128,
+      kind: 'onchain',
+      expiresAt: 2_000_000_000,
+      createdAt: 1_793_866_175,
+    }
+    const result = { ...quote, state, ...(state === 'pending' ? { chargedAt: 1_793_866_176 } : {}) }
+    const api = vi
+      .fn()
+      .mockResolvedValueOnce({ ...overview, transfers: [quote] })
+      .mockResolvedValueOnce({ ok: true, result })
+      .mockRejectedValueOnce(new Error('Status refresh unavailable'))
+    const panel = new RebalancePanel(api, vi.fn())
+    await panel.refresh()
+    panel.quote = quote
+    await panel.act(action, { id: quote.id, confirm: quote.id })
+    expect(panel.data.transfers[0]).toEqual(result)
+    expect(panel.quote).toEqual(result)
+    const tree = panel.render(h)
+    expect(JSON.stringify(tree)).toContain(label)
+    expect(JSON.stringify(tree)).not.toContain('No funds have been sent')
+    expect(nodesIn(tree).some((node) => node.children[1] === 'Send')).toBe(false)
+    expect(panel.error).toBe('Status refresh unavailable')
+  })
+  it('clears an older reviewed quote when a new quote fails and explains that nothing was sent', async () => {
+    const api = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('Available Arkade funds cannot cover this transfer.'))
+      .mockResolvedValue(overview)
+    const panel = new RebalancePanel(api, vi.fn())
+    panel.quote = { id: 'old', state: 'quoted' }
+    await panel.act('quote', { amount: '2000000' })
+    expect(panel.quote).toBeNull()
+    expect(panel.error).toBe(
+      'Could not prepare a quote. No funds were sent. Available Arkade funds cannot cover this transfer.',
+    )
+    expect(nodesIn(panel.render(h)).some((node) => node.children[1] === 'Send')).toBe(false)
+  })
+  it('shows a manual quote above automatic fee limits and disables Send when it expires', async () => {
+    const quote = {
+      id: 'manual-high-fee',
+      state: 'quoted',
+      poolId: 'rail:shared',
+      netSats: 2_000_000,
+      feeSats: 15_759,
+      debitSats: 2_015_759,
+      kind: 'onchain',
+      expiresAt: 2_000_000_000,
+      deposit: { kind: 'onchain', feeSats: 1000 },
+    }
+    const panel = new RebalancePanel(vi.fn().mockResolvedValue({ ...overview, transfers: [quote] }), vi.fn())
+    await panel.refresh()
+    panel.quote = quote
+    const review = () => nodesIn(panel.render(h)).find((node) => node.tag === 'section.wallet-quote')!
+    expect(JSON.stringify(review())).toContain('15,759 sat')
+    expect(JSON.stringify(review())).toContain('2,015,759 sat')
+    expect(nodesIn(review()).find((node) => node.children[1] === 'Send')!.children[0].disabled).toBe(false)
+    quote.expiresAt = 1
+    expect(JSON.stringify(review())).toContain('This quote has expired')
+    expect(nodesIn(review()).find((node) => node.children[1] === 'Send')!.children[0].disabled).toBe(true)
+    quote.state = 'pending'
+    expect(review()).toBeUndefined()
+  })
+  it('redraws the countdown and disables an expired quote without a status refresh', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_800_000_000_000)
+    const quote = {
+      id: 'short-quote',
+      state: 'quoted',
+      poolId: 'rail:shared',
+      netSats: 123,
+      feeSats: 5,
+      debitSats: 128,
+      kind: 'onchain',
+      expiresAt: Date.now() / 1000 + 2,
+    }
+    const api = vi.fn().mockResolvedValue({ ...overview, transfers: [quote] })
+    const redraw = vi.fn()
+    const panel = new RebalancePanel(api, redraw)
+    await panel.refresh()
+    panel.quote = quote
+    let tree = panel.render(h)
+    redraw.mockImplementation(() => {
+      tree = panel.render(h)
+    })
+    const originalSend = nodesIn(tree).find((node) => node.children[1] === 'Send')!
+    expect(JSON.stringify(tree)).toContain('Expires in 2 seconds')
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(JSON.stringify(tree)).toContain('Expires in 1 second')
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(JSON.stringify(tree)).toContain('This quote has expired')
+    expect(nodesIn(tree).find((node) => node.children[1] === 'Send')!.children[0].disabled).toBe(true)
+    expect(nodesIn(tree).some((node) => node.children[1] === 'Review a fresh quote')).toBe(true)
+    await originalSend.children[0].onclick()
+    expect(api).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it('reviews an expired transfer with a new request key before allowing Send again', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_800_000_000_000)
+    const expired = {
+      id: 'old-quote',
+      state: 'quoted',
+      poolId: 'rail:shared',
+      netSats: 123,
+      feeSats: 5,
+      debitSats: 128,
+      kind: 'onchain',
+      expiresAt: Date.now() / 1000 - 1,
+    }
+    const fresh = { ...expired, id: 'fresh-quote', feeSats: 6, debitSats: 129, expiresAt: Date.now() / 1000 + 60 }
+    const api = vi
+      .fn()
+      .mockResolvedValueOnce({ ...overview, transfers: [expired] })
+      .mockResolvedValueOnce({ ok: true, result: fresh })
+      .mockResolvedValueOnce({ ...overview, transfers: [fresh, expired] })
+    const panel = new RebalancePanel(api, vi.fn())
+    await panel.refresh()
+    panel.quote = expired
+    panel.draft.amount = '123'
+    const previousKey = panel.quoteBody().requestKey
+    const review = nodesIn(panel.render(h)).find((node) => node.children[1] === 'Review a fresh quote')!
+    await review.children[0].onclick()
+    const request = JSON.parse(api.mock.calls[1]![1].body)
+    expect(request.requestKey).not.toBe(previousKey)
+    expect(request.amount).toBe('123')
+    expect(api.mock.calls.map(([path]) => path)).toEqual(['/api/rebalance', '/api/rebalance/quote', '/api/rebalance'])
+    const tree = panel.render(h)
+    expect(JSON.stringify(tree)).toContain('129 sat')
+    expect(JSON.stringify(tree)).toContain('Expires in 60 seconds')
+    expect(nodesIn(tree).find((node) => node.children[1] === 'Send')!.children[0].disabled).toBe(false)
+    expect(JSON.stringify(tree)).toContain('These limits govern automatic transfers.')
+  })
   it('clears a failed balance read when the operator retries with Refresh', async () => {
     const api = vi.fn().mockRejectedValueOnce(new Error('backend unavailable')).mockResolvedValue(overview)
     const panel = new RebalancePanel(api, vi.fn())
@@ -147,11 +436,90 @@ describe('rebalance wallet panel', () => {
       nodesIn(manual)
         .filter((node) => node.tag === 'label.wallet-field')
         .map((node) => node.children[0]),
-    ).toEqual(['Destination pool', 'Deposit route', 'Minimum credit (sat)'])
+    ).toEqual(['Destination pool', 'Deposit route', 'Minimum credit (sat)', 'Destination fee allowance (sat)'])
     const settings = nodes.find((node) => node.tag === 'details.wallet-policy')!
     expect(settings.children[0].open).toBe(false)
     expect(nodesIn(settings).some((node) => node.tag === 'fieldset.wallet-fieldset')).toBe(true)
     expect(JSON.stringify(nodes)).toContain('No transfers yet. Review a quote to start a transfer.')
+  })
+  it('keeps active transfers visible while loading older history only when requested', async () => {
+    const recent = Array.from({ length: 12 }, (_, index) => historyTransfer(`recent-${index}`, 100 - index))
+    const pending = historyTransfer('old-pending', 1, 'pending')
+    const api = vi
+      .fn()
+      .mockResolvedValueOnce({ ...overview, transfers: [...recent, pending], transfersNextCursor: 'opaque-cursor' })
+      .mockResolvedValueOnce({ transfers: [pending, historyTransfer('older', 0)], nextCursor: null })
+      .mockResolvedValueOnce({ ...overview, transfers: recent, transfersNextCursor: 'newer-cursor' })
+    const panel = new RebalancePanel(api, vi.fn())
+    await panel.refresh()
+    const history = () => nodesIn(panel.render(h)).find((node) => node.tag === 'section.wallet-history')!
+    const ids = () =>
+      nodesIn(history())
+        .filter((node) => node.tag === 'li.wallet-transfer')
+        .map((row) => nodesIn(row).find((node) => node.tag === 'code')?.children[0])
+    const loadOlder = () => nodesIn(history()).find((node) => node.children[1] === 'Load older transfers')!
+    expect(nodesIn(history()).find((node) => node.tag === 'ol.wallet-transfer-list')!.children[0]).toEqual({
+      tabindex: 0,
+      'aria-labelledby': 'wallet-transfer-history',
+    })
+    expect(ids()).toHaveLength(11)
+    expect(ids()).toContain('old-pending')
+    await loadOlder().children[0].onclick()
+    expect(ids()).toHaveLength(13)
+    expect(api).toHaveBeenCalledTimes(1)
+    await loadOlder().children[0].onclick()
+    expect(api.mock.calls[1]?.[0]).toBe('/api/rebalance/transfers?before=opaque-cursor&limit=20')
+    expect(ids()).toHaveLength(14)
+    expect(ids()).toContain('older')
+    expect(nodesIn(history()).some((node) => node.children[1] === 'Load older transfers')).toBe(false)
+    await panel.refresh()
+    expect(ids()).not.toContain('old-pending')
+    expect(ids()).toContain('older')
+  })
+  it('starts server paging when a later overview grows past the recent-history limit', async () => {
+    const latest = Array.from({ length: 100 }, (_, index) => historyTransfer(`recent-${index}`, 200 - index))
+    const api = vi
+      .fn()
+      .mockResolvedValueOnce({ ...overview, transfers: [historyTransfer('first', 1)], transfersNextCursor: null })
+      .mockResolvedValueOnce({ ...overview, transfers: latest, transfersNextCursor: 'cursor-after-100' })
+      .mockResolvedValueOnce({ transfers: [historyTransfer('older', 0)], nextCursor: null })
+    const panel = new RebalancePanel(api, vi.fn())
+    await panel.refresh()
+    await panel.refresh()
+    const loadOlder = () => nodesIn(panel.render(h)).find((node) => node.children[1] === 'Load older transfers')!
+    const ids = () =>
+      nodesIn(panel.render(h))
+        .filter((node) => node.tag === 'li.wallet-transfer')
+        .map((row) => nodesIn(row).find((node) => node.tag === 'code')?.children[0])
+    for (let index = 0; index < 6; index++) await loadOlder().children[0].onclick()
+    expect(api.mock.calls[2]?.[0]).toBe('/api/rebalance/transfers?before=cursor-after-100&limit=20')
+    expect(ids()).toContain('older')
+  })
+  it('does not restore stale in-flight history when a page resolves after refresh', async () => {
+    const recent = Array.from({ length: 12 }, (_, index) => historyTransfer(`recent-${index}`, 100 - index))
+    const oldPending = historyTransfer('old-pending', 1, 'pending')
+    let finishPage: (value: unknown) => void = () => {}
+    const pendingPage = new Promise((resolve) => {
+      finishPage = resolve
+    })
+    const api = vi
+      .fn()
+      .mockResolvedValueOnce({ ...overview, transfers: [...recent, oldPending], transfersNextCursor: 'cursor' })
+      .mockReturnValueOnce(pendingPage)
+      .mockResolvedValueOnce({ ...overview, transfers: recent, transfersNextCursor: 'later-cursor' })
+    const panel = new RebalancePanel(api, vi.fn())
+    await panel.refresh()
+    const loadOlder = () => nodesIn(panel.render(h)).find((node) => node.children[1] === 'Load older transfers')!
+    await loadOlder().children[0].onclick()
+    const loading = loadOlder().children[0].onclick()
+    await panel.refresh()
+    finishPage({ transfers: [oldPending, historyTransfer('older', 0)], nextCursor: null })
+    await loading
+    const ids = nodesIn(panel.render(h))
+      .filter((node) => node.tag === 'li.wallet-transfer')
+      .map((row) => nodesIn(row).find((node) => node.tag === 'code')?.children[0])
+    expect(ids).not.toContain('old-pending')
+    expect(ids).toContain('older')
   })
   it('keeps expanded policy and edits through a balance refresh without saving or enabling automation', async () => {
     const api = vi.fn().mockResolvedValue(overview)
@@ -169,5 +537,134 @@ describe('rebalance wallet panel', () => {
     expect(panel.policy.reserveSats).toBe('25000')
     expect(panel.policy.enabled).toBe(false)
     expect(api.mock.calls.map(([path]) => path)).toEqual(['/api/rebalance', '/api/rebalance'])
+  })
+
+  it('shows the completed money path and links each identifier to the correct explorer', async () => {
+    const sourceTxid = 'a'.repeat(64)
+    const fundingTxid = 'b'.repeat(64)
+    const address = 'bc1pdepositaddress'
+    const transfer = {
+      id: 'transfer-1',
+      origin: 'automatic',
+      poolId: 'rail:shared',
+      state: 'completed',
+      netSats: 500_000,
+      debitSats: 500_500,
+      feeSats: 500,
+      creditedSats: 500_102,
+      createdAt: 1_793_866_175,
+      updatedAt: 1_793_866_593,
+      inputs: [{ txid: sourceTxid, vout: 0, value: 7_779_649 }],
+      fundingTxid,
+      deposit: { kind: 'onchain', destination: address, amountSats: 500_300 },
+    }
+    const panel = new RebalancePanel(
+      vi.fn().mockResolvedValue({ ...overview, transfers: [transfer] }),
+      vi.fn(),
+      () => ({ arkade: 'https://arkade.space', onchain: 'https://mempool.arkade.sh' }),
+    )
+    await panel.refresh()
+    const row = nodesIn(panel.render(h)).find((node) => node.tag === 'li.wallet-transfer')!
+    expect(nodesIn(row).find((node) => node.tag === 'span.wallet-transfer-origin')!.children[0]).toBe('Automatic')
+    const rendered = JSON.stringify(row)
+    expect(rendered).toContain('Arkade wallet')
+    expect(rendered).toContain('shared pool')
+    expect(rendered).toContain('From Arkade (up to)')
+    expect(rendered).toContain('500,500 sat')
+    expect(rendered).toContain('500,300 sat confirmed')
+    expect(rendered).toContain('500,102 sat credited')
+    expect(rendered).toContain('Fee limit')
+    expect(rendered).toContain('500 sat')
+    expect(rendered).not.toContain('398 sat paid')
+    expect(rendered).toContain('Transfer ID')
+    const links = nodesIn(row).filter((node) => node.tag === 'a')
+    expect(links.map((node) => node.children[0].href)).toEqual([
+      `https://arkade.space/tx/${sourceTxid}`,
+      `https://mempool.arkade.sh/tx/${fundingTxid}`,
+      `https://mempool.arkade.sh/address/${address}`,
+    ])
+    expect(links.every((node) => node.children[0].rel === 'noreferrer noopener')).toBe(true)
+  })
+
+  it('distinguishes a created quote from a send that actually started', async () => {
+    const transfer = {
+      id: 'transfer-before-send',
+      origin: 'manual',
+      poolId: 'rail:shared',
+      state: 'quoted',
+      kind: 'onchain',
+      netSats: 500_000,
+      debitSats: 500_500,
+      feeSats: 500,
+      createdAt: 1_793_866_175,
+      chargedAt: undefined as number | undefined,
+      inputs: [],
+    }
+    const panel = new RebalancePanel(vi.fn().mockResolvedValue({ ...overview, transfers: [transfer] }), vi.fn())
+    await panel.refresh()
+    const row = () => JSON.stringify(nodesIn(panel.render(h)).find((node) => node.tag === 'li.wallet-transfer'))
+    expect(nodesIn(panel.render(h)).find((node) => node.tag === 'span.wallet-transfer-origin')!.children[0]).toBe(
+      'Manual',
+    )
+    for (const state of ['quoted', 'cancelled', 'failed']) {
+      transfer.state = state
+      expect(row()).toContain('Manual quote created')
+      expect(row()).not.toContain('send started')
+      expect(row()).not.toContain('transfer started')
+    }
+    transfer.state = 'pending'
+    transfer.chargedAt = 1_793_866_200
+    expect(row()).toContain('quote created')
+    expect(row()).toContain('send started')
+  })
+
+  it('describes a Lightning refill as pending without inventing an explorer link for its invoice', async () => {
+    const fundingTxid = 'c'.repeat(64)
+    const transfer = {
+      id: 'transfer-2',
+      origin: 'manual',
+      poolId: 'rail:shared',
+      state: 'pending',
+      netSats: 300_000,
+      debitSats: 300_250,
+      feeSats: 250,
+      createdAt: 1_793_866_175,
+      inputs: [],
+      fundingTxid,
+      deposit: { kind: 'lightning', destination: 'lnbc1notanexploreraddress' },
+    }
+    const panel = new RebalancePanel(
+      vi.fn().mockResolvedValue({ ...overview, transfers: [transfer] }),
+      vi.fn(),
+      () => ({ arkade: 'https://arkade.space', onchain: 'https://mempool.arkade.sh' }),
+    )
+    await panel.refresh()
+    const row = nodesIn(panel.render(h)).find((node) => node.tag === 'li.wallet-transfer')!
+    const rendered = JSON.stringify(row)
+    expect(rendered).toContain('On its way')
+    expect(rendered).toContain('At least 300,000 sat expected')
+    expect(rendered).toContain('Waiting for the destination to confirm the credit.')
+    expect(rendered).not.toContain('sat credited')
+    const links = nodesIn(row).filter((node) => node.tag === 'a')
+    expect(links.map((node) => node.children[0].href)).toEqual([`https://arkade.space/tx/${fundingTxid}`])
+    transfer.state = 'needs_reconciliation'
+    const uncertain = JSON.stringify(nodesIn(panel.render(h)).find((node) => node.tag === 'li.wallet-transfer'))
+    expect(uncertain).toContain('Credit unconfirmed')
+    expect(uncertain).not.toContain('300,250 sat sent')
+  })
+
+  it('shows when the next automatic attempt can begin', async () => {
+    const panel = new RebalancePanel(
+      vi.fn().mockResolvedValue({
+        ...overview,
+        lastEvaluation: { reason: 'cooldown active', nextEligibleAt: 1_793_878_231 },
+      }),
+      vi.fn(),
+    )
+    await panel.refresh()
+    const rendered = JSON.stringify(panel.render(h))
+    expect(rendered).toContain('Automatic refill: cooldown active')
+    expect(rendered).toContain('Next eligible')
+    expect(rendered).toContain('UTC')
   })
 })

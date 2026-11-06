@@ -49,7 +49,7 @@ sets every field. Below, `rails.lightning.backend` is a path into it, and
 | `http.port` / `http.host`                                           | no (`8787` / `127.0.0.1`)                                    | `serve` binding                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `admin.port`                                                        | no (off)                                                     | admin console port. Unset means no console and no new socket. **No authentication — see "The admin console"**                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `admin.host`                                                        | no (`127.0.0.1`)                                             | admin console binding. A non-loopback value is ALLOWED (the container needs it); access control is a reverse proxy's job                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `admin.allowedHosts`                                                | no (unset: any `Host`)                                       | opt-in DNS-rebinding guard: once set, a state-changing request must carry one of these `Host` values, the bound host or its loopback aliases, or the console answers `403 host_not_allowed`; include the port unless it is the scheme's default. Set it on a console a browser can reach without authentication in front of it                                                                                                                                                                                       |
+| `admin.allowedHosts`                                                | no (unset: any `Host`)                                       | opt-in DNS-rebinding guard: once set, a state-changing request must carry one of these `Host` values, the bound host or its loopback aliases, or the console answers `403 host_not_allowed`; include the port unless it is the scheme's default. Set it on a console a browser can reach without authentication in front of it                                                                                                                                                                                           |
 | `relay.url`                                                         | yes for `relay` (the default command)                        | outbound relay WebSocket URL (e.g. `wss://nostr.arkade.sh`) — `wss://`, not `https://`                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `relay.healthPath`                                                  | no (`.data/relay-health`; `/data/relay-health` in the image) | `relay` refreshes this file's mtime every 10s while the relay socket is up; the image's HEALTHCHECK reads it                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `relay.protocol`                                                    | no (`nostr`)                                                 | relay wire dialect; `dev` speaks the mock-relay broker framing                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
@@ -177,10 +177,86 @@ quantities stay in their own atomic units. EVM wallets and custom fund sources
 are not covered.
 
 A decrease since the last complete checkpoint emits `POSSIBLE LOSS` with the
-before, after, and decrease amounts. Failed or invalid reads are stored as
+before, after, and decrease amounts. For journaled rebalances, checkpoints
+also keep a comparison total that accounts for an observed source debit while
+the destination credit is pending and a bounded fee after completion. Raw
+balances and balance-report deltas still show the actual readings. An
+unexplained decrease beyond the transfer attribution remains visible and can
+still trigger `POSSIBLE LOSS`. Failed or invalid reads are stored as
 incomplete, never zero, and do not replace the comparison baseline. The baseline
 survives restarts and is separated by network, Arkade server, provider identity,
 and backend (including the LND socket).
+
+Console withdrawals from Arkade are journaled before sending. Checkpoints wait
+while a send or its source debit is uncertain, and send a withdrawal balance
+check notice with the journal ID, destination and transaction reference. A
+withdrawal is labeled accounted for only after settled outgoing wallet history
+matches its transaction and exact debit, followed by an Arkade balance read
+that shows the source debit. The notice does not prove destination receipt.
+If a withdrawal and rebalance have indistinguishable source debits, BTC
+classification stays paused until the rebalance is terminal and each funding
+transaction has a distinct settled outgoing wallet-history match for its
+actual debit and a checkpoint captured the rebalance's debit basis. A
+rebalance that completed between checkpoints may lack that basis even when
+funding history later appears. The authorized debit is a maximum, not proof
+of what was spent. If evidence is missing, reminders call for manual
+reconciliation; asset checks continue. An additional unexplained BTC decrease
+can still raise `POSSIBLE LOSS` once attribution is
+resolved. Earlier alerts are not retroactively reclassified by this journal.
+
+If a restart uses a missing or different rebalance store while
+`operatorWithdrawals.rebalanceIds` still names its transfers, the checkpoint
+is incomplete instead of guessing their debits. Restore the matching store
+and configuration, or reconcile the recorded transfers with evidence before
+resuming BTC classification.
+
+A `sending` or `uncertain` withdrawal with no transaction reference needs an
+operator check. The notice repeats every 30 minutes and BTC classification
+remains paused for that scope. Stop the solver and back up the admin SQLite
+database before reconciling. Inspect `operator_withdrawal` by journal ID and
+scope, then compare the destination with the audit/chain record and the wallet's
+outgoing history. If a settled outgoing transaction is verified, set a
+`sending` or `uncertain` row to `sent`, its `reference` to that transaction ID,
+and its `fee_sats` to the verified net debit minus `amount_sats`. A `sent` row
+whose quoted fee differs from the matched history debit also needs its
+`fee_sats` corrected to that verified difference; one mismatch defers all
+concurrent live withdrawals. Restrict either correction to the matching ID,
+scope and expected state. Mark a row `failed` only with positive evidence that
+nothing was sent. Absence from a delayed index is not that evidence. Restart
+and check the next checkpoint; keep a record of the evidence used.
+
+An overlapping rebalance can remain deferred after its journal row becomes
+terminal. A withdrawal journal edit alone does not resolve the rebalance's
+source debit or fee allowance. For one overlapping rebalance and withdrawal
+whose funding history or debit basis is missing:
+
+1. Stop the solver and back up both the admin and rebalance databases. Find
+   the latest `complete = 1` row for the current `scope` in
+   `balance_checkpoint`. Preserve its `snapshot`, the matching
+   `operator_withdrawal` row and the `rebalance_transfer.data` row.
+2. Inspect `snapshot.operatorWithdrawals`: `pending`, `rebalanceIds`,
+   `rebalanceReservedSats`, `rebalanceAllowanceBasis`,
+   `observedSourceDropSats`, `comparisonTotalSats`, `deferred`, and
+   `rebalanceAttributionAmbiguous`. Inspect `snapshot.rebalance`:
+   `pending`, `feeAllowanceUsedSats`, and `comparisonTotalSats`.
+3. Independently establish the rebalance's actual source debit from its
+   `fundingTxid` and wallet or chain records, its destination credit or
+   refund, the withdrawal's exact debit and destination, and a fresh Arkade
+   balance. Account for any other activity in the checkpoint interval. The
+   raw drop must cover the proven transfers; retain any unexplained
+   remainder as a possible loss. `debitSats` is an authorized maximum, not
+   the actual debit.
+4. If the evidence is complete, have a DBA reconcile those linked snapshot
+   fields in one recorded operation, including the rebalance's actual debit
+   basis, reserved source drop, fee allowance, and the withdrawal comparison
+   and deferral state. Preserve the raw balance and all unrelated alerts.
+   Never clear `rebalanceAttributionAmbiguous` alone or infer a debit from
+   an aggregate balance drop. Restart and verify the next checkpoint and any
+   remaining `POSSIBLE LOSS` notice.
+
+If any transaction cannot be proven, leave BTC classification deferred and
+escalate for manual accounting. Escalate multi-transfer or manual-override
+overlap rather than applying this single-transfer procedure.
 
 Each decrease is then followed against its own before amount. The first later
 complete checkpoint where that asset is back at or above it emits `RECOVERED`,
@@ -206,10 +282,12 @@ best-effort delivery. A failed notification delivery does not roll it back.
 The next report compares from that advanced baseline, so changes from an
 undelivered report are not repeated after delivery retries are exhausted.
 
-This is a sanity check, not reconciled profit or solvency: fees, withdrawals,
-token trades, pending HTLCs and non-atomic reads during transfers can cause
-warnings; deposits or gains can mask losses. Investigate warnings against swap
-and operator history. They do not stop trading. Checkpoints are retained until
+This is a sanity check, not reconciled profit or solvency: withdrawals, token
+trades, pending HTLCs and non-atomic reads can cause warnings; deposits or
+gains can mask losses. The bounded rebalance attribution cannot prove the
+exact source fee or retroactively classify alerts written before this change.
+Investigate warnings against the transfer journal, swap and operator history.
+They do not stop trading. Checkpoints are retained until
 removed by the operator; back up the admin database to preserve the history.
 
 ## Shape 1a — the same thing as a Docker image (recommended)
@@ -547,15 +625,18 @@ sats is `float-lifecycle`'s job (it carries the CLTV guard, and a bare
 `settle()` would merge the whole float into one coin). It does withdraw, and the
 destination's form picks the rail — an Arkade address is paid offchain at once,
 a bitcoin address by collaborative exit at the server's next batch. Either way
-the withdrawal spends **every asset-free coin no live swap's funding has pinned**,
-holding all of them until it settles — for a bitcoin address that is the next
-batch, and until then no swap can be funded from the float — and
-returns the rest as one change coin, so the float's piece count drops to one
-until `pool-mint` splits it again — on its own only with `rails.arkade.poolAutoMint: true`,
-otherwise at the next renewal or by hand. The pinned coins are left alone, because
-the SDK's own selection cannot be told "not that one". The destination receives
-exactly the typed amount; the exit's intent fees — one per coin spent — come out
-of the change back to the float.
+the withdrawal selects only enough unpinned, asset-free coins to cover the
+amount, quoted fees and valid change. It holds that selected set until the send
+settles; other float coins remain available for swaps. The selection uses at
+most 50 inputs, matching the SDK's settlement input bound. If a single bounded
+selection cannot cover the amount, it refuses without sending a partial
+payment. The selected coins return any change as one coin; unselected float
+pieces stay separate. `pool-mint` can split change when
+`rails.arkade.poolAutoMint: true`, or the operator can do so at a later renewal.
+The destination receives exactly the typed amount; the exit's intent fees —
+one per selected coin spent — come out of the change back to the float. A
+server can still reject an unusually heavy proof, so inspect any failed send
+before trying again.
 
 **Nothing here opens Lightning channels.** Neither port has a channel primitive,
 so a rail deposit lands in its onchain wallet and whether it becomes inbound or
@@ -572,9 +653,13 @@ deployment's network before any money moves — the float's Arkade addresses
 inside the SDK's `wallet.send`, everything else in the source. The rail refuses
 an amount above the **confirmed** balance; the float refuses when a live swap's
 funding pins every coin, or when the unpinned coins cannot cover the amount and
-the exit fee. It is **not safe to repeat**: nothing persists or re-drives it, so
-each attempt is a separate payment and a withdrawal that timed out must be
-checked against the chain before retrying.
+the exit fee. It is **not safe to repeat**: each attempt is a separate payment.
+Arkade withdrawals persist a journal row before sending and record the quoted
+fee and transaction reference after success. If the send or settlement result
+is uncertain, the API returns `withdrawal_uncertain` with the journal ID and
+the console closes the armed confirmation. Check the wallet transaction and
+destination before retrying. Other fund sources retain their own withdrawal
+behavior.
 
 Remember what `admin.host` is: with the console reachable, `fund-withdraw` lets
 anything that can reach the port send a source's balance to an address of its
@@ -785,12 +870,20 @@ the reasons to take one.
 
 - **Hundreds of coins in the float.** Swap proceeds and refunds land as
   separate coins, so a busy solver fragments between renewals. `cli balances`
-  and the console's pool line then read `consolidating M of N coins…`. Each
+  and the console's pool plan preview may propose consolidating them. Each
   `cli pool --mint` (or console `pool-mint`) merges up to 50 of them into the
   pool's pieces plus one remainder, in one Arkade transaction and at no intent
-  fee; repeat until the reason stops saying `consolidating`. With
-  `rails.arkade.poolAutoMint: true` the watch loop does one pass per lifecycle cadence
-  while no swap is in flight.
+  fee. If the server rejects an oversized proof before accepting it, the
+  planner retries a smaller complete set. It never sends a partial plan or
+  retries an uncertain submission. Repeat until the reason stops saying
+  `consolidating`. With
+  `rails.arkade.poolAutoMint: true` the watch loop does one pass per five-minute
+  lifecycle cadence. The console and watch loop share the provider's coin
+  reservations, so they can reshape unreserved coins while swaps remain open.
+  A separate `cli pool --mint` process cannot see those reservations and refuses
+  while any non-terminal swap has committed funds. Its aggregate committed
+  amount does not identify safe coins. Keep one process per wallet; do not use
+  `--force` while another provider may be spending from that wallet.
 
 - **Exposure**: `cli balances` shows current exposed sats vs the cap. The cap
   counts every non-terminal swap including bare quotes, and quote creation is

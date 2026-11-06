@@ -253,8 +253,122 @@ describe('Arkade rebalance source routes', () => {
     expect(quote.feeSats).toBe(30)
     expect(services.arkade.wallet.getSpendableVtxos).toHaveBeenCalledWith({ withRecoverable: false })
     const capped = rowFrom(await source.quote(deposit, { ...policy, maxFeeSats: 29 }))
+    capped.origin = 'automatic'
     await expect(source.reserve(capped, { ...policy, maxFeeSats: 29 })).rejects.toThrow(/fee/)
     release()
+  })
+
+  it('authorizes a reviewed manual debit beyond automatic limits while retaining its exact source bound', async () => {
+    coins = [coin('1', 3_000_000)]
+    sourceFee = 14_759
+    const receiving = { ...deposit, netSats: 2_000_000, amountSats: 2_001_000, feeSats: 1000 }
+    const limits = { ...policy, reserveSats: 2_000_000, maxFeeSats: 500, maxFeeBps: 20, maxDebitSats: 500_500 }
+    await expect(source.quote(receiving, limits)).rejects.toThrow(/surplus/)
+    const row = rowFrom(await source.quote(receiving, limits, 'manual'), receiving)
+    expect(row.debitSats).toBe(2_015_759)
+    const release = await source.reserve(row, limits)
+    sourceFee += 1
+    await expect(source.submit(row)).rejects.toThrow(/debit changed/)
+    expect(send).not.toHaveBeenCalled()
+    sourceFee -= 1
+    expect(await source.submit(row)).toBe(txid)
+    release()
+  })
+
+  it.each(['manual', 'automatic'] as const)(
+    'chooses six older inputs over one expensive input for %s refill',
+    async (origin) => {
+      const older = new Date('2026-11-10T00:00:00Z')
+      const newer = new Date('2026-12-20T00:00:00Z')
+      coins = [
+        { ...coin('f', 7_278_590), expiresAt: newer },
+        ...Array.from({ length: 6 }, (_, i) => ({ ...coin(String(i + 1), 90_207), expiresAt: older })),
+      ]
+      mocks.route.mockImplementation(async ({ amount, selectedVtxos }) => {
+        const fee = selectedVtxos.some((input: NormalizedExtendedVirtualCoin) => input.txid === coins[0]!.txid)
+          ? 14_757
+          : 200
+        return { amount, total: amount + fee, fee, send }
+      })
+      const receiving = { ...deposit, amountSats: 500_500, netSats: 500_000, feeSats: 500 }
+      const quote = await source.quote(receiving, policy, origin)
+      expect(quote.inputs).toEqual(coins.slice(1).map(({ txid, vout, value }) => ({ txid, vout, value })))
+      expect(quote.debitSats).toBe(500_700)
+      expect(quote.feeSats).toBe(700)
+      expect(send).not.toHaveBeenCalled()
+      const row = { ...rowFrom(quote, receiving), origin }
+      const limits = { ...policy, maxDebitSats: 600_000, maxFeeSats: 800 }
+      const release = await source.reserve(row, limits)
+      expect(await source.submit(row)).toBe(txid)
+      expect(mocks.route.mock.lastCall?.[0].selectedVtxos).toEqual(coins.slice(1))
+      expect(send).toHaveBeenCalledTimes(1)
+      release()
+    },
+  )
+
+  it('keeps the smaller selection when older inputs quote a higher fee', async () => {
+    coins = [coin('1', 2_000), { ...coin('2', 1_500), expiresAt: new Date('2026-11-10') }]
+    mocks.route.mockImplementation(async ({ amount, selectedVtxos }) => {
+      const fee = selectedVtxos[0].txid === coins[0]!.txid ? 10 : 20
+      return { amount, total: amount + fee, fee, send }
+    })
+    const quote = await source.quote(deposit, policy)
+    expect(quote.inputs[0]!.txid).toBe(coins[0]!.txid)
+    expect(quote.debitSats).toBe(1_030)
+  })
+
+  it('can quote an alternative input set after a preview failure without sending either set', async () => {
+    coins = [coin('1', 2_000), { ...coin('2', 1_500), expiresAt: new Date('2026-11-10') }]
+    mocks.route.mockImplementation(async ({ amount, selectedVtxos }) => {
+      if (selectedVtxos[0].txid === coins[0]!.txid) throw new Error('TX_TOO_LARGE: proof weight exceeds limit')
+      return { amount, total: amount + 10, fee: 10, send }
+    })
+    const quote = await source.quote(deposit, policy)
+    expect(quote.inputs[0]!.txid).toBe(coins[1]!.txid)
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('refuses a transfer requiring more than 50 inputs without sending', async () => {
+    coins = Array.from({ length: 60 }, (_, i) => ({ ...coin('1', 100), vout: i }))
+    await expect(source.quote({ ...deposit, amountSats: 5_100, netSats: 5_080 }, policy, 'manual')).rejects.toThrow(
+      /50 input limit/,
+    )
+    expect(mocks.route).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('never grows a fee-short selection beyond 50 inputs', async () => {
+    coins = Array.from({ length: 60 }, (_, i) => ({ ...coin('1', 100), vout: i }))
+    sourceFee = 100
+    await expect(source.quote({ ...deposit, amountSats: 4_950, netSats: 4_930 }, policy, 'manual')).rejects.toThrow(
+      /50 input limit/,
+    )
+    expect(mocks.route).toHaveBeenCalledTimes(1)
+    expect(mocks.route.mock.lastCall?.[0].selectedVtxos).toHaveLength(50)
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('surfaces a rejected proof-size quote without claiming a transfer or sending', async () => {
+    mocks.route.mockRejectedValue(new Error('TX_TOO_LARGE: proof weight exceeds limit'))
+    await expect(source.quote(deposit, policy)).rejects.toThrow(/TX_TOO_LARGE/)
+    expect(send).not.toHaveBeenCalled()
+    expect(services.arkade.reservations.reserved().size).toBe(0)
+  })
+
+  it('manual transfers cannot consume outstanding payouts or inventory reserved for customer quotes', async () => {
+    const limits = { ...policy, reserveSats: 10_000 }
+    const row = rowFrom(await source.quote(deposit, limits, 'manual'))
+    const readers = services.readers
+    services.readers = [{ committedSats: async () => 2500 }] as unknown as Services['readers']
+    await expect(source.quote(deposit, limits, 'manual')).rejects.toThrow(/surplus/)
+    await expect(source.reserve(row, limits)).rejects.toThrow(/surplus/)
+    expect(services.arkade.reservations.reserved().size).toBe(0)
+    services.readers = readers
+    const customer = await admission.reserveInventory('arkade', 2500, 3500, async () => 0)
+    await expect(source.quote(deposit, limits, 'manual')).rejects.toThrow(/surplus/)
+    await expect(source.reserve(row, limits)).rejects.toThrow(/surplus/)
+    expect(send).not.toHaveBeenCalled()
+    customer?.release()
   })
 
   it('rejects another Bitcoin network before source quoting', async () => {
@@ -317,6 +431,32 @@ describe('Arkade rebalance source routes', () => {
     expect(admission.outstandingInventorySats('arkade')).toBe(0)
   })
 
+  it('keeps submitted inputs pinned without charging inventory while a later quote uses another coin', async () => {
+    const row = rowFrom(await source.quote(deposit, policy, 'manual'))
+    expect(() => source.pinPendingInputs({ ...row, inputs: [] })).toThrow(/no valid source inputs/)
+    const releaseFull = await source.reserve(row, policy)
+    const releasePending = source.pinPendingInputs(row)
+    releaseFull()
+    expect(admission.outstandingInventorySats('arkade')).toBe(0)
+    expect(services.arkade.reservations.reserved().has(`${row.inputs[0]!.txid}:0`)).toBe(true)
+    expect((await source.quote(deposit, policy, 'manual')).inputs[0]!.txid).not.toBe(row.inputs[0]!.txid)
+    releasePending()
+    expect(services.arkade.reservations.reserved().size).toBe(0)
+  })
+
+  it('keeps a terminal source input protected until a fresh wallet snapshot omits it', async () => {
+    const row = rowFrom(await source.quote(deposit, policy, 'manual'))
+    const other = { ...row, id: 'other', inputs: [{ txid: 'ff'.repeat(32), vout: 0, value: 1000 }] }
+    vi.mocked(services.arkade.wallet.getSpendableVtxos).mockClear()
+    const absent = await source.inputsAbsent([row, other])
+    expect([...absent]).toEqual(['other'])
+    expect(services.arkade.wallet.getSpendableVtxos).toHaveBeenCalledTimes(1)
+    coins = coins.filter((coin) => coin.txid !== row.inputs[0]!.txid)
+    expect((await source.inputsAbsent([row])).has(row.id)).toBe(true)
+    vi.mocked(services.arkade.wallet.getSpendableVtxos).mockRejectedValueOnce(new Error('indexer offline'))
+    await expect(source.inputsAbsent([row])).rejects.toThrow('indexer offline')
+  })
+
   it('refuses higher fees and missing inputs without an unnamed top-up', async () => {
     const row = rowFrom(await source.quote(deposit, policy))
     sourceFee = 11
@@ -363,6 +503,7 @@ describe('Arkade rebalance source routes', () => {
     expect(await source.reconcile(row)).toEqual({ state: 'submitted', fundingTxid: txid })
     outputs.push({ txid: 'dd'.repeat(32), vout: 0, valueSats: deposit.amountSats, confirmations: 0 })
     expect(await source.reconcile(row)).toEqual({ state: 'unknown' })
+    expect(await source.reconcile({ ...row, fundingTxid: txid })).toEqual({ state: 'submitted', fundingTxid: txid })
   })
 
   it('rejects self counterparties, invoice amounts, and invoice networks before requesting', async () => {

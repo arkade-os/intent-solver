@@ -42,6 +42,7 @@ import {
 } from '@arkade-os/solver-app/ops/fundSources.js'
 import { railFundSource } from '@arkade-os/solver-app/ops/railFunds.js'
 import { arkadeFundSource } from '@arkade-os/solver-app/ops/arkadeFunds.js'
+import { balanceCheckpointScope } from '@arkade-os/solver-app/ops/balanceCheckpoints.js'
 
 /** Deterministic, and REAL: a hand-written string would exercise the decode, not the path. */
 const addressOn = (network: 'regtest' | 'bitcoin', fill: number): string =>
@@ -98,6 +99,10 @@ const adminStore = () => ({
   recordAction: vi.fn().mockResolvedValue(undefined),
   listActions: vi.fn().mockResolvedValue([]),
   getOverrides: vi.fn().mockResolvedValue({}),
+  createOperatorWithdrawal: vi.fn(async (_input: unknown) => undefined),
+  transitionOperatorWithdrawal: vi.fn(
+    async (_id: string, _from: string, _to: string, _data?: { feeSats?: number; reference?: string }) => undefined,
+  ),
 })
 
 type Fake = Parameters<typeof arkadeFundSource>[0]
@@ -105,7 +110,7 @@ type Fake = Parameters<typeof arkadeFundSource>[0]
 const fakeServices = (over: Record<string, unknown> = {}) =>
   ({
     adminStore: adminStore(),
-    config: { network: 'regtest' },
+    config: { network: 'regtest', arkade: { operatorUrl: 'https://ark.test' } },
     ln: lnBackend(),
     onchain: onchainBackend(),
     arkade: { wallet: arkadeWallet(), reservations: createReservationLedger() },
@@ -806,21 +811,156 @@ describe('withdrawing from the arkade float — both rails out, routed by the de
     expect(wallet.settle).not.toHaveBeenCalled()
   })
 
-  it('hands the router every unpinned coin, and the exit returns the rest as one change coin', async () => {
+  it('spends only enough unpinned coins, leaving the rest available to swaps', async () => {
     const coins = [coin(0x01, 60_000), coin(0x02, 60_000)]
     const wallet = withdrawingWallet(coins)
 
     await withdraw(servicesWith(wallet), { address: TESTNET_ARKADE_ADDRESS, amount: '50000' })
     await withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '50000' })
 
-    expect(wallet.send).toHaveBeenCalledWith(expect.objectContaining({ selectedVtxos: coins }))
+    expect(wallet.send).toHaveBeenCalledWith(expect.objectContaining({ selectedVtxos: [coins[0]] }))
     expect(wallet.settle.mock.calls[0]![0]).toEqual({
-      inputs: coins,
+      inputs: [coins[0]],
       outputs: [
         { address: REGTEST_ADDRESS, amount: 50_000n },
-        { address: ARKADE_ADDRESS, amount: 70_000n },
+        { address: ARKADE_ADDRESS, amount: 10_000n },
       ],
     })
+  })
+
+  it('withdraws the full requested amount without putting the entire float into the proof', async () => {
+    const large = coin(0x01, 7_279_149)
+    const coins = [...Array.from({ length: 80 }, (_, i) => coin(i + 2, 50_000)), large]
+    const wallet = withdrawingWallet(coins, {
+      settle: vi.fn(async ({ inputs }: { inputs: unknown[] }) => {
+        if (inputs.length > 50) throw new Error('TX_TOO_LARGE (46): proof weight is too high: 43917')
+        return 'ff'.repeat(32)
+      }),
+    })
+
+    const result = await withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '3000000' })
+
+    expect(wallet.settle).toHaveBeenCalledTimes(1)
+    expect(wallet.settle.mock.calls[0]![0]).toEqual({
+      inputs: [large],
+      outputs: [
+        { address: REGTEST_ADDRESS, amount: 3_000_000n },
+        { address: ARKADE_ADDRESS, amount: 4_279_149n },
+      ],
+    })
+    expect(result.amount).toBe('3000000')
+  })
+
+  it('adds an input when the first one cannot cover the quoted fee', async () => {
+    const coins = [coin(0x01, 50_100), coin(0x02, 1_000), coin(0x03, 500)]
+    const wallet = withdrawingWallet(coins, {
+      arkProvider: {
+        getInfo: vi
+          .fn()
+          .mockResolvedValue({ dust: 330n, vtxoMaxAmount: -1n, fees: { intentFee: { onchainOutput: '200.0' } } }),
+      },
+    })
+
+    await withdraw(servicesWith(wallet), { address: REGTEST_ADDRESS, amount: '50000' })
+
+    expect(wallet.settle.mock.calls[0]![0]).toEqual({
+      inputs: coins.slice(0, 2),
+      outputs: [
+        { address: REGTEST_ADDRESS, amount: 50_000n },
+        { address: ARKADE_ADDRESS, amount: 900n },
+      ],
+    })
+  })
+
+  it('adds an input to avoid dust change and keeps unused coins unreserved during settlement', async () => {
+    const coins = [coin(0x01, 50_200), coin(0x02, 1_000), coin(0x03, 500)]
+    const reservations = createReservationLedger()
+    const wallet = withdrawingWallet(coins, {
+      settle: vi.fn(async () => {
+        expect([...reservations.reserved()]).toEqual(coins.slice(0, 2).map((c) => `${c.txid}:0`))
+        return 'ff'.repeat(32)
+      }),
+    })
+
+    await withdraw(servicesWith(wallet, reservations), { address: REGTEST_ADDRESS, amount: '50000' })
+
+    expect(wallet.settle.mock.calls[0]![0].inputs).toEqual(coins.slice(0, 2))
+    expect(reservations.reserved().size).toBe(0)
+  })
+
+  it('refreshes unselected coins after a competing swap spends during the quote', async () => {
+    const first = coin(0x01, 50_100)
+    const competing = coin(0x02, 1_000)
+    const remaining = coin(0x03, 500)
+    let spendable = [first, competing, remaining]
+    let startQuote!: () => void
+    const quoting = new Promise<void>((resolve) => {
+      startQuote = resolve
+    })
+    let finishQuote!: (address: string) => void
+    const quotedAddress = new Promise<string>((resolve) => {
+      finishQuote = resolve
+    })
+    const reservations = createReservationLedger()
+    const wallet = withdrawingWallet(spendable, {
+      getSpendableVtxos: vi.fn(async () => spendable),
+      getAddress: vi
+        .fn()
+        .mockImplementationOnce(() => {
+          startQuote()
+          return quotedAddress
+        })
+        .mockResolvedValue(ARKADE_ADDRESS),
+      arkProvider: {
+        getInfo: vi
+          .fn()
+          .mockResolvedValue({ dust: 330n, vtxoMaxAmount: -1n, fees: { intentFee: { onchainOutput: '200.0' } } }),
+      },
+    })
+
+    const withdrawal = withdraw(servicesWith(wallet, reservations), { address: REGTEST_ADDRESS, amount: '50000' })
+    await quoting
+    const releaseCompeting = reservations.reserve([competing])
+    spendable = [first, remaining]
+    releaseCompeting()
+    finishQuote(ARKADE_ADDRESS)
+    await withdrawal
+
+    expect(wallet.settle).toHaveBeenCalledTimes(1)
+    expect(wallet.settle.mock.calls[0]![0].inputs).toEqual([first, remaining])
+    expect(reservations.reserved().size).toBe(0)
+  })
+
+  it('allows asset-free Arkade change below Bitcoin dust when the operator minimum allows it', async () => {
+    const input = coin(0x01, 50_200)
+    const wallet = withdrawingWallet([input], {
+      arkProvider: {
+        getInfo: vi
+          .fn()
+          .mockResolvedValue({ dust: 330n, vtxoMinAmount: 0n, vtxoMaxAmount: -1n, fees: { intentFee: {} } }),
+      },
+    })
+
+    await withdraw(servicesWith(wallet), { address: TESTNET_ARKADE_ADDRESS, amount: '50000' })
+
+    expect(wallet.send).toHaveBeenCalledWith({
+      recipients: [{ address: TESTNET_ARKADE_ADDRESS, amount: 50_000 }],
+      selectedVtxos: [input],
+    })
+    expect(wallet.settle).not.toHaveBeenCalled()
+  })
+
+  it('refuses an input-heavy withdrawal before sending and never sends a partial amount', async () => {
+    const reservations = createReservationLedger()
+    const wallet = withdrawingWallet(Array.from({ length: 51 }, (_, i) => coin(i + 1, 1_000)))
+
+    await expect(
+      withdraw(servicesWith(wallet, reservations), { address: REGTEST_ADDRESS, amount: '51000' }),
+    ).rejects.toThrow('needs more than 50 inputs')
+
+    expect(wallet.settle).not.toHaveBeenCalled()
+    expect(wallet.send).not.toHaveBeenCalled()
+    expect(reservations.reserved().size).toBe(0)
   })
 
   it('leaves an asset-bearing coin out of both routes, and refuses when nothing else is free', async () => {
@@ -972,15 +1112,159 @@ describe('withdrawing from the arkade float — both rails out, routed by the de
 
   it('pays out of the arkade float through the action once the typed address matches', async () => {
     const wallet = withdrawingWallet([coin(0x01, 100_000)])
+    const services = servicesWith(wallet)
 
     const response = await post(
       'fund-withdraw',
       { source: 'arkade', address: TESTNET_ARKADE_ADDRESS, amount: '1000', confirm: TESTNET_ARKADE_ADDRESS },
-      servicesWith(wallet),
+      services,
     )
 
     expect(response.status).toBe(200)
     expect(wallet.send).toHaveBeenCalledTimes(1)
+    const journal = (services as unknown as { adminStore: ReturnType<typeof adminStore> }).adminStore
+    expect(journal.createOperatorWithdrawal).toHaveBeenCalledWith({
+      id: expect.any(String),
+      scope: balanceCheckpointScope(services),
+      source: 'arkade',
+      address: TESTNET_ARKADE_ADDRESS,
+      amountSats: 1000,
+    })
+    const id = (journal.createOperatorWithdrawal.mock.calls[0]![0] as { id: string }).id
+    expect(journal.transitionOperatorWithdrawal).toHaveBeenNthCalledWith(1, id, 'preparing', 'sending', {
+      feeSats: 0,
+    })
+    expect(journal.transitionOperatorWithdrawal).toHaveBeenNthCalledWith(2, id, 'sending', 'sent', {
+      reference: 'ee'.repeat(32),
+    })
+    expect(journal.createOperatorWithdrawal.mock.invocationCallOrder[0]).toBeLessThan(
+      journal.transitionOperatorWithdrawal.mock.invocationCallOrder[0]!,
+    )
+    expect(journal.transitionOperatorWithdrawal.mock.invocationCallOrder[0]).toBeLessThan(
+      wallet.send.mock.invocationCallOrder[0]!,
+    )
+  })
+
+  it('records an onchain exit fee before settling', async () => {
+    const intentFee = { onchainOutput: '100.0', offchainInput: '7.0' }
+    const wallet = withdrawingWallet([coin(0x01, 100_000)], {
+      arkProvider: { getInfo: vi.fn().mockResolvedValue({ dust: 330n, vtxoMaxAmount: -1n, fees: { intentFee } }) },
+    })
+    const services = servicesWith(wallet)
+    const journal = (services as unknown as { adminStore: ReturnType<typeof adminStore> }).adminStore
+
+    const response = await post(
+      'fund-withdraw',
+      { source: 'arkade', address: REGTEST_ADDRESS, amount: '50000', confirm: REGTEST_ADDRESS },
+      services,
+    )
+
+    expect(response.status).toBe(200)
+    expect(journal.transitionOperatorWithdrawal).toHaveBeenNthCalledWith(
+      1,
+      expect.any(String),
+      'preparing',
+      'sending',
+      { feeSats: 107 },
+    )
+    expect(journal.transitionOperatorWithdrawal.mock.invocationCallOrder[0]).toBeLessThan(
+      wallet.settle.mock.invocationCallOrder[0]!,
+    )
+  })
+
+  it('does not send when the durable withdrawal row cannot be created', async () => {
+    const wallet = withdrawingWallet([coin(0x01, 100_000)])
+    const services = servicesWith(wallet)
+    const journal = (services as unknown as { adminStore: ReturnType<typeof adminStore> }).adminStore
+    journal.createOperatorWithdrawal.mockRejectedValue(new Error('journal unavailable'))
+
+    const response = await post(
+      'fund-withdraw',
+      { source: 'arkade', address: TESTNET_ARKADE_ADDRESS, amount: '1000', confirm: TESTNET_ARKADE_ADDRESS },
+      services,
+    )
+
+    expect(response.status).toBe(500)
+    expect(await response.json()).toMatchObject({ message: 'journal unavailable' })
+    expect(wallet.send).not.toHaveBeenCalled()
+    expect(journal.transitionOperatorWithdrawal).not.toHaveBeenCalled()
+    expect(journal.recordAction).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'error' }))
+  })
+
+  it('marks a preflight refusal failed without sending', async () => {
+    const wallet = withdrawingWallet([])
+    const services = servicesWith(wallet)
+    const journal = (services as unknown as { adminStore: ReturnType<typeof adminStore> }).adminStore
+
+    const response = await post(
+      'fund-withdraw',
+      { source: 'arkade', address: TESTNET_ARKADE_ADDRESS, amount: '1000', confirm: TESTNET_ARKADE_ADDRESS },
+      services,
+    )
+
+    expect(response.status).toBe(500)
+    expect(wallet.send).not.toHaveBeenCalled()
+    expect(journal.transitionOperatorWithdrawal).toHaveBeenCalledWith(expect.any(String), 'preparing', 'failed')
+  })
+
+  it('marks a send error uncertain and preserves its original cause', async () => {
+    const wallet = withdrawingWallet([coin(0x01, 100_000)], {
+      send: vi.fn().mockRejectedValue(new Error('server unreachable')),
+    })
+    const services = servicesWith(wallet)
+    const journal = (services as unknown as { adminStore: ReturnType<typeof adminStore> }).adminStore
+
+    const response = await post(
+      'fund-withdraw',
+      { source: 'arkade', address: TESTNET_ARKADE_ADDRESS, amount: '1000', confirm: TESTNET_ARKADE_ADDRESS },
+      services,
+    )
+
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({
+      error: 'withdrawal_uncertain',
+      withdrawalId: expect.any(String),
+      message: expect.stringContaining('Check the wallet and chain before retrying'),
+      cause: 'server unreachable',
+    })
+    expect(journal.transitionOperatorWithdrawal).toHaveBeenNthCalledWith(2, expect.any(String), 'sending', 'uncertain')
+    expect(journal.recordAction).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'error' }))
+  })
+
+  it('keeps the payment successful when the completion journal write fails', async () => {
+    const wallet = withdrawingWallet([coin(0x01, 100_000)])
+    const services = servicesWith(wallet)
+    const journal = (services as unknown as { adminStore: ReturnType<typeof adminStore> }).adminStore
+    journal.transitionOperatorWithdrawal.mockImplementation(async (_id, _from, to) => {
+      if (to === 'sent') throw new Error('database is locked')
+    })
+
+    const response = await post(
+      'fund-withdraw',
+      { source: 'arkade', address: TESTNET_ARKADE_ADDRESS, amount: '1000', confirm: TESTNET_ARKADE_ADDRESS },
+      services,
+    )
+
+    expect(response.status).toBe(200)
+    expect(wallet.send).toHaveBeenCalledTimes(1)
+    expect(journal.recordAction).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'ok' }))
+  })
+
+  it('does not send when the journal cannot enter the sending state', async () => {
+    const wallet = withdrawingWallet([coin(0x01, 100_000)])
+    const services = servicesWith(wallet)
+    const journal = (services as unknown as { adminStore: ReturnType<typeof adminStore> }).adminStore
+    journal.transitionOperatorWithdrawal.mockRejectedValue(new Error('journal transition unavailable'))
+
+    const response = await post(
+      'fund-withdraw',
+      { source: 'arkade', address: TESTNET_ARKADE_ADDRESS, amount: '1000', confirm: TESTNET_ARKADE_ADDRESS },
+      services,
+    )
+
+    expect(response.status).toBe(500)
+    expect(await response.json()).toMatchObject({ message: 'journal transition unavailable' })
+    expect(wallet.send).not.toHaveBeenCalled()
   })
 })
 
@@ -1207,6 +1491,90 @@ describe('the wallet page’s funding panel', () => {
     fileURLToPath(new URL('../../packages/solver-app/src/admin/static/app.js', import.meta.url)),
     'utf8',
   )
+
+  const runWithdrawalWithError = async (error: unknown) => {
+    const start = appSource.indexOf('const runAction = async')
+    const end = appSource.indexOf('\n}', start)
+    const source = appSource.slice(start, end + 2)
+    const state = {
+      running: null,
+      detail: null,
+      dialog: { name: 'fund-withdraw', error: null as string | null },
+      data: { withdrawDrafts: { arkade: { address: REGTEST_ADDRESS, amount: '1000' } } },
+      withdrawing: 'arkade',
+      banner: null,
+      result: null,
+      view: 'wallet',
+    }
+    const api = vi.fn().mockRejectedValue(error)
+    const render = vi.fn()
+    const fail = vi.fn()
+    const runAction = new Function(
+      'state',
+      'api',
+      'render',
+      'load',
+      'openDetail',
+      'fail',
+      `${source}; return runAction`,
+    )(state, api, render, vi.fn(), vi.fn(), fail) as (name: string, body: Record<string, string>) => Promise<void>
+
+    await runAction('fund-withdraw', { source: 'arkade', address: REGTEST_ADDRESS, amount: '1000' })
+
+    return { state, api, render, fail }
+  }
+
+  it('closes the armed withdrawal and clears its draft when sending is uncertain', async () => {
+    const error = Object.assign(new Error('Withdrawal record-123 may have gone out. Check before retrying.'), {
+      body: { error: 'withdrawal_uncertain', withdrawalId: 'record-123' },
+      status: 409,
+    })
+    const { state, api, render, fail } = await runWithdrawalWithError(error)
+
+    expect(api).toHaveBeenCalledTimes(1)
+    expect(state.dialog).toBeNull()
+    expect(state.data.withdrawDrafts.arkade).toBeUndefined()
+    expect(state.withdrawing).toBeNull()
+    expect(state.banner).toContain('Check before retrying')
+    expect(state.running).toBeNull()
+    expect(fail).not.toHaveBeenCalled()
+    expect(render).toHaveBeenCalled()
+  })
+
+  it('disarms a withdrawal when the browser loses its response', async () => {
+    const { state, api } = await runWithdrawalWithError(new TypeError('Failed to fetch'))
+
+    expect(api).toHaveBeenCalledTimes(1)
+    expect(state.dialog).toBeNull()
+    expect(state.data.withdrawDrafts.arkade).toBeUndefined()
+    expect(state.withdrawing).toBeNull()
+    expect(state.banner).toContain('Check the wallet and chain before retrying')
+    expect(state.banner).toContain('Failed to fetch')
+    expect(state.running).toBeNull()
+  })
+
+  it('disarms a withdrawal when an HTTP error has no parsed body', async () => {
+    const error = Object.assign(new Error('502 Bad Gateway'), { body: null, status: 502 })
+    const { state } = await runWithdrawalWithError(error)
+
+    expect(state.dialog).toBeNull()
+    expect(state.data.withdrawDrafts.arkade).toBeUndefined()
+    expect(state.banner).toContain('Check the wallet and chain before retrying')
+    expect(state.banner).toContain('502 Bad Gateway')
+  })
+
+  it('keeps a parsed pre-send failure in the confirmation for correction', async () => {
+    const error = Object.assign(new Error('no spendable coins'), {
+      body: { error: 'action_failed', message: 'no spendable coins' },
+      status: 500,
+    })
+    const { state } = await runWithdrawalWithError(error)
+
+    expect(state.dialog).toMatchObject({ name: 'fund-withdraw', error: 'no spendable coins' })
+    expect(state.data.withdrawDrafts.arkade).toEqual({ address: REGTEST_ADDRESS, amount: '1000' })
+    expect(state.withdrawing).toBe('arkade')
+    expect(state.banner).toBeNull()
+  })
   const walletView = (): string => {
     const start = appSource.indexOf('const walletView')
     if (start === -1) throw new Error('walletView is gone')

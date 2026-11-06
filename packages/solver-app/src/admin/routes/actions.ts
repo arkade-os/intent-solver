@@ -21,12 +21,15 @@
  */
 
 import type { Hono } from 'hono'
+import { randomUUID } from 'node:crypto'
 import { refundNow, onchainRefundNow, reclaimL1Htlc, receiveRefundNow } from '../../ops/refunds.js'
 import { hex } from '@scure/base'
 import { claimNow, onchainClaimNow } from '../../ops/claims.js'
 import { planExitForSwap } from '../../ops/unilateralExit.js'
 import { requireLn } from '../../ops/rails.js'
-import { capabilityRefusal, fundSources, requireFundSource, summarise } from '../../ops/fundSources.js'
+import { capabilityRefusal, fundSources, parseWholeSats, requireFundSource, summarise } from '../../ops/fundSources.js'
+import { ARKADE_FUND_SOURCE_ID } from '../../ops/arkadeFunds.js'
+import { balanceCheckpointScope } from '../../ops/balanceCheckpoints.js'
 import { committedAcrossCorridors, mintPool, poolPlan } from '../../ops/pool.js'
 import { runFloatLifecycle } from '../../ops/float.js'
 import { paymentVerdict } from '../../ops/paymentVerdict.js'
@@ -44,7 +47,6 @@ interface ActionBody {
   /** Which corridor's store owns {@link id} — see `requireCorridor`. */
   corridor?: unknown
   confirm?: unknown
-  force?: unknown
   /** `claim-now` only: an operator's own preimage, where the backend has none. */
   preimage?: unknown
   /** `park-swap` only: why this row is being stopped. Required, and recorded. */
@@ -63,6 +65,20 @@ interface ActionBody {
    * source and silently truncate the first token one.
    */
   amount?: unknown
+}
+
+class UncertainWithdrawalError extends Error {
+  readonly withdrawalId: string
+  readonly sendError: string
+
+  constructor(withdrawalId: string, cause: unknown) {
+    const sendError = messageOf(cause)
+    super(
+      `Withdrawal ${withdrawalId} may have gone out. Check the wallet and chain before retrying. Send error: ${sendError}`,
+    )
+    this.withdrawalId = withdrawalId
+    this.sendError = sendError
+  }
 }
 
 /**
@@ -562,9 +578,9 @@ export const ACTIONS: Record<string, ActionDefinition> = {
     expectedConfirm: () => 'MINT',
     warning:
       'Spends: reshapes the float in one Arkade transaction to the solver’s own address — splitting it into pool ' +
-      'pieces, or merging small coins into them once it holds too many. Refused while any corridor has a ' +
-      'non-terminal swap, because coin reservations are process-local and a concurrent provider could be holding them.',
-    run: (services, body) => mintPool(services, { force: body.force === true }),
+      'pieces, or merging small coins into them once it holds too many. Uses this provider’s coin reservations; ' +
+      'other providers must not share its wallet.',
+    run: (services) => mintPool(services, { inProviderProcess: true }),
   },
 
   // Armed though it moves no money: it stops the process driving the ones that
@@ -722,15 +738,61 @@ export const ACTIONS: Record<string, ActionDefinition> = {
       'NOT channel liquidity — that is the wallet the onchain corridors fund from, so withdrawing leaves less to ' +
       'fund them with. On the arkade float an Arkade address is paid offchain at once, while a bitcoin address ' +
       'is paid by collaborative exit at the server’s next batch — so the request can take a minute. Either way ' +
-      'the float withdrawal holds every free coin until it settles, so swaps cannot be funded from the float ' +
-      'meanwhile, and it leaves less float to fund them with afterwards. NOT SAFE TO REPEAT: each attempt is a separate payment, so a ' +
+      'the float withdrawal reserves only the inputs needed for the amount and fees until it settles, ' +
+      'and it leaves less float to fund swaps afterwards. NOT SAFE TO REPEAT: each attempt is a separate payment, so a ' +
       'withdrawal that times out must be checked against the chain before you try again.',
     run: async (services, body) => {
       const source = requireFundSource(fundSources(services), body.source)
       if (!source.withdraw) {
         throw capabilityRefusal(source, 'withdraw', 'it has no way to pay an arbitrary destination')
       }
-      return source.withdraw({ address: requireAddress(body), amount: requireAmount(body) })
+      const address = requireAddress(body)
+      const amount = requireAmount(body)
+      if (source.id !== ARKADE_FUND_SOURCE_ID) return source.withdraw({ address, amount })
+
+      const id = randomUUID()
+      await services.adminStore.createOperatorWithdrawal({
+        id,
+        scope: balanceCheckpointScope(services),
+        source: source.id,
+        address,
+        amountSats: parseWholeSats(amount),
+      })
+      let sending = false
+      try {
+        const result = await source.withdraw({
+          address,
+          amount,
+          onSending: async (feeSats) => {
+            await services.adminStore.transitionOperatorWithdrawal(id, 'preparing', 'sending', { feeSats })
+            sending = true
+          },
+        })
+        try {
+          await services.adminStore.transitionOperatorWithdrawal(
+            id,
+            sending ? 'sending' : 'preparing',
+            sending ? 'sent' : 'uncertain',
+            { reference: result.reference },
+          )
+        } catch (error) {
+          log(`operator withdrawal ${id}: completion journal failed`, messageOf(error))
+        }
+        if (!sending) log(`operator withdrawal ${id}: send boundary was not reported`)
+        return result
+      } catch (error) {
+        try {
+          await services.adminStore.transitionOperatorWithdrawal(
+            id,
+            sending ? 'sending' : 'preparing',
+            sending ? 'uncertain' : 'failed',
+          )
+        } catch (journalError) {
+          log(`operator withdrawal ${id}: failure journal failed`, messageOf(journalError))
+        }
+        if (sending) throw new UncertainWithdrawalError(id, error)
+        throw error
+      }
     },
   },
 }
@@ -800,9 +862,31 @@ export const registerActionRoutes = (app: Hono, deps: AdminDeps): void => {
       result = await definition.run(deps.services, body)
     } catch (error) {
       await record('error', messageOf(error))
+      if (error instanceof UncertainWithdrawalError) {
+        return c.json(
+          {
+            ok: false,
+            error: 'withdrawal_uncertain',
+            withdrawalId: error.withdrawalId,
+            message: error.message,
+            cause: error.sendError,
+          },
+          409,
+        )
+      }
       // 500 with a readable body rather than a thrown fault: the operator needs
       // the reason, and the action WAS attempted, unlike a confirm failure.
       return c.json({ ok: false, error: 'action_failed', message: messageOf(error) }, 500)
+    }
+    if (
+      name === 'pool-mint' &&
+      result &&
+      typeof result === 'object' &&
+      'refused' in result &&
+      typeof result.refused === 'string'
+    ) {
+      await record('error', JSON.stringify(result).slice(0, 500))
+      return c.json({ ok: false, error: 'pool_mint_refused', message: result.refused, result }, 409)
     }
     await record('ok', JSON.stringify(result).slice(0, 500))
     return c.json({ ok: true, result })

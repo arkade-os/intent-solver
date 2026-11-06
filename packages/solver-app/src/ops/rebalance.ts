@@ -13,12 +13,14 @@ import type {
   RebalancePool,
   RebalanceTransfer,
 } from '@arkade-os/solver-core/ports/rebalance.js'
-import type { RebalanceStore } from './rebalanceStore.js'
+import type { RebalanceStore, TransferCursor } from './rebalanceStore.js'
+import { rebalanceOverlapReady, type BalanceCheckpoint } from './balanceCheckpoints.js'
 
 export interface RebalanceSource {
   quote(
     deposit: RebalanceDeposit,
     policy: RebalancePolicy,
+    origin?: RebalanceTransfer['origin'],
   ): Promise<{
     debitSats: number
     feeSats: number
@@ -27,6 +29,8 @@ export interface RebalanceSource {
     routeData?: Record<string, unknown>
   }>
   reserve(row: RebalanceTransfer, policy: RebalancePolicy, restoring?: boolean): Promise<() => void>
+  pinPendingInputs(row: RebalanceTransfer): () => void
+  inputsAbsent(rows: readonly RebalanceTransfer[]): Promise<ReadonlySet<string>>
   submit(row: RebalanceTransfer): Promise<string>
   reconcile(row: RebalanceTransfer): Promise<{ state: 'unknown' | 'submitted' | 'refunded'; fundingTxid?: string }>
   close?(): Promise<void>
@@ -39,6 +43,8 @@ interface RebalanceDeps {
   policy: RebalancePolicy
   savePolicy(policy: RebalancePolicy): Promise<void>
   now?: () => number
+  postNotice?: (text: string) => void
+  overlapCheckpoint?: () => Promise<BalanceCheckpoint | undefined>
 }
 
 const revision = (policy: RebalancePolicy): string =>
@@ -46,19 +52,48 @@ const revision = (policy: RebalancePolicy): string =>
 const positiveSats = (value: number): void => {
   if (!Number.isSafeInteger(value) || value <= 0) throw new Error('amount must be a positive whole safe number of sats')
 }
+const sats = (value: number): string => value.toLocaleString('en-US')
+const poolName = (id: string): string =>
+  id === 'rail:shared'
+    ? 'the shared backend wallet'
+    : id === 'rail:onchain'
+      ? 'the backend on-chain wallet'
+      : id === 'rail:lightning'
+        ? 'the backend Lightning balance'
+        : 'the backend pool'
+const transferLine = (row: RebalanceTransfer): string =>
+  `${row.origin === 'automatic' ? 'Automatic' : 'Manual'} transfer from Arkade to ${poolName(row.poolId)}.\nTransfer ID: ${row.id}`
+const skippedReason = (error: unknown): string => {
+  const message = error instanceof Error ? error.message : String(error)
+  if (/fee.*(limit|cap|policy)|fees exceed policy/i.test(message)) return 'The quoted fees exceed the policy limit.'
+  if (/reserve|inventory|surplus/i.test(message)) return 'Available Arkade funds cannot cover the refill and reserve.'
+  if (/allowance|debit limit/i.test(message)) return 'The transfer would exceed a spending limit.'
+  if (/counterparty|route.*unavailable/i.test(message)) return 'No approved route can provide this refill.'
+  return 'No acceptable transfer quote was available.'
+}
 
 export class RebalanceService {
   private readonly serialise = createSerialiser()
   private readonly holds = new Map<string, () => void>()
+  private readonly terminalPins = new Map<string, RebalanceTransfer>()
   private currentPolicy: RebalancePolicy
   private stopped = false
   private ticking?: Promise<void>
-  private evaluation?: { at: number; reason: string }
+  private evaluation?: { at: number; reason: string; nextEligibleAt?: number }
+  private lastAttemptFailure?: string
   private readonly now: () => number
 
   private constructor(private readonly deps: RebalanceDeps) {
     this.currentPolicy = validateRebalancePolicy(deps.policy)
     this.now = deps.now ?? (() => Math.floor(Date.now() / 1000))
+  }
+
+  private notice(text: string): void {
+    try {
+      this.deps.postNotice?.(text)
+    } catch {
+      // A notification failure must not change the recorded transfer state.
+    }
   }
 
   static async create(deps: RebalanceDeps, mode: 'active' | 'passive' = 'active'): Promise<RebalanceService> {
@@ -73,8 +108,20 @@ export class RebalanceService {
         row.state = 'needs_reconciliation'
         row.error = 'Process stopped during submission; reconcile before any new spend.'
         await deps.store.save(row)
+        service.notice(
+          `⚠️ *Rebalance needs checking*\n${transferLine(row)}\nThe process stopped while sending. The source payment may be in flight; no new refill will start until it is reconciled.`,
+        )
       }
-      if (!row.fundingTxid) service.holds.set(row.id, await deps.source.reserve(row, service.currentPolicy, true))
+      service.holds.set(
+        row.id,
+        row.fundingTxid
+          ? deps.source.pinPendingInputs(row)
+          : await deps.source.reserve(row, service.currentPolicy, true),
+      )
+    }
+    for (const row of await deps.store.protectedTerminalInputs()) {
+      service.holds.set(row.id, deps.source.pinPendingInputs(row))
+      service.terminalPins.set(row.id, row)
     }
     return service
   }
@@ -88,6 +135,7 @@ export class RebalanceService {
       const next = validateRebalancePolicy(value)
       await this.deps.savePolicy(next)
       this.currentPolicy = next
+      this.lastAttemptFailure = undefined
       return this.policy()
     })
   }
@@ -112,13 +160,28 @@ export class RebalanceService {
         }
       }),
     )
+    const [page, active] = await Promise.all([this.deps.store.page(100), this.deps.store.active()])
+    const known = new Set(page.transfers.map((row) => row.id))
+    const transfers = [
+      ...page.transfers,
+      ...active.filter((row) => {
+        if (known.has(row.id)) return false
+        known.add(row.id)
+        return true
+      }),
+    ].sort((a, b) => b.createdAt - a.createdAt || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0))
     return {
       policy: this.policy(),
       policyRevision: revision(this.currentPolicy),
       pools: readings,
-      transfers: await this.deps.store.list(),
+      transfers,
+      transfersNextCursor: page.nextCursor,
       lastEvaluation: this.evaluation,
     }
+  }
+
+  async transfersPage(limit = 20, before?: TransferCursor) {
+    return this.deps.store.page(limit, before)
   }
 
   async quote(params: {
@@ -126,16 +189,71 @@ export class RebalanceService {
     amountSats: number
     requestKey: string
     kind?: DepositKind
+    receivingFeeAllowanceSats?: number
+    overridePendingIds?: string[]
   }): Promise<RebalanceTransfer> {
     return this.serialise(() => this.makeQuote(params, 'manual'))
   }
 
+  private async checkAdmission(origin: RebalanceTransfer['origin'], overridePendingIds?: string[]): Promise<void> {
+    if (
+      overridePendingIds !== undefined &&
+      (overridePendingIds.length !== 1 ||
+        typeof overridePendingIds[0] !== 'string' ||
+        !overridePendingIds[0] ||
+        overridePendingIds[0].length > 128)
+    )
+      throw new Error('Select exactly one pending transfer to override.')
+    const checkpoint = await this.deps.overlapCheckpoint?.()
+    if (checkpoint?.rebalance?.attributionDeferred && (origin !== 'manual' || !overridePendingIds))
+      throw new Error(
+        'Balance attribution is still catching up after an overlapping transfer. Wait for a fresh checkpoint.',
+      )
+    const active = await this.deps.store.active()
+    if (active.length === 0) {
+      if (overridePendingIds) throw new Error('The transfer being overridden has changed. Review a fresh quote.')
+      return
+    }
+    if (origin !== 'manual' || !overridePendingIds)
+      throw new Error('Another transfer is still in progress. Check its status or explicitly review one more transfer.')
+    const prior = active[0]
+    if (
+      active.length !== 1 ||
+      !prior ||
+      prior.id !== overridePendingIds[0] ||
+      prior.state !== 'pending' ||
+      !this.holds.has(prior.id) ||
+      !prior.fundingTxid ||
+      !/^[0-9a-f]{64}$/i.test(prior.fundingTxid)
+    )
+      throw new Error('The pending transfer changed or needs reconciliation. Review its status before trying again.')
+    if (
+      !checkpoint ||
+      checkpoint.finishedAt < this.now() - 180 ||
+      !rebalanceOverlapReady(checkpoint, overridePendingIds)
+    )
+      throw new Error('Wait for a fresh balance checkpoint to observe the first transfer before overriding it.')
+  }
+
   private async makeQuote(
-    params: { poolId: string; amountSats: number; requestKey: string; kind?: DepositKind },
+    params: {
+      poolId: string
+      amountSats: number
+      requestKey: string
+      kind?: DepositKind
+      receivingFeeAllowanceSats?: number
+      overridePendingIds?: string[]
+    },
     origin: 'manual' | 'automatic',
   ): Promise<RebalanceTransfer> {
     if (this.stopped) throw new Error('rebalancing is stopping')
     positiveSats(params.amountSats)
+    const receivingFeeAllowanceSats = origin === 'manual' ? (params.receivingFeeAllowanceSats ?? 1000) : undefined
+    if (
+      receivingFeeAllowanceSats !== undefined &&
+      (!Number.isSafeInteger(receivingFeeAllowanceSats) || receivingFeeAllowanceSats < 0)
+    )
+      throw new Error('receiving fee allowance must be nonnegative whole safe sats')
     if (typeof params.requestKey !== 'string' || !params.requestKey.trim() || params.requestKey.length > 128)
       throw new Error('request key is required and must be at most 128 characters')
     const existing = await this.deps.store.byKey(params.requestKey)
@@ -143,13 +261,21 @@ export class RebalanceService {
       if (
         existing.poolId !== params.poolId ||
         existing.netSats !== params.amountSats ||
-        (params.kind && existing.deposit.kind !== params.kind)
+        (existing.receivingFeeAllowanceSats !== undefined &&
+          existing.receivingFeeAllowanceSats !== receivingFeeAllowanceSats) ||
+        (receivingFeeAllowanceSats !== undefined && existing.deposit.feeSats > receivingFeeAllowanceSats) ||
+        (params.kind && existing.deposit.kind !== params.kind) ||
+        JSON.stringify(existing.overridePendingIds ?? []) !== JSON.stringify(params.overridePendingIds ?? [])
       )
         throw new Error('request key already belongs to a different transfer')
       return existing
     }
+    await this.checkAdmission(origin, params.overridePendingIds)
     const policy = this.currentPolicy
-    if (params.amountSats < policy.minTransferSats || policy.maxDebitSats === 0 || policy.dailyDebitSats === 0)
+    if (
+      origin === 'automatic' &&
+      (params.amountSats < policy.minTransferSats || policy.maxDebitSats === 0 || policy.dailyDebitSats === 0)
+    )
       throw new Error('configure debit limits and minimum transfer size before rebalancing')
     const pool = (await this.pools()).find((pool) => pool.id === params.poolId)
     if (!pool) throw new Error('rebalance destination pool is unavailable')
@@ -158,10 +284,9 @@ export class RebalanceService {
     for (const kind of pool.kinds) {
       if (params.kind && params.kind !== kind) continue
       try {
-        const totalAllowance = Math.min(
-          policy.maxFeeSats,
-          Number((BigInt(params.amountSats) * BigInt(policy.maxFeeBps)) / 10000n),
-        )
+        const totalAllowance =
+          receivingFeeAllowanceSats ??
+          Math.min(policy.maxFeeSats, Number((BigInt(params.amountSats) * BigInt(policy.maxFeeBps)) / 10000n))
         let feeAllowance = totalAllowance
         let deposit!: RebalanceDeposit
         let source!: Awaited<ReturnType<RebalanceSource['quote']>>
@@ -173,21 +298,25 @@ export class RebalanceService {
           if (
             !Number.isSafeInteger(deposit.feeSats) ||
             deposit.feeSats < 0 ||
+            deposit.feeSats > feeAllowance ||
             deposit.amountSats - deposit.netSats !== deposit.feeSats
           )
             throw new Error('deposit fee allowance does not match quoted credit')
-          source = await this.deps.source.quote(deposit, policy)
+          source = await this.deps.source.quote(deposit, policy, origin)
+          positiveSats(source.debitSats)
           const sourceFee = source.debitSats - deposit.amountSats
           if (!Number.isSafeInteger(sourceFee) || sourceFee < 0) throw new Error('invalid source fee estimate')
-          if (source.debitSats - params.amountSats <= totalAllowance) break
+          if (origin === 'manual' || source.debitSats - params.amountSats <= totalAllowance) break
           const remaining = totalAllowance - sourceFee
           if (remaining < 0 || remaining >= feeAllowance) break
           feeAllowance = remaining
         }
-        checkRebalanceFees(policy, params.amountSats, source.debitSats)
-        if (source.debitSats > policy.maxDebitSats) throw new Error('transfer exceeds per-transfer debit limit')
-        if (source.debitSats + (await this.deps.store.rollingDebit(this.now())) > policy.dailyDebitSats)
-          throw new Error('transfer exceeds rolling 24-hour debit limit')
+        if (origin === 'automatic') {
+          checkRebalanceFees(policy, params.amountSats, source.debitSats)
+          if (source.debitSats > policy.maxDebitSats) throw new Error('transfer exceeds per-transfer debit limit')
+          if (source.debitSats + (await this.deps.store.rollingDebit(this.now())) > policy.dailyDebitSats)
+            throw new Error('transfer exceeds rolling 24-hour debit limit')
+        }
         if (source.feeSats !== source.debitSats - params.amountSats)
           throw new Error('source quote fee does not match debit')
         const now = this.now()
@@ -197,6 +326,8 @@ export class RebalanceService {
           id: randomUUID(),
           requestKey: params.requestKey,
           origin,
+          ...(params.overridePendingIds ? { overridePendingIds: [...params.overridePendingIds] } : {}),
+          ...(receivingFeeAllowanceSats === undefined ? {} : { receivingFeeAllowanceSats }),
           poolId: pool.id,
           netSats: params.amountSats,
           debitSats: source.debitSats,
@@ -221,21 +352,26 @@ export class RebalanceService {
     return selected
   }
 
-  async submit(id: string): Promise<RebalanceTransfer> {
-    return this.serialise(() => this.send(id))
+  async submit(id: string, overridePendingIds?: string[]): Promise<RebalanceTransfer> {
+    return this.serialise(() => this.send(id, overridePendingIds))
   }
 
-  private async send(id: string): Promise<RebalanceTransfer> {
+  private async send(id: string, overridePendingIds?: string[]): Promise<RebalanceTransfer> {
     const row = await this.deps.store.get(id)
     if (!row) throw new Error('rebalance quote not found')
     if (row.state !== 'quoted') return row
     if (this.stopped) throw new Error('rebalancing is stopping')
     if (row.expiresAt <= this.now()) throw new Error('rebalance quote expired; request another preview')
-    if (row.policyRevision !== revision(this.currentPolicy)) throw new Error('policy changed; request another preview')
-    if ((await this.deps.store.active()).length) throw new Error('an active rebalance transfer must resolve first')
-    checkRebalanceFees(this.currentPolicy, row.netSats, row.debitSats)
-    if (row.debitSats + (await this.deps.store.rollingDebit(this.now())) > this.currentPolicy.dailyDebitSats)
-      throw new Error('rolling 24-hour debit limit reached')
+    if (row.origin !== 'manual' && row.policyRevision !== revision(this.currentPolicy))
+      throw new Error('policy changed; request another preview')
+    if (JSON.stringify(row.overridePendingIds ?? []) !== JSON.stringify(overridePendingIds ?? []))
+      throw new Error('The pending-transfer override changed. Review a fresh quote.')
+    await this.checkAdmission(row.origin, row.overridePendingIds)
+    if (row.origin !== 'manual') {
+      checkRebalanceFees(this.currentPolicy, row.netSats, row.debitSats)
+      if (row.debitSats + (await this.deps.store.rollingDebit(this.now())) > this.currentPolicy.dailyDebitSats)
+        throw new Error('rolling 24-hour debit limit reached')
+    }
     const release = await this.deps.source.reserve(row, this.currentPolicy)
     row.state = 'submitting'
     row.chargedAt = this.now()
@@ -247,6 +383,9 @@ export class RebalanceService {
       throw error
     }
     this.holds.set(row.id, release)
+    this.notice(
+      `⏳ *Rebalance starting*\n${transferLine(row)}\nSubmitting an Arkade payment authorized up to ${sats(row.debitSats)} sats. The destination credit may arrive later; at least ${sats(row.netSats)} sats are expected.${row.overridePendingIds?.length ? `\nAnother transfer (${row.overridePendingIds[0]}) is pending. BTC loss and recovery notices will wait until both transfers resolve.` : ''}`,
+    )
     try {
       const txid = await this.deps.source.submit(row)
       if (!/^[0-9a-f]{64}$/i.test(txid))
@@ -255,12 +394,18 @@ export class RebalanceService {
       row.state = 'pending'
       row.updatedAt = this.now()
       await this.deps.store.save(row)
-      this.release(row.id)
+      this.holdPending(row)
+      this.notice(
+        `⏳ *Rebalance submitted*\n${transferLine(row)}\n${row.deposit.kind === 'onchain' ? 'Bitcoin transaction' : 'Arkade funding transaction'}: ${row.fundingTxid}\nWaiting for at least ${sats(row.netSats)} sats to become spendable at the destination. ${row.deposit.kind === 'onchain' ? 'Bitcoin confirmation and deposit claiming may take time.' : 'The destination invoice must settle.'}`,
+      )
     } catch (error) {
       row.state = 'needs_reconciliation'
       row.error = error instanceof Error ? error.message : String(error)
       row.updatedAt = this.now()
       await this.deps.store.save(row)
+      this.notice(
+        `⚠️ *Rebalance needs checking*\n${transferLine(row)}\nThe Arkade payment was attempted, but its result is uncertain. No new refill will start until it is reconciled.`,
+      )
     }
     return row
   }
@@ -281,10 +426,40 @@ export class RebalanceService {
     this.holds.delete(id)
   }
 
+  private holdPending(row: RebalanceTransfer): void {
+    const pin = this.deps.source.pinPendingInputs(row)
+    const previous = this.holds.get(row.id)
+    this.holds.set(row.id, pin)
+    previous?.()
+  }
+
+  private async clearTerminalPins(): Promise<void> {
+    if (this.terminalPins.size === 0) return
+    let absent: ReadonlySet<string>
+    try {
+      absent = await this.deps.source.inputsAbsent([...this.terminalPins.values()])
+    } catch {
+      return
+    }
+    for (const row of this.terminalPins.values()) {
+      if (!this.holds.has(row.id)) throw new Error('terminal rebalance inputs lost their source protection')
+      if (!absent.has(row.id)) continue
+      try {
+        row.sourceInputsClearedAt = this.now()
+        await this.deps.store.save(row)
+        this.release(row.id)
+        this.terminalPins.delete(row.id)
+      } catch {
+        // Keep the source pins until a later fresh wallet read proves the inputs gone.
+      }
+    }
+  }
+
   tick(): Promise<void> {
     if (this.ticking) return this.ticking
     this.ticking = this.serialise(async () => {
       if (this.stopped) return
+      await this.clearTerminalPins()
       if (!this.currentPolicy.enabled && !(await this.deps.store.active()).length && !this.deps.backend.maintain) {
         this.evaluation = { at: this.now(), reason: 'automatic rebalancing disabled' }
         return
@@ -303,13 +478,18 @@ export class RebalanceService {
           if (!pool) throw new Error(poolError ?? 'destination pool unavailable; transfer remains tracked')
           const receipt = await pool.receipt(row.deposit, row.fundingTxid)
           if (receipt.state === 'credited') {
-            if (!Number.isSafeInteger(receipt.netSats) || receipt.netSats! < row.netSats)
+            const creditedSats = receipt.netSats
+            if (typeof creditedSats !== 'number' || !Number.isSafeInteger(creditedSats) || creditedSats < row.netSats)
               throw new Error('destination credited less than the quoted minimum')
             row.state = 'completed'
-            row.creditedSats = receipt.netSats
+            row.creditedSats = creditedSats
             delete row.error
-            await this.deps.store.save({ ...row, updatedAt: this.now() })
-            this.release(row.id)
+            row.updatedAt = this.now()
+            await this.deps.store.save(row)
+            this.terminalPins.set(row.id, row)
+            this.notice(
+              `✅ *Rebalance credited*\n${transferLine(row)}\n${sats(creditedSats)} sats are now spendable at the destination. The authorized Arkade debit was up to ${sats(row.debitSats)} sats; the final source debit is not recorded separately.`,
+            )
             continue
           }
           if (receipt.state === 'failed')
@@ -319,6 +499,7 @@ export class RebalanceService {
         }
         if (receiptError) row.error = receiptError
         try {
+          const previousState = row.state
           const observed = await this.deps.source.reconcile(row)
           if (observed.state === 'submitted' && observed.fundingTxid) {
             if (!/^[0-9a-f]{64}$/i.test(observed.fundingTxid))
@@ -327,11 +508,19 @@ export class RebalanceService {
             row.state = 'pending'
             if (!receiptError) delete row.error
             await this.deps.store.save({ ...row, updatedAt: this.now() })
-            this.release(row.id)
+            this.holdPending(row)
+            if (previousState !== 'pending')
+              this.notice(
+                `⏳ *Rebalance found*\n${transferLine(row)}\nThe Arkade payment was found. Waiting for the destination credit to become spendable.`,
+              )
           } else if (observed.state === 'refunded') {
             row.state = 'refunded'
-            await this.deps.store.save({ ...row, updatedAt: this.now() })
-            this.release(row.id)
+            row.updatedAt = this.now()
+            await this.deps.store.save(row)
+            this.terminalPins.set(row.id, row)
+            this.notice(
+              `↩️ *Rebalance refunded*\n${transferLine(row)}\nThe source refund was observed in Arkade; the destination was not credited. Fees may still apply.`,
+            )
           } else if (row.error) await this.deps.store.save({ ...row, updatedAt: this.now() })
         } catch (error) {
           const sourceError = error instanceof Error ? error.message : String(error)
@@ -339,6 +528,7 @@ export class RebalanceService {
           await this.deps.store.save({ ...row, updatedAt: this.now() })
         }
       }
+      await this.clearTerminalPins()
       const policy = this.currentPolicy
       this.evaluation = { at: this.now(), reason: 'automatic rebalancing disabled' }
       try {
@@ -364,12 +554,43 @@ export class RebalanceService {
           balances[pool.id] = null
         }
       }
-      const target = selectRebalanceTarget(policy, balances, {}, this.now(), await this.deps.store.lastAttempt())
+      const now = this.now()
+      const lastAttempt = await this.deps.store.lastAttempt()
+      const target = selectRebalanceTarget(policy, balances, {}, now, lastAttempt)
       if (!target) {
-        this.evaluation.reason = 'no eligible deficit, or cooldown active'
+        const configured = Object.entries(policy.targets).filter(([, value]) => value.minimumSats > 0)
+        const readable = configured.filter(([id]) => {
+          const balance = balances[id]
+          return typeof balance === 'number' && Number.isSafeInteger(balance) && balance >= 0
+        })
+        const below = readable.filter(([id, value]) => balances[id]! < value.minimumSats)
+        const eligible = below.filter(([id, value]) => value.targetSats - balances[id]! >= policy.minTransferSats)
+        if (eligible.length > 0 && lastAttempt > now) {
+          this.evaluation.reason = 'The clock is earlier than the last rebalance attempt; automatic refills are paused.'
+        } else if (eligible.length > 0 && lastAttempt > 0 && now - lastAttempt < policy.cooldownSeconds) {
+          const nextEligibleAt = lastAttempt + policy.cooldownSeconds
+          this.evaluation = {
+            at: now,
+            reason: this.lastAttemptFailure
+              ? `Cooling down after a failed attempt: ${this.lastAttemptFailure}`
+              : 'Cooling down after the last rebalance attempt.',
+            ...(Number.isSafeInteger(nextEligibleAt) && nextEligibleAt <= 8_640_000_000_000 ? { nextEligibleAt } : {}),
+          }
+        } else if (configured.length === 0) {
+          this.evaluation.reason = 'No backend refill trigger is configured.'
+        } else if (readable.length < configured.length) {
+          this.evaluation.reason =
+            'A backend balance could not be read; automatic refill is waiting for a fresh balance.'
+        } else if (below.length > 0) {
+          this.evaluation.reason = 'The refill amount is below the configured minimum transfer size.'
+        } else {
+          this.evaluation.reason = 'Backend balances are above their refill triggers.'
+        }
         return
       }
-      await this.deps.store.recordAttempt(this.now())
+      const attemptAt = this.now()
+      await this.deps.store.recordAttempt(attemptAt)
+      let quoted: RebalanceTransfer | undefined
       try {
         const maximum = Math.min(
           target.netSats,
@@ -378,7 +599,6 @@ export class RebalanceService {
         )
         if (maximum < policy.minTransferSats) throw new Error('remaining daily allowance below minimum transfer size')
         let amount = maximum
-        let quoted: RebalanceTransfer | undefined
         for (let attempt = 0; attempt < 8 && amount >= policy.minTransferSats; attempt++) {
           try {
             quoted = await this.makeQuote(
@@ -392,10 +612,27 @@ export class RebalanceService {
           }
         }
         if (!quoted) throw new Error('source surplus cannot cover minimum transfer size')
-        await this.send(quoted.id)
-        this.evaluation.reason = 'refill submitted'
+        const sent = await this.send(quoted.id)
+        this.evaluation.reason = sent.state === 'pending' ? 'refill submitted' : 'refill needs reconciliation'
+        this.lastAttemptFailure = undefined
       } catch (error) {
-        this.evaluation.reason = error instanceof Error ? error.message : String(error)
+        let storedState: RebalanceTransfer['state'] | undefined
+        if (quoted) {
+          try {
+            storedState = (await this.deps.store.get(quoted.id))?.state
+          } catch {
+            storedState = undefined
+          }
+        }
+        const noSourceSubmission = !quoted || storedState === 'quoted' || storedState === 'cancelled'
+        const reason = noSourceSubmission ? skippedReason(error) : 'The transfer needs checking.'
+        this.evaluation.reason = reason
+        this.lastAttemptFailure = reason
+        this.notice(
+          noSourceSubmission
+            ? `⚠️ *Automatic rebalance could not start*\nNo funds were sent from Arkade to ${poolName(target.poolId)}. ${reason}\nThe next attempt waits for the configured cooldown.`
+            : `⚠️ *Rebalance needs checking*\n${transferLine(quoted!)}\nThe transfer could not be confirmed. Check its state before trying again.`,
+        )
       }
     }).finally(() => {
       this.ticking = undefined

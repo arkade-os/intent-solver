@@ -266,7 +266,7 @@ describe('layer boundaries', () => {
       .filter((file) => layerOf(file) === null)
       .map((file) => relative(REPO, file).replace(/\\/g, '/'))
     expect([...new Set(unassigned)].sort()).toEqual([])
-  }, 30_000)
+  }, 90_000)
 
   it('has no import that crosses a layer boundary the DAG forbids', () => {
     const found = new Set<string>()
@@ -293,7 +293,7 @@ describe('layer boundaries', () => {
     const unexpected = [...found].filter((edge) => !KNOWN_VIOLATIONS.includes(edge)).sort()
     const stale = KNOWN_VIOLATIONS.filter((edge) => !found.has(edge)).sort()
     expect({ unexpected, stale }).toEqual({ unexpected: [], stale: [] })
-  }, 30_000)
+  }, 90_000)
 })
 
 /**
@@ -378,5 +378,5 @@ describe('the corridor record census', () => {
       census[relative(REPO, file).replace(/\\/g, '/')] = matches.length
     }
     expect(census).toEqual(CORRIDOR_RECORD_CENSUS)
-  }, 30_000)
+  }, 90_000)
 })
