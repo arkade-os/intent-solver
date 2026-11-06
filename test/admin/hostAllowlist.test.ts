@@ -22,6 +22,9 @@ const mutate = (host: string, config: Record<string, unknown>) =>
     }),
   )
 
+const read = (host: string, config: Record<string, unknown>) =>
+  app(config).fetch(new Request(`http://${host}/api/healthz`, { method: 'GET' }))
+
 const UNPINNED = { adminHost: '127.0.0.1', adminPort: 8788 }
 const LOOPBACK = { ...UNPINNED, adminAllowedHosts: ['solver.example.com'] }
 
@@ -85,5 +88,21 @@ describe('the mutating guard pins the Host header', () => {
   it('stays inert when no port is configured, leaving every current caller alone', async () => {
     const response = await mutate('admin', { adminHost: '127.0.0.1', adminPort: null })
     expect(response.status).not.toBe(403)
+  })
+})
+
+describe('the Host pin also covers reads', () => {
+  it('rejects a rebinding GET even though a read carries no CSRF risk', async () => {
+    const response = await read('attacker.com', LOOPBACK)
+    expect(response.status).toBe(403)
+    expect(await response.json()).toMatchObject({ error: 'host_not_allowed' })
+  })
+
+  it('serves a GET at a pinned Host', async () => {
+    expect((await read('127.0.0.1:8788', LOOPBACK)).status).toBe(200)
+  })
+
+  it('leaves GET alone when no hosts are declared', async () => {
+    expect((await read('attacker.com', UNPINNED)).status).toBe(200)
   })
 })

@@ -107,11 +107,16 @@ export const buildAdminApp = (deps: AdminDeps): Hono => {
   const allowedHosts = adminHostAllowlist(deps.services.config)
 
   /**
-   * Same-site JSON only, ahead of every route: Hono runs handlers in
-   * registration order, so a guard added later runs later. Host rather than
-   * whole origin — a proxy terminating TLS changes the scheme, not the host.
+   * Ahead of every route (Hono runs handlers in registration order). The Host pin
+   * guards reads and writes; the same-site and media-type checks only writes.
    */
   app.use('/api/*', async (c, next) => {
+    // Reads too (a rebinding GET is same-origin and can read audit rows carrying preimages).
+    const host = new URL(c.req.url).host.toLowerCase()
+    if (allowedHosts.size > 0 && !allowedHosts.has(host)) {
+      const message = `${host} is not a Host this console is served at; add it to admin.allowedHosts`
+      return c.json({ error: 'host_not_allowed', message }, 403)
+    }
     if (!MUTATING.has(c.req.method)) return next()
     const origin = c.req.header('origin')
     if (
@@ -119,12 +124,6 @@ export const buildAdminApp = (deps: AdminDeps): Hono => {
       (origin !== undefined && URL.parse(origin)?.host !== new URL(c.req.url).host)
     ) {
       return c.json({ error: 'cross_origin', message: 'a cross-origin request cannot change this solver' }, 403)
-    }
-    // `c.req.url`'s host is the Host header — the node adapter builds the URL from it.
-    const host = new URL(c.req.url).host.toLowerCase()
-    if (allowedHosts.size > 0 && !allowedHosts.has(host)) {
-      const message = `${host} is not a Host this console is served at; add it to admin.allowedHosts`
-      return c.json({ error: 'host_not_allowed', message }, 403)
     }
     // A form post cannot set this header; `DELETE` is the one the console sends bodiless.
     const mediaType = (c.req.header('content-type') ?? '').split(';')[0]!.trim().toLowerCase()
