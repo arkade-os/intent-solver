@@ -29,6 +29,7 @@ import { ArkAddress } from '@arkade-os/sdk'
 import type { ReceiveArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 import { provenDepth } from '@arkade-os/solver-rails-evm/evm/lockDepth.js'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
+import { capture, unwrap } from '@arkade-os/solver-core/util/capture.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import type { Limits } from '@arkade-os/solver-core/core/limits.js'
 import { payoutSatsFor, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
@@ -204,8 +205,15 @@ export class EvmReceiveSwapService {
       this.deps.timelockHeight(),
       this.claimOutcome(row),
     ])
-    // Only worth asking once the lockup exists to be claimed FROM.
-    const preimage = row.preimage ?? (funded ? await this.deps.arkadePreimage(row) : null)
+    // Only worth asking once the lockup exists to be claimed FROM. Captured
+    // because the depth probe below is awaited first, and for as long as it runs.
+    const preimageP = capture(
+      row.preimage !== null
+        ? Promise.resolve(row.preimage)
+        : funded
+          ? this.deps.arkadePreimage(row)
+          : Promise.resolve(null),
+    )
     // PROVEN depth, not assumed — same probe as the send shell. On THIS leg it
     // is the only thing standing between a client lock that can still reorg
     // away and the solver's own sats, and the solver never sees that lock's
@@ -229,7 +237,7 @@ export class EvmReceiveSwapService {
       evmLockAgeSeconds: depth.ageSeconds,
       arkadeLockupFunded: funded,
       evmClaimOutcome: claimOutcome,
-      preimage,
+      preimage: unwrap(await preimageP),
       nowSeconds: this.now(),
       evmTimelockHeight: clock,
     }
@@ -357,6 +365,10 @@ export class EvmReceiveSwapService {
       return { accepted: false, reason: 'amount_out_of_range' }
     }
 
+    // Sampled with the height read, not after it: a newer `now` against a stale
+    // height makes the client's timeout look further away than it is.
+    const nowSeconds = this.now()
+    const tipP = capture(this.deps.timelockHeight())
     let grossSats: number
     try {
       const price = await this.deps.fetchPrice(market.priceFeed, market.pricePath)
@@ -384,23 +396,19 @@ export class EvmReceiveSwapService {
     const payoutSats = payoutSatsFor(grossSats, fee)
     if (payoutSats <= 0) return { accepted: false, reason: 'fee_consumes_swap' }
 
-    if (await store.findLiveByPaymentHash(request.paymentHash)) {
-      return { accepted: false, reason: 'duplicate_swap' }
-    }
-    for (const peer of this.deps.peerStores ?? []) {
-      if (await peer.findLiveByPaymentHash(request.paymentHash)) {
-        return { accepted: false, reason: 'duplicate_swap' }
-      }
-    }
+    const spokenFor = await Promise.all([
+      store.findLiveByPaymentHash(request.paymentHash),
+      ...(this.deps.peerStores ?? []).map((peer) => peer.findLiveByPaymentHash(request.paymentHash)),
+    ])
+    if (spokenFor.some(Boolean)) return { accepted: false, reason: 'duplicate_swap' }
 
     // The client's deadline is a HEIGHT and the ordering gate is in seconds. The
     // conversion uses the FASTEST plausible block time, so the deadline is read
     // as the earliest it could arrive - the safe direction when it bounds
     // somebody else's recourse rather than our own.
-    const nowSeconds = this.now()
     const evmTimeoutSeconds = deadlineSecondsForBlock({
       timeoutBlock: BigInt(request.evmTimeout),
-      currentBlock: BigInt(await this.deps.timelockHeight()),
+      currentBlock: BigInt(unwrap(await tipP)),
       nowSeconds,
       cadence: chain.timelockCadence,
     })

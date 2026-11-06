@@ -37,8 +37,14 @@ export const evmRpcUrl = (): string => process.env.EVM_E2E_RPC_URL ?? 'http://lo
 
 export type EvmRpc = (method: string, params: readonly unknown[]) => Promise<unknown>
 
-// Anvil >= 1.9 stamps each block after its parent, so a burst runs the chain
-// clock ahead of wall time; a zero interval keeps one timestamp.
+/**
+ * Current Anvil stamps each new block strictly after its parent. A burst of
+ * automined transactions in one wall-clock second therefore walks the chain
+ * clock into the future, and claim-age checks treat a just-mined log as not
+ * yet old enough. A zero interval keeps one timestamp until a test sets the
+ * next block itself. `scripts/e2e-stack.mjs` does the same at startup; a file
+ * that resets the chain has to say it again.
+ */
 export const pinAnvilClock = async (rpc: EvmRpc): Promise<void> => {
   await rpc('anvil_setBlockTimestampInterval', [0])
 }

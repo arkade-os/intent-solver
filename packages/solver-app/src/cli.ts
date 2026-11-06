@@ -431,9 +431,13 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
     // this registry and its rows are simply not watched. They stay readable —
     // the console and the status route read the wider READER set — and
     // re-enabling resumes them.
-    for (const corridor of services.corridors) {
-      watch(await corridor.findRecoverable(), (id) => corridor.tick(id))
-    }
+    const recovered = await Promise.all(
+      [...services.corridors].map(async (corridor) => ({
+        rows: await corridor.findRecoverable(),
+        tick: (id: string) => corridor.tick(id),
+      })),
+    )
+    for (const { rows, tick } of recovered) watch(rows, tick)
     // Read before `swapByScript` is replaced: the scripts this pass is the
     // first to see, which are exactly the ones not yet registered anywhere.
     const adopted = [...next.keys()].filter((script) => !swapByScript.has(script))

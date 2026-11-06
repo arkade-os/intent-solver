@@ -60,6 +60,7 @@ import {
   sweptOpsFrom,
   type SweptLockupRefund,
 } from '@arkade-os/solver-arkade/arkade/sweptLockupRefund.js'
+import { capture, unwrap } from '@arkade-os/solver-core/util/capture.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { unilateralLadderFor } from '@arkade-os/solver-core/core/send.js'
 import { askApproval, type ApprovalCheck } from '@arkade-os/solver-core/core/approvalGate.js'
@@ -349,16 +350,11 @@ export class OnchainSendSwapService {
       return { accepted: false, reason: 'payout_below_dust' }
     }
 
-    if (await store.findLiveByPaymentHash(request.paymentHash)) {
-      return { accepted: false, reason: 'duplicate_swap' }
-    }
-    // The same check against the OTHER corridors' stores: a hash that is live
-    // in ANY of them is spoken for.
-    for (const peer of this.deps.peerStores ?? []) {
-      if (await peer.findLiveByPaymentHash(request.paymentHash)) {
-        return { accepted: false, reason: 'duplicate_swap' }
-      }
-    }
+    const spokenFor = await Promise.all([
+      store.findLiveByPaymentHash(request.paymentHash),
+      ...(this.deps.peerStores ?? []).map((peer) => peer.findLiveByPaymentHash(request.paymentHash)),
+    ])
+    if (spokenFor.some(Boolean)) return { accepted: false, reason: 'duplicate_swap' }
     if (request.requesterKey !== undefined && !this.quoteLimiter.take(request.requesterKey)) {
       return { accepted: false, reason: 'rate_limited' }
     }
@@ -590,7 +586,11 @@ export class OnchainSendSwapService {
   async refundSweep(): Promise<string[]> {
     const pushed: string[] = []
     const now = this.now()
-    const rows = [...(await this.deps.store.findRefundable(now)), ...(await this.deps.store.findReleasable(now))]
+    const [refundableRows, releasableRows] = await Promise.all([
+      this.deps.store.findRefundable(now),
+      this.deps.store.findReleasable(now),
+    ])
+    const rows = [...refundableRows, ...releasableRows]
     const refundable = new Set(rows.map((row) => row.id))
     for (const id of this.unknownLockups.keys()) if (!refundable.has(id)) this.unknownLockups.delete(id)
     for (const row of rows) {
@@ -969,10 +969,12 @@ export class OnchainSendSwapService {
 
     let signed
     try {
-      const shortfall = await this.lockupShortfall(row)
+      const shortfallP = this.lockupShortfall(row)
+      const feeP = capture(onchain.estimateFeeRate())
+      const shortfall = await shortfallP
       if (shortfall) return this.refuseFunding(row, fresh, shortfall)
       // Rounded: fundPsbt's fee_tokens_per_vbyte is an integer, and the contract should not rest on the estimator returning one.
-      const feeRateSatPerVbyte = Math.round(Math.max(await onchain.estimateFeeRate(), MIN_RELAY_FEE_RATE))
+      const feeRateSatPerVbyte = Math.round(Math.max(unwrap(await feeP), MIN_RELAY_FEE_RATE))
       signed = await onchain.signFunding({
         address: row.onchainAddress,
         amountSats: row.payoutSats,
@@ -1105,8 +1107,9 @@ export class OnchainSendSwapService {
       await store.fail(row.id, 'claiming', 'claiming state with no preimage')
       return false
     }
-    const outputs = claimOutputs(await arkade.findLockups(row.pkScript), row.amountSats)
+    const lockupsP = capture(arkade.findLockups(row.pkScript))
     const unrolled = await advanceUnrolledClaims(store, row, arkade, covenantRowFor(row), row.preimage)
+    const outputs = claimOutputs(unwrap(await lockupsP), row.amountSats)
     // claimOutputs falls back to EVERY output when the asset-free ones fall short, so a
     // dust asset vtxo left after the clean funding was swept reads non-empty yet cannot
     // cover the amount. Guard on value, not emptiness — held 0 is the empty case.
@@ -1116,7 +1119,11 @@ export class OnchainSendSwapService {
       // spendableOnly, and claimOutputs may fall back to a dust asset vtxo that cannot
       // cover the amount. {@link pushRefund}'s refusal applies — `stuck` has no `step`
       // case, so parking ends collection after we paid out.
-      const evidence = await arkade.lockupSpendEvidence(row.pkScript)
+      const evidenceP = arkade.lockupSpendEvidence(row.pkScript)
+      const outpointsP = capture(
+        arkade.findLockupOutpoints ? arkade.findLockupOutpoints(row.pkScript) : Promise.resolve([]),
+      )
+      const evidence = await evidenceP
       if (evidence !== 'spent' && this.now() < row.refundLocktime) {
         throw new Error(
           `swap ${row.id}: lockup holds ${held} < ${row.amountSats} while claiming but no spend is provable (${evidence})`,
@@ -1127,7 +1134,7 @@ export class OnchainSendSwapService {
       if (pending) return store.transition(row.id, 'claiming', 'claimed', { claim_ark_txid: pending })
       // A spend revealing OUR preimage is our own claim that landed before a crash took the txid.
       // Like the normal path, never `claimed` while an adopted output is still out.
-      const outpoints = (await arkade.findLockupOutpoints?.(row.pkScript)) ?? []
+      const outpoints = unwrap(await outpointsP)
       const ours = outpoints.length > 0 && (await arkade.findClaimPreimage?.(outpoints, row.paymentHash))
       if (ours && (await lockupLeftover(arkade, row, [], null)).length === 0) {
         return store.transition(row.id, 'claiming', 'claimed', { claim_ark_txid: null })

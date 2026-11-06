@@ -110,6 +110,37 @@ const build = async (over: Partial<EvmReceiveServiceDeps> = {}) => {
   return { store, deps, service: new EvmReceiveSwapService(deps) }
 }
 
+describe('a failing preimage read beside the depth probe', () => {
+  it('reaches the tick rather than going unhandled', async () => {
+    const unhandled: unknown[] = []
+    const record = (error: unknown): void => void unhandled.push(error)
+    process.on('unhandledRejection', record)
+    try {
+      const evm = evmFake()
+      const probe = evm.isLockedAt as unknown as ReturnType<typeof vi.fn>
+      probe.mockImplementation(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        return true
+      })
+      const { service } = await build({
+        evm,
+        arkadeLockupFunded: vi.fn().mockResolvedValue(true),
+        // Not `vi.fn().mockRejectedValue`: that tracks settled results, observing
+        // the rejection this asserts is unobserved.
+        arkadePreimage: async () => {
+          throw new Error('arkade indexer unreachable')
+        },
+      })
+
+      await expect(service.tick('swap-1')).rejects.toThrow('arkade indexer unreachable')
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off('unhandledRejection', record)
+    }
+  })
+})
+
 describe('the row is exposed BEFORE the sats go out', () => {
   it('is already funding_arkade by the time fundArkade is called', async () => {
     // A crash between the two must not leave a funded lockup against a row that
