@@ -1073,8 +1073,15 @@ export class ReceiveSwapService {
     const { store, arkade } = this.deps
     const observeStarted = performance.now()
     const outputs = await arkade.findLockups(row.pkScript)
+    if (row.arkadeLockupTxid === null || row.arkadeLockupVout === null) {
+      await store.fail(row.id, 'funded', 'funded state with no funded outpoint recorded')
+      return false
+    }
+    // Gate on the RECORDED funded output, not an empty script: dust on the public
+    // lockup address must not defer claim detection to the refund deadline.
+    const fundedSpendable = outputs.some((o) => o.txid === row.arkadeLockupTxid && o.vout === row.arkadeLockupVout)
 
-    if (outputs.length > 0) {
+    if (fundedSpendable) {
       // The refund-deadline check comes BEFORE the reveal attempt, not after:
       // revealToCovclaimd can throw (covclaimd unreachable), and if that check
       // ran second it would never be reached while covclaimd stays down —
@@ -1094,14 +1101,6 @@ export class ReceiveSwapService {
       return false
     }
 
-    // Nothing spendable left — most likely covclaimd's claim landed.
-    if (row.arkadeLockupTxid === null || row.arkadeLockupVout === null) {
-      // Unreachable by construction: `funded` is only ever entered with these
-      // set (whenArmed polls until it finds them). Guarded so a bad edit
-      // fails loudly rather than reading null silently.
-      await store.fail(row.id, 'funded', 'funded state with no funded outpoint recorded')
-      return false
-    }
     // ALL historical outpoints, not just the recorded one. The recorded
     // outpoint is this row's refund target, but it is not guaranteed to be the
     // one that got claimed — a row adopted out of a crashed funding attempt
@@ -1283,7 +1282,10 @@ export class ReceiveSwapService {
     }
 
     const outputs = await arkade.findLockups(row.pkScript)
-    if (outputs.length === 0) {
+    // Keyed on the RECORDED funded output, not an empty script: dust must not be
+    // refunded into terminal `refunded` while a claim trails the `late` recheck.
+    const fundedOutput = outputs.find((o) => o.txid === row.arkadeLockupTxid && o.vout === row.arkadeLockupVout)
+    if (!fundedOutput) {
       // Our own refund, finalized (one-shot) or accepted before its response reached us. A throw keeps
       // the row refunding, so the sweep retries a finalize arkd refused.
       const own = await arkade.finalizePendingRefund?.(receiveCovenantRowFor(row))
@@ -1306,7 +1308,11 @@ export class ReceiveSwapService {
       if (row.htlcExpiresAt !== null && this.now() < row.htlcExpiresAt) return false
       // Still nothing, and nothing left to collect. A human needs to look, same
       // posture the onchain leg takes for its own ambiguous-witness case.
-      await store.fail(row.id, 'refunding', 'lockup empty during refunding with no matching claim found; needs review')
+      await store.fail(
+        row.id,
+        'refunding',
+        'funded output gone during refunding with no matching claim found; needs review',
+      )
       return false
     }
 
