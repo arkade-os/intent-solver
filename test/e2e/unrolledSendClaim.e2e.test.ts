@@ -73,7 +73,7 @@ describe('an unrolled send lockup is claimed without arkd co-signing', () => {
       const claimDelay = relativeDelayFrom(ctx.unilateralDelays.unilateralClaimDelay)
       if (claimDelay.unit !== 'blocks') throw new Error('unrolled claim requires a block-typed arkd')
 
-      await assertArkadeSpendable(arkade, AMOUNT_SATS)
+      await assertArkadeSpendable(arkade, AMOUNT_SATS + 1_000)
       const { invoice } = ln.forgeInvoice(AMOUNT_SATS)
       const quote = await service.quote(invoice, await ctx.wallet.getAddress(), {
         clientRefundPubkey: CLIENT_REFUND_PUBKEY,
@@ -83,9 +83,9 @@ describe('an unrolled send lockup is claimed without arkd co-signing', () => {
       await (
         await ctx.wallet.getContractManager()
       ).createContract(lockupContractRegistration(covenantScriptFromRow(swap), swap.lockupAddress))
-      await ctx.wallet.send({ address: swap.lockupAddress, amount: AMOUNT_SATS })
+      await ctx.wallet.send({ address: swap.lockupAddress, amount: swap.amountSats })
       const funded = await poll(
-        async () => (await findLockups(ctx, swap.pkScript)).find((output) => output.value === AMOUNT_SATS),
+        async () => (await findLockups(ctx, swap.pkScript)).find((output) => output.value === swap.amountSats),
         { attempts: 30, intervalMs: 2000, whenExhausted: 'funded lockup did not appear' },
       )
       const key = `${funded.txid}:${funded.vout}`
