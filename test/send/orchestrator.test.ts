@@ -1147,7 +1147,7 @@ describe('tick: refusals before money moves', () => {
     const row = await guarded.tick(outcome.swap.id)
 
     expect(row.state).toBe('refused')
-    expect(row.failureReason).toContain('vhtlc_csv_window_unsafe')
+    expect(row.failureReason).toContain('client_solo_csv_window_unsafe')
     expect(row.failureReason).toContain('Core txindex is unavailable')
     expect(ln.payCalls).toHaveLength(0)
   })

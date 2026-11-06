@@ -1,10 +1,6 @@
 import { hex } from '@scure/base'
 import { REFUND_SAFETY_MARGIN } from '@arkade-os/solver-core/core/send.js'
-import {
-  MAX_BIP68_SECONDS,
-  relativeDelayFrom,
-  SEQUENCE_GRANULARITY_SECONDS,
-} from '@arkade-os/solver-core/core/timelocks.js'
+import { relativeDelayFrom, SEQUENCE_GRANULARITY_SECONDS } from '@arkade-os/solver-core/core/timelocks.js'
 import { covenantScriptFromRow, type CovenantScriptRow } from '@arkade-os/solver-arkade/arkade/covenantRow.js'
 
 export interface CsvWindowOutpoint {
@@ -85,7 +81,7 @@ const validTime = (value: number): boolean => Number.isSafeInteger(value) && val
 const validSats = (value: number): boolean => Number.isSafeInteger(value) && value > 0 && value <= 2_100_000_000_000_000
 const validHash = (value: string): boolean => /^[0-9a-f]{64}$/i.test(value)
 
-export const assertVhtlcCsvWindow = async (
+export const assertClientSoloCsvWindow = async (
   row: CovenantScriptRow,
   outpoints: readonly CsvWindowOutpoint[],
   facts: CsvWindowFacts,
@@ -98,21 +94,9 @@ export const assertVhtlcCsvWindow = async (
   if (hex.encode(script.pkScript) !== row.pkScript.toLowerCase()) {
     throw new Error(`swap ${row.id}: CSV window script does not match funded lockup`)
   }
-  const delays = [
-    { name: 'preimage claim', value: row.claimDelay },
-    { name: 'joint refund', value: row.refundDelay },
-    { name: 'client solo refund', value: row.refundWithoutReceiverDelay },
-  ].map(({ name, value }) => ({ name, delay: relativeDelayFrom(value) }))
-  if (
-    delays.some(
-      ({ delay }) =>
-        delay.unit !== 'seconds' ||
-        !validTime(delay.value) ||
-        delay.value > MAX_BIP68_SECONDS ||
-        delay.value % SEQUENCE_GRANULARITY_SECONDS !== 0,
-    )
-  ) {
-    throw new Error(`swap ${row.id}: VHTLC CSV paths need representable seconds delays`)
+  const delay = relativeDelayFrom(row.refundWithoutReceiverDelay)
+  if (delay.unit !== 'seconds' || !validTime(delay.value) || delay.value % SEQUENCE_GRANULARITY_SECONDS !== 0) {
+    throw new Error(`swap ${row.id}: client solo refund CSV is not a representable seconds delay`)
   }
   if (
     outpoints.length === 0 ||
@@ -165,13 +149,11 @@ export const assertVhtlcCsvWindow = async (
     ) {
       throw new Error(`swap ${row.id}: CSV window origin has incomplete active-chain evidence`)
     }
-    for (const { name, delay } of delays) {
-      const maturity = mtp + delay.value
-      if (!Number.isSafeInteger(maturity) || maturity > 0xffff_ffff || maturity <= threshold) {
-        throw new Error(`swap ${row.id}: ${name} CSV can mature before the scripted refund deadline plus safety margin`)
-      }
+    const maturity = mtp + delay.value
+    if (!Number.isSafeInteger(maturity) || maturity > 0xffff_ffff || maturity <= threshold) {
+      throw new Error(
+        `swap ${row.id}: client solo refund CSV can mature before the scripted refund deadline plus safety margin`,
+      )
     }
   }
 }
-
-export const assertClientSoloCsvWindow = assertVhtlcCsvWindow

@@ -365,14 +365,14 @@ export const refundLocktimeFor = (
 
 /**
  * Size the ladder for one quote: the deployment base stretched, where needed,
- * so no CSV rung can open before the quoted absolute refund horizon.
+ * so the solo rung cannot open before the quoted absolute refund horizon.
  *
  * Stays in the base unit while the horizon fits it. Past it — a block ladder
  * whose horizon needs SEQUENCE_GRANULARITY_SECONDS or more blocks, where the
  * value would read back as seconds — the whole ladder re-clocks to seconds
  * rather than refusing: every rung converted conservatively, so each ordering
- * the base ladder held still holds and the solo rung still opens last. The CSV
- * window shifts all rungs together and refuses if any exceeds BIP68's range.
+ * the base ladder held still holds and the solo rung still opens last. Refuses
+ * only past MAX_BIP68_SECONDS, which no quotable invoice can reach.
  */
 export const unilateralLadderFor = (
   base: UnilateralDelays,
@@ -408,27 +408,6 @@ export const unilateralLadderFor = (
       (csvWindow ? 1 : 0),
   )
   if (!Number.isSafeInteger(horizon)) throw new Error('CSV window horizon overflows')
-  if (csvWindow) {
-    const earliest = Math.min(
-      base.unilateralClaimDelay,
-      base.unilateralRefundDelay,
-      base.unilateralRefundWithoutReceiverDelay,
-    )
-    const shift = Math.max(0, ceilToGranularity(horizon) - earliest)
-    const ladder: UnilateralDelays = {
-      unilateralClaimDelay: base.unilateralClaimDelay + shift,
-      unilateralRefundDelay: base.unilateralRefundDelay + shift,
-      unilateralRefundWithoutReceiverDelay: base.unilateralRefundWithoutReceiverDelay + shift,
-    }
-    if (
-      base.unilateralClaimDelay > base.unilateralRefundDelay ||
-      base.unilateralRefundDelay >= base.unilateralRefundWithoutReceiverDelay ||
-      Object.values(ladder).some((delay) => !isEncodableDelay(delay) || delay > MAX_BIP68_SECONDS)
-    ) {
-      throw new Error('refund horizon requires an invalid or unencodable seconds relative delay')
-    }
-    return ladder
-  }
   if (baseUnits.has('seconds')) {
     const solo = Math.max(base.unilateralRefundWithoutReceiverDelay, ceilToGranularity(horizon))
     if (!isEncodableDelay(solo) || solo > MAX_BIP68_SECONDS) {

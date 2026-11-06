@@ -80,7 +80,7 @@ export type { CovenantScriptRow }
 
 import type { ArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 export type { ArkadeOps }
-import { assertVhtlcCsvWindow, checkedFutureOriginLowerBoundMtp, type CsvWindowFacts } from './csvWindow.js'
+import { assertClientSoloCsvWindow, checkedFutureOriginLowerBoundMtp, type CsvWindowFacts } from './csvWindow.js'
 
 import {
   refundSweptLockupFor,
@@ -1591,7 +1591,7 @@ export class SendSwapService {
         await this.assertClientCsvWindow(row)
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error)
-        const reason = `refused to pay: vhtlc_csv_window_unsafe: ${detail}`
+        const reason = `refused to pay: client_solo_csv_window_unsafe: ${detail}`
         if (nothingCommitted) {
           await store.transition(row.id, row.state, 'refused', { failure_reason: reason })
         } else {
@@ -1720,7 +1720,7 @@ export class SendSwapService {
     if (!facts) return
     const points = adoptedOutpoints(row)
     if (!points) throw new Error('the lockup outpoints have not been durably recorded')
-    await assertVhtlcCsvWindow(row, points, facts)
+    await assertClientSoloCsvWindow(row, points, facts)
   }
 
   private async refuseUnsubmittedPayment(row: SendSwapRow, detail: string): Promise<void> {
@@ -2131,7 +2131,7 @@ export class SendSwapService {
       const expectedSats = fundingOutpoints.reduce((sum, point) => sum + point.value, 0)
       if (this.deps.csvWindow) {
         try {
-          await assertVhtlcCsvWindow(row, fundingOutpoints, this.deps.csvWindow)
+          await assertClientSoloCsvWindow(row, fundingOutpoints, this.deps.csvWindow)
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error)
           this.onTickError?.(
