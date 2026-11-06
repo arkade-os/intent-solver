@@ -510,7 +510,7 @@ describe('UnrolledSpender', () => {
     it('uses mined height for a block-typed CSV even when wall time has not advanced', async () => {
       claim = { ...claim, exitDelay: { unit: 'blocks', value: 5 } }
       chain.status.set(claim.txid, { confirmed: true, blockTime: NOW, blockHeight: 900_000 })
-      chain.tip = { ...chain.tip, height: 900_005 }
+      chain.tip = { ...chain.tip, height: 900_004 }
       let prepares = 0
       const spender = new UnrolledSpender({
         chain: fakeChain,
@@ -637,6 +637,14 @@ describe('UnrolledSpender', () => {
           solo,
           now: () => now,
         })
+      chain.outspends.set(claim.txid, [{ spent: true, txid: manual.id }])
+      chain.status.set(manual.id, { confirmed: true, blockTime: now, blockHeight: 900_001 })
+      expect(await spender().advance(claim, null, save)).toMatchObject({
+        kind: 'confirmed',
+        record: { txid: manual.id, confirmedTxid: manual.id },
+      })
+      chain.outspends.delete(claim.txid)
+      chain.status.delete(manual.id)
       const first = await spender().advance(claim, null, save)
       const record = (first as { record: UnrolledSpendRecord }).record
       chain.outspends.set(claim.txid, [{ spent: true, txid: manual.id }])
@@ -645,6 +653,34 @@ describe('UnrolledSpender', () => {
       expect(await spender().advance(claim, record, save)).toMatchObject({
         kind: 'confirmed',
         record: { confirmedTxid: manual.id, soloPackage: record.soloPackage },
+      })
+    })
+
+    it('recognizes a confirmed manual claim while a co-signed claim is journaled', async () => {
+      const first = await refunder().advance(claim, null, save)
+      const record = (first as { record: UnrolledSpendRecord }).record
+      const manual = new Transaction({ version: 2 })
+      manual.addInput({ txid: claim.txid, index: claim.vout })
+      manual.addOutput({ script: p2tr(await keyOf(21)), amount: BigInt(VALUE - 500) })
+      chain.raw.set(manual.id, manual.toBytes(true, true))
+      chain.status.set(claim.txid, { confirmed: true, blockTime: NOW - EXIT_DELAY, blockHeight: 899_000 })
+      chain.outspends.set(claim.txid, [{ spent: true, txid: manual.id }])
+      chain.status.set(manual.id, { confirmed: true, blockTime: now, blockHeight: 900_001 })
+      const spender = new UnrolledSpender({
+        chain: fakeChain,
+        signer: solver,
+        cosign,
+        boarding,
+        solo: {
+          prepare: async () => soloPackage(),
+          progress: async () => ({ kind: 'pending' }),
+          ownsSpend: async (_lockup, txid) => txid === manual.id,
+        },
+        now: () => now,
+      })
+      expect(await spender.advance(claim, record, save)).toMatchObject({
+        kind: 'confirmed',
+        record: { txid: record.txid, confirmedTxid: manual.id },
       })
     })
   })

@@ -213,7 +213,23 @@ export class UnrolledSpender {
     const out = (await chain.getTxOutspends(lockup.txid))[lockup.vout]
     if (out?.spent) {
       const ours = out.txid === undefined ? null : await this.adopt(out.txid)
-      return ours ? this.track(lockup, ours, save) : { kind: 'spent' }
+      if (ours) return this.track(lockup, ours, save)
+      if ('preimage' in lockup && out.txid && (await this.deps.solo?.ownsSpend?.(lockup, out.txid))) {
+        const status = await chain.getTxStatus(out.txid).catch(() => null)
+        if (!status?.confirmed) return { kind: 'waiting' }
+        return {
+          kind: 'confirmed',
+          record: {
+            txid: out.txid,
+            tx: null,
+            feeRate: 0,
+            broadcastAt: this.deps.now(),
+            cpfpTxid: null,
+            confirmedTxid: out.txid,
+          },
+        }
+      }
+      return { kind: 'spent' }
     }
     if ('preimage' in lockup && this.deps.solo && (await this.cosignWindowClosed(lockup))) {
       return this.startSolo(lockup, save)
@@ -247,7 +263,14 @@ export class UnrolledSpender {
     if (out?.spent && out.txid === record.txid) return { kind: 'pending', record }
     if (out?.spent && out.txid !== undefined) {
       const ours = await this.adopt(out.txid)
-      return ours ? this.track(lockup, ours, save) : { kind: 'spent' }
+      if (ours) return this.track(lockup, ours, save)
+      if (await this.deps.solo?.ownsSpend?.(lockup, out.txid)) {
+        const manualStatus = await this.deps.chain.getTxStatus(out.txid).catch(() => null)
+        return manualStatus?.confirmed
+          ? { kind: 'confirmed', record: { ...record, confirmedTxid: out.txid } }
+          : { kind: 'pending', record }
+      }
+      return { kind: 'spent' }
     }
     if (out?.spent) return { kind: 'pending', record }
     return this.startSolo(lockup, save, record)
@@ -335,7 +358,7 @@ export class UnrolledSpender {
     if (!unroll?.confirmed) return false
     if (lockup.exitDelay.unit === 'blocks') {
       const tip = await this.deps.chain.getChainTip()
-      return tip.height >= unroll.blockHeight + lockup.exitDelay.value
+      return tip.height + 1 >= unroll.blockHeight + lockup.exitDelay.value
     }
     return this.deps.now() >= unroll.blockTime + lockup.exitDelay.value - COSIGN_EXIT_MARGIN_SECONDS
   }
