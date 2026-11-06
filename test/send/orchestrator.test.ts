@@ -1465,7 +1465,7 @@ describe('tick: refusals before money moves', () => {
       expect(done.claimBatch).not.toContain('registered-only')
     })
 
-    it('keeps an unknown registration reserved until its outcome is proven', async () => {
+    it('keeps an unknown registration reserved until cancellation proves the funding is still ours', async () => {
       const batch = batchClaimFake()
       const row = await claimingAdopted([first])
       arkade.sweptLockups = [first]
@@ -1480,10 +1480,54 @@ describe('tick: refusals before money moves', () => {
       arkade.claimSwept = healthyClaim
       expect((await service.tick(row.id)).state).toBe('claiming')
       expect(batch.calls).toHaveLength(0)
-      clock += 8 * 60
-      await expect(service.tick(row.id)).rejects.toThrow('registration outcome is unknown')
-      expect((await store.get(row.id)).state).toBe('claiming')
       expect(batch.deleteCalls).toHaveLength(0)
+      clock += 8 * 60
+      const done = await service.tick(row.id)
+      expect(done.state).toBe('claimed')
+      expect(batch.deleteCalls).toEqual(['ZGVsZXRl'])
+      expect(batch.calls).toHaveLength(1)
+      expect(JSON.parse(done.claimBatch!)).toHaveLength(1)
+    })
+
+    it('keeps a prepared batch reserved when its cancellation cannot be confirmed', async () => {
+      const batch = batchClaimFake()
+      const row = await claimingAdopted([first])
+      arkade.sweptLockups = [first]
+      arkade.claimSwept = async (_row, _outputs, _preimage, _expected, _registered, _committed, onPrepared) => {
+        await onPrepared?.({ proofTxid: 'a'.repeat(64), deleteProof: 'ZGVsZXRl' })
+        throw new Error('registration reply lost')
+      }
+      await expect(service.tick(row.id)).rejects.toThrow('registration reply lost')
+      clock += 8 * 60
+      arkade.deleteSweptClaim = async () => {
+        throw new Error('delete intent unavailable')
+      }
+
+      await expect(service.tick(row.id)).rejects.toThrow('delete intent unavailable')
+      expect((await store.get(row.id)).state).toBe('claiming')
+      expect(JSON.parse((await store.get(row.id)).claimBatch!)).toMatchObject([{ intentId: null }])
+      expect(batch.calls).toHaveLength(0)
+    })
+
+    it('escalates a batch whose cancellation keeps failing PAST the refund deadline', async () => {
+      const batch = batchClaimFake()
+      const row = await claimingAdopted([first])
+      arkade.sweptLockups = [first]
+      arkade.claimSwept = async (_row, _outputs, _preimage, _expected, onRegistered) => {
+        await onRegistered({ intentId: 'registered-only', proofTxid: 'a'.repeat(64), deleteProof: 'ZGVsZXRl' })
+        throw new Error('stream ended before batch commitment')
+      }
+      await expect(service.tick(row.id)).rejects.toThrow('stream ended')
+      arkade.deleteSweptClaim = async () => {
+        throw new Error('delete intent unavailable')
+      }
+      clock = row.refundLocktime + 1
+
+      const done = await service.tick(row.id)
+      expect(done.state).toBe('stuck')
+      expect(done.failureReason).toContain('delete intent unavailable')
+      expect(done.failureReason).toContain('unilateralClaim')
+      expect(done.claimBatch).toContain('registered-only')
       expect(batch.calls).toHaveLength(0)
     })
 

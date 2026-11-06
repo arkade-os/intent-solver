@@ -2016,21 +2016,10 @@ export class SendSwapService {
         return false
       }
       if (!batch.commitmentTxid && this.now() - batch.registeredAt >= (2 * SWEPT_REFUND_BATCH_TIMEOUT_MS) / 1000) {
-        if (batch.intentId === null) {
-          batchError ??= new Error(
-            `swap ${row.id}: prepared batch ${batch.proofTxid} registration outcome is unknown; needs review`,
-          )
-          for (const point of batch.fundingOutpoints) reservedKeys.add(outpointKey(point))
-          pendingBatches.push(batch)
-          index += 1
-          continue
-        }
+        // Covers a prepared journal too: arkd matches the delete proof without an intent id we never learned.
+        const label = batch.intentId ?? `prepared batch ${batch.proofTxid}`
         if (!batch.deleteProof) {
-          await store.fail(
-            row.id,
-            'claiming',
-            `batch claim ${batch.intentId} has no signed cancellation proof; needs review`,
-          )
+          await store.fail(row.id, 'claiming', `batch claim ${label} has no signed cancellation proof; needs review`)
           return false
         }
         try {
@@ -2042,7 +2031,7 @@ export class SendSwapService {
             history.some((output) => outpointKey(output) === outpointKey(point) && !output.spent && !output.unrolled),
           )
           if (!recovered || !stillUnspent) {
-            throw new Error(`swap ${row.id}: batch ${batch.intentId} cancelled but exact swept funding is unverified`)
+            throw new Error(`swap ${row.id}: batch ${label} cancelled but exact swept funding is unverified`)
           }
           batches.splice(index, 1)
           await persistBatches()
@@ -2234,10 +2223,20 @@ export class SendSwapService {
     }
     if (pendingBatches.length > 0) {
       if (txid !== null) await store.patch(row.id, { claim_ark_txid: txid })
-      if (batchError !== undefined) throw batchError
+      // Deadline first: past it a retry cannot beat the client's refund, so the row must name its recourse.
       if (await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip)) {
-        await store.fail(row.id, 'claiming', 'batch claim commitment has no verified payout at the refund deadline')
-      } else if (
+        const detail =
+          batchError === undefined ? '' : `: ${batchError instanceof Error ? batchError.message : String(batchError)}`
+        const recourse = unilateralExitRecourse(row, { solverPubkey: arkade.providerPubkey })
+        await store.fail(
+          row.id,
+          'claiming',
+          `batch claim commitment has no verified payout at the refund deadline${detail} — ${recourse}`,
+        )
+        return false
+      }
+      if (batchError !== undefined) throw batchError
+      if (
         pendingBatches.some(
           (batch) =>
             batch.commitmentTxid && this.now() - batch.registeredAt >= (2 * SWEPT_REFUND_BATCH_TIMEOUT_MS) / 1000,
