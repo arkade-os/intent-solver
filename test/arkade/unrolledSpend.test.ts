@@ -6,6 +6,7 @@ import { schnorr } from '@noble/curves/secp256k1.js'
 import {
   ConditionWitness,
   DefaultVtxo,
+  type ExitPackage,
   getArkPsbtFields,
   SingleKey,
   Transaction,
@@ -170,7 +171,13 @@ beforeEach(async () => {
   parent.updateInput(0, { finalScriptWitness: [new Uint8Array(64)] }, true)
   chain.raw.set(parent.id, parent.toBytes(true, true))
   chain.status.set(parent.id, { confirmed: false })
-  lockup = { script, txid: parent.id, vout: 0, refundLocktime: REFUND_LOCKTIME, exitDelaySeconds: EXIT_DELAY }
+  lockup = {
+    script,
+    txid: parent.id,
+    vout: 0,
+    refundLocktime: REFUND_LOCKTIME,
+    exitDelay: { unit: 'seconds', value: EXIT_DELAY },
+  }
 })
 
 const pushed = async (): Promise<UnrolledSpendRecord> => {
@@ -419,7 +426,13 @@ describe('UnrolledSpender', () => {
       unroll.updateInput(0, { finalScriptWitness: [new Uint8Array(64)] }, true)
       chain.raw.set(unroll.id, unroll.toBytes(true, true))
       chain.status.set(unroll.id, { confirmed: true, blockTime: NOW - 600, blockHeight: 899_999 })
-      claim = { script: claimScript, txid: unroll.id, vout: 0, preimage: PREIMAGE, exitDelaySeconds: EXIT_DELAY }
+      claim = {
+        script: claimScript,
+        txid: unroll.id,
+        vout: 0,
+        preimage: PREIMAGE,
+        exitDelay: { unit: 'seconds', value: EXIT_DELAY },
+      }
     })
 
     it('goes out at once through the claim leaf, revealing P only to it', async () => {
@@ -435,6 +448,248 @@ describe('UnrolledSpender', () => {
       expect(witness.at(-3)).toEqual(PREIMAGE)
       expect(hex.encode(tx!.getOutput(0).script!)).toBe(hex.encode(boarding.pkScript))
       expect(VALUE - Number(tx!.getOutput(0).amount)).toBe(Math.ceil(10 * tx!.vsize))
+    })
+
+    const soloPackage = (): ExitPackage => ({
+      version: 1,
+      mode: 'graph',
+      network: 'regtest',
+      createdAt: now,
+      feeRate: 10,
+      sweepAddress: 'bcrt1qtest',
+      totals: { txCount: 1, totalFeeSats: 100, fundingRequiredSats: 0, recoveredSats: VALUE - 100 },
+      vtxos: [{ outpoint: `${claim.txid}:0`, value: VALUE, delay: { type: 'seconds', value: EXIT_DELAY } }],
+      steps: [
+        {
+          kind: 'sweep',
+          vtxo: `${claim.txid}:0`,
+          txid: 'cd'.repeat(32),
+          hex: '00',
+          dependsOnTxid: claim.txid,
+          delay: { type: 'seconds', value: EXIT_DELAY },
+        },
+      ],
+    })
+
+    it('journals a solo claim before driving it after the co-sign window closes', async () => {
+      chain.status.set(claim.txid, { confirmed: true, blockTime: NOW - EXIT_DELAY, blockHeight: 899_000 })
+      const pkg = soloPackage()
+      let prepares = 0
+      let progresses = 0
+      const solo = {
+        prepare: async () => (prepares++, pkg),
+        progress: async () => (progresses++, { kind: 'pending' as const }),
+      }
+      const spender = () =>
+        new UnrolledSpender({
+          chain: fakeChain,
+          signer: solver,
+          cosign,
+          boarding,
+          solo,
+          now: () => now,
+          pause: async () => {},
+        })
+      const first = await spender().advance(claim, null, save)
+      expect(first).toMatchObject({ kind: 'pending', record: { txid: 'cd'.repeat(32), soloPackage: pkg } })
+      expect(saved).toHaveLength(1)
+      expect(saved[0]?.soloPackage).toEqual(pkg)
+      expect(prepares).toBe(1)
+      expect(progresses).toBe(1)
+      expect(cosigned).toHaveLength(0)
+
+      now += 60
+      const restarted = await spender().advance(claim, saved[0]!, save)
+      expect(restarted.kind).toBe('pending')
+      expect(prepares).toBe(1)
+      chain.status.set('cd'.repeat(32), { confirmed: true, blockTime: now, blockHeight: 900_001 })
+      now += 60
+      expect(await spender().advance(claim, saved[0]!, save)).toMatchObject({ kind: 'confirmed' })
+    })
+
+    it('uses mined height for a block-typed CSV even when wall time has not advanced', async () => {
+      claim = { ...claim, exitDelay: { unit: 'blocks', value: 5 } }
+      chain.status.set(claim.txid, { confirmed: true, blockTime: NOW, blockHeight: 900_000 })
+      chain.tip = { ...chain.tip, height: 900_004 }
+      let prepares = 0
+      const spender = new UnrolledSpender({
+        chain: fakeChain,
+        signer: solver,
+        cosign,
+        boarding,
+        solo: {
+          prepare: async () => (prepares++, soloPackage()),
+          progress: async () => ({ kind: 'pending' }),
+        },
+        now: () => now,
+      })
+      expect((await spender.advance(claim, null, save)).kind).toBe('pending')
+      expect(prepares).toBe(1)
+      expect(cosigned).toHaveLength(0)
+    })
+
+    it('refuses a solo package for another output before journaling or broadcasting', async () => {
+      chain.status.set(claim.txid, { confirmed: true, blockTime: NOW - EXIT_DELAY, blockHeight: 899_000 })
+      const pkg = soloPackage()
+      ;(pkg.steps[0] as { dependsOnTxid: string }).dependsOnTxid = 'ee'.repeat(32)
+      const spender = new UnrolledSpender({
+        chain: fakeChain,
+        signer: solver,
+        cosign,
+        boarding,
+        solo: { prepare: async () => pkg, progress: async () => ({ kind: 'pending' }) },
+        now: () => now,
+      })
+      await expect(spender.advance(claim, null, save)).rejects.toThrow('does not spend the selected output')
+      expect(saved).toHaveLength(0)
+      expect(cosigned).toHaveLength(0)
+    })
+
+    it('keeps a possible co-signed claim in the solo journal and accepts either confirmed spend', async () => {
+      const first = await refunder().advance(claim, null, save)
+      const record = (first as { record: UnrolledSpendRecord }).record
+      chain.status.set(claim.txid, { confirmed: true, blockTime: NOW - EXIT_DELAY, blockHeight: 899_000 })
+      let prepares = 0
+      const makeSpender = () =>
+        new UnrolledSpender({
+          chain: fakeChain,
+          signer: solver,
+          cosign,
+          boarding,
+          solo: {
+            prepare: async () => (prepares++, soloPackage()),
+            progress: async () => ({ kind: 'pending' }),
+          },
+          now: () => now,
+        })
+      const transition = await makeSpender().advance(claim, record, save)
+      expect(transition).toMatchObject({
+        kind: 'pending',
+        record: { txid: 'cd'.repeat(32), priorCosigned: { txid: record.txid } },
+      })
+      expect(prepares).toBe(1)
+      const journal = JSON.parse(
+        JSON.stringify((transition as { record: UnrolledSpendRecord }).record),
+      ) as UnrolledSpendRecord
+      chain.status.set(record.txid, { confirmed: true, blockTime: now, blockHeight: 900_001 })
+      now += 60
+      expect(await makeSpender().advance(claim, journal, save)).toMatchObject({
+        kind: 'confirmed',
+        record: { txid: 'cd'.repeat(32), confirmedTxid: record.txid, priorCosigned: record },
+      })
+      expect(prepares).toBe(1)
+    })
+
+    it('waits on an observed co-signed spend instead of preparing a competing sweep', async () => {
+      const first = await refunder().advance(claim, null, save)
+      const record = (first as { record: UnrolledSpendRecord }).record
+      chain.status.set(claim.txid, { confirmed: true, blockTime: NOW - EXIT_DELAY, blockHeight: 899_000 })
+      chain.outspends.set(claim.txid, [{ spent: true, txid: record.txid }])
+      let prepares = 0
+      const spender = new UnrolledSpender({
+        chain: fakeChain,
+        signer: solver,
+        cosign,
+        boarding,
+        solo: {
+          prepare: async () => (prepares++, soloPackage()),
+          progress: async () => ({ kind: 'pending' }),
+        },
+        now: () => now,
+      })
+      expect(await spender.advance(claim, record, save)).toEqual({ kind: 'pending', record })
+      expect(prepares).toBe(0)
+      now += 20 * 60
+      chain.feeRate = 40
+      expect(await spender.advance(claim, record, save)).toMatchObject({
+        kind: 'pending',
+        record: { cpfpTxid: expect.any(String) },
+      })
+      expect(cosigned).toHaveLength(2)
+      expect(prepares).toBe(0)
+    })
+
+    it('rejects an indexer output value that disagrees with the confirmed lockup', async () => {
+      chain.status.set(claim.txid, { confirmed: true, blockTime: NOW - EXIT_DELAY, blockHeight: 899_000 })
+      const pkg = soloPackage()
+      pkg.vtxos[0]!.value = VALUE - 1
+      const spender = new UnrolledSpender({
+        chain: fakeChain,
+        signer: solver,
+        cosign,
+        boarding,
+        solo: { prepare: async () => pkg, progress: async () => ({ kind: 'pending' }) },
+        now: () => now,
+      })
+      await expect(spender.advance(claim, null, save)).rejects.toThrow('does not spend the selected output')
+      expect(saved).toHaveLength(0)
+    })
+
+    it('recognizes a confirmed manual claim paying the solver onchain', async () => {
+      chain.status.set(claim.txid, { confirmed: true, blockTime: NOW - EXIT_DELAY, blockHeight: 899_000 })
+      const manual = new Transaction({ version: 2 })
+      manual.addInput({ txid: claim.txid, index: claim.vout })
+      manual.addOutput({ script: p2tr(await keyOf(21)), amount: BigInt(VALUE - 500) })
+      chain.raw.set(manual.id, manual.toBytes(true, true))
+      const solo = {
+        prepare: async () => soloPackage(),
+        progress: async () => ({ kind: 'pending' as const }),
+        ownsSpend: async (_lockup: UnrolledSpend, txid: string) => txid === manual.id,
+      }
+      const spender = () =>
+        new UnrolledSpender({
+          chain: fakeChain,
+          signer: solver,
+          cosign,
+          boarding,
+          solo,
+          now: () => now,
+        })
+      chain.outspends.set(claim.txid, [{ spent: true, txid: manual.id }])
+      chain.status.set(manual.id, { confirmed: true, blockTime: now, blockHeight: 900_001 })
+      expect(await spender().advance(claim, null, save)).toMatchObject({
+        kind: 'confirmed',
+        record: { txid: manual.id, confirmedTxid: manual.id },
+      })
+      chain.outspends.delete(claim.txid)
+      chain.status.delete(manual.id)
+      const first = await spender().advance(claim, null, save)
+      const record = (first as { record: UnrolledSpendRecord }).record
+      chain.outspends.set(claim.txid, [{ spent: true, txid: manual.id }])
+      chain.status.set(manual.id, { confirmed: true, blockTime: now, blockHeight: 900_001 })
+      now += 60
+      expect(await spender().advance(claim, record, save)).toMatchObject({
+        kind: 'confirmed',
+        record: { confirmedTxid: manual.id, soloPackage: record.soloPackage },
+      })
+    })
+
+    it('recognizes a confirmed manual claim while a co-signed claim is journaled', async () => {
+      const first = await refunder().advance(claim, null, save)
+      const record = (first as { record: UnrolledSpendRecord }).record
+      const manual = new Transaction({ version: 2 })
+      manual.addInput({ txid: claim.txid, index: claim.vout })
+      manual.addOutput({ script: p2tr(await keyOf(21)), amount: BigInt(VALUE - 500) })
+      chain.raw.set(manual.id, manual.toBytes(true, true))
+      chain.status.set(claim.txid, { confirmed: true, blockTime: NOW - EXIT_DELAY, blockHeight: 899_000 })
+      chain.outspends.set(claim.txid, [{ spent: true, txid: manual.id }])
+      chain.status.set(manual.id, { confirmed: true, blockTime: now, blockHeight: 900_001 })
+      const spender = new UnrolledSpender({
+        chain: fakeChain,
+        signer: solver,
+        cosign,
+        boarding,
+        solo: {
+          prepare: async () => soloPackage(),
+          progress: async () => ({ kind: 'pending' }),
+          ownsSpend: async (_lockup, txid) => txid === manual.id,
+        },
+        now: () => now,
+      })
+      expect(await spender.advance(claim, record, save)).toMatchObject({
+        kind: 'confirmed',
+        record: { txid: record.txid, confirmedTxid: manual.id },
+      })
     })
   })
 

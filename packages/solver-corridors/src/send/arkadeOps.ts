@@ -13,6 +13,7 @@ import { hex } from '@scure/base'
 import { ArkAddress } from '@arkade-os/sdk'
 import {
   claimSwapScript,
+  claimSwapScriptDetailed,
   finalizePendingClaim,
   findClaimPreimage,
   findLockupOutpoints,
@@ -23,9 +24,12 @@ import {
   refundSwapScript,
   type ArkadeContext,
 } from '@arkade-os/solver-arkade/arkade/wallet.js'
-import { rawDelaySeconds } from '@arkade-os/solver-core/core/timelocks.js'
+import { rawDelaySeconds, relativeDelayFrom } from '@arkade-os/solver-core/core/timelocks.js'
 import { unrolledSpenderFor } from '@arkade-os/solver-arkade/arkade/unrolledSpend.js'
+import { unrolledClaimFallbackFor } from '@arkade-os/solver-arkade/arkade/unilateralExitOps.js'
 import { refundSweptSwapScript } from '@arkade-os/solver-arkade/arkade/sweptRefund.js'
+import { claimSweptSwapScript, deleteSweptClaimIntent } from '@arkade-os/solver-arkade/arkade/sweptClaim.js'
+import { verifySweptClaimCommitment } from '@arkade-os/solver-arkade/arkade/sweptClaimEvidence.js'
 import type { ArkadeOps, CovenantScriptRow } from './orchestrator.js'
 
 /** The emulator service the refund covenant is signed by. */
@@ -49,10 +53,9 @@ export const assertScriptMatchesRow = (script: { pkScript: Uint8Array }, row: Co
 export const unrolledLockupOf = (row: CovenantScriptRow, lockup: { txid: string; vout: number }) => {
   const script = covenantScriptFromRow(row)
   assertScriptMatchesRow(script, row)
-  const exitDelaySeconds = Math.min(
-    ...[row.claimDelay, row.refundDelay, row.refundWithoutReceiverDelay].map(rawDelaySeconds),
-  )
-  return { script, txid: lockup.txid, vout: lockup.vout, exitDelaySeconds }
+  const rawDelays = [row.claimDelay, row.refundDelay, row.refundWithoutReceiverDelay]
+  const shortest = rawDelays.reduce((a, b) => (rawDelaySeconds(a) <= rawDelaySeconds(b) ? a : b))
+  return { script, txid: lockup.txid, vout: lockup.vout, exitDelay: relativeDelayFrom(shortest) }
 }
 
 export const arkadeOpsFromContext = async (ctx: ArkadeContext, emulator: EmulatorInfo): Promise<ArkadeOps> => {
@@ -61,7 +64,7 @@ export const arkadeOpsFromContext = async (ctx: ArkadeContext, emulator: Emulato
   // interactive claims to (`destination` below) — decoded to its pkScript so
   // `nonInteractiveClaim`'s covenant can commit to it at quote time.
   const receiverPkScript = hex.encode(ArkAddress.decode(await ctx.wallet.getAddress()).pkScript)
-  const spender = unrolledSpenderFor(ctx)
+  const spender = unrolledSpenderFor(ctx, unrolledClaimFallbackFor(ctx, providerPubkey))
   // assertScriptMatchesRow proves the row is self-consistent; this proves
   // the LIVE key can spend it. A rotated mnemonic would otherwise surface
   // deep in the server round-trip as a signature error naming nothing.
@@ -87,6 +90,14 @@ export const arkadeOpsFromContext = async (ctx: ArkadeContext, emulator: Emulato
       const destination = await ctx.wallet.getAddress()
       return claimSwapScript(ctx, script, outputs, hex.decode(preimageHex), destination)
     },
+    claimDetailed: async (row, outputs, preimageHex) => {
+      const mismatch = keyMismatch(row)
+      if (mismatch) throw new Error(mismatch)
+      const script = covenantScriptFromRow(row)
+      assertScriptMatchesRow(script, row)
+      const destination = await ctx.wallet.getAddress()
+      return claimSwapScriptDetailed(ctx, script, outputs, hex.decode(preimageHex), destination)
+    },
     finalizePendingClaim: async (row, preimageHex) => {
       const mismatch = keyMismatch(row)
       if (mismatch) throw new Error(mismatch)
@@ -105,7 +116,11 @@ export const arkadeOpsFromContext = async (ctx: ArkadeContext, emulator: Emulato
     claimUnrolled: async (row, lockup, record, save, preimageHex) => {
       const reason = keyMismatch(row)
       if (reason) return { kind: 'closed', reason }
-      return spender.advance({ ...unrolledLockupOf(row, lockup), preimage: hex.decode(preimageHex) }, record, save)
+      return spender.advance(
+        { ...unrolledLockupOf(row, lockup), preimage: hex.decode(preimageHex), claimRow: row },
+        record,
+        save,
+      )
     },
     findSweptLockups: (pkScriptHex) => findSweptLockups(ctx, pkScriptHex),
     refundSwept: async (row, swept) => {
@@ -113,5 +128,23 @@ export const arkadeOpsFromContext = async (ctx: ArkadeContext, emulator: Emulato
       assertScriptMatchesRow(script, row)
       return refundSweptSwapScript(ctx, emulator.url, script, swept, hex.decode(row.refundPkScript!))
     },
+    claimSwept: async (row, swept, preimageHex, expectedSats, onRegistered, onCommitmentValidated, onPrepared) => {
+      const mismatch = keyMismatch(row)
+      if (mismatch) throw new Error(mismatch)
+      const script = covenantScriptFromRow(row)
+      assertScriptMatchesRow(script, row)
+      return claimSweptSwapScript(
+        ctx,
+        script,
+        swept,
+        hex.decode(preimageHex),
+        expectedSats,
+        onRegistered,
+        onCommitmentValidated,
+        onPrepared,
+      )
+    },
+    verifySweptClaim: (journal) => verifySweptClaimCommitment(ctx.wallet.indexerProvider, journal),
+    deleteSweptClaim: (deleteProof) => deleteSweptClaimIntent(ctx, deleteProof),
   }
 }

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { NON_TERMINAL, SwapStore, type QuoteRecord } from '@arkade-os/solver-corridors/db/swaps.js'
+import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
 let store: SwapStore
@@ -191,6 +192,21 @@ describe('transition', () => {
 })
 
 describe('patch', () => {
+  it('atomically reserves a claim journal against a stale writer', async () => {
+    await store.insertQuote(quote())
+    await store.transition('swap-1', 'quoted', 'funded')
+    await store.transition('swap-1', 'funded', 'claiming', { preimage: 'aa'.repeat(32) })
+    const first = '[{"intentId":"first"}]'
+    const second = '[{"intentId":"second"}]'
+    expect(await store.compareAndSwapClaimBatch('swap-1', null, first)).toBe(true)
+    expect(await store.compareAndSwapClaimBatch('swap-1', null, second)).toBe(false)
+    expect((await store.get('swap-1')).claimBatch).toBe(first)
+    expect(await store.compareAndSwapClaimBatch('swap-1', first, second)).toBe(true)
+    expect((await store.get('swap-1')).claimBatch).toBe(second)
+    await store.transition('swap-1', 'claiming', 'claimed')
+    expect(await store.compareAndSwapClaimBatch('swap-1', second, null)).toBe(false)
+  })
+
   it('refuses to touch a column outside its allowlist — never state', async () => {
     await store.insertQuote(quote())
     await expect(store.patch('swap-1', { state: 'claimed' })).rejects.toThrow(/may not set/)
@@ -198,6 +214,34 @@ describe('patch', () => {
     // A permitted column still works.
     await store.patch('swap-1', { lockup_value: 500 })
     expect((await store.get('swap-1')).lockupValue).toBe(500)
+  })
+
+  it('round-trips a swept-claim journal while the swap is claiming', async () => {
+    await store.insertQuote(quote())
+    await store.transition('swap-1', 'quoted', 'funded')
+    await store.transition('swap-1', 'funded', 'claiming', { preimage: 'aa'.repeat(32) })
+    const journal = JSON.stringify({ intentId: 'intent-1', commitmentTxid: 'bb'.repeat(32) })
+    await store.patch('swap-1', { claim_batch: journal })
+    expect((await store.get('swap-1')).claimBatch).toBe(journal)
+    expect((await store.findRecoverable())[0]?.claimBatch).toBe(journal)
+  })
+})
+
+describe('claim batch migration', () => {
+  it('adds the journal column to an existing send table without losing its row', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    const previous = await SwapStore.open(driver, () => clock)
+    await previous.insertQuote(quote({ id: 'old-swap', paymentHash: 'b'.repeat(64) }))
+    await driver.exec('ALTER TABLE send_swap DROP COLUMN claim_batch')
+
+    const migrated = await SwapStore.open(driver, () => clock)
+    try {
+      expect((await migrated.get('old-swap')).claimBatch).toBeNull()
+      await migrated.patch('old-swap', { claim_batch: '{"intentId":"intent-2"}' })
+      expect((await migrated.get('old-swap')).claimBatch).toBe('{"intentId":"intent-2"}')
+    } finally {
+      await migrated.close()
+    }
   })
 })
 

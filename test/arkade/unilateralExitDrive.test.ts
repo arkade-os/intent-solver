@@ -20,10 +20,13 @@ import { hex } from '@scure/base'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { ripemd160 } from '@noble/hashes/legacy.js'
+import { Transaction, type ExitPackage } from '@arkade-os/sdk'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { paysSolverOnchain } from '@arkade-os/solver-arkade/arkade/unilateralExitOps.js'
 import type { CovenantScriptRow } from '@arkade-os/solver-arkade/arkade/covenantRow.js'
 import {
   planUnilateralExit,
+  prepareUnrolledClaim,
   quoteUnilateralExit,
   startUnilateralExit,
   type ExitContractAccess,
@@ -251,5 +254,96 @@ describe('startUnilateralExit', () => {
     } as never)
     await startUnilateralExit(deps, claimPlan())
     expect(order).toEqual(['arm', 'prepare'])
+  })
+})
+
+describe('prepareUnrolledClaim', () => {
+  const claimInfo = infoFor({ type: 'seconds', value: CLAIM_DELAY })
+  const pkg = (): ExitPackage => ({
+    version: 1,
+    mode: 'graph',
+    network: 'regtest',
+    createdAt: 1_800_000_000,
+    feeRate: 10,
+    sweepAddress: 'bcrt1qexample',
+    totals: { txCount: 1, totalFeeSats: 300, fundingRequiredSats: 0, recoveredSats: 99_700 },
+    vtxos: [claimInfo],
+    steps: [
+      {
+        kind: 'sweep',
+        vtxo: claimInfo.outpoint,
+        txid: 'bb'.repeat(32),
+        hex: '00',
+        dependsOnTxid: OUTPOINT.txid,
+        delay: { type: 'seconds', value: CLAIM_DELAY },
+      },
+    ],
+  })
+
+  it('prepares only the selected confirmed output with graph mode and the solver claim leaf', async () => {
+    const contracts = contractsWith(registeredParams())
+    const deps = depsWith({
+      contracts,
+      findLockups: vi.fn(async () => []),
+      exit: {
+        estimate: vi.fn(async () => ({
+          vtxos: [claimInfo],
+          totals: { txCount: 1, fundingRequiredSats: 0 },
+        })),
+        prepare: vi.fn(async () => pkg()),
+      },
+    } as never)
+    expect(await prepareUnrolledClaim(deps, claimPlan(), OUTPOINT)).toEqual(pkg())
+    expect(contracts.written.preimage).toBe(PREIMAGE_HEX)
+    expect(deps.exit.estimate).toHaveBeenCalledWith(expect.objectContaining({ mode: 'graph', vtxos: [OUTPOINT] }))
+    expect(deps.exit.prepare).toHaveBeenCalledWith(expect.objectContaining({ mode: 'graph', vtxos: [OUTPOINT] }))
+    expect(deps.findLockups).not.toHaveBeenCalled()
+  })
+
+  it('does not prepare when the quote needs another transaction or selects a different leaf', async () => {
+    const deps = depsWith({
+      exit: {
+        estimate: vi.fn(async () => ({
+          vtxos: [claimInfo],
+          totals: { txCount: 2, fundingRequiredSats: 0 },
+        })),
+        prepare: vi.fn(async () => pkg()),
+      },
+    } as never)
+    await expect(prepareUnrolledClaim(deps, claimPlan(), OUTPOINT)).rejects.toThrow('single funded-output sweep')
+    expect(deps.exit.prepare).not.toHaveBeenCalled()
+  })
+
+  it('rejects a prepared sweep with another destination', async () => {
+    const wrong = { ...pkg(), sweepAddress: 'bcrt1qwrong' }
+    const deps = depsWith({
+      exit: {
+        estimate: vi.fn(async () => ({
+          vtxos: [claimInfo],
+          totals: { txCount: 1, fundingRequiredSats: 0 },
+        })),
+        prepare: vi.fn(async () => wrong),
+      },
+    } as never)
+    await expect(prepareUnrolledClaim(deps, claimPlan(), OUTPOINT)).rejects.toThrow(
+      'changed its outpoint or destination',
+    )
+  })
+})
+
+describe('paysSolverOnchain', () => {
+  const outpoint = { txid: 'aa'.repeat(32), vout: 1 }
+  const destination = p2tr(key(21))
+  const spend = (input = outpoint, output = destination): Uint8Array => {
+    const tx = new Transaction({ version: 2 })
+    tx.addInput({ txid: input.txid, index: input.vout })
+    tx.addOutput({ script: output, amount: 900n })
+    return tx.toBytes(true, true)
+  }
+
+  it('recognizes only the adopted input paid entirely to the solver onchain script', () => {
+    expect(paysSolverOnchain(spend(), outpoint, destination)).toBe(true)
+    expect(paysSolverOnchain(spend({ ...outpoint, vout: 0 }), outpoint, destination)).toBe(false)
+    expect(paysSolverOnchain(spend(outpoint, p2tr(key(22))), outpoint, destination)).toBe(false)
   })
 })
