@@ -46,6 +46,25 @@ export const RfqStatusRequest = z
   .strict()
 
 /**
+ * Hand an HTLC preimage to the solver so it sends the claim the client would otherwise send and pay gas for
+ * (docs/rfq-protocol.md § 4.7). Like a status request it carries no `pair`; the `rfq_id` finds the corridor.
+ */
+export const RfqRevealRequest = z
+  .object({
+    v: z.literal(1),
+    type: z.literal('rfq_reveal'),
+    rfq_id: RFQ_ID,
+    preimage: z.string().regex(/^[0-9a-f]{64}$/),
+  })
+  .strict()
+
+export const rfqRevealAckPayload = (rfqId: string): Record<string, unknown> => ({
+  v: 1,
+  type: 'rfq_reveal_ack',
+  rfq_id: rfqId,
+})
+
+/**
  * An open-RFQ broadcast (docs/rfq-protocol.md § 4.6). Strict shape, but a
  * parse failure is answered with SILENCE, never a refusal — broadcasts are
  * the one place § 4's refusal rule inverts. Unknown fields also land on

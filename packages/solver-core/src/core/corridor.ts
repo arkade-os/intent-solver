@@ -192,6 +192,12 @@ export interface CorridorReader {
   close(): Promise<void>
 }
 
+export type CorridorRevealOutcome =
+  | { kind: 'accepted' }
+  /** `detail` is for the log; the wire answer is the generic refusal. */
+  | { kind: 'refused'; detail: string }
+  | { kind: 'unknown' }
+
 /**
  * A corridor that is also SERVING — quoting, and driven by the sweep.
  *
@@ -208,6 +214,12 @@ export interface Corridor extends CorridorReader {
    * wire contract and stays the host's to enforce.
    */
   quote(payload: unknown, options?: QuoteOptions): Promise<CorridorRfqOutcome>
+
+  /**
+   * Take an HTLC preimage and send the claim on the client's behalf. Absent where the client claims nothing the
+   * solver could send for it; `unknown` lets the host ask the next corridor.
+   */
+  reveal?(rfqId: string, preimage: string): Promise<CorridorRevealOutcome>
 
   /** Drive one swap one step. Must be re-entrant and re-read the row. */
   tick(id: string): Promise<void>
