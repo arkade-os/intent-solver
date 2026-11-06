@@ -288,6 +288,20 @@ describe('a bigint in a successful result', () => {
     const { detail } = services.adminStore.recordAction.mock.calls[0]![0] as { detail: string }
     expect(detail).toContain('"lockedSats":"50000"')
   })
+
+  it('still answers 200 and audits ok when the result cannot be serialized at all', async () => {
+    const cyclic: Record<string, unknown> = { id: 'swap-1' }
+    cyclic.self = cyclic
+    const services = fakeServices({
+      arkade: { wallet: {} },
+      store: { get: vi.fn(), patch: vi.fn() },
+      corridors: oneCorridor('arkade:BTC->lightning:BTC', vi.fn().mockResolvedValue(undefined), cyclic),
+    })
+    const response = await post('tick', { id: 'swap-1', corridor: 'arkade:BTC->lightning:BTC' }, services)
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ ok: true, result: { unserializable: expect.any(String) } })
+    expect(services.adminStore.recordAction).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'ok' }))
+  })
 })
 
 describe('GET /api/audit', () => {

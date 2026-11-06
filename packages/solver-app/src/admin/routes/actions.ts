@@ -804,7 +804,13 @@ export const registerActionRoutes = (app: Hono, deps: AdminDeps): void => {
       return c.json({ ok: false, error: 'action_failed', message: messageOf(error) }, 500)
     }
     // bigint-safe: plain stringify throws on one, a 500 AFTER the action moved money.
-    const rendered = json(result)
+    // A cyclic or `undefined` result would do the same, so it is reported, not thrown.
+    let rendered: string
+    try {
+      rendered = json(result) ?? 'null'
+    } catch (error) {
+      rendered = json({ unserializable: messageOf(error) })
+    }
     const safeResult = JSON.parse(rendered) as unknown
     if (
       name === 'pool-mint' &&
