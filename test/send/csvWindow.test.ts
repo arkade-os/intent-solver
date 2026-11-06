@@ -6,7 +6,7 @@ import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import type { CovenantScriptRow } from '@arkade-os/solver-arkade/arkade/covenantRow.js'
 import { REFUND_SAFETY_MARGIN, unilateralLadderFor } from '@arkade-os/solver-core/core/send.js'
 import {
-  assertClientSoloCsvWindow,
+  assertVhtlcCsvWindow,
   checkedFutureOriginLowerBoundMtp,
   CSV_REORG_BUDGET_BLOCKS,
   type CsvWindowOrigin,
@@ -25,16 +25,19 @@ const soloDelay = 1_266_176
 const claimDelay = 605_184
 const refundDelay = 950_272
 
-const row = (): CovenantScriptRow => {
+const row = (overrides: { claimDelay?: number; refundDelay?: number; soloDelay?: number } = {}): CovenantScriptRow => {
+  const claim = overrides.claimDelay ?? claimDelay
+  const refund = overrides.refundDelay ?? refundDelay
+  const solo = overrides.soloDelay ?? soloDelay
   const script = new CovenantSwapScript({
     receiver,
     server,
     preimageHash: ripemd160(hex.decode(paymentHash)),
     refundLocktime,
-    claimDelay,
+    claimDelay: claim,
     client,
-    clientRefundDelay: soloDelay,
-    refundWithoutServerDelay: refundDelay,
+    clientRefundDelay: solo,
+    refundWithoutServerDelay: refund,
     nonInteractiveParameters: {
       emulatorPubkey: emulator,
       receiverPkScript: p2tr(key(13)),
@@ -47,13 +50,13 @@ const row = (): CovenantScriptRow => {
     serverPubkey: hex.encode(server),
     paymentHash,
     refundLocktime,
-    claimDelay,
+    claimDelay: claim,
     emulatorPubkey: hex.encode(emulator),
     refundPkScript: hex.encode(p2tr(key(5))),
     pkScript: hex.encode(script.pkScript),
     clientRefundPubkey: hex.encode(client),
-    refundWithoutReceiverDelay: soloDelay,
-    refundDelay,
+    refundWithoutReceiverDelay: solo,
+    refundDelay: refund,
     receiverPkScript: hex.encode(p2tr(key(13))),
     nonInteractiveParameters: true,
   }
@@ -71,22 +74,22 @@ const makeOrigin = (swap: CovenantScriptRow, overrides: Partial<ConfirmedOrigin>
   blockHash: '01'.repeat(32),
   blockHeight: 100,
   confirmations: CSV_REORG_BUDGET_BLOCKS + 1,
-  priorBlockMtp: 1_798_750_000,
-  originLowerBoundMtp: 1_798_750_000,
+  priorBlockMtp: 1_799_500_000,
+  originLowerBoundMtp: 1_799_500_000,
   tipHash: '02'.repeat(32),
   tipHeight: 106,
   reorgBudgetBlocks: CSV_REORG_BUDGET_BLOCKS,
   ...overrides,
 })
 
-describe('client solo CSV window', () => {
+describe('VHTLC CSV window', () => {
   it('stretches a seconds CSV from the conservative common-ancestor MTP', () => {
     const deadline = 1_795_173_670
     const originLowerBoundMtp = 1_793_907_970
     const base = {
-      unilateralClaimDelay: 604_800,
-      unilateralRefundDelay: 1_000_000,
-      unilateralRefundWithoutReceiverDelay: 1_266_176,
+      unilateralClaimDelay: 605_184,
+      unilateralRefundDelay: 605_184,
+      unilateralRefundWithoutReceiverDelay: 609_280,
     }
 
     const ladder = unilateralLadderFor(base, deadline, originLowerBoundMtp, {
@@ -94,10 +97,14 @@ describe('client solo CSV window', () => {
       marginSeconds: REFUND_SAFETY_MARGIN,
     })
 
-    expect(ladder.unilateralRefundWithoutReceiverDelay).toBe(1_273_344)
-    expect(originLowerBoundMtp + ladder.unilateralRefundWithoutReceiverDelay).toBeGreaterThan(
-      deadline + REFUND_SAFETY_MARGIN,
-    )
+    expect(ladder).toEqual({
+      unilateralClaimDelay: 1_273_344,
+      unilateralRefundDelay: 1_273_344,
+      unilateralRefundWithoutReceiverDelay: 1_277_440,
+    })
+    for (const delay of Object.values(ladder)) {
+      expect(originLowerBoundMtp + delay).toBeGreaterThan(deadline + REFUND_SAFETY_MARGIN)
+    }
   })
 
   it('rejects a quote floor that is not the six block common ancestor', () => {
@@ -110,17 +117,17 @@ describe('client solo CSV window', () => {
     const swap = row()
     const origin = makeOrigin(swap, { confirmations: 6, tipHeight: 105 })
     await expect(
-      assertClientSoloCsvWindow(swap, [point], {
+      assertVhtlcCsvWindow(swap, [point], {
         futureOriginLowerBoundMtp: async () => originFloor(),
         origin: async () => origin,
       }),
     ).rejects.toThrow(/six block common ancestor|incomplete active-chain evidence/)
   })
 
-  it('admits the exact script and a >32-bit sat value when its solo refund stays behind deadline plus margin', async () => {
+  it('admits the exact script and a >32-bit sat value when every CSV path stays behind deadline plus margin', async () => {
     const swap = row()
     await expect(
-      assertClientSoloCsvWindow(swap, [point], {
+      assertVhtlcCsvWindow(swap, [point], {
         futureOriginLowerBoundMtp: async () => originFloor(),
         origin: async (_point, expectedPkScript) => {
           expect(expectedPkScript).toBe(swap.pkScript)
@@ -132,9 +139,9 @@ describe('client solo CSV window', () => {
 
   it('rejects equality at the deadline plus margin', async () => {
     const swap = row()
-    const exactOriginMtp = swap.refundLocktime + REFUND_SAFETY_MARGIN - soloDelay
+    const exactOriginMtp = swap.refundLocktime + REFUND_SAFETY_MARGIN - claimDelay
     await expect(
-      assertClientSoloCsvWindow(swap, [point], {
+      assertVhtlcCsvWindow(swap, [point], {
         futureOriginLowerBoundMtp: async () => originFloor(),
         origin: async () =>
           makeOrigin(swap, {
@@ -142,19 +149,33 @@ describe('client solo CSV window', () => {
             originLowerBoundMtp: exactOriginMtp,
           }),
       }),
-    ).rejects.toThrow(/mature before the scripted refund deadline plus safety margin/)
+    ).rejects.toThrow(/preimage claim CSV can mature before the scripted refund deadline plus safety margin/)
+  })
+
+  it.each([
+    ['preimage claim', { claimDelay: 506_880 }],
+    ['joint refund', { refundDelay: 506_880 }],
+    ['client solo refund', { soloDelay: 506_880 }],
+  ])('rejects an early %s sibling', async (name, delays) => {
+    const swap = row(delays)
+    await expect(
+      assertVhtlcCsvWindow(swap, [point], {
+        futureOriginLowerBoundMtp: async () => originFloor(),
+        origin: async () => makeOrigin(swap),
+      }),
+    ).rejects.toThrow(`${name} CSV can mature before the scripted refund deadline`)
   })
 
   it('rejects missing or conflicting origin evidence', async () => {
     const swap = row()
     await expect(
-      assertClientSoloCsvWindow(swap, [point], {
+      assertVhtlcCsvWindow(swap, [point], {
         futureOriginLowerBoundMtp: async () => originFloor(),
         origin: async () => makeOrigin(swap, { value: point.value + 1 }),
       }),
     ).rejects.toThrow(/does not match/)
     await expect(
-      assertClientSoloCsvWindow(swap, [point], {
+      assertVhtlcCsvWindow(swap, [point], {
         futureOriginLowerBoundMtp: async () => originFloor(),
         origin: async () => makeOrigin(swap, { reorgBudgetBlocks: 5 }),
       }),
@@ -173,21 +194,21 @@ describe('client solo CSV window', () => {
       absentAtTipHash: tipHash,
       tipHash,
       tipHeight: 106,
-      originLowerBoundMtp: 1_798_750_000,
+      originLowerBoundMtp: 1_799_500_000,
       ancestorHash: '03'.repeat(32),
       ancestorHeight: 100,
-      ancestorMedianTimePast: 1_798_750_000,
+      ancestorMedianTimePast: 1_799_500_000,
       reorgBudgetBlocks: CSV_REORG_BUDGET_BLOCKS,
       ancestryProofRef: 'batch-tree:commitment-1:leaf-0',
     }
     await expect(
-      assertClientSoloCsvWindow(swap, [point], {
+      assertVhtlcCsvWindow(swap, [point], {
         futureOriginLowerBoundMtp: async () => originFloor(),
         origin: async () => origin,
       }),
     ).resolves.toBeUndefined()
     await expect(
-      assertClientSoloCsvWindow(swap, [point], {
+      assertVhtlcCsvWindow(swap, [point], {
         futureOriginLowerBoundMtp: async () => originFloor(),
         origin: async () => ({ ...origin, absentAtTipHash: '04'.repeat(32) }),
       }),
@@ -207,11 +228,11 @@ describe('client solo CSV window', () => {
 })
 
 const originFloor = () => ({
-  originLowerBoundMtp: 1_798_750_000,
+  originLowerBoundMtp: 1_799_500_000,
   tipHash: '02'.repeat(32),
   tipHeight: 106,
   ancestorHash: '03'.repeat(32),
   ancestorHeight: 100,
-  ancestorMedianTimePast: 1_798_750_000,
+  ancestorMedianTimePast: 1_799_500_000,
   reorgBudgetBlocks: CSV_REORG_BUDGET_BLOCKS,
 })
