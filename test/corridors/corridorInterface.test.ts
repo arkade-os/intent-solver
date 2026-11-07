@@ -154,6 +154,43 @@ describe('covenant negotiation', () => {
     },
   )
 
+  const multi = () => {
+    const seen: (string | undefined)[] = []
+    const corridor: Corridor = {
+      ...stub('a->b', 'A', 'v2'),
+      descriptor: { ...descriptor('a->b', 'A', 'v2'), covenantVersions: ['v2', 'v3'] },
+      quote: async (_payload, options) => {
+        seen.push(options?.covenantVersion)
+        return { kind: 'quote', payload: { v: 1, type: 'rfq_quote', rfq_id: RFQ.rfq_id } }
+      },
+    }
+    return { corridor, seen }
+  }
+
+  it('serves the client most-preferred version both sides build, and passes it down', async () => {
+    const { corridor, seen } = multi()
+    const set = createCorridorSet([corridor], { supportedCovenantVersions: new Set(['v2', 'v3']) })
+    const outcome = await set.get('a->b')!.quote({ ...RFQ, covenant_versions: ['v3', 'v2'] })
+    expect(seen).toEqual(['v3'])
+    expect(outcome).toMatchObject({ payload: { covenant_version: 'v3' } })
+  })
+
+  it('falls to the next version the client lists when the top one is disabled', async () => {
+    const { corridor, seen } = multi()
+    const set = createCorridorSet([corridor], { supportedCovenantVersions: new Set(['v2']) })
+    const outcome = await set.get('a->b')!.quote({ ...RFQ, covenant_versions: ['v3', 'v2'] })
+    expect(seen).toEqual(['v2'])
+    expect(outcome).toMatchObject({ payload: { covenant_version: 'v2' } })
+  })
+
+  it('derives the baseline and names no version when the request does not negotiate', async () => {
+    const { corridor, seen } = multi()
+    const set = createCorridorSet([corridor], { supportedCovenantVersions: new Set(['v2', 'v3']) })
+    const outcome = await set.get('a->b')!.quote(RFQ)
+    expect(seen).toEqual([undefined])
+    expect(outcome.payload).not.toHaveProperty('covenant_version')
+  })
+
   it('keeps a class-based corridor whole, prototype methods and private fields included', async () => {
     class Counted {
       readonly descriptor = descriptor('a->b', 'A', 'example-v1')

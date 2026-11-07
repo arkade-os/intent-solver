@@ -11,6 +11,9 @@ export const RFQ_LIGHTNING_SEND_V2 = 'lightning-send-v2'
 export const RFQ_LIGHTNING_RECEIVE_V2 = 'lightning-receive-v2'
 export const RFQ_ONCHAIN_SEND_V2 = 'onchain-send-v2'
 export const RFQ_ASSET_SWAP_V2 = 'asset-swap-v2'
+// ts-sdk #1147's arkadec program; fixes v2's pinned payout-leaf index. Served
+// alongside v2 but never the baseline — a v2 client names no version. @see assetOfferGeneration
+export const RFQ_ASSET_SWAP_V3 = 'asset-swap-v3'
 export const RFQ_EVM_SEND_V1 = 'evm-send-v1'
 export const RFQ_EVM_RECEIVE_V1 = 'evm-receive-v1'
 
@@ -20,6 +23,7 @@ export const RFQ_COVENANT_VERSIONS = [
   RFQ_LIGHTNING_RECEIVE_V2,
   RFQ_ONCHAIN_SEND_V2,
   RFQ_ASSET_SWAP_V2,
+  RFQ_ASSET_SWAP_V3,
   RFQ_EVM_SEND_V1,
   RFQ_EVM_RECEIVE_V1,
 ] as const

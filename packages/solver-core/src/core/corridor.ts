@@ -32,6 +32,8 @@ export interface CorridorRfqOutcome {
  */
 export interface QuoteOptions {
   requesterKey?: string
+  /** The covenant the host negotiated for this quote; absent derives the corridor's baseline. */
+  covenantVersion?: string
 }
 
 /**
@@ -344,17 +346,20 @@ export const createCorridorSet = (corridors: readonly Corridor[], options: Corri
  * byte-identical. The field is stripped before the corridor's strict schema and echoed only if asked.
  */
 const negotiatingCovenant = (corridor: Corridor, supported: ReadonlySet<string> | undefined): Corridor => {
-  const { pair, covenantVersion: version } = corridor.descriptor
-  const served = supported === undefined || supported.has(version)
+  const { pair, covenantVersion: baseline } = corridor.descriptor
+  // What this corridor can build (baseline alone unless it declares more), kept to what the deployment serves.
+  const buildable = corridor.descriptor.covenantVersions ?? [baseline]
+  const servedVersions = buildable.filter((v) => supported === undefined || supported.has(v))
+  const baselineServed = servedVersions.includes(baseline)
   const quote: Corridor['quote'] = async (payload, options) => {
     const rfqId = extractRfqId(payload)
     const asked = typeof payload === 'object' && payload !== null && 'covenant_versions' in payload
     if (!asked) {
-      if (served) return corridor.quote(payload, options)
+      if (baselineServed) return corridor.quote(payload, options)
       return {
         kind: 'refused',
         payload: rfqRefusalPayload(rfqId, 'unsupported_pair'),
-        detail: `${pair} speaks covenant ${version}, which rfq.covenantVersions disables`,
+        detail: `${pair} speaks covenant ${baseline}, which rfq.covenantVersions disables`,
       }
     }
     const { covenant_versions: listed, ...rest } = payload as Record<string, unknown>
@@ -366,21 +371,21 @@ const negotiatingCovenant = (corridor: Corridor, supported: ReadonlySet<string> 
         detail: 'covenant_versions is malformed',
       }
     }
-    if (!served || !parsed.data.includes(version)) {
+    // The client's most-preferred version this corridor serves — its order is the preference.
+    const chosen = parsed.data.find((v) => servedVersions.includes(v))
+    if (chosen === undefined) {
       return {
         kind: 'refused',
         payload: rfqRefusalPayload(rfqId, 'unsupported_payload', {
           error_code: 'covenant_version_unsupported',
           field: 'covenant_versions',
         }),
-        detail: served
-          ? `${pair} speaks covenant ${version}, which covenant_versions does not list`
-          : `${pair} speaks covenant ${version}, which rfq.covenantVersions disables`,
+        detail: `${pair} serves ${servedVersions.join(', ') || 'no covenant'}; covenant_versions names none of them`,
       }
     }
-    const outcome = await corridor.quote(rest, options)
+    const outcome = await corridor.quote(rest, { ...options, covenantVersion: chosen })
     return outcome.kind === 'quote'
-      ? { ...outcome, payload: { ...outcome.payload, covenant_version: version } }
+      ? { ...outcome, payload: { ...outcome.payload, covenant_version: chosen } }
       : outcome
   }
   const wrapped = withQuote(corridor, quote)

@@ -171,6 +171,18 @@ describe('quote', () => {
     })
   })
 
+  it('passes the negotiated covenant version through to the derivation', async () => {
+    const seen: (string | undefined)[] = []
+    const { service } = await harness({
+      deriveOffer: (_terms, covenantVersion) => {
+        seen.push(covenantVersion)
+        return { pkScript: OFFER_SCRIPT, address: 'ark1qoffer' }
+      },
+    })
+    await service.quote(request({ covenantVersion: 'asset-swap-v3' }))
+    expect(seen[0]).toBe('asset-swap-v3')
+  })
+
   it.each([
     ['a pair on another corridor', { pair: 'arkade:BTC->lightning:BTC' }],
     [
