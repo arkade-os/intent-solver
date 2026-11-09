@@ -29,7 +29,7 @@ import type { SwapNetwork } from './networks.js'
 /** Mirrors the registry card schema's `name` rule (must equal the filename). */
 const NAME = /^[a-z0-9-]+$/
 /** Mirrors the registry schemas' relay item rule and bound. */
-const RELAY = /^wss:\/\/[^\s]+$/
+const RELAY = /^wss?:\/\/[^\s]+$/
 const MAX_RELAYS = 8
 /** The registry's ceiling on an asset's `decimals` AND on `price_decimals`. */
 const MAX_DECIMALS = 18
