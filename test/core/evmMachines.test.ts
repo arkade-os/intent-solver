@@ -14,7 +14,7 @@ import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 // Copied from `Edges` in spec/tla/EvmSend.tla and EvmReceive.tla; a change here is a change there.
 const SEND_EDGES = {
   quoted: ['locking_evm', 'claiming', 'refused', 'stuck'],
-  funded: ['locking_evm', 'claiming', 'stuck'],
+  funded: ['locking_evm', 'claiming', 'refused', 'stuck'],
   locking_evm: ['awaiting_claim', 'claiming', 'refunding_evm', 'stuck'],
   awaiting_claim: ['claiming', 'refunding_evm', 'stuck'],
   claiming: ['claimed', 'stuck'],

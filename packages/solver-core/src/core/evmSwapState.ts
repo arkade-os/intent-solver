@@ -24,7 +24,7 @@ import { defineMachine, type StateOf } from './stateMachine.js'
 /** `arkade:BTC -> ethereum:<token>`: the client locks sats, the solver locks ERC20. */
 export const EvmSendMachine = defineMachine({
   quoted: { live: true, exposed: false, to: ['locking_evm', 'claiming', 'refused', 'stuck'] },
-  funded: { live: true, exposed: false, to: ['locking_evm', 'claiming', 'stuck'] },
+  funded: { live: true, exposed: false, to: ['locking_evm', 'claiming', 'refused', 'stuck'] },
   locking_evm: { live: true, exposed: true, to: ['awaiting_claim', 'claiming', 'refunding_evm', 'stuck'] },
   awaiting_claim: { live: true, exposed: true, to: ['claiming', 'refunding_evm', 'stuck'] },
   claiming: { live: true, exposed: true, to: ['claimed', 'stuck'] },

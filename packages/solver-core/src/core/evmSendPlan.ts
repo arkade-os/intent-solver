@@ -140,7 +140,11 @@ export const planEvmSend = (row: EvmSendPlanRow, seen: EvmSendObservation): EvmS
       return { do: 'lock_evm' }
 
     case 'funded':
-      // RULE 1 again, from the other side: the row says funded, so lock.
+      // RULE 1 again, from the other side: the row says funded, so lock. RULE 5 still binds: quoting
+      // enforces valid_until < refund_locktime, so this is also what keeps a late lock out of the refund race.
+      if (seen.nowSeconds >= row.validUntil) {
+        return { do: 'refuse', reason: 'lockup funded after the quote expired' }
+      }
       return { do: 'lock_evm' }
 
     case 'locking_evm':
