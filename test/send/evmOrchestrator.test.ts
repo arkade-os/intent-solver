@@ -517,8 +517,7 @@ describe('a failing claim scan beside the depth probe', () => {
         timelockHeight: vi.fn().mockResolvedValue(21_000_000),
         onTickError,
       })
-      await store.transition('swap-1', 'quoted', 'funded')
-      await store.transition('swap-1', 'funded', 'locking_evm', { evm_lock_txid: '0xtx' })
+      await store.transition('swap-1', 'quoted', 'locking_evm', { evm_lock_txid: '0xtx' })
       await store.transition('swap-1', 'locking_evm', 'awaiting_claim')
 
       await service.tickAll()
