@@ -163,23 +163,30 @@ export const liveLockupRows = async (
   corridors: CorridorReaderSet,
   log: (line: string) => void = () => {},
 ): Promise<CovenantScriptRow[]> => {
-  const rows: CovenantScriptRow[] = []
-  const answered: string[] = []
   const mute: string[] = []
+  const readers: { pair: string; rows: Promise<readonly unknown[]> }[] = []
   for (const corridor of corridors) {
     if (!corridor.liveLockups) {
       mute.push(corridor.descriptor.pair)
       continue
     }
-    answered.push(corridor.descriptor.pair)
-    for (const row of await corridor.liveLockups()) {
-      // Checked, not cast. `liveLockups` is typed `readonly unknown[]` so core
-      // need not name this row, and a plugged-in corridor is third-party code:
-      // a cast would carry a malformed row into `covenantScriptFromRow` and
-      // build a wrong script from it. See `assertCovenantScriptRow`.
-      rows.push(assertCovenantScriptRow(row, corridor.descriptor.pair))
-    }
+    readers.push({ pair: corridor.descriptor.pair, rows: corridor.liveLockups() })
   }
+  const loaded = await Promise.all(
+    readers.map(async ({ pair, rows: pending }) => {
+      const parsed: CovenantScriptRow[] = []
+      for (const row of await pending) {
+        // Checked, not cast. `liveLockups` is typed `readonly unknown[]` so core
+        // need not name this row, and a plugged-in corridor is third-party code:
+        // a cast would carry a malformed row into `covenantScriptFromRow` and
+        // build a wrong script from it. See `assertCovenantScriptRow`.
+        parsed.push(assertCovenantScriptRow(row, pair))
+      }
+      return parsed
+    }),
+  )
+  const rows = loaded.flat()
+  const answered = readers.map((reader) => reader.pair)
   // A non-empty set in which NOTHING answered is a wiring fault, not an idle
   // solver: every built-in corridor supplies `liveLockups`, so the only way to
   // get here is a set assembled wrong. Returning [] would report every contract
@@ -439,9 +446,8 @@ export const renewExpiringVtxos = async <V extends RenewableVtxo>(deps: RenewVtx
   const due = candidates.filter((vtxo) => isRenewalDue(vtxo, now))
   if (due.length === 0) throw new Error('No VTXOs available to renew')
 
-  const { intentFee, vtxoMaxAmount, dust } = await deps.serverInfo()
+  const [{ intentFee, vtxoMaxAmount, dust }, address] = await Promise.all([deps.serverInfo(), deps.destination()])
   const estimator = new Estimator(intentFee)
-  const address = await deps.destination()
   const script = hex.encode(ArkAddress.decode(address).pkScript)
   const outputFeeOn = (amount: bigint): bigint => BigInt(estimator.evalOffchainOutput({ amount, script }).satoshis)
 

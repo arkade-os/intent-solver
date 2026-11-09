@@ -128,13 +128,17 @@ export const buildWorker = (deps: WorkerDeps): Worker => {
       }
       // Fan-out: one message per swap so a slow Lightning poll on one swap
       // cannot eat the whole cron budget, plus one sweep job.
-      for (const row of await deps.store.findRecoverable()) {
-        await deps.driveQueue.send({ v: 1, type: 'tick_swap', leg: 'lightning', swap_id: row.id })
+      const queue = deps.driveQueue
+      // Each leg dispatches on its OWN read, so one store failing or hanging cannot hold up the other.
+      const dispatch = async (leg: 'lightning' | 'onchain', rows: Promise<{ id: string }[]>): Promise<void> => {
+        await Promise.all((await rows).map((row) => queue.send({ v: 1, type: 'tick_swap', leg, swap_id: row.id })))
       }
-      for (const row of await deps.onchainStore.findRecoverable()) {
-        await deps.driveQueue.send({ v: 1, type: 'tick_swap', leg: 'onchain', swap_id: row.id })
-      }
-      await deps.driveQueue.send({ v: 1, type: 'refund_sweep' })
+      const legs = await Promise.allSettled([
+        dispatch('lightning', deps.store.findRecoverable()),
+        dispatch('onchain', deps.onchainStore.findRecoverable()),
+      ])
+      for (const leg of legs) if (leg.status === 'rejected') throw leg.reason
+      await queue.send({ v: 1, type: 'refund_sweep' })
     },
 
     queue: async (batch) => {

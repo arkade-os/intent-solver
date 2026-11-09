@@ -417,21 +417,14 @@ export class ReceiveSwapService {
       return { accepted: false, reason: 'invalid_payout_address' }
     }
 
-    if (await store.findLiveByPaymentHash(request.paymentHash)) {
-      return { accepted: false, reason: 'duplicate_swap' }
-    }
-    // The same check against the OTHER corridors' stores, BEFORE the mint
-    // side effect below: a hash live anywhere else is spoken for.
-    for (const peer of this.deps.peerStores ?? []) {
-      if (await peer.findLiveByPaymentHash(request.paymentHash)) {
-        return { accepted: false, reason: 'duplicate_swap' }
-      }
-    }
-    // A coupling is receive-then-send, so a live send on this hash is a conflict.
-    // Refuse before createHoldInvoice so a declined quote leaves no hold invoice.
-    if (await this.deps.coupledSendStore?.findLiveByPaymentHash(request.paymentHash)) {
-      return { accepted: false, reason: 'duplicate_swap' }
-    }
+    // Before the mint below: a hash live anywhere is spoken for, and a declined
+    // quote must not leave a hold invoice.
+    const spokenFor = await Promise.all([
+      store.findLiveByPaymentHash(request.paymentHash),
+      ...(this.deps.peerStores ?? []).map((peer) => peer.findLiveByPaymentHash(request.paymentHash)),
+      ...(this.deps.coupledSendStore ? [this.deps.coupledSendStore.findLiveByPaymentHash(request.paymentHash)] : []),
+    ])
+    if (spokenFor.some(Boolean)) return { accepted: false, reason: 'duplicate_swap' }
     if (request.requesterKey !== undefined && !this.quoteLimiter.take(request.requesterKey)) {
       return { accepted: false, reason: 'rate_limited' }
     }
@@ -893,7 +886,7 @@ export class ReceiveSwapService {
     }
 
     // Re-polled HERE, immediately before funding — not trusted from whenQuoted's
-    // observation, which can be minutes stale. Only 'armed' status's E is
+    // observation, nor sampled beside the adoption scan. Only 'armed' status's E is
     // trusted; any other status (cancelled, or a backend quirk) is treated as
     // "nothing real to fund against" for this gate.
     const fresh = await ln.getHoldState(row.paymentHash)
@@ -1089,7 +1082,7 @@ export class ReceiveSwapService {
       // is that the provider's own refund path must open regardless of
       // whether settlement is still going well. Past the deadline there is
       // also no point revealing any more: `whenRefunding`'s own recheck still
-      // catches a claim that lands right at the boundary.
+      // catches a claim that lands right at the boundary. Read AFTER the lockup.
       if (await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip)) {
         return store.transition(row.id, 'funded', 'refunding', {})
       }

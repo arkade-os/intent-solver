@@ -1,5 +1,6 @@
 import { concatBytes } from '@noble/hashes/utils.js'
 import { keccak_256 } from '@noble/hashes/sha3.js'
+import { capture, unwrap } from '@arkade-os/solver-core/util/capture.js'
 import { addressWord, selectorFor, uintWord, type Erc20SwapLock } from './erc20Swap.js'
 import { receiverArtifact } from './receiverArtifact.js'
 import { readTimelockClock } from './timelockClock.js'
@@ -150,12 +151,15 @@ export const verifyReceiverBinding = async (
   nonzeroAddress(receiverAddress, 'receiverAddress')
   if (expectedRuntimeHash.length !== 32) throw new Error('expectedRuntimeHash must be bytes32')
   const expected = encodeReceiverArgs(binding)
-  const chainId = BigInt((await rpc('eth_chainId', [])) as string)
-  if (chainId !== binding.chainId) throw new Error('receiver chain mismatch')
+  const chainP = capture(rpc('eth_chainId', []))
   const blockTag = options.blockTag ?? ((await rpc('eth_blockNumber', [])) as string)
-  const code = fromHex(await rpc('eth_getCode', [asHex(receiverAddress), blockTag]))
+  const codeP = capture(rpc('eth_getCode', [asHex(receiverAddress), blockTag]))
+  const implementationP = capture(rpc('eth_getCode', [asHex(RECEIVER_IMPLEMENTATION), blockTag]))
+  const chainId = BigInt(unwrap(await chainP) as string)
+  if (chainId !== binding.chainId) throw new Error('receiver chain mismatch')
+  const code = fromHex(unwrap(await codeP))
   if (code.length === 0 || !equal(keccak_256(code), expectedRuntimeHash)) throw new Error('receiver runtime mismatch')
-  const implementation = fromHex(await rpc('eth_getCode', [asHex(RECEIVER_IMPLEMENTATION), blockTag]))
+  const implementation = fromHex(unwrap(await implementationP))
   if (!equal(keccak_256(implementation), expectedImplementationRuntimeHash()))
     throw new Error('receiver implementation mismatch')
   const getters = [
@@ -170,24 +174,24 @@ export const verifyReceiverBinding = async (
     'timelock()',
     'activationCutoffTimestamp()',
   ]
+  const call = (signature: string) =>
+    rpc('eth_call', [{ to: asHex(receiverAddress), data: asHex(selectorFor(signature)) }, blockTag])
+  const words = await Promise.all([...getters.map(call), call('activated()')])
   for (let i = 0; i < getters.length; i++) {
-    const value = fromHex(
-      await rpc('eth_call', [{ to: asHex(receiverAddress), data: asHex(selectorFor(getters[i]!)) }, blockTag]),
-    )
+    const value = fromHex(words[i])
     if (!equal(value, expected.subarray(i * 32, (i + 1) * 32)))
       throw new Error(`receiver binding mismatch: ${getters[i]}`)
   }
-  const active = fromHex(
-    await rpc('eth_call', [{ to: asHex(receiverAddress), data: asHex(selectorFor('activated()')) }, blockTag]),
-  )
+  const active = fromHex(words[getters.length])
   if (active.length !== 32 || active.subarray(0, 31).some((b) => b !== 0) || active[31]! > 1)
     throw new Error('invalid receiver activated state')
   if (!options.allowActivated && active[31] === 1) throw new Error('receiver already activated')
   if (!options.allowClosed) {
     if (typeof blockTag !== 'string') throw new Error('open-window check requires numeric block tag')
-    if ((await readTimelockClock(rpc, blockTag)) >= binding.activationCutoff)
-      throw new Error('receiver activation closed')
-    const header = (await rpc('eth_getBlockByNumber', [blockTag, false])) as { timestamp: string } | null
+    const clockP = capture(readTimelockClock(rpc, blockTag))
+    const headerP = capture(rpc('eth_getBlockByNumber', [blockTag, false]) as Promise<{ timestamp: string } | null>)
+    if (unwrap(await clockP) >= binding.activationCutoff) throw new Error('receiver activation closed')
+    const header = unwrap(await headerP)
     if (!header || BigInt(header.timestamp) >= binding.activationCutoffTimestamp)
       throw new Error('receiver timestamp activation closed')
   }
