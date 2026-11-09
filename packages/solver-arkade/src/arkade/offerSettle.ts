@@ -25,6 +25,7 @@
  * `test/e2e/assetOffer.e2e.test.ts` against a live Arkade Service.
  */
 import { hex } from '@scure/base'
+import { capture, unwrap } from '@arkade-os/solver-core/util/capture.js'
 import type { ArkadeContext } from './wallet.js'
 import { offerFromFundingTx } from './offerPacket.js'
 import { heldOf, offerFillInputFrom } from './offerFill.js'
@@ -87,7 +88,9 @@ export const offerSettleFor = (
   const fulfill = deps.fulfill ?? fulfillOffer
 
   return async (intent, options) => {
-    const raw = await fetchTx(intent.offerTxid)
+    const rawP = capture(fetchTx(intent.offerTxid))
+    const liveP = capture(outpointsAt(intent.offerPkScript))
+    const raw = unwrap(await rawP)
     if (raw === null || raw === '') {
       throw new Error(`no funding transaction for ${intent.offerTxid}: the offer cannot be rebuilt to fill it`)
     }
@@ -132,7 +135,7 @@ export const offerSettleFor = (
 
     // BOTH LEGS, because the funding transaction outlives the spend: on its own
     // it reads a cancelled or already-filled deposit as still fundable.
-    const live = await outpointsAt(intent.offerPkScript)
+    const live = unwrap(await liveP)
     const deposit = live.find((o) => o.txid === intent.offerTxid && o.vout === intent.offerVout)
     if (!deposit) {
       throw new Error(`${intent.offerTxid}:${intent.offerVout} is no longer live at ${intent.offerPkScript}`)

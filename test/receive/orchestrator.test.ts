@@ -1006,6 +1006,30 @@ describe('ReceiveSwapService.tick — funding gate reuse (evaluateReceiveFunding
     // The defining assertion: no exposure was ever created.
     expect(arkade.state.fundCalls).toHaveLength(0)
   })
+
+  // Nothing below the hold read re-reads it, so a stale `armed` funds a lockup
+  // with nothing left to settle against.
+  it('does not fund when the HTLC goes away while the adoption scan is in flight', async () => {
+    const outcome = await service.quote(quoteRequest())
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    let htlcGone = false
+    ln.getHoldState = async () =>
+      htlcGone
+        ? { status: 'cancelled' as const, amountSats: 5_000, expiresAt: null }
+        : { status: 'armed' as const, amountSats: 5_000, expiresAt: now + 4 * 3600 }
+    const scan = arkade.ops.findLockupOutpoints
+    arkade.ops.findLockupOutpoints = async (pkScript) => {
+      const outpoints = await scan(pkScript)
+      // A macrotask, so any hold read started beside this one has resolved.
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      htlcGone = true
+      return outpoints
+    }
+
+    const row = await service.tick(outcome.swap.id)
+    expect(row.state).toBe('refused')
+    expect(arkade.state.fundCalls).toHaveLength(0)
+  })
 })
 
 describe('ReceiveSwapService.tick — crash recovery: no double-funding', () => {
@@ -1894,6 +1918,22 @@ describe('ReceiveSwapService.tick — refund path', () => {
     const funded = await armAndFund()
     const row0 = await store.get(funded.id)
     now = row0.refundLocktime
+
+    const row = await service.tick(funded.id)
+    expect(row.state).toBe('refunded')
+    expect(arkade.state.refundCalls).toBe(1)
+  })
+
+  // A deadline sampled beside the lockup read can still say "not yet" past it.
+  it('refunds when the deadline opens while the lockup read is in flight', async () => {
+    const funded = await armAndFund()
+    const row0 = await store.get(funded.id)
+    const scan = arkade.ops.findLockups
+    arkade.ops.findLockups = async (pkScript) => {
+      const outputs = await scan(pkScript)
+      now = row0.refundLocktime
+      return outputs
+    }
 
     const row = await service.tick(funded.id)
     expect(row.state).toBe('refunded')

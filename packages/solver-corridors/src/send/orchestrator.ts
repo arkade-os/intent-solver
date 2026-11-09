@@ -45,6 +45,7 @@ import { FREE, giveSatsFor, type Fee } from '@arkade-os/solver-core/core/corrido
 import type { UnilateralDelays } from '@arkade-os/solver-core/core/timelocks.js'
 import type { SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
 import type { ChainTipProvider } from '@arkade-os/solver-rails/onchain/chainTip.js'
+import { capture, unwrap } from '@arkade-os/solver-core/util/capture.js'
 import { absoluteLocktimeFor, refundDeadlineReached, refundDeadlineSeconds } from '../chainClock.js'
 import {
   decodeCoupledInvoice,
@@ -504,6 +505,9 @@ export class SendSwapService {
     if (!acceptance.accept)
       return { accepted: false, reason: acceptance.reason, ...(acceptance.detail ? { detail: acceptance.detail } : {}) }
 
+    const peerHits = capture(
+      Promise.all((this.deps.peerStores ?? []).map((peer) => peer.findLiveByPaymentHash(decoded.paymentHash))),
+    )
     if (await store.findLiveByPaymentHash(decoded.paymentHash)) {
       // Two live swaps sharing a payment hash mean two lockups and one payment;
       // whichever client loses the race has its lockup claimed and no refund.
@@ -543,14 +547,11 @@ export class SendSwapService {
       if (!deadlines.couple) return { accepted: false, reason: deadlines.reason }
     }
     // The same check against the other corridors' stores: a hash that is live
-    // in ANY of them is spoken for. This loop cannot recognise a coupling — it
+    // in ANY of them is spoken for. This cannot recognise a coupling — it
     // answers `unknown` by design and cannot say which corridor replied — so
     // the receive store is handled above and deliberately kept OUT of it.
-    for (const peer of this.deps.peerStores ?? []) {
-      if (await peer.findLiveByPaymentHash(decoded.paymentHash)) {
-        return { accepted: false, reason: 'duplicate_swap' }
-      }
-    }
+    // The fee probe stays AFTER this: `estimateSendFee` sends real HTLCs.
+    if (unwrap(await peerHits).some(Boolean)) return { accepted: false, reason: 'duplicate_swap' }
     // The quote's own ladder, not the deployment base: when the horizon
     // overflows a block-typed ladder the whole thing re-clocks to seconds,
     // and the script, the row and the absolute locktime below must all run
@@ -1811,9 +1812,10 @@ export class SendSwapService {
       await store.fail(row.id, 'claiming', 'claiming state with no preimage')
       return false
     }
-    const outputs = claimOutputs(await arkade.findLockups(row.pkScript), row.amountSats)
-    // `findLockups` leaves out an output the client unrolled: arkd refuses it every offchain spend.
+    // An unrolled output is already off Arkade, so its claim is not parked behind the vtxo read.
+    const lockupsP = capture(arkade.findLockups(row.pkScript))
     const unrolled = await advanceUnrolledClaims(store, row, arkade, row, row.preimage)
+    const outputs = claimOutputs(unwrap(await lockupsP), row.amountSats)
     // claimOutputs falls back to EVERY output when the asset-free ones fall short, so a
     // dust asset vtxo left after the clean funding was swept reads non-empty yet still
     // cannot cover the amount. Guard on value, not emptiness — held 0 is the empty case.
@@ -1828,8 +1830,10 @@ export class SendSwapService {
       // `stuck` costs a glance, a false `claimed` costs the funds. The only paths that
       // record `claimed` are below, each with our own claim txids in hand — not a lagging
       // view (`stuck` is terminal, so parking it ends collection we are owed).
-      const evidence = await arkade.lockupSpendEvidence(row.pkScript)
-      if (evidence !== 'spent' && !(await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip))) {
+      const evidenceP = arkade.lockupSpendEvidence(row.pkScript)
+      const deadlineP = capture(refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip))
+      const evidence = await evidenceP
+      if (evidence !== 'spent' && !unwrap(await deadlineP)) {
         throw new Error(
           `swap ${row.id}: lockup holds ${held} < ${row.amountSats} while claiming but no spend is provable (${evidence})`,
         )

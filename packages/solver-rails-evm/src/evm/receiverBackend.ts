@@ -1,6 +1,7 @@
 import { bytesToHex, hexToBytes, concatBytes } from '@noble/hashes/utils.js'
 import { keccak_256 } from '@noble/hashes/sha3.js'
 import type { JsonRpc } from '@arkade-os/solver-core/ports/evm.js'
+import { capture, unwrap } from '@arkade-os/solver-core/util/capture.js'
 import { EvmPayoutFundingQuarantinedError } from '@arkade-os/solver-core/ports/evmPayoutFunding.js'
 import {
   addressWord,
@@ -209,32 +210,41 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
     const { current, observed, tip, target, tag, ageSeconds } = seen ?? (await view(policy))
     const runtimeHash = expectedReceiverRuntimeHash(binding)
     const deployed = bytes(await rpc('eth_getCode', [hx(receiverAddress), tag])).length > 0
+    const observationP = capture(
+      (async () => {
+        const readsP = capture(
+          Promise.all([
+            read(binding.lock.tokenAddress, 'balanceOf(address)', [addressWord(receiverAddress, 'receiver')], tag),
+            read(binding.lock.tokenAddress, 'balanceOf(address)', [addressWord(binding.swapContract, 'swap')], tag),
+            deployed ? read(receiverAddress, 'activated()', [], tag) : Promise.resolve(0n),
+            read(binding.swapContract, 'swaps(bytes32)', [swapKey(binding.lock)], tag),
+            readTimelockClock(rpc, current.number),
+          ]),
+        )
+        const [swapAllow, tokenAllow] = await Promise.all([
+          capture(allowed(binding.swapContract, deps.allowedSwapCodeHashes, tag)),
+          capture(allowed(binding.lock.tokenAddress, deps.allowedTokenCodeHashes, tag)),
+        ])
+        if (!swapAllow.ok) throw swapAllow.error
+        if (!tokenAllow.ok) throw tokenAllow.error
+        const [tokenBalance, swapTokenBalance, activatedWord, htlcWord, currentClock] = unwrap(await readsP)
+        return { tokenBalance, swapTokenBalance, activatedWord, htlcWord, currentClock }
+      })(),
+    )
     if (deployed)
       await verifyReceiverBinding(rpc, receiverAddress, binding, runtimeHash, {
         blockTag: tag,
         allowActivated: true,
         allowClosed: true,
       })
-    await allowed(binding.swapContract, deps.allowedSwapCodeHashes, tag)
-    await allowed(binding.lock.tokenAddress, deps.allowedTokenCodeHashes, tag)
-    const tokenBalance = await read(
-      binding.lock.tokenAddress,
-      'balanceOf(address)',
-      [addressWord(receiverAddress, 'receiver')],
-      tag,
-    )
-    const swapTokenBalance = await read(
-      binding.lock.tokenAddress,
-      'balanceOf(address)',
-      [addressWord(binding.swapContract, 'swap')],
-      tag,
-    )
-    const activated = deployed && bool(await read(receiverAddress, 'activated()', [], tag))
-    const htlcPresent = bool(await read(binding.swapContract, 'swaps(bytes32)', [swapKey(binding.lock)], tag))
-    const currentClock = await readTimelockClock(rpc, current.number)
+    const { tokenBalance, swapTokenBalance, activatedWord, htlcWord, currentClock } = unwrap(await observationP)
+    const activated = deployed && bool(activatedWord)
+    const htlcPresent = bool(htlcWord)
     const invalidExactLock = htlcPresent && (!activated || swapTokenBalance < binding.lock.amount)
-    await stable(observed)
-    await stable(current)
+    const observedStable = capture(stable(observed))
+    const currentStable = capture(stable(current))
+    unwrap(await observedStable)
+    unwrap(await currentStable)
     if (invalidExactLock) throw new ReceiverInvariantError('exact lock lacks receiver activation or token backing')
     return {
       receiverAddress: Uint8Array.from(receiverAddress),
@@ -270,8 +280,10 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
   }
   const factoryRequest = { to: RECEIVER_DEPLOYER, data: receiverFactoryDeploymentCall() }
   const factoryReady = async (tag: unknown): Promise<boolean> => {
-    if (bytes(await rpc('eth_getCode', [hx(RECEIVER_FACTORY), tag])).length === 0) return false
-    const implementation = bytes(await rpc('eth_getCode', [hx(RECEIVER_IMPLEMENTATION), tag]))
+    const factoryP = capture(rpc('eth_getCode', [hx(RECEIVER_FACTORY), tag]))
+    const implementationP = capture(rpc('eth_getCode', [hx(RECEIVER_IMPLEMENTATION), tag]))
+    if (bytes(unwrap(await factoryP)).length === 0) return false
+    const implementation = bytes(unwrap(await implementationP))
     if (hx(keccak_256(implementation)) !== hx(expectedImplementationRuntimeHash()))
       throw new Error('receiver implementation mismatch')
     return true

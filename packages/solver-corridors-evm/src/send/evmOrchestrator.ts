@@ -38,6 +38,7 @@ import {
 } from '@arkade-os/solver-arkade/arkade/sweptLockupRefund.js'
 import { provenDepth } from '@arkade-os/solver-rails-evm/evm/lockDepth.js'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
+import { capture, unwrap } from '@arkade-os/solver-core/util/capture.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import type { Limits } from '@arkade-os/solver-core/core/limits.js'
 import { askApproval, type ApprovalCheck } from '@arkade-os/solver-core/core/approvalGate.js'
@@ -336,21 +337,25 @@ export class EvmSendSwapService {
     // deletes its flag on claim, so absence is exactly when a Claim exists.
     // Keyed on the state (its CAS precedes the broadcast), not `evmLockTxid`,
     // which is patched after it and so is null across a crash.
-    let preimage = row.preimage
-    if (preimage === null && (EVM_SEND_EXPOSED as readonly string[]).includes(row.state)) {
-      // Reported and survived, as `provenDepth` treats its failed reads.
-      try {
-        const found = await this.deps.evm.findClaimPreimage(lock, await this.claimScanFloor(row, height), {
-          minConfirmations: row.minConfirmations,
-          minAgeSeconds: row.minAgeSeconds,
-          nowSeconds: this.now(),
-        })
-        preimage = found === null ? null : Buffer.from(found).toString('hex')
-      } catch (error) {
-        if (error instanceof EvmClaimVerificationError) throw error
-        this.deps.onTickError?.(row.id, error)
-      }
-    }
+    // Captured because the depth probe below is awaited first, and for as long as it runs.
+    const preimageP = capture(
+      (async (): Promise<string | null> => {
+        if (row.preimage !== null || !(EVM_SEND_EXPOSED as readonly string[]).includes(row.state)) return row.preimage
+        // Reported and survived, as `provenDepth` treats its failed reads.
+        try {
+          const found = await this.deps.evm.findClaimPreimage(lock, await this.claimScanFloor(row, height), {
+            minConfirmations: row.minConfirmations,
+            minAgeSeconds: row.minAgeSeconds,
+            nowSeconds: this.now(),
+          })
+          return found === null ? null : Buffer.from(found).toString('hex')
+        } catch (error) {
+          if (error instanceof EvmClaimVerificationError) throw error
+          this.deps.onTickError?.(row.id, error)
+          return null
+        }
+      })(),
+    )
     // PROVEN depth, not assumed. Ask the contract whether this lock was already
     // there `minConfirmations` blocks back; if it was, it is at least that
     // deep, and the probe block's own timestamp bounds its age from below.
@@ -374,7 +379,7 @@ export class EvmSendSwapService {
       // zero for an absent or unproven lock, so it cannot advance.
       evmLockConfirmations: depth.confirmations,
       evmLockAgeSeconds: depth.ageSeconds,
-      preimage,
+      preimage: unwrap(await preimageP),
       nowSeconds: this.now(),
       evmTimelockHeight: clock,
     }
@@ -384,12 +389,13 @@ export class EvmSendSwapService {
     const adapter = this.deps.payoutFunding
     if (adapter === undefined) return
     const binding = payoutFundingBinding(adapter.identity, row, this.deps.lockFor(row))
+    const [blockHeight, timelockHeight] = await Promise.all([this.deps.blockHeight(), this.deps.timelockHeight()])
     const result = await adapter.ensure(
       {
         binding,
         nowSeconds: this.now(),
-        blockHeight: await this.deps.blockHeight(),
-        timelockHeight: await this.deps.timelockHeight(),
+        blockHeight,
+        timelockHeight,
       },
       mode,
     )
@@ -567,18 +573,6 @@ export class EvmSendSwapService {
     })
     if (!acceptance.accept) return { accepted: false, reason: acceptance.reason }
 
-    // Seconds -> HEIGHT, floored on the SLOWEST cadence ("setting our own
-    // timelock", blockTime.ts) so the refund opens no later than sized. The row
-    // stores the height: the contract keys the lock by exactly this timelock.
-    const evmTimeoutHeight =
-      (await this.deps.timelockHeight()) +
-      Number(blocksForDuration(acceptance.evmTimeout - nowSeconds, chain.timelockCadence))
-    // The quote binds for the configured window, NOT until the refund locktime:
-    // every second past it is an unhedged option on a live pair (rfq-protocol.md
-    // §5). Snapshotted onto the row so a later config change can neither
-    // reprice a live quote nor resurrect an expired one.
-    const validUntil = nowSeconds + chain.quoteValiditySeconds
-
     // The client locks the full give; the solver pays out the give MINUS this
     // corridor's fee, converted into the token. `payoutSatsFor` does not clamp,
     // so a payout at or below zero is "the fee ate the swap" and is refused by
@@ -586,19 +580,29 @@ export class EvmSendSwapService {
     const payoutSats = payoutSatsFor(request.amountSats, fee)
     if (payoutSats <= 0) return { accepted: false, reason: 'fee_consumes_swap' }
 
-    if (await store.findLiveByPaymentHash(request.paymentHash)) {
-      return { accepted: false, reason: 'duplicate_swap' }
-    }
-    for (const peer of this.deps.peerStores ?? []) {
-      if (await peer.findLiveByPaymentHash(request.paymentHash)) {
-        return { accepted: false, reason: 'duplicate_swap' }
-      }
-    }
+    // `nowSeconds` is already fixed, so this height is not sampled later than before.
+    const tipP = this.deps.timelockHeight()
+    const traceP = capture(this.deps.assertClaimTraceSupport(hex.decode(token.address.slice(2))))
+    // Seconds -> HEIGHT, floored on the SLOWEST cadence ("setting our own
+    // timelock", blockTime.ts) so the refund opens no later than sized. The row
+    // stores the height: the contract keys the lock by exactly this timelock.
+    const evmTimeoutHeight =
+      (await tipP) + Number(blocksForDuration(acceptance.evmTimeout - nowSeconds, chain.timelockCadence))
+    // The quote binds for the configured window, NOT until the refund locktime:
+    // every second past it is an unhedged option on a live pair (rfq-protocol.md
+    // §5). Snapshotted onto the row so a later config change can neither
+    // reprice a live quote nor resurrect an expired one.
+    const validUntil = nowSeconds + chain.quoteValiditySeconds
 
-    try {
-      await this.deps.assertClaimTraceSupport(hex.decode(token.address.slice(2)))
-    } catch (error) {
-      this.deps.onTickError?.(request.paymentHash, error)
+    const spokenFor = await Promise.all([
+      store.findLiveByPaymentHash(request.paymentHash),
+      ...(this.deps.peerStores ?? []).map((peer) => peer.findLiveByPaymentHash(request.paymentHash)),
+    ])
+    if (spokenFor.some(Boolean)) return { accepted: false, reason: 'duplicate_swap' }
+
+    const trace = await traceP
+    if (!trace.ok) {
+      this.deps.onTickError?.(request.paymentHash, trace.error)
       return { accepted: false, reason: 'execution_unavailable' }
     }
 
@@ -722,11 +726,15 @@ export class EvmSendSwapService {
         if (funding?.prepareQuote) {
           preparedBinding = payoutFundingBinding(funding.identity, candidate, sendLockFromRow(candidate))
           try {
+            const [blockHeight, timelockHeight] = await Promise.all([
+              this.deps.blockHeight(),
+              this.deps.timelockHeight(),
+            ])
             const prepared = await funding.prepareQuote({
               binding: preparedBinding,
               nowSeconds: this.now(),
-              blockHeight: await this.deps.blockHeight(),
-              timelockHeight: await this.deps.timelockHeight(),
+              blockHeight,
+              timelockHeight,
               tokenDecimals: token.decimals,
               orderMarginSeconds: chain.orderMarginSeconds ?? EVM_ORDER_MARGIN_SECONDS,
               quoteValiditySeconds: chain.quoteValiditySeconds,
@@ -839,15 +847,22 @@ export class EvmSendSwapService {
     for (const row of watched) {
       try {
         const lock = this.deps.lockFor(row)
-        const present = await this.deps.evm.isLocked(lock)
-        const claimed =
+        const presentP = this.deps.evm.isLocked(lock)
+        const claimedP =
           row.preimage === null
-            ? await this.deps.evm.findClaimPreimage(lock, await this.claimScanFloor(row, height), {
-                minConfirmations: row.minConfirmations,
-                minAgeSeconds: row.minAgeSeconds,
-                nowSeconds: this.now(),
-              })
-            : null
+            ? this.claimScanFloor(row, height).then((floor) =>
+                this.deps.evm.findClaimPreimage(lock, floor, {
+                  minConfirmations: row.minConfirmations,
+                  minAgeSeconds: row.minAgeSeconds,
+                  nowSeconds: this.now(),
+                }),
+              )
+            : Promise.resolve(null)
+        const [presentR, claimedR] = await Promise.allSettled([presentP, claimedP])
+        if (presentR.status === 'rejected') throw presentR.reason
+        if (claimedR.status === 'rejected') throw claimedR.reason
+        const present = presentR.value
+        const claimed = claimedR.value
         if (claimed !== null) {
           await store.patch(row.id, { preimage: Buffer.from(claimed).toString('hex') })
           this.deps.onTickError?.(

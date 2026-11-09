@@ -103,6 +103,7 @@ const CONFIG_KEYS = [
   'NOSTR_AD_PUBLISH',
   'DB_DIR',
   'SWAP_DB_PATH',
+  'ALLOW_UNDRAINED_ONCHAIN_RECEIVE',
   'WALLET_DB_PATH',
   'FAKE_LN_STATE_PATH',
   'POOL_AUTO_MINT',
@@ -155,6 +156,19 @@ afterEach(() => {
     if (saved[key] === undefined) delete process.env[key]
     else process.env[key] = saved[key]
   }
+})
+
+describe('configFromKnobs — ALLOW_UNDRAINED_ONCHAIN_RECEIVE', () => {
+  it('defaults to false, so an undrained onchain-receive row stops the boot', () => {
+    expect(configFromKnobs(process.env).allowUndrainedOnchainReceive).toBe(false)
+  })
+
+  it('is true only on an exact "true", so a typo does not quietly abandon rows', () => {
+    process.env.ALLOW_UNDRAINED_ONCHAIN_RECEIVE = 'true'
+    expect(configFromKnobs(process.env).allowUndrainedOnchainReceive).toBe(true)
+    process.env.ALLOW_UNDRAINED_ONCHAIN_RECEIVE = 'yes'
+    expect(configFromKnobs(process.env).allowUndrainedOnchainReceive).toBe(false)
+  })
 })
 
 describe('loadConfig — LN_BACKEND', () => {

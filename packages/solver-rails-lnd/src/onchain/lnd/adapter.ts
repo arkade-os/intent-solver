@@ -217,6 +217,8 @@ export class LndOnchainAdapter implements OnchainSendBackend {
       // spend is confirmed, and only by pushing it at a subscription. So ask,
       // briefly: a confirmed spend answers in milliseconds (measured: 32ms),
       // and a mempool-only one answers never, which is the case below.
+      // Tip BEFORE the status read. The other order can watch the funding confirm
+      // and then bound the rescan at a tip above the block that spend is already in.
       const { current_block_height } = await getWalletInfo({ lnd: this.lnd })
       const fundingStatus = (await esplora.getJson(`/tx/${params.txid}/status`)) as
         { confirmed: false } | { confirmed: true; block_height: number }
