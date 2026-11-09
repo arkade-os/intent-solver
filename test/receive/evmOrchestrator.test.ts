@@ -174,9 +174,7 @@ describe('the preimage is persisted BEFORE the ERC20 claim', () => {
         return '0xclaimtx'
       }),
     })
-    await store.transition('swap-1', 'quoted', 'awaiting_lock')
-    await store.transition('swap-1', 'awaiting_lock', 'locked')
-    await store.transition('swap-1', 'locked', 'funding_arkade')
+    await store.transition('swap-1', 'quoted', 'funding_arkade')
     await store.transition('swap-1', 'funding_arkade', 'awaiting_claim')
     await service.tick('swap-1')
     expect(preimageAtBroadcast).toBe('ab'.repeat(32))
@@ -193,9 +191,7 @@ describe('`claimed` is written for a claim that landed, not one that was sent', 
       arkadePreimage: vi.fn().mockResolvedValue('ab'.repeat(32)),
       ...over,
     })
-    await built.store.transition('swap-1', 'quoted', 'awaiting_lock')
-    await built.store.transition('swap-1', 'awaiting_lock', 'locked')
-    await built.store.transition('swap-1', 'locked', 'funding_arkade')
+    await built.store.transition('swap-1', 'quoted', 'funding_arkade')
     await built.store.transition('swap-1', 'funding_arkade', 'awaiting_claim')
     await built.service.tick('swap-1')
     return built
@@ -237,9 +233,7 @@ describe('the unclaimed path', () => {
       arkadeLockupFunded: vi.fn().mockResolvedValue(true),
       now: () => NOW + 86_400,
     })
-    await store.transition('swap-1', 'quoted', 'awaiting_lock')
-    await store.transition('swap-1', 'awaiting_lock', 'locked')
-    await store.transition('swap-1', 'locked', 'funding_arkade')
+    await store.transition('swap-1', 'quoted', 'funding_arkade')
     await store.transition('swap-1', 'funding_arkade', 'awaiting_claim')
     await service.tick('swap-1')
     const row = await store.get('swap-1')
@@ -254,9 +248,7 @@ describe('the unclaimed path', () => {
       refundArkade,
       now: () => NOW + 86_400,
     })
-    await store.transition('swap-1', 'quoted', 'awaiting_lock')
-    await store.transition('swap-1', 'awaiting_lock', 'locked')
-    await store.transition('swap-1', 'locked', 'funding_arkade')
+    await store.transition('swap-1', 'quoted', 'funding_arkade')
     await store.transition('swap-1', 'funding_arkade', 'awaiting_claim')
     await store.transition('swap-1', 'awaiting_claim', 'refunding_arkade')
 
@@ -277,9 +269,7 @@ describe('the unclaimed path', () => {
       refundArkade,
       now: () => NOW + 86_400,
     })
-    await store.transition('swap-1', 'quoted', 'awaiting_lock')
-    await store.transition('swap-1', 'awaiting_lock', 'locked')
-    await store.transition('swap-1', 'locked', 'funding_arkade')
+    await store.transition('swap-1', 'quoted', 'funding_arkade')
     await store.transition('swap-1', 'funding_arkade', 'awaiting_claim')
     await store.transition('swap-1', 'awaiting_claim', 'refunding_arkade')
 
@@ -374,9 +364,7 @@ describe('a retried claim does not rewrite the state trail', () => {
       broadcast: vi.fn().mockRejectedValue(new Error('rpc down')),
       onTickError: () => {},
     })
-    await store.transition('swap-1', 'quoted', 'awaiting_lock')
-    await store.transition('swap-1', 'awaiting_lock', 'locked')
-    await store.transition('swap-1', 'locked', 'funding_arkade')
+    await store.transition('swap-1', 'quoted', 'funding_arkade')
     await store.transition('swap-1', 'funding_arkade', 'awaiting_claim')
 
     // Three ticks, each failing at the broadcast so the row stays in claiming.

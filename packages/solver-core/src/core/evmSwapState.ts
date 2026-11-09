@@ -14,87 +14,49 @@
  * not a broadcast, so it can revert rather than merely fail to confirm.
  */
 
+import { defineMachine, type StateOf } from './stateMachine.js'
+
+// `stuck` is terminal, as on every corridor: counting a pager against the cap would let one incident starve it.
+// Exposure starts when the solver's own side is committed: the ERC20 lock is submitted (send), or sats
+// are committed against the client's lock (receive). A revert is not observable until it is mined.
+// `funded`, `awaiting_lock` and `locked` are planner states no transition writes; they keep the planner's edges.
+
 /** `arkade:BTC -> ethereum:<token>`: the client locks sats, the solver locks ERC20. */
-export type EvmSendSwapState =
-  | 'quoted'
-  | 'funded'
-  | 'locking_evm'
-  | 'awaiting_claim'
-  | 'claiming'
-  | 'claimed'
-  | 'refunding_evm'
-  | 'refunded'
-  | 'refused'
-  | 'stuck'
+export const EvmSendMachine = defineMachine({
+  quoted: { live: true, exposed: false, to: ['locking_evm', 'claiming', 'refused', 'stuck'] },
+  funded: { live: true, exposed: false, to: ['locking_evm', 'claiming', 'stuck'] },
+  locking_evm: { live: true, exposed: true, to: ['awaiting_claim', 'claiming', 'refunding_evm', 'stuck'] },
+  awaiting_claim: { live: true, exposed: true, to: ['claiming', 'refunding_evm', 'stuck'] },
+  claiming: { live: true, exposed: true, to: ['claimed', 'stuck'] },
+  claimed: { live: false, exposed: false, to: [] },
+  refunding_evm: { live: true, exposed: true, to: ['claiming', 'refunded', 'stuck'] },
+  refunded: { live: false, exposed: false, to: [] },
+  refused: { live: false, exposed: false, to: [] },
+  stuck: { live: false, exposed: false, to: [] },
+})
 
 /** `ethereum:<token> -> arkade:BTC`: the client locks ERC20, the solver locks sats. */
-export type EvmReceiveSwapState =
-  | 'quoted'
-  | 'awaiting_lock'
-  | 'locked'
-  | 'funding_arkade'
-  | 'awaiting_claim'
-  | 'claiming'
-  | 'claimed'
-  | 'refunding_arkade'
-  | 'refunded'
-  | 'refused'
-  | 'stuck'
+export const EvmReceiveMachine = defineMachine({
+  quoted: { live: true, exposed: false, to: ['funding_arkade', 'claiming', 'refused', 'stuck'] },
+  awaiting_lock: { live: true, exposed: false, to: ['funding_arkade', 'claiming', 'refused', 'stuck'] },
+  // `refused` too: the shell re-checks the fund window before its CAS, and the planner funds `locked` unconditionally.
+  locked: { live: true, exposed: false, to: ['funding_arkade', 'claiming', 'refused', 'stuck'] },
+  funding_arkade: { live: true, exposed: true, to: ['awaiting_claim', 'claiming', 'stuck'] },
+  awaiting_claim: { live: true, exposed: true, to: ['claiming', 'refunding_arkade', 'stuck'] },
+  claiming: { live: true, exposed: true, to: ['claimed', 'stuck'] },
+  claimed: { live: false, exposed: false, to: [] },
+  refunding_arkade: { live: true, exposed: true, to: ['claiming', 'refunded', 'stuck'] },
+  refunded: { live: false, exposed: false, to: [] },
+  refused: { live: false, exposed: false, to: [] },
+  stuck: { live: false, exposed: false, to: [] },
+})
 
-/**
- * States a swap can still leave, so a row in one counts against the cap.
- *
- * `stuck` is NOT here, and that is the same call the other corridors make: a
- * stuck row is a pager, not a live swap, and counting it against the cap would
- * let one incident starve every corridor until a human cleared it.
- */
-export const EVM_SEND_NON_TERMINAL: readonly EvmSendSwapState[] = [
-  'quoted',
-  'funded',
-  'locking_evm',
-  'awaiting_claim',
-  'claiming',
-  'refunding_evm',
-]
+export type EvmSendSwapState = StateOf<typeof EvmSendMachine>
+export type EvmReceiveSwapState = StateOf<typeof EvmReceiveMachine>
 
-export const EVM_RECEIVE_NON_TERMINAL: readonly EvmReceiveSwapState[] = [
-  'quoted',
-  'awaiting_lock',
-  'locked',
-  'funding_arkade',
-  'awaiting_claim',
-  'claiming',
-  'refunding_arkade',
-]
-
-/**
- * States where the SOLVER's money is committed and could still be lost.
- *
- * Narrower than non-terminal, and that difference is semantics, NOT cap
- * accounting: `committedSats()` in both stores sums NON_TERMINAL, because a
- * binding quote is a claim on the float whether or not the solver's own funds
- * have moved. These lists answer the narrower question — "on which states is
- * the solver's money literally at risk" — for everything downstream of that
- * distinction (admission reasoning, operator views, tests).
- *
- * On the send side exposure begins at `locking_evm` — the moment the ERC20 lock
- * is submitted, the solver's tokens are at risk even if the call later reverts,
- * because a revert is not observable until it is mined.
- *
- * On the receive side it begins at `funding_arkade` for the mirror reason. The
- * client's ERC20 lock existing (`locked`) costs the solver nothing; committing
- * sats against it does.
- */
-export const EVM_SEND_EXPOSED: readonly EvmSendSwapState[] = [
-  'locking_evm',
-  'awaiting_claim',
-  'claiming',
-  'refunding_evm',
-]
-
-export const EVM_RECEIVE_EXPOSED: readonly EvmReceiveSwapState[] = [
-  'funding_arkade',
-  'awaiting_claim',
-  'claiming',
-  'refunding_arkade',
-]
+/** Live: counted against the cap, since a binding quote claims float whether or not funds moved. */
+export const EVM_SEND_NON_TERMINAL = EvmSendMachine.live
+export const EVM_RECEIVE_NON_TERMINAL = EvmReceiveMachine.live
+/** Where the solver's own money is committed and could still be lost; narrower than live. */
+export const EVM_SEND_EXPOSED = EvmSendMachine.exposed
+export const EVM_RECEIVE_EXPOSED = EvmReceiveMachine.exposed

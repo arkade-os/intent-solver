@@ -36,7 +36,7 @@
  */
 
 import type { EvmTransactionOutcome, TimelockHeight } from '../ports/evm.js'
-import type { EvmSendSwapState } from './evmSwapState.js'
+import { EvmSendMachine, type EvmSendSwapState } from './evmSwapState.js'
 
 /**
  * The planner's view of a swap row — declared HERE, structurally, for the same
@@ -97,10 +97,8 @@ export type EvmSendAction =
   /** Money is committed and cannot be recovered by this state machine. */
   | { do: 'stick'; reason: string }
 
-const TERMINAL: readonly EvmSendSwapState[] = ['claimed', 'refunded', 'refused', 'stuck']
-
 export const planEvmSend = (row: EvmSendPlanRow, seen: EvmSendObservation): EvmSendAction => {
-  if (TERMINAL.includes(row.state)) return { do: 'wait' }
+  if (EvmSendMachine.isTerminal(row.state)) return { do: 'wait' }
 
   // RULE 4 FIRST, and the order of these branches IS the rule. A preimage is
   // the money: once revealed, the Arkade lockup is claimable and no fact about

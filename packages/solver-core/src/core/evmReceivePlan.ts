@@ -28,7 +28,7 @@
  */
 
 import type { EvmTransactionOutcome, TimelockHeight } from '../ports/evm.js'
-import type { EvmReceiveSwapState } from './evmSwapState.js'
+import { EvmReceiveMachine, type EvmReceiveSwapState } from './evmSwapState.js'
 
 /**
  * The planner's view of a swap row — structural, declared here for the same
@@ -92,10 +92,8 @@ export type EvmReceiveAction =
   | { do: 'refuse'; reason: string }
   | { do: 'stick'; reason: string }
 
-const TERMINAL: readonly EvmReceiveSwapState[] = ['claimed', 'refunded', 'refused', 'stuck']
-
 export const planEvmReceive = (row: EvmReceivePlanRow, seen: EvmReceiveObservation): EvmReceiveAction => {
-  if (TERMINAL.includes(row.state)) return { do: 'wait' }
+  if (EvmReceiveMachine.isTerminal(row.state)) return { do: 'wait' }
 
   const preimage = seen.preimage ?? row.preimage
 
