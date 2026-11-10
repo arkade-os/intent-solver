@@ -4478,7 +4478,7 @@ const reconFigures = (data) => {
       withdrawalError
         ? `withdrawal journal unavailable: ${withdrawalError}`
         : data.withdrawals.sentCount === 0
-          ? 'no sent operator withdrawals in this view'
+          ? 'no sent withdrawals; unsettled rows remain listed regardless of window'
           : `${data.withdrawals.sentCount} sent, including ${sats(data.withdrawals.feeSats)} sat in reported fees` +
             (unreportedWithdrawals > 0 ? `; ${unreportedWithdrawals} has no reported fee, so this is a minimum` : ''),
     ),
@@ -4675,7 +4675,8 @@ const incomingTable = (data) => {
 const withdrawalTable = (data) => {
   const failure = sectionFailure(data, 'withdrawals')
   if (failure) return h('p.banner', `Withdrawal journal unavailable: ${failure}`)
-  if (data.withdrawals.records.length === 0) return h('p.muted', 'No operator withdrawals in this view.')
+  if (data.withdrawals.records.length === 0)
+    return h('p.muted', 'No operator withdrawals in this window or awaiting settlement.')
   return h(
     'table',
     h(

@@ -19,6 +19,8 @@ describe('the reconciliation page', () => {
     expect(source).toContain('oldest of the latest')
     expect(source).toContain('reported fees')
     expect(source).toContain('so this is a minimum')
+    expect(source).toContain('unsettled rows remain listed regardless of window')
+    expect(source).toContain('No operator withdrawals in this window or awaiting settlement.')
     expect(source).not.toContain("figure('net'")
   })
 })
