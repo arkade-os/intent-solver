@@ -227,6 +227,7 @@ const checkpointLedger = async (
 ): Promise<CheckpointLedger> => {
   const scope = balanceCheckpointScope(deps.services)
   const rows = await deps.services.adminStore.listBalanceCheckpoints(scope, CHECKPOINT_LIMIT)
+  // The store returns newest first; reverse for chronological gap and delta math.
   const ascending = [...rows].reverse()
   let prior: BalanceCheckpoint | undefined
   for (const checkpoint of ascending) {

@@ -221,6 +221,28 @@ describe('GET /api/reconciliation', () => {
     await adminStore.close()
   })
 
+  it('uses the last checkpoint before the window as the opening baseline', async () => {
+    const { response, body, adminStore } = await build(undefined, {
+      checkpointRows: (scope) =>
+        [
+          checkpoint(scope, NOW - 1_000, '10400'),
+          checkpoint(scope, NOW - 3_000, '9500'),
+          checkpoint(scope, NOW - 4_000, '9000'),
+        ].map((row, index) => ({ ...row, id: index + 1 })),
+    })
+
+    expect(response.status).toBe(200)
+    expect(body.balance).toMatchObject({
+      windowCount: 2,
+      observedFrom: NOW - 4_000,
+      openingSats: 9000,
+      closingSats: 10400,
+      changeSats: 1400,
+    })
+    expect(body.balance.incoming.map((row: { at: number }) => row.at)).toEqual([NOW - 3_000, NOW - 1_000])
+    await adminStore.close()
+  })
+
   it('keeps swap economics visible when the rebalance journal cannot be read', async () => {
     const { response, body, adminStore } = await build('/api/reconciliation?window=1h', { failRebalances: true })
     expect(response.status).toBe(200)

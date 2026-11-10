@@ -270,6 +270,10 @@ The checkpoint history is bounded to the latest 2,000 samples. When that bound
 truncates a longer window, the response sets `balance.limited` and the console
 says so instead of presenting the visible history as complete.
 
+When a checkpoint exists just before the selected window, it becomes the opening
+baseline so the first in-window delta is complete. `balance.observedFrom` can
+therefore predate `window.since`, and the console labels that case explicitly.
+
 The reconciliation route is read-only. In particular, an incoming checkpoint
 increase is an observed balance movement, not proof of an external deposit:
 there is no generic deposit journal today.

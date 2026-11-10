@@ -4418,10 +4418,10 @@ const reconFigures = (data) => {
   const balance = data.balance
   const summary = data.swaps.summary
   const checkpointCount = balance.windowCount ?? balance.checkpoints.length
+  const openingPrecedesWindow = balance.observedFrom !== null && balance.observedFrom < data.window.since
   const checkpointError = sectionFailure(data, 'checkpoints')
   const swapError = sectionFailure(data, 'swaps')
   const withdrawalError = sectionFailure(data, 'withdrawals')
-  const withdrawalFloorSats = data.withdrawals.amountSats + data.withdrawals.feeSats
   const unreportedWithdrawals = data.withdrawals.unreportedFeeCount ?? 0
   return h(
     'div.figures',
@@ -4433,7 +4433,8 @@ const reconFigures = (data) => {
         : balance.openingSats === null || balance.closingSats === null
           ? 'opening or closing checkpoint is incomplete'
           : `${sats(balance.openingSats)} to ${sats(balance.closingSats)} sat` +
-            (balance.limited ? `; oldest of the latest ${balance.limit} checkpoints, not the window start` : ''),
+            (balance.limited ? `; oldest of the latest ${balance.limit} checkpoints, not the window start` : '') +
+            (openingPrecedesWindow ? '; opening checkpoint predates this window' : ''),
       balance.changeSats !== null && balance.changeSats < 0 ? 'c-loss' : null,
     ),
     figure(
@@ -4474,7 +4475,7 @@ const reconFigures = (data) => {
     ),
     figure(
       'withdrawn',
-      withdrawalError ? 'unknown' : data.withdrawals.sentCount === 0 ? 'none' : sats(withdrawalFloorSats),
+      withdrawalError ? 'unknown' : data.withdrawals.sentCount === 0 ? 'none' : sats(data.withdrawals.debitSats),
       withdrawalError
         ? `withdrawal journal unavailable: ${withdrawalError}`
         : data.withdrawals.sentCount === 0
@@ -4744,7 +4745,7 @@ const rebalanceTable = (data) => {
             h('td.muted', row.poolId),
             h('td', row.kind),
             h('td.right', sats(row.debitSats)),
-            h('td.right', sats(row.feeSats)),
+            h('td.right', row.feeSats === null ? h('span.faint', 'not reported') : sats(row.feeSats)),
             h('td.right', row.creditedSats === null ? h('span.faint', 'pending') : sats(row.creditedSats)),
             h('td', row.state),
           ),
@@ -4824,7 +4825,7 @@ const reconciliationView = () => {
       checkpointTable(data),
     ),
     checkpointGapPanel(data),
-    h('section.panel', h('h2', 'Deposits / incoming balance'), incomingTable(data)),
+    h('section.panel', h('h2', 'Incoming balance'), incomingTable(data)),
     h(
       'section.panel',
       h('h2', 'Operator withdrawals'),
