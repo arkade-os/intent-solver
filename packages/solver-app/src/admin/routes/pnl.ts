@@ -273,7 +273,16 @@ const checkpointLedger = async (
 }
 
 const withdrawalRow = (withdrawal: OperatorWithdrawal) => ({
-  ...withdrawal,
+  id: withdrawal.id,
+  scope: withdrawal.scope,
+  source: withdrawal.source,
+  address: withdrawal.address,
+  amountSats: withdrawal.amountSats,
+  feeSats: withdrawal.feeSats,
+  reference: withdrawal.reference,
+  state: withdrawal.state,
+  createdAt: withdrawal.createdAt,
+  updatedAt: withdrawal.updatedAt,
   debitSats: withdrawal.feeSats === null ? null : withdrawal.amountSats + withdrawal.feeSats,
 })
 

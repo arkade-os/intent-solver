@@ -741,6 +741,7 @@ export class AdminStore {
     return row
   }
 
+  /** Keeps sending/uncertain rows reachable even when they predate `since`. */
   async listOperatorWithdrawals(scope: string, since: number): Promise<OperatorWithdrawal[]> {
     if (!scope) throw new Error('operator withdrawal scope is required')
     if (!Number.isSafeInteger(since) || since < 0) throw new Error('operator withdrawal cursor must be non-negative')

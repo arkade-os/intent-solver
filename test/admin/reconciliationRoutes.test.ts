@@ -37,6 +37,7 @@ const build = async (
     rebalances?: RebalanceTransfer[]
     withdrawalSince?: number[]
     rebalanceSince?: number[]
+    staleUncertain?: boolean
   } = {},
 ) => {
   let clock = NOW - 2_000
@@ -92,11 +93,13 @@ const build = async (
   if (options.checkpointRows) {
     vi.spyOn(adminStore, 'listBalanceCheckpoints').mockResolvedValue(options.checkpointRows(scope))
   }
-  const listWithdrawals = adminStore.listOperatorWithdrawals.bind(adminStore)
-  vi.spyOn(adminStore, 'listOperatorWithdrawals').mockImplementation(async (scopeArg, sinceArg) => {
-    options.withdrawalSince?.push(sinceArg)
-    return options.withdrawals ? options.withdrawals(scopeArg) : listWithdrawals(scopeArg, sinceArg)
-  })
+  if (options.withdrawals || options.withdrawalSince) {
+    const listWithdrawals = adminStore.listOperatorWithdrawals.bind(adminStore)
+    vi.spyOn(adminStore, 'listOperatorWithdrawals').mockImplementation(async (scopeArg, sinceArg) => {
+      options.withdrawalSince?.push(sinceArg)
+      return options.withdrawals ? options.withdrawals(scopeArg) : listWithdrawals(scopeArg, sinceArg)
+    })
+  }
   await adminStore.recordBalanceCheckpoint(checkpoint(scope, NOW - 1_500, '10000'))
   await adminStore.recordBalanceCheckpoint(checkpoint(scope, NOW - 1_300, '10500'))
   await adminStore.recordBalanceCheckpoint(checkpoint(scope, NOW - 900, '10400'))
@@ -104,6 +107,18 @@ const build = async (
     checkpoint(scope, NOW - 500, null, { errors: { lightning: 'node unavailable' } }),
   )
   await adminStore.recordBalanceCheckpoint(checkpoint(scope, NOW - 400, '10450'))
+
+  clock = NOW - 5_000
+  if (options.staleUncertain) {
+    await adminStore.createOperatorWithdrawal({
+      id: 'stale-uncertain',
+      scope,
+      source: 'arkade',
+      address: 'bc1stale',
+      amountSats: 400,
+    })
+    await adminStore.transitionOperatorWithdrawal('stale-uncertain', 'preparing', 'uncertain')
+  }
 
   clock = NOW - 1_100
   await adminStore.createOperatorWithdrawal({
@@ -178,6 +193,16 @@ describe('GET /api/reconciliation', () => {
       unreportedFeeCount: 1,
     })
     expect(body.withdrawals.records[0].debitSats).toBeNull()
+    await adminStore.close()
+  })
+
+  it('keeps unsettled withdrawals older than the selected window visible', async () => {
+    const { response, body, adminStore } = await build(undefined, { staleUncertain: true })
+    expect(response.status).toBe(200)
+    expect(body.balance.observedFrom).toBeGreaterThan(body.window.since)
+    expect(body.withdrawals.records).toContainEqual(
+      expect.objectContaining({ id: 'stale-uncertain', state: 'uncertain', createdAt: NOW - 5_000 }),
+    )
     await adminStore.close()
   })
 
