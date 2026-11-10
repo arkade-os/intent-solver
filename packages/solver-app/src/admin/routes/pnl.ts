@@ -193,10 +193,7 @@ const checkpointSummary = (checkpoint: BalanceCheckpoint, previous: BalanceCheck
   }
 }
 
-const checkpointLedger = async (
-  deps: AdminDeps,
-  window: LedgerWindow & { label: string },
-): Promise<{
+type CheckpointLedger = {
   scope: string
   checkpoints: ReturnType<typeof checkpointSummary>[]
   gaps: { afterId: number; beforeId: number; from: number; to: number; seconds: number }[]
@@ -208,7 +205,26 @@ const checkpointLedger = async (
   changeSats: number | null
   limited: boolean
   incompleteCount: number
-}> => {
+}
+
+const emptyCheckpointLedger = (scope: string): CheckpointLedger => ({
+  scope,
+  checkpoints: [],
+  gaps: [],
+  windowCount: 0,
+  observedFrom: null,
+  observedTo: null,
+  openingSats: null,
+  closingSats: null,
+  changeSats: null,
+  limited: false,
+  incompleteCount: 0,
+})
+
+const checkpointLedger = async (
+  deps: AdminDeps,
+  window: LedgerWindow & { label: string },
+): Promise<CheckpointLedger> => {
   const scope = balanceCheckpointScope(deps.services)
   const rows = await deps.services.adminStore.listBalanceCheckpoints(scope, CHECKPOINT_LIMIT)
   const ascending = [...rows].reverse()
@@ -256,6 +272,8 @@ const withdrawalRow = (withdrawal: OperatorWithdrawal) => ({
   ...withdrawal,
   debitSats: withdrawal.feeSats === null ? null : withdrawal.amountSats + withdrawal.feeSats,
 })
+
+const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
 interface Scan {
   records: SwapEconomics[]
@@ -440,14 +458,22 @@ export const registerPnlRoutes = (app: Hono, deps: AdminDeps): void => {
       return c.json({ error: 'bad_request', message: error.message }, 400)
     }
 
-    const [scanned, ledger] = await Promise.all([scan(deps, window), checkpointLedger(deps, window)])
+    const scope = balanceCheckpointScope(deps.services)
+    const [scannedResult, ledgerResult] = await Promise.allSettled([scan(deps, window), checkpointLedger(deps, window)])
+    const scanned: Scan =
+      scannedResult.status === 'fulfilled'
+        ? scannedResult.value
+        : { records: [], measured: [], unmeasured: [], failed: [], truncated: [] }
+    const ledger = ledgerResult.status === 'fulfilled' ? ledgerResult.value : emptyCheckpointLedger(scope)
     const records = [...scanned.records].sort((a, b) => b.settledAt - a.settledAt || a.id.localeCompare(b.id))
     const summary = summarise(records, window.since, window.until)
     const since = ledger.observedFrom ?? window.since
-    const [withdrawals, rebalances] = await Promise.all([
+    const [withdrawalResult, rebalanceResult] = await Promise.allSettled([
       deps.services.adminStore.listOperatorWithdrawals(ledger.scope, since),
       deps.services.rebalanceStore?.checkpointTransfers(since) ?? Promise.resolve([]),
     ])
+    const withdrawals = withdrawalResult.status === 'fulfilled' ? withdrawalResult.value : []
+    const rebalances = rebalanceResult.status === 'fulfilled' ? rebalanceResult.value : []
     const withdrawalRows = withdrawals.filter((withdrawal) => withdrawal.createdAt < window.until).map(withdrawalRow)
     const rebalanceRows = rebalances
       .filter((transfer) => (transfer.chargedAt ?? transfer.createdAt) < window.until)
@@ -498,17 +524,33 @@ export const registerPnlRoutes = (app: Hono, deps: AdminDeps): void => {
         feeSats: sentWithdrawals.reduce((total, withdrawal) => total + (withdrawal.feeSats ?? 0), 0),
         debitSats: sentWithdrawals.reduce((total, withdrawal) => total + (withdrawal.debitSats ?? 0), 0),
         unreportedFeeCount: sentWithdrawals.filter((withdrawal) => withdrawal.feeSats === null).length,
+        error: withdrawalResult.status === 'rejected' ? errorMessage(withdrawalResult.reason) : null,
       },
       rebalances: {
         records: rebalanceRows,
         completedCount: completedRebalances.length,
         feeSats: completedRebalances.reduce((total, transfer) => total + transfer.feeSats, 0),
+        error: rebalanceResult.status === 'rejected' ? errorMessage(rebalanceResult.reason) : null,
       },
       coverage: {
         measured: scanned.measured,
         unmeasured: scanned.unmeasured,
         failed: scanned.failed,
         truncated: scanned.truncated,
+        failedSections: [
+          ...(scannedResult.status === 'rejected'
+            ? [{ section: 'swaps', reason: errorMessage(scannedResult.reason) }]
+            : []),
+          ...(ledgerResult.status === 'rejected'
+            ? [{ section: 'checkpoints', reason: errorMessage(ledgerResult.reason) }]
+            : []),
+          ...(withdrawalResult.status === 'rejected'
+            ? [{ section: 'withdrawals', reason: errorMessage(withdrawalResult.reason) }]
+            : []),
+          ...(rebalanceResult.status === 'rejected'
+            ? [{ section: 'rebalances', reason: errorMessage(rebalanceResult.reason) }]
+            : []),
+        ],
         basis: summary.costedCount === 0 ? 'gross' : 'mixed',
       },
     })

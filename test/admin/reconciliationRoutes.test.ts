@@ -27,7 +27,7 @@ const checkpoint = (
   ...over,
 })
 
-const build = async (path = '/api/reconciliation?window=1h') => {
+const build = async (path = '/api/reconciliation?window=1h', failRebalances = false) => {
   let clock = NOW - 2_000
   const adminStore = await AdminStore.open(':memory:', () => clock)
   const services = {
@@ -36,6 +36,15 @@ const build = async (path = '/api/reconciliation?window=1h') => {
     providerPubkey: 'provider',
     ln: {},
     onchain: null,
+    ...(failRebalances
+      ? {
+          rebalanceStore: {
+            checkpointTransfers: async () => {
+              throw new Error('journal offline')
+            },
+          },
+        }
+      : {}),
     readers: [
       {
         descriptor: { pair: 'arkade:BTC->lightning:BTC' },
@@ -112,6 +121,15 @@ describe('GET /api/reconciliation', () => {
     const { response, body, adminStore } = await build('/api/reconciliation?window=forever')
     expect(response.status).toBe(400)
     expect(body.error).toBe('bad_request')
+    await adminStore.close()
+  })
+
+  it('keeps swap economics visible when the rebalance journal cannot be read', async () => {
+    const { response, body, adminStore } = await build('/api/reconciliation?window=1h', true)
+    expect(response.status).toBe(200)
+    expect(body.swaps.records).toHaveLength(1)
+    expect(body.rebalances.error).toBe('journal offline')
+    expect(body.coverage.failedSections).toContainEqual({ section: 'rebalances', reason: 'journal offline' })
     await adminStore.close()
   })
 })

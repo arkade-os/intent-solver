@@ -4385,6 +4385,9 @@ const reconciliationToolbar = () =>
 
 const reconTime = (at) => (at === null || at === undefined ? h('span.faint', 'unknown') : bucketLabel(at))
 
+const sectionFailure = (data, section) =>
+  (data.coverage.failedSections ?? []).find((failure) => failure.section === section)?.reason ?? null
+
 const reconAtomic = (raw, decimals) => {
   try {
     const value = BigInt(raw)
@@ -4415,61 +4418,88 @@ const reconFigures = (data) => {
   const balance = data.balance
   const summary = data.swaps.summary
   const checkpointCount = balance.windowCount ?? balance.checkpoints.length
+  const checkpointError = sectionFailure(data, 'checkpoints')
+  const swapError = sectionFailure(data, 'swaps')
+  const withdrawalError = sectionFailure(data, 'withdrawals')
+  const withdrawalFloorSats = data.withdrawals.amountSats + data.withdrawals.feeSats
+  const unreportedWithdrawals = data.withdrawals.unreportedFeeCount ?? 0
   return h(
     'div.figures',
     figure(
       'balance change',
-      reconDelta(balance.changeSats),
-      balance.openingSats === null || balance.closingSats === null
-        ? 'opening or closing checkpoint is incomplete'
-        : `${sats(balance.openingSats)} to ${sats(balance.closingSats)} sat`,
+      checkpointError ? 'unknown' : reconDelta(balance.changeSats),
+      checkpointError
+        ? `checkpoint history unavailable: ${checkpointError}`
+        : balance.openingSats === null || balance.closingSats === null
+          ? 'opening or closing checkpoint is incomplete'
+          : `${sats(balance.openingSats)} to ${sats(balance.closingSats)} sat` +
+            (balance.limited ? `; oldest of the latest ${balance.limit} checkpoints, not the window start` : ''),
       balance.changeSats !== null && balance.changeSats < 0 ? 'c-loss' : null,
     ),
     figure(
       'closing balance',
-      balance.closingSats === null ? 'unknown' : sats(balance.closingSats),
-      balance.observedTo === null
-        ? 'no usable checkpoint in this view'
-        : `${checkpointCount} checkpoint(s) in window; latest ${ago(balance.observedTo)} ago`,
+      checkpointError || balance.closingSats === null ? 'unknown' : sats(balance.closingSats),
+      checkpointError
+        ? 'checkpoint history unavailable'
+        : balance.observedTo === null
+          ? 'no usable checkpoint in this view'
+          : `${checkpointCount} checkpoint(s) in window; latest ${ago(balance.observedTo)} ago`,
     ),
     figure(
       'swap spread kept',
-      signedSats(summary.grossSats),
-      `received minus delivered over ${summary.pricedCount} priced swap(s)`,
+      swapError ? 'unknown' : signedSats(summary.grossSats),
+      swapError
+        ? `swap scan unavailable: ${swapError}`
+        : `received minus delivered over ${summary.pricedCount} priced swap(s)`,
       summary.grossSats < 0 ? 'c-loss' : null,
     ),
     figure(
       'execution fees paid',
-      summary.costedCount === 0 ? 'not reported' : sats(summary.realizedCostSats),
-      summary.costedCount === 0
-        ? 'no rail reported an actual fee'
-        : `${summary.costedCount} of ${summary.pricedCount} priced swaps include a fee`,
+      swapError ? 'unknown' : summary.costedCount === 0 ? 'not reported' : sats(summary.realizedCostSats),
+      swapError
+        ? 'swap scan unavailable'
+        : summary.costedCount === 0
+          ? 'no rail reported an actual fee'
+          : `${summary.costedCount} of ${summary.pricedCount} priced swaps include a fee`,
     ),
     figure(
       'after reported fees',
-      summary.netSats === null ? 'unknown' : signedSats(summary.netSats),
-      summary.netSats === null
-        ? 'spread alone is not net'
-        : `${summary.pricedCount - summary.costedCount} priced swap(s) still have no reported fee`,
+      swapError || summary.netSats === null ? 'unknown' : signedSats(summary.netSats),
+      swapError
+        ? 'swap scan unavailable'
+        : summary.netSats === null
+          ? 'spread alone is not net'
+          : `${summary.pricedCount - summary.costedCount} priced swap(s) still have no reported fee`,
       summary.netSats !== null && summary.netSats < 0 ? 'c-loss' : null,
     ),
     figure(
       'withdrawn',
-      data.withdrawals.sentCount === 0 ? 'none' : sats(data.withdrawals.debitSats),
-      data.withdrawals.sentCount === 0
-        ? 'no sent operator withdrawals in this view'
-        : `${data.withdrawals.sentCount} sent, including ${sats(data.withdrawals.feeSats)} sat in fees`,
+      withdrawalError ? 'unknown' : data.withdrawals.sentCount === 0 ? 'none' : sats(withdrawalFloorSats),
+      withdrawalError
+        ? `withdrawal journal unavailable: ${withdrawalError}`
+        : data.withdrawals.sentCount === 0
+          ? 'no sent operator withdrawals in this view'
+          : `${data.withdrawals.sentCount} sent, including ${sats(data.withdrawals.feeSats)} sat in reported fees` +
+            (unreportedWithdrawals > 0 ? `; ${unreportedWithdrawals} has no reported fee, so this is a minimum` : ''),
     ),
     figure(
       'checkpoint gaps',
-      String(balance.gaps.length),
-      balance.gaps.length === 0 ? 'cadence is continuous' : 'intervals have no checkpoint',
+      checkpointError ? 'unknown' : String(balance.gaps.length),
+      checkpointError
+        ? 'checkpoint history unavailable'
+        : balance.gaps.length === 0
+          ? 'cadence is continuous'
+          : 'intervals have no checkpoint',
       balance.gaps.length > 0 ? 'c-risk' : null,
     ),
     figure(
       'incomplete checkpoints',
-      String(balance.incompleteCount),
-      balance.incompleteCount === 0 ? 'all samples are usable' : 'a rail could not be read',
+      checkpointError ? 'unknown' : String(balance.incompleteCount),
+      checkpointError
+        ? 'checkpoint history unavailable'
+        : balance.incompleteCount === 0
+          ? 'all samples are usable'
+          : 'a rail could not be read',
       balance.incompleteCount > 0 ? 'c-risk' : null,
     ),
   )
@@ -4495,6 +4525,15 @@ const reconExplanation = (data) =>
           h('br'),
           h('b', 'Failed to read: '),
           data.coverage.failed.map((entry) => `${entry.corridor} (${entry.reason})`).join('; '),
+          '.',
+        )
+      : null,
+    (data.coverage.failedSections ?? []).length > 0
+      ? h(
+          'span',
+          h('br'),
+          h('b', 'Unavailable: '),
+          data.coverage.failedSections.map((failure) => `${failure.section} (${failure.reason})`).join('; '),
           '.',
         )
       : null,
@@ -4535,6 +4574,8 @@ const checkpointRow = (checkpoint, baselineAt) =>
   )
 
 const checkpointTable = (data) => {
+  const failure = sectionFailure(data, 'checkpoints')
+  if (failure) return h('p.banner', `Checkpoint history unavailable: ${failure}`)
   const rows = [...data.balance.checkpoints].reverse()
   const baselineAt = data.balance.checkpoints[0]?.at ?? null
   const table = (subset) =>
@@ -4574,26 +4615,30 @@ const checkpointGapPanel = (data) =>
   h(
     'section.panel',
     h('h2', 'Checkpoint gaps'),
-    data.balance.gaps.length === 0
-      ? h('p.muted', 'No gap longer than two checkpoint intervals in this view.')
-      : h(
-          'table',
-          h('thead', h('tr', h('th', 'from'), h('th', 'to'), h('th.right', 'gap'))),
-          h(
-            'tbody',
-            data.balance.gaps.map((gap) =>
-              h(
-                'tr',
-                h('td', reconTime(gap.from)),
-                h('td', reconTime(gap.to)),
-                h('td.right', h('span.at-risk', duration(gap.seconds))),
+    sectionFailure(data, 'checkpoints')
+      ? h('p.banner', `Checkpoint history unavailable: ${sectionFailure(data, 'checkpoints')}`)
+      : data.balance.gaps.length === 0
+        ? h('p.muted', 'No gap longer than two checkpoint intervals in this view.')
+        : h(
+            'table',
+            h('thead', h('tr', h('th', 'from'), h('th', 'to'), h('th.right', 'gap'))),
+            h(
+              'tbody',
+              data.balance.gaps.map((gap) =>
+                h(
+                  'tr',
+                  h('td', reconTime(gap.from)),
+                  h('td', reconTime(gap.to)),
+                  h('td.right', h('span.at-risk', duration(gap.seconds))),
+                ),
               ),
             ),
           ),
-        ),
   )
 
 const incomingTable = (data) => {
+  const failure = sectionFailure(data, 'checkpoints')
+  if (failure) return h('p.banner', `Checkpoint history unavailable: ${failure}`)
   const rows = [...data.balance.incoming].reverse()
   if (rows.length === 0) return h('p.muted', 'No checkpoint increases in this view.')
   return h(
@@ -4628,6 +4673,8 @@ const incomingTable = (data) => {
 }
 
 const withdrawalTable = (data) => {
+  const failure = sectionFailure(data, 'withdrawals')
+  if (failure) return h('p.banner', `Withdrawal journal unavailable: ${failure}`)
   if (data.withdrawals.records.length === 0) return h('p.muted', 'No operator withdrawals in this view.')
   return h(
     'table',
@@ -4666,6 +4713,8 @@ const withdrawalTable = (data) => {
 }
 
 const rebalanceTable = (data) => {
+  const failure = sectionFailure(data, 'rebalances')
+  if (failure) return h('p.banner', `Rebalance journal unavailable: ${failure}`)
   if (data.rebalances.records.length === 0) return h('p.muted', 'No rebalances in this view.')
   return h(
     'table',
@@ -4704,6 +4753,8 @@ const rebalanceTable = (data) => {
 }
 
 const swapEconomicsTable = (data) => {
+  const failure = sectionFailure(data, 'swaps')
+  if (failure) return h('p.banner', `Swap scan unavailable: ${failure}`)
   if (data.swaps.records.length === 0) return h('p.muted', 'No swaps settled in this view.')
   return h(
     'table',

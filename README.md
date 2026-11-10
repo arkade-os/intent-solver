@@ -215,14 +215,16 @@ engine-strict` returns `undefined`, and `.npmrc` does not set it), so an
   recovery of uncertain submissions.
 
   Its **p&l** tab (and `GET /api/pnl`) charts the spread kept by corridor, by
-  time to fill, and per cross-asset fill against the window's own mean rate,
-  which is how a drawn-out swap that priced against a stale view becomes
-  visible. The spread includes the quoted fee and market margin; only execution
-  fees a rail actually reported are deducted. Unreported chain and routing fees
-  remain missing rather than being treated as zero. The **reconciliation** tab
-  (`GET /api/reconciliation`) shows checkpoint balances and gaps, incoming
-  balance changes, operator withdrawals, rebalances, and per-swap economics.
-  The definitions and API are in [`docs/pnl.md`](docs/pnl.md).
+  time to fill, and rate drift per cross-asset fill against the window's mean
+  rate for the same leg. Zero drift means the fill matched its peers' mean; it
+  says nothing about whether that fill was profitable. Spread figures are gross
+  and do not deduct execution fees. A separate after-fee result deducts only
+  fees a rail actually reported, over the rows that have both figures.
+  Unreported chain and routing fees remain missing rather than being treated as
+  zero. The **reconciliation** tab (`GET /api/reconciliation`) shows checkpoint
+  balances and gaps, incoming balance changes, operator withdrawals,
+  rebalances, and per-swap economics. The definitions and API are in
+  [`docs/pnl.md`](docs/pnl.md).
 
   `admin.host` chooses that bind, and defaults to `127.0.0.1` — which is the
   whole of the console's access control. Setting it to `0.0.0.0` publishes an
