@@ -467,10 +467,9 @@ export const registerPnlRoutes = (app: Hono, deps: AdminDeps): void => {
     const ledger = ledgerResult.status === 'fulfilled' ? ledgerResult.value : emptyCheckpointLedger(scope)
     const records = [...scanned.records].sort((a, b) => b.settledAt - a.settledAt || a.id.localeCompare(b.id))
     const summary = summarise(records, window.since, window.until)
-    const since = ledger.observedFrom ?? window.since
     const [withdrawalResult, rebalanceResult] = await Promise.allSettled([
-      deps.services.adminStore.listOperatorWithdrawals(ledger.scope, since),
-      deps.services.rebalanceStore?.checkpointTransfers(since) ?? Promise.resolve([]),
+      deps.services.adminStore.listOperatorWithdrawals(ledger.scope, window.since),
+      deps.services.rebalanceStore?.checkpointTransfers(window.since) ?? Promise.resolve([]),
     ])
     const withdrawals = withdrawalResult.status === 'fulfilled' ? withdrawalResult.value : []
     const rebalances = rebalanceResult.status === 'fulfilled' ? rebalanceResult.value : []
@@ -522,14 +521,17 @@ export const registerPnlRoutes = (app: Hono, deps: AdminDeps): void => {
         sentCount: sentWithdrawals.length,
         amountSats: sentWithdrawals.reduce((total, withdrawal) => total + withdrawal.amountSats, 0),
         feeSats: sentWithdrawals.reduce((total, withdrawal) => total + (withdrawal.feeSats ?? 0), 0),
-        debitSats: sentWithdrawals.reduce((total, withdrawal) => total + (withdrawal.debitSats ?? 0), 0),
+        debitSats: sentWithdrawals.reduce(
+          (total, withdrawal) => total + (withdrawal.debitSats ?? withdrawal.amountSats),
+          0,
+        ),
         unreportedFeeCount: sentWithdrawals.filter((withdrawal) => withdrawal.feeSats === null).length,
         error: withdrawalResult.status === 'rejected' ? errorMessage(withdrawalResult.reason) : null,
       },
       rebalances: {
         records: rebalanceRows,
         completedCount: completedRebalances.length,
-        feeSats: completedRebalances.reduce((total, transfer) => total + transfer.feeSats, 0),
+        feeSats: completedRebalances.reduce((total, transfer) => total + (transfer.feeSats ?? 0), 0),
         error: rebalanceResult.status === 'rejected' ? errorMessage(rebalanceResult.reason) : null,
       },
       coverage: {
