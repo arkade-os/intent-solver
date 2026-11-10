@@ -4390,6 +4390,7 @@ const sectionFailure = (data, section) =>
 
 const reconAtomic = (raw, decimals) => {
   try {
+    if (decimals > 20) return String(raw)
     const value = BigInt(raw)
     const scale = 10n ** BigInt(decimals)
     const whole = value / scale
@@ -4419,6 +4420,7 @@ const reconFigures = (data) => {
   const summary = data.swaps.summary
   const checkpointCount = balance.windowCount ?? balance.checkpoints.length
   const openingPrecedesWindow = balance.observedFrom !== null && balance.observedFrom < data.window.since
+  const historyStartsInWindow = balance.windowFullyCovered === false && !balance.limited && balance.openingSats !== null
   const checkpointError = sectionFailure(data, 'checkpoints')
   const swapError = sectionFailure(data, 'swaps')
   const withdrawalError = sectionFailure(data, 'withdrawals')
@@ -4434,7 +4436,8 @@ const reconFigures = (data) => {
           ? 'opening or closing checkpoint is incomplete'
           : `${sats(balance.openingSats)} to ${sats(balance.closingSats)} sat` +
             (balance.limited ? `; oldest of the latest ${balance.limit} checkpoints, not the window start` : '') +
-            (openingPrecedesWindow ? '; opening checkpoint predates this window' : ''),
+            (openingPrecedesWindow ? '; opening checkpoint predates this window' : '') +
+            (historyStartsInWindow ? '; checkpoint history starts after this window began' : ''),
       balance.changeSats !== null && balance.changeSats < 0 ? 'c-loss' : null,
     ),
     figure(

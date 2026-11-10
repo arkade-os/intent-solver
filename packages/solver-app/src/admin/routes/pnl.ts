@@ -207,6 +207,7 @@ type CheckpointLedger = {
   closingSats: number | null
   changeSats: number | null
   limited: boolean
+  windowFullyCovered: boolean
   incompleteCount: number
 }
 
@@ -221,6 +222,7 @@ const emptyCheckpointLedger = (scope: string): CheckpointLedger => ({
   closingSats: null,
   changeSats: null,
   limited: false,
+  windowFullyCovered: false,
   incompleteCount: 0,
 })
 
@@ -268,6 +270,7 @@ const checkpointLedger = async (
     closingSats: closing?.totalSats ?? null,
     changeSats: satsDelta(opening?.totalSats ?? null, closing?.totalSats ?? null),
     limited: rows.length >= CHECKPOINT_LIMIT && (ascending[0]?.startedAt ?? Number.POSITIVE_INFINITY) > window.since,
+    windowFullyCovered: prior !== undefined && inWindow.length > 0,
     incompleteCount: checkpoints.filter((checkpoint) => !checkpoint.complete).length,
   }
 }
@@ -534,6 +537,7 @@ export const registerPnlRoutes = (app: Hono, deps: AdminDeps): void => {
         sentCount: sentWithdrawals.length,
         amountSats: sentWithdrawals.reduce((total, withdrawal) => total + withdrawal.amountSats, 0),
         feeSats: sentWithdrawals.reduce((total, withdrawal) => total + (withdrawal.feeSats ?? 0), 0),
+        // The amount alone is the floor when a fee is unreported.
         debitSats: sentWithdrawals.reduce(
           (total, withdrawal) => total + (withdrawal.debitSats ?? withdrawal.amountSats),
           0,

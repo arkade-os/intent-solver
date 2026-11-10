@@ -146,6 +146,7 @@ describe('GET /api/reconciliation', () => {
     expect(body.balance.changeSats).toBe(450)
     expect(body.balance.windowCount).toBe(5)
     expect(body.balance.incompleteCount).toBe(1)
+    expect(body.balance.windowFullyCovered).toBe(false)
     expect(body.balance.gaps.length).toBeGreaterThan(0)
     expect(body.balance.incoming).toEqual([expect.objectContaining({ amountSats: 500 })])
     expect(body.withdrawals.sentCount).toBe(1)
@@ -263,6 +264,7 @@ describe('GET /api/reconciliation', () => {
       openingSats: 9000,
       closingSats: 10400,
       changeSats: 1400,
+      windowFullyCovered: true,
     })
     expect(body.balance.incoming.map((row: { at: number }) => row.at)).toEqual([NOW - 3_000, NOW - 1_000])
     await adminStore.close()
