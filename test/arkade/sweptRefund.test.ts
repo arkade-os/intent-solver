@@ -3,7 +3,15 @@ import { schnorr } from '@noble/curves/secp256k1.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { ripemd160 } from '@noble/hashes/legacy.js'
 import { base64, hex } from '@scure/base'
-import { ArkAddress, Extension, MnemonicIdentity, MultisigTapscript, Transaction, VtxoScript } from '@arkade-os/sdk'
+import {
+  ArkAddress,
+  Extension,
+  MnemonicIdentity,
+  MultisigTapscript,
+  SettlementEventType,
+  Transaction,
+  VtxoScript,
+} from '@arkade-os/sdk'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import type { ArkadeContext, FundedOutput } from '@arkade-os/solver-arkade/arkade/wallet.js'
@@ -30,6 +38,7 @@ vi.mock('@arkade-os/sdk', async (importOriginal) => {
 
 const { refundSweptSwapScript, sweptRefundBatchHandler } =
   await import('@arkade-os/solver-arkade/arkade/sweptRefund.js')
+const { claimSweptSwapScript } = await import('@arkade-os/solver-arkade/arkade/sweptClaim.js')
 
 const key = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
 const p2tr = (program: Uint8Array): Uint8Array => Uint8Array.from([0x51, 0x20, ...program])
@@ -81,8 +90,12 @@ interface Stack {
 const stack = (options: {
   swept: readonly FundedOutput[]
   inputFee?: string
+  outputFee?: string
   floatCoins?: { txid: string; vout: number; value: number; isSwept?: boolean }[]
   duringFloatRead?: (reservations: ReturnType<typeof createReservationLedger>) => void
+  beforeStreamStarted?: () => Promise<void>
+  omitStreamStarted?: boolean
+  streamError?: Error
 }): Stack => {
   const virtualTxs = new Map<string, string>()
   for (const output of options.swept) virtualTxs.set(output.txid, sourceTx(output.vout, BigInt(output.value)).b64)
@@ -121,7 +134,7 @@ const stack = (options: {
           vtxoTreeExpiry: 180n,
           forfeitPubkey: hex.encode(SERVER),
           forfeitAddress: 'bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080',
-          fees: { intentFee: { offchainInput: options.inputFee ?? '', offchainOutput: '' } },
+          fees: { intentFee: { offchainInput: options.inputFee ?? '', offchainOutput: options.outputFee ?? '' } },
         }),
         registerIntent: async (intent: { proof: string }) => {
           registered.push(intent)
@@ -129,7 +142,11 @@ const stack = (options: {
         },
         getEventStream: (_signal: AbortSignal, subscribed: string[]) => {
           topics.push(subscribed)
-          return (async function* () {})()
+          return (async function* () {
+            await options.beforeStreamStarted?.()
+            if (options.streamError) throw options.streamError
+            if (!options.omitStreamStarted) yield { type: SettlementEventType.StreamStarted, id: 'stream-1' }
+          })()
         },
       },
       indexerProvider: {
@@ -144,6 +161,84 @@ const stack = (options: {
 
 const proofOf = (registered: { proof: string }[]): InstanceType<typeof Transaction> =>
   Transaction.fromPSBT(base64.decode(registered.at(-1)!.proof))
+
+describe('swept claim intent fees', () => {
+  it('prices the change output at its actual amount', async () => {
+    const swept: FundedOutput[] = [{ txid: sourceTx(0, 1976n).id, vout: 0, value: 1976 }]
+    const feeCoin = { txid: sourceTx(9, 50_000n).id, vout: 9, value: 50_000 }
+    const { ctx, registered } = stack({ swept, outputFee: 'amount * 0.01', floatCoins: [feeCoin] })
+
+    await claimSweptSwapScript(ctx, swapScript(), swept, new Uint8Array(32).fill(7), 1976)
+
+    expect(proofOf(registered).getOutput(1).amount).toBe(49_485n)
+  })
+
+  it('prices the swept input from its mint time', async () => {
+    const swept: FundedOutput[] = [
+      { txid: sourceTx(0, 1976n).id, vout: 0, value: 1976, createdAt: new Date(86_400_000) },
+    ]
+    const feeCoin = { txid: sourceTx(9, 50_000n).id, vout: 9, value: 50_000 }
+    const { ctx, registered } = stack({ swept, inputFee: 'birth / 86400.0', floatCoins: [feeCoin] })
+
+    await claimSweptSwapScript(ctx, swapScript(), swept, new Uint8Array(32).fill(7), 1976)
+
+    expect(proofOf(registered).getOutput(1).amount).toBe(49_999n)
+  })
+})
+
+describe('swept claim event subscription', () => {
+  const swept: FundedOutput[] = [{ txid: sourceTx(0, 1976n).id, vout: 0, value: 1976 }]
+
+  it('waits for the stream acknowledgment before registering the intent', async () => {
+    let acknowledge!: () => void
+    const streamReady = new Promise<void>((resolve) => {
+      acknowledge = resolve
+    })
+    const { ctx, registered, topics } = stack({ swept, beforeStreamStarted: () => streamReady })
+    const prepared = vi.fn(async () => undefined)
+    const claim = claimSweptSwapScript(
+      ctx,
+      swapScript(),
+      swept,
+      new Uint8Array(32).fill(7),
+      1976,
+      undefined,
+      undefined,
+      prepared,
+    )
+
+    await vi.waitFor(() => expect(topics).toHaveLength(1))
+    expect(registered).toHaveLength(0)
+    expect(prepared).not.toHaveBeenCalled()
+    acknowledge()
+    await expect(claim).resolves.toBe('commitment-txid')
+    expect(prepared).toHaveBeenCalledOnce()
+    expect(registered).toHaveLength(1)
+  })
+
+  it.each([
+    {
+      name: 'closes without an acknowledgment',
+      options: { omitStreamStarted: true },
+      message: 'subscription was acknowledged',
+    },
+    {
+      name: 'fails before an acknowledgment',
+      options: { streamError: new Error('stream unavailable') },
+      message: 'stream unavailable',
+    },
+  ])('$name', async ({ options, message }) => {
+    const { ctx, registered } = stack({ swept, ...options })
+    const prepared = vi.fn(async () => undefined)
+
+    await expect(
+      claimSweptSwapScript(ctx, swapScript(), swept, new Uint8Array(32).fill(7), 1976, undefined, undefined, prepared),
+    ).rejects.toThrow(message)
+    expect(prepared).not.toHaveBeenCalled()
+    expect(registered).toHaveLength(0)
+    expect(ctx.reservations.reserved().size).toBe(0)
+  })
+})
 
 describe('refundSweptSwapScript builds an intent the covenant can satisfy', () => {
   beforeEach(() => {
@@ -228,6 +323,28 @@ describe('refundSweptSwapScript builds an intent the covenant can satisfy', () =
     // What arkd prices: proof inputs minus outputs. 1% of each input here.
     const fee = BigInt(feeCoin.value) + 1976n - (1976n + change.amount!)
     expect(fee).toBeGreaterThanOrEqual(BigInt(Math.floor(50_000 * 0.01)) + BigInt(Math.floor(1976 * 0.01)))
+  })
+
+  it('prices the change output at its actual amount', async () => {
+    const swept: FundedOutput[] = [{ txid: sourceTx(0, 1976n).id, vout: 0, value: 1976 }]
+    const feeCoin = { txid: sourceTx(9, 50_000n).id, vout: 9, value: 50_000 }
+    const { ctx, registered } = stack({ swept, outputFee: 'amount * 0.01', floatCoins: [feeCoin] })
+
+    await refundSweptSwapScript(ctx, 'http://emulator', swapScript(), swept, CLIENT_REFUND)
+
+    expect(proofOf(registered).getOutput(2).amount).toBe(49_485n)
+  })
+
+  it('prices a swept input using its mint time', async () => {
+    const swept: FundedOutput[] = [
+      { txid: sourceTx(0, 1976n).id, vout: 0, value: 1976, createdAt: new Date(86_400_000) },
+    ]
+    const feeCoin = { txid: sourceTx(9, 50_000n).id, vout: 9, value: 50_000 }
+    const { ctx, registered } = stack({ swept, inputFee: 'birth / 86400.0', floatCoins: [feeCoin] })
+
+    await refundSweptSwapScript(ctx, 'http://emulator', swapScript(), swept, CLIENT_REFUND)
+
+    expect(proofOf(registered).getOutput(2).amount).toBe(49_999n)
   })
 
   it("subscribes to the fee coin's outpoint, the topic arkd routes its connector under", async () => {

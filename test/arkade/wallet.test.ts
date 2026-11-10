@@ -45,6 +45,7 @@ vi.mock('@arkade-os/sdk', async (importOriginal) => {
 // hoisting semantics.
 const {
   claimSwapScript,
+  claimSwapScriptDetailed,
   finalizePendingClaim,
   finalizePendingRefund,
   refundSwapScript,
@@ -493,7 +494,7 @@ describe('a lockup sprayed with outputs anyone could have paid in', () => {
 
   it('claims at most the cap, taking the most valuable outputs', async () => {
     arkadeSubmitTx.mockClear()
-    await claimSwapScript(arkadeCtx(), baseScript(), SPRAYED, PREIMAGE, CLAIM_DEST)
+    const result = await claimSwapScriptDetailed(arkadeCtx(), baseScript(), SPRAYED, PREIMAGE, CLAIM_DEST)
     const [arkadeTxB64, checkpointsB64] = arkadeSubmitTx.mock.calls[0] as [string, string[]]
     const vouts = spentVouts(checkpointsB64)
 
@@ -501,6 +502,8 @@ describe('a lockup sprayed with outputs anyone could have paid in', () => {
     expect(vouts).toContain(0)
     expect(Math.min(...vouts.filter((vout) => vout !== 0))).toBe(6)
     expect(Transaction.fromPSBT(base64.decode(arkadeTxB64)).getOutput(0).amount).toBe(KEPT_TOTAL)
+    expect(result.inputsActuallySubmitted.map(({ vout }) => vout)).toEqual(vouts)
+    expect(result.txid).toBe(Transaction.fromPSBT(base64.decode(arkadeTxB64)).id)
   })
 
   it('refunds without the receiver at most the cap, paying only what it spent', async () => {
@@ -532,10 +535,11 @@ describe('a lockup sprayed with outputs anyone could have paid in', () => {
     const expiring = { txid: FUNDING.id, vout: 0, value: 50_000, expiresAt: Math.floor(Date.now() / 1000) + 60 }
     const healthy = { txid: FUNDING.id, vout: 1, value: 1_000 }
 
-    await claimSwapScript(arkadeCtx(), baseScript(), [expiring, healthy], PREIMAGE, CLAIM_DEST)
+    const result = await claimSwapScriptDetailed(arkadeCtx(), baseScript(), [expiring, healthy], PREIMAGE, CLAIM_DEST)
     const [arkadeTxB64, checkpointsB64] = arkadeSubmitTx.mock.calls[0] as [string, string[]]
     expect(spentVouts(checkpointsB64)).toEqual([1])
     expect(Transaction.fromPSBT(base64.decode(arkadeTxB64)).getOutput(0).amount).toBe(1_000n)
+    expect(result.inputsActuallySubmitted).toEqual([healthy])
 
     await expect(claimSwapScript(arkadeCtx(), baseScript(), [expiring], PREIMAGE, CLAIM_DEST)).rejects.toThrow(/expir/)
   })

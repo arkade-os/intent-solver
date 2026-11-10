@@ -547,3 +547,42 @@ export const startUnilateralExit = (
   deps: UnilateralExitDeps,
   plan: UnilateralExitPlan,
 ): Promise<UnilateralExitOutcome<ExitPackage>> => runExit(deps, plan, (opts) => deps.exit.prepare(opts))
+
+export const prepareUnrolledClaim = async (
+  deps: UnilateralExitDeps,
+  plan: UnilateralExitPlan,
+  outpoint: ExitOutpoint,
+): Promise<ExitPackage> => {
+  if (plan.role !== 'receiver' || plan.leaf !== 'unilateralClaim' || plan.preimage === null) {
+    throw new Error(`swap ${plan.swapId}: only its receiver may prepare an unrolled claim`)
+  }
+  await armContractForExit(deps, plan)
+  const opts: ExitOptions = { ...deps.options, mode: 'graph', vtxos: [outpoint] }
+  const expected = `${outpoint.txid}:${outpoint.vout}`
+  const quote = await deps.exit.estimate(opts)
+  if (
+    quote.vtxos.length !== 1 ||
+    quote.vtxos[0]?.outpoint !== expected ||
+    assertExitMatchesPlan(plan, quote.vtxos).length > 0 ||
+    quote.totals.fundingRequiredSats !== 0 ||
+    quote.totals.txCount !== 1
+  ) {
+    throw new Error(`swap ${plan.swapId}: unrolled claim is not a single funded-output sweep`)
+  }
+  const pkg = await deps.exit.prepare(opts)
+  const sweep = pkg.steps[0]
+  if (
+    pkg.vtxos.length !== 1 ||
+    pkg.vtxos[0]?.outpoint !== expected ||
+    assertExitMatchesPlan(plan, pkg.vtxos).length > 0 ||
+    pkg.steps.length !== 1 ||
+    sweep?.kind !== 'sweep' ||
+    sweep.vtxo !== expected ||
+    sweep.dependsOnTxid !== outpoint.txid ||
+    pkg.totals.fundingRequiredSats !== 0 ||
+    pkg.sweepAddress !== deps.options.sweepAddress
+  ) {
+    throw new Error(`swap ${plan.swapId}: prepared unrolled claim changed its outpoint or destination`)
+  }
+  return pkg
+}

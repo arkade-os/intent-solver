@@ -75,7 +75,7 @@ describe('.github/e2e-groups.json', () => {
     expect(
       blockTyped.map((group) => group.name).sort(),
       'each block-typed group is a stack of its own; add one only for a file that cannot share',
-    ).toEqual(['lifecycle', 'swept-refund'])
+    ).toEqual(['lifecycle', 'swept-refund', 'unrolled-claim'])
   })
 
   it('asks for covclaimd wherever a file needs it', () => {

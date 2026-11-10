@@ -197,6 +197,7 @@ class FakeLn {
 
 interface FakeArkade extends ArkadeOps {
   lockups: FundedOutput[]
+  sweptLockups: FundedOutput[]
   /**
    * Whether the script's outputs are PROVABLY spent — set independently of
    * {@link lockups} going empty, because the two facts are exactly what the
@@ -229,6 +230,7 @@ const fakeArkade = (): FakeArkade => {
     },
     hrp: 'ark',
     lockups: [],
+    sweptLockups: [],
     lockupsSpent: false,
     claimCalls: [],
     refundCalls: [],
@@ -241,6 +243,10 @@ const fakeArkade = (): FakeArkade => {
       arkade.claimCalls.push({ rowId: row.id, outputs, preimage })
       return 'claim-txid'
     },
+    claimDetailed: async (row, outputs, preimage) => ({
+      txid: await arkade.claim(row, outputs, preimage),
+      inputsActuallySubmitted: outputs,
+    }),
     refund: async (row, outputs) => {
       arkade.refundCalls.push({ rowId: row.id, outputs })
       return 'refund-txid'
@@ -279,6 +285,54 @@ const quoted = async () => {
   const outcome = await service.quote(INVOICE, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
   if (!outcome.accepted) throw new Error(`fixture quote refused: ${outcome.reason}`)
   return outcome
+}
+
+const batchClaimFake = () => {
+  const calls: { rowId: string; outputs: FundedOutput[]; preimage: string; expectedSats: number }[] = []
+  const deleteCalls: string[] = []
+  let pending = false
+  let crashAfterCommitment = false
+  arkade.findSweptLockups = async () => arkade.sweptLockups
+  arkade.findLockupOutpoints = async () =>
+    [...arkade.lockups, ...arkade.sweptLockups].map((output) => ({
+      txid: output.txid,
+      vout: output.vout,
+      value: output.value,
+      spent: false,
+      unrolled: false,
+    }))
+  arkade.findClaimPreimage = async () => null
+  arkade.deleteSweptClaim = async (deleteProof) => {
+    deleteCalls.push(deleteProof)
+  }
+  arkade.verifySweptClaim = async (journal) =>
+    pending || !journal.commitmentTxid
+      ? { status: 'pending' }
+      : { status: 'claimed', commitmentTxid: journal.commitmentTxid }
+  arkade.claimSwept = async (row, outputs, preimage, expectedSats, onRegistered, onCommitmentValidated, onPrepared) => {
+    calls.push({ rowId: row.id, outputs: [...outputs], preimage, expectedSats })
+    const proofTxid = 'a'.repeat(64)
+    const commitmentTxid = 'b'.repeat(64)
+    const deleteProof = 'ZGVsZXRl'
+    const intentId = `batch-${calls.length}`
+    await onPrepared?.({ proofTxid, deleteProof })
+    await onRegistered({ intentId, proofTxid, deleteProof })
+    await onCommitmentValidated({
+      intentId,
+      proofTxid,
+      deleteProof,
+      commitmentTxid,
+      payoutOutpoints: outputs.map(({ value }, vout) => ({ txid: 'c'.repeat(64), vout, value })),
+    })
+    if (crashAfterCommitment) throw new Error('process stopped after batch commitment')
+    return commitmentTxid
+  }
+  return {
+    calls,
+    deleteCalls,
+    setPending: (value: boolean) => (pending = value),
+    setCrashAfterCommitment: (value: boolean) => (crashAfterCommitment = value),
+  }
 }
 
 describe('the solver spread', () => {
@@ -1096,7 +1150,7 @@ describe('tick: refusals before money moves', () => {
     )
   })
 
-  describe("the lockup's batch expiry is a deadline too", () => {
+  describe('without batch claim support, the lockup expiry still bounds payment', () => {
     it('caps the route so the HTLC ends a margin before the lockup is swept', async () => {
       const outcome = await quoted()
       const expiresAt = clock + 2 * 24 * 3600
@@ -1184,6 +1238,396 @@ describe('tick: refusals before money moves', () => {
         expect(row.state).toBe('refused')
         expect(ln.payCalls).toHaveLength(0)
       })
+    })
+  })
+
+  describe('batch claims for swept lockups', () => {
+    const first = { txid: '1'.repeat(64), vout: 0, value: AMOUNT }
+    const second = { txid: '2'.repeat(64), vout: 0, value: AMOUNT / 2 }
+    const third = { txid: '3'.repeat(64), vout: 0, value: AMOUNT / 2 }
+
+    const claimingAdopted = async (outputs: FundedOutput[]) => {
+      const { swap } = await quoted()
+      await store.transition(swap.id, 'quoted', 'funded', {
+        lockup_value: AMOUNT,
+        lockup_outpoints: JSON.stringify(outputs.map(({ txid, vout, value }) => ({ txid, vout, value }))),
+      })
+      await store.transition(swap.id, 'funded', 'paying', { idempotency_key: 'batch-test' })
+      await store.transition(swap.id, 'paying', 'paid', { payment_id: 'pay-1' })
+      await store.transition(swap.id, 'paid', 'claiming', { preimage: 'cc'.repeat(32) })
+      return store.get(swap.id)
+    }
+
+    it('pays a funded output whose remaining lifetime is shorter than the route', async () => {
+      batchClaimFake()
+      const { swap } = await quoted()
+      arkade.lockups = [{ ...first, expiresAt: clock + 60 }]
+      ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
+
+      const row = await service.tick(swap.id)
+      expect(row.state).toBe('paid')
+      expect(ln.payCalls).toHaveLength(1)
+      expect(ln.payCalls[0]!.maxCltvBlocks * SECONDS_PER_BLOCK).toBeGreaterThan(60)
+      expect(row.lockupOutpoints).toContain(first.txid)
+    })
+
+    it('claims a swept output in a batch after the Lightning preimage arrives', async () => {
+      const batch = batchClaimFake()
+      const outcome = await service.quote(FORGED.invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+      if (!outcome.accepted) throw new Error(`quote refused: ${outcome.reason}`)
+      arkade.lockups = [{ ...first, expiresAt: clock + 60 }]
+      ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
+      expect((await service.tick(outcome.swap.id)).state).toBe('paid')
+
+      arkade.lockups = []
+      arkade.sweptLockups = [first]
+      ln.payments.set('pay-1', { id: 'pay-1', status: 'succeeded', preimage: FORGED_PREIMAGE })
+      const row = await service.tick(outcome.swap.id)
+
+      expect(row.state).toBe('claimed')
+      expect(row.claimArkTxid).toBe('b'.repeat(64))
+      expect(batch.calls).toEqual([
+        { rowId: row.id, outputs: [first], preimage: FORGED_PREIMAGE, expectedSats: AMOUNT },
+      ])
+      expect(JSON.parse(row.claimBatch!)).toMatchObject([{ fundingOutpoints: [first], commitmentTxid: 'b'.repeat(64) }])
+      expect(arkade.claimCalls).toHaveLength(0)
+    })
+
+    it('recovers a finalized batch after a crash without registering another claim', async () => {
+      const batch = batchClaimFake()
+      const row = await claimingAdopted([first])
+      arkade.sweptLockups = [first]
+      batch.setCrashAfterCommitment(true)
+
+      await expect(service.tick(row.id)).rejects.toThrow('process stopped after batch commitment')
+      expect((await store.get(row.id)).claimBatch).toContain('b'.repeat(64))
+      batch.setCrashAfterCommitment(false)
+      service = new SendSwapService({
+        store,
+        ln,
+        arkade,
+        limits: { minSats: 500, maxSats: 10_000 },
+        invoicePrefix: 'bc',
+        maxExposedSats: 5_000,
+        totalCommitted: () => store.committedSats(),
+        admission: new AdmissionControl(),
+        now: () => clock,
+      })
+
+      const done = await service.tick(row.id)
+      expect(done.state).toBe('claimed')
+      expect(batch.calls).toHaveLength(1)
+      expect(done.claimArkTxid).toBe('b'.repeat(64))
+    })
+
+    it('claims only the adopted swept and spendable outpoints in a mixed lockup', async () => {
+      const batch = batchClaimFake()
+      const row = await claimingAdopted([second, third])
+      arkade.lockups = [third, { txid: '4'.repeat(64), vout: 0, value: 1 }]
+      arkade.sweptLockups = [second]
+
+      const done = await service.tick(row.id)
+      expect(done.state).toBe('claimed')
+      expect(batch.calls[0]).toMatchObject({ outputs: [second], expectedSats: AMOUNT / 2 })
+      expect(arkade.claimCalls).toMatchObject([{ outputs: [third] }])
+      expect(done.claimBatch).toContain(second.txid)
+      expect(done.claimArkTxid).toBe('claim-txid')
+    })
+
+    it('claims only adopted spendable outputs when no batch is needed', async () => {
+      batchClaimFake()
+      const row = await claimingAdopted([first])
+      const later = { txid: '4'.repeat(64), vout: 0, value: 1 }
+      arkade.lockups = [first, later]
+      arkade.findLockupOutpoints = async () => [
+        { ...first, spent: false, unrolled: false },
+        { ...later, spent: false, unrolled: true },
+      ]
+      const unrolledCalls: string[] = []
+      arkade.claimUnrolled = async (_row, output) => {
+        unrolledCalls.push(output.txid)
+        return { kind: 'waiting' }
+      }
+      await store.patch(row.id, {
+        unrolled_claim: JSON.stringify({ [`${later.txid}:0`]: { kind: 'pending', record: {} } }),
+      })
+
+      const done = await service.tick(row.id)
+      expect(done.state).toBe('claimed')
+      expect(arkade.claimCalls).toMatchObject([{ outputs: [first] }])
+      expect(unrolledCalls).toHaveLength(0)
+    })
+
+    it('keeps a pending unrolled claim active at the refund deadline', async () => {
+      batchClaimFake()
+      const row = await claimingAdopted([first])
+      arkade.findLockupOutpoints = async () => [{ ...first, spent: false, unrolled: true }]
+      arkade.claimUnrolled = async function () {
+        expect(this).toBe(arkade)
+        return { kind: 'waiting' }
+      }
+      clock = row.refundLocktime + 1
+
+      expect((await service.tick(row.id)).state).toBe('claiming')
+      expect((await store.get(row.id)).failureReason).toBeNull()
+    })
+
+    it('does not credit an input the wallet omitted when it rechecked expiry', async () => {
+      batchClaimFake()
+      const row = await claimingAdopted([first])
+      arkade.lockups = [first]
+      arkade.claimDetailed = async () => ({ txid: 'claim-txid', inputsActuallySubmitted: [] })
+
+      await expect(service.tick(row.id)).rejects.toThrow(`lockup output(s) ${first.txid}:0 not yet collected`)
+      expect((await store.get(row.id)).state).toBe('claiming')
+    })
+
+    it('waits for a too-young output to sweep and then batch-claims it', async () => {
+      const batch = batchClaimFake()
+      const row = await claimingAdopted([first])
+      arkade.lockups = [{ ...first, expiresAt: clock + 60 }]
+
+      await expect(service.tick(row.id)).rejects.toThrow(`lockup output(s) ${first.txid}:0 not yet collected`)
+      arkade.lockups = []
+      arkade.sweptLockups = [first]
+      expect((await service.tick(row.id)).state).toBe('claimed')
+      expect(batch.calls).toHaveLength(1)
+      expect(arkade.claimCalls).toHaveLength(0)
+    })
+
+    it('does not mark a mixed lockup claimed when the other adopted output disappears', async () => {
+      batchClaimFake()
+      const row = await claimingAdopted([second, third])
+      arkade.sweptLockups = [second]
+
+      await expect(service.tick(row.id)).rejects.toThrow(`lockup output(s) ${third.txid}:0 not yet collected`)
+      expect((await store.get(row.id)).state).toBe('claiming')
+      expect((await store.get(row.id)).claimBatch).toContain(second.txid)
+      expect(arkade.claimCalls).toHaveLength(0)
+    })
+
+    it('refuses payment when an adopted lockup was spent and another deposit has the same value', async () => {
+      batchClaimFake()
+      const { swap } = await quoted()
+      await store.transition(swap.id, 'quoted', 'funded', {
+        lockup_value: AMOUNT,
+        lockup_outpoints: JSON.stringify([first]),
+      })
+      arkade.lockups = [{ txid: '5'.repeat(64), vout: 0, value: AMOUNT }]
+
+      const row = await service.tick(swap.id)
+      expect(row.state).toBe('refused')
+      expect(ln.payCalls).toHaveLength(0)
+    })
+
+    it('keeps the expiry cap on legacy funded rows without adopted outpoints', async () => {
+      batchClaimFake()
+      const { swap } = await quoted()
+      await store.transition(swap.id, 'quoted', 'funded', { lockup_value: AMOUNT })
+      arkade.lockups = [{ ...first, expiresAt: clock + 60 }]
+
+      const row = await service.tick(swap.id)
+      expect(row.state).toBe('refused')
+      expect(ln.payCalls).toHaveLength(0)
+    })
+
+    it('collects another adopted output while an earlier batch is pending', async () => {
+      const batch = batchClaimFake()
+      const row = await claimingAdopted([second, third])
+      arkade.sweptLockups = [second]
+      batch.setPending(true)
+      expect((await service.tick(row.id)).state).toBe('claiming')
+
+      arkade.sweptLockups = [second, third]
+      expect((await service.tick(row.id)).state).toBe('claiming')
+      expect(batch.calls.map((call) => call.outputs)).toEqual([[second], [third]])
+      expect(JSON.parse((await store.get(row.id)).claimBatch!)).toHaveLength(2)
+    })
+
+    it('keeps a registered journal when delete succeeds but selection may have raced it', async () => {
+      const batch = batchClaimFake()
+      const row = await claimingAdopted([first])
+      arkade.sweptLockups = [first]
+      arkade.claimSwept = async (_row, _outputs, _preimage, _expected, onRegistered) => {
+        await onRegistered({ intentId: 'registered-only', proofTxid: 'a'.repeat(64), deleteProof: 'ZGVsZXRl' })
+        throw new Error('stream ended before batch commitment')
+      }
+      await expect(service.tick(row.id)).rejects.toThrow('stream ended')
+
+      clock += 8 * 60
+      await expect(service.tick(row.id)).rejects.toThrow('cancellation is unverified')
+      expect(batch.deleteCalls).toEqual(['ZGVsZXRl'])
+      expect(batch.calls).toHaveLength(0)
+      const pending = await store.get(row.id)
+      expect(pending.state).toBe('claiming')
+      expect(pending.claimBatch).toContain('registered-only')
+    })
+
+    it('keeps an unknown registration reserved after an ambiguous delete response', async () => {
+      const batch = batchClaimFake()
+      const row = await claimingAdopted([first])
+      arkade.sweptLockups = [first]
+      arkade.claimSwept = async (_row, _outputs, _preimage, _expected, _registered, _committed, onPrepared) => {
+        await onPrepared?.({ proofTxid: 'a'.repeat(64), deleteProof: 'ZGVsZXRl' })
+        throw new Error('registration reply lost')
+      }
+      await expect(service.tick(row.id)).rejects.toThrow('registration reply lost')
+      expect(JSON.parse((await store.get(row.id)).claimBatch!)).toMatchObject([{ intentId: null }])
+
+      expect((await service.tick(row.id)).state).toBe('claiming')
+      expect(batch.calls).toHaveLength(0)
+      expect(batch.deleteCalls).toHaveLength(0)
+      clock += 8 * 60
+      await expect(service.tick(row.id)).rejects.toThrow('cancellation is unverified')
+      expect(batch.deleteCalls).toEqual(['ZGVsZXRl'])
+      expect(batch.calls).toHaveLength(0)
+      const pending = await store.get(row.id)
+      expect(pending.state).toBe('claiming')
+      expect(JSON.parse(pending.claimBatch!)).toMatchObject([{ intentId: null }])
+    })
+
+    it('keeps a prepared batch reserved when its cancellation cannot be confirmed', async () => {
+      const batch = batchClaimFake()
+      const row = await claimingAdopted([first])
+      arkade.sweptLockups = [first]
+      arkade.claimSwept = async (_row, _outputs, _preimage, _expected, _registered, _committed, onPrepared) => {
+        await onPrepared?.({ proofTxid: 'a'.repeat(64), deleteProof: 'ZGVsZXRl' })
+        throw new Error('registration reply lost')
+      }
+      await expect(service.tick(row.id)).rejects.toThrow('registration reply lost')
+      clock += 8 * 60
+      arkade.deleteSweptClaim = async () => {
+        throw new Error('delete intent unavailable')
+      }
+
+      await expect(service.tick(row.id)).rejects.toThrow('delete intent unavailable')
+      expect((await store.get(row.id)).state).toBe('claiming')
+      expect(JSON.parse((await store.get(row.id)).claimBatch!)).toMatchObject([{ intentId: null }])
+      expect(batch.calls).toHaveLength(0)
+    })
+
+    it('escalates a batch whose cancellation keeps failing PAST the refund deadline', async () => {
+      const batch = batchClaimFake()
+      const row = await claimingAdopted([first])
+      arkade.sweptLockups = [first]
+      arkade.claimSwept = async (_row, _outputs, _preimage, _expected, onRegistered) => {
+        await onRegistered({ intentId: 'registered-only', proofTxid: 'a'.repeat(64), deleteProof: 'ZGVsZXRl' })
+        throw new Error('stream ended before batch commitment')
+      }
+      await expect(service.tick(row.id)).rejects.toThrow('stream ended')
+      arkade.deleteSweptClaim = async () => {
+        throw new Error('delete intent unavailable')
+      }
+      clock = row.refundLocktime + 1
+
+      const done = await service.tick(row.id)
+      expect(done.state).toBe('stuck')
+      expect(done.failureReason).toContain('delete intent unavailable')
+      expect(done.failureReason).toContain('unilateralClaim')
+      expect(done.claimBatch).toContain('registered-only')
+      expect(batch.calls).toHaveLength(0)
+    })
+
+    it('collects another swept output when cancellation of the first batch fails', async () => {
+      const batch = batchClaimFake()
+      const row = await claimingAdopted([second, third])
+      arkade.sweptLockups = [second]
+      const healthyClaim = arkade.claimSwept!
+      arkade.claimSwept = async (_row, _outputs, _preimage, _expected, onRegistered) => {
+        await onRegistered({ intentId: 'registered-only', proofTxid: 'a'.repeat(64), deleteProof: 'ZGVsZXRl' })
+        throw new Error('stream ended')
+      }
+      await expect(service.tick(row.id)).rejects.toThrow('stream ended')
+
+      arkade.claimSwept = healthyClaim
+      arkade.deleteSweptClaim = async () => {
+        throw new Error('delete intent unavailable')
+      }
+      arkade.sweptLockups = [second, third]
+      clock += 8 * 60
+      await expect(service.tick(row.id)).rejects.toThrow('delete intent unavailable')
+      expect(batch.calls.map((call) => call.outputs)).toEqual([[third]])
+      expect(JSON.parse((await store.get(row.id)).claimBatch!)).toHaveLength(2)
+      expect((await store.get(row.id)).state).toBe('claiming')
+    })
+
+    it('retains a registered journal when cancellation or exact recovery evidence is uncertain', async () => {
+      const batch = batchClaimFake()
+      const row = await claimingAdopted([first])
+      arkade.sweptLockups = [first]
+      arkade.claimSwept = async (_row, _outputs, _preimage, _expected, onRegistered) => {
+        await onRegistered({ intentId: 'registered-only', proofTxid: 'a'.repeat(64), deleteProof: 'ZGVsZXRl' })
+        throw new Error('stream ended before batch commitment')
+      }
+      await expect(service.tick(row.id)).rejects.toThrow('stream ended')
+      clock += 8 * 60
+      arkade.deleteSweptClaim = async () => {
+        throw new Error('delete intent unavailable')
+      }
+
+      await expect(service.tick(row.id)).rejects.toThrow('delete intent unavailable')
+      expect((await store.get(row.id)).state).toBe('claiming')
+      expect((await store.get(row.id)).claimBatch).toContain('registered-only')
+      expect(batch.calls).toHaveLength(0)
+    })
+
+    it('keeps the journal when deletion succeeds but the swept input is no longer visible', async () => {
+      const batch = batchClaimFake()
+      const row = await claimingAdopted([first])
+      arkade.sweptLockups = [first]
+      arkade.claimSwept = async (_row, _outputs, _preimage, _expected, onRegistered) => {
+        await onRegistered({ intentId: 'registered-only', proofTxid: 'a'.repeat(64), deleteProof: 'ZGVsZXRl' })
+        throw new Error('stream ended before batch commitment')
+      }
+      await expect(service.tick(row.id)).rejects.toThrow('stream ended')
+      clock += 8 * 60
+      arkade.sweptLockups = []
+
+      await expect(service.tick(row.id)).rejects.toThrow('cancellation is unverified')
+      expect(batch.deleteCalls).toEqual(['ZGVsZXRl'])
+      expect((await store.get(row.id)).claimBatch).toContain('registered-only')
+    })
+
+    it('reports an unverified commitment after timeout without cancelling it', async () => {
+      const batch = batchClaimFake()
+      const row = await claimingAdopted([first])
+      arkade.sweptLockups = [first]
+      batch.setPending(true)
+      expect((await service.tick(row.id)).state).toBe('claiming')
+
+      clock += 8 * 60
+      await expect(service.tick(row.id)).rejects.toThrow('awaits exact payout evidence')
+      expect((await store.get(row.id)).state).toBe('claiming')
+      expect(batch.deleteCalls).toHaveLength(0)
+      expect(batch.calls).toHaveLength(1)
+    })
+
+    it('rejects a batch receipt whose funding is outside the adopted outpoints', async () => {
+      const batch = batchClaimFake()
+      const row = await claimingAdopted([first])
+      arkade.sweptLockups = [first]
+      batch.setPending(true)
+      expect((await service.tick(row.id)).state).toBe('claiming')
+      const kept = JSON.parse((await store.get(row.id)).claimBatch!)
+      kept[0].fundingOutpoints = [{ txid: second.txid, vout: 0, value: AMOUNT }]
+      await store.patch(row.id, { claim_batch: JSON.stringify(kept) })
+
+      const done = await service.tick(row.id)
+      expect(done.state).toBe('stuck')
+      expect(done.failureReason).toContain('does not match adopted')
+    })
+
+    it('never marks a journaled batch claimed from an empty indexer view', async () => {
+      const batch = batchClaimFake()
+      const row = await claimingAdopted([first])
+      arkade.sweptLockups = [first]
+      batch.setPending(true)
+      expect((await service.tick(row.id)).state).toBe('claiming')
+
+      arkade.sweptLockups = []
+      expect((await service.tick(row.id)).state).toBe('claiming')
+      expect((await store.get(row.id)).claimArkTxid).toBeNull()
+      expect(batch.calls).toHaveLength(1)
     })
   })
 
@@ -2486,7 +2930,7 @@ describe('tick: failure and recovery', () => {
       l1.confirmed.add('u2:1')
       const done = await service.tick(row.id)
       expect(done.state).toBe('stuck')
-      expect(done.failureReason).toContain('u1:0 spent on L1 by a transaction that is not ours')
+      expect(done.failureReason).toContain('u1:0 spent on L1 by an unrecognized transaction; destination needs review')
       expect(done.failureReason).toContain('unilateralClaim')
     })
   })
