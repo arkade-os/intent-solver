@@ -37,7 +37,7 @@ import { requestRestart } from '../../ops/restart.js'
 import type { Services } from '../../ops/services.js'
 import type { AdminDeps } from '../server.js'
 import { clampLimit } from '@arkade-os/solver-core/core/page.js'
-import { log, messageOf } from '@arkade-os/solver-core/util/poll.js'
+import { json, log, messageOf } from '@arkade-os/solver-core/util/poll.js'
 import { CORRIDORS, isCorridor, type Corridor } from '@arkade-os/solver-core/core/corridorPolicy.js'
 
 export type ActionTier = 'safe' | 'armed'
@@ -878,6 +878,15 @@ export const registerActionRoutes = (app: Hono, deps: AdminDeps): void => {
       // the reason, and the action WAS attempted, unlike a confirm failure.
       return c.json({ ok: false, error: 'action_failed', message: messageOf(error) }, 500)
     }
+    // bigint-safe: plain stringify throws on one, a 500 AFTER the action moved money.
+    // A cyclic or `undefined` result would do the same, so it is reported, not thrown.
+    let rendered: string
+    try {
+      rendered = json(result) ?? 'null'
+    } catch (error) {
+      rendered = json({ unserializable: messageOf(error) })
+    }
+    const safeResult = JSON.parse(rendered) as unknown
     if (
       name === 'pool-mint' &&
       result &&
@@ -885,11 +894,11 @@ export const registerActionRoutes = (app: Hono, deps: AdminDeps): void => {
       'refused' in result &&
       typeof result.refused === 'string'
     ) {
-      await record('error', JSON.stringify(result).slice(0, 500))
-      return c.json({ ok: false, error: 'pool_mint_refused', message: result.refused, result }, 409)
+      await record('error', rendered.slice(0, 500))
+      return c.json({ ok: false, error: 'pool_mint_refused', message: result.refused, result: safeResult }, 409)
     }
-    await record('ok', JSON.stringify(result).slice(0, 500))
-    return c.json({ ok: true, result })
+    await record('ok', rendered.slice(0, 500))
+    return c.json({ ok: true, result: safeResult })
   })
 
   app.get('/api/audit', async (c) => {

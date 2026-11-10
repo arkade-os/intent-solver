@@ -1530,6 +1530,22 @@ describe('OnchainSendSwapService', () => {
     expect(done.claimArkTxid).toBeNull()
   })
 
+  it('parks a legacy row with no recorded outpoints instead of claiming off one provable spend', async () => {
+    const row = await claiming()
+    // A row written before `lockup_outpoints` existed has no adopted set, so the
+    // leftover check cannot prove the whole multi-output lockup was collected.
+    await deps.driver.run('UPDATE send_onchain_swap SET lockup_outpoints = NULL WHERE id = ?', [row.id])
+    deps.outputs.delete(row.pkScript)
+    deps.spent.add(row.pkScript)
+    deps.arkade.findLockupOutpoints = async () => [{ txid: 'lockup-tx', vout: 0, spent: true, unrolled: false }]
+    deps.arkade.findClaimPreimage = async () => P
+
+    const done = await service.tick(row.id)
+    expect(done.state).toBe('stuck')
+    expect(done.claimArkTxid).toBeNull()
+    expect(done.failureReason).toContain('no claim txid')
+  })
+
   it('still parks when our claim landed but another adopted output is uncollected', async () => {
     const outcome = await service.quote({
       paymentHash,

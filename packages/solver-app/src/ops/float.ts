@@ -81,15 +81,18 @@ export const lockupDeadlinesOf = async (services: Services): Promise<readonly Lo
   // The READER set, deliberately — never `services.corridors`. That one holds
   // only corridors with a live SERVICE, and a corridor an operator switched off
   // still has funded lockups whose deadlines this guard exists to respect.
-  const rows = await liveLockupRows(services.readers)
+  const [rows, solverKey, manager] = await Promise.all([
+    liveLockupRows(services.readers),
+    services.arkade.identity.xOnlyPublicKey(),
+    services.arkade.wallet.getContractManager(),
+  ])
   // Both sides of this comparison are written by the same `hex.encode`, so it
   // is an exact match rather than a normalised one. A send leg's value comes
   // from the trader over the wire and could arrive in any case, but a
   // mismatch there yields `false` — which is already the right answer for a
   // send leg — so case can only ever confirm the correct outcome, never
   // invert it.
-  const solverPubkey = hex.encode(await services.arkade.identity.xOnlyPublicKey())
-  const manager = await services.arkade.wallet.getContractManager()
+  const solverPubkey = hex.encode(solverKey)
   // `getContracts`, never `getContractsWithVtxos`: that one re-syncs against
   // the indexer (every call, with `vtxoSyncMaxAgeMs` unset) and rethrows a
   // non-retryable answer. Only the stored params are read here, already local.
@@ -433,9 +436,11 @@ const settleBoardedSats = async (services: Services, warn: (message: string) => 
   if (utxos.length === 0) return null
 
   const vtxoManager = await wallet.getVtxoManager()
-  const expired = await vtxoManager.getExpiredBoardingUtxos()
-  const info = await wallet.arkProvider.getInfo()
-  const address = await wallet.getAddress()
+  const [expired, info, address] = await Promise.all([
+    vtxoManager.getExpiredBoardingUtxos(),
+    wallet.arkProvider.getInfo(),
+    wallet.getAddress(),
+  ])
 
   const plan = planBoardingSettle({
     boarding: utxos,

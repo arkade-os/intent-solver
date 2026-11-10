@@ -493,6 +493,47 @@ describe('a preimage scan the node refuses must not strand the solver’s tokens
   )
 })
 
+describe('a failing claim scan beside the depth probe', () => {
+  it('reaches the tick rather than going unhandled', async () => {
+    const unhandled: unknown[] = []
+    const record = (error: unknown): void => void unhandled.push(error)
+    process.on('unhandledRejection', record)
+    try {
+      const proofError = new EvmClaimVerificationError('claim trace exceeded its verification bound')
+      const onTickError = vi.fn()
+      const { store, service } = await build({
+        evm: {
+          isLocked: vi.fn().mockResolvedValue(true),
+          // Not `vi.fn().mockRejectedValue`: that tracks settled results, observing
+          // the rejection this asserts is unobserved.
+          findClaimPreimage: async () => {
+            throw proofError
+          },
+          isLockedAt: async () => {
+            await new Promise((resolve) => setTimeout(resolve, 10))
+            return true
+          },
+        } as never,
+        blockHeight: vi.fn().mockResolvedValue(21_000_000),
+        timelockHeight: vi.fn().mockResolvedValue(21_000_000),
+        onTickError,
+      })
+      await store.transition('swap-1', 'quoted', 'funded')
+      await store.transition('swap-1', 'funded', 'locking_evm', { evm_lock_txid: '0xtx' })
+      await store.transition('swap-1', 'locking_evm', 'awaiting_claim')
+
+      await service.tickAll()
+      await new Promise((resolve) => setTimeout(resolve, 20))
+
+      expect(unhandled).toEqual([])
+      expect(onTickError).toHaveBeenCalledWith('swap-1', proofError)
+      await store.close()
+    } finally {
+      process.off('unhandledRejection', record)
+    }
+  })
+})
+
 describe('a quarantined receiver invariant closes only the public live row', () => {
   it.each(['start', 'reconcile'] as const)(
     'alerts once, releases live capacity, and preserves late-lock monitoring from %s',

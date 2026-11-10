@@ -111,7 +111,9 @@ beforeAll(async () => {
   if ((await arkade.ctx.wallet.getBalance()).available < AMOUNT_SATS) return
 
   rpc = evmRpc()
-  // Earlier refund cases advance Anvil time; this file needs honest wall-clock cutoff checks.
+  // Earlier cases both advance Anvil time and, on current Anvil, walk it one
+  // second per block. `anvil_reset` restores process start, not wall time, so
+  // the next block is stamped at now before any cutoff check.
   await rpc('anvil_reset', [])
   await rpc('anvil_setAutomine', [true])
   await pinAnvilClock(rpc)

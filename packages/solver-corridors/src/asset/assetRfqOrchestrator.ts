@@ -47,6 +47,7 @@ import {
 import type { Price } from '@arkade-os/solver-core/core/priceFeed.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { askApprovalFor, type ApprovalCheck } from '@arkade-os/solver-core/core/approvalGate.js'
+import { capture, unwrap } from '@arkade-os/solver-core/util/capture.js'
 import { createSerialiser, type Serialiser } from '@arkade-os/solver-core/util/serialise.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
@@ -273,6 +274,7 @@ export class AssetRfqSwapService {
       return { accepted: false, reason: 'rate_limited' }
     }
 
+    const inventoryP = capture(this.deps.balance())
     let feed: Price
     try {
       feed = await this.deps.fetchPrice(market.feedUrl, market.pricePath)
@@ -297,7 +299,7 @@ export class AssetRfqSwapService {
     // `tick` runs the same gate again immediately before spending. Quoting a
     // payout the float already cannot cover would commit this solver to a price
     // it knows it cannot honour.
-    const available = await this.deps.balance()
+    const available = unwrap(await inventoryP)
     if ((available.get(pair.to) ?? 0n) < resolved.toAmount) {
       return { accepted: false, reason: 'insufficient_inventory' }
     }
@@ -426,13 +428,16 @@ export class AssetRfqSwapService {
    * spend it — § 9's action-time gate.
    */
   private async whenFunded(row: AssetRfqSwapRow): Promise<void> {
-    const deposit = await this.deps.depositAt(row.offerPkScript, row.fromAssetId)
+    const [deposit, available] = await Promise.all([
+      this.deps.depositAt(row.offerPkScript, row.fromAssetId),
+      this.deps.balance(),
+    ])
     const decision = evaluateAssetFill({
       toAmount: row.toAmount,
       toAssetId: row.toAssetId,
       fromAmount: row.fromAmount,
       depositedAmount: deposit ? heldOf(deposit, row.fromAssetId) : 0n,
-      available: await this.deps.balance(),
+      available,
       now: this.now(),
       validUntil: row.validUntil,
     })

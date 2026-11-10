@@ -417,21 +417,14 @@ export class ReceiveSwapService {
       return { accepted: false, reason: 'invalid_payout_address' }
     }
 
-    if (await store.findLiveByPaymentHash(request.paymentHash)) {
-      return { accepted: false, reason: 'duplicate_swap' }
-    }
-    // The same check against the OTHER corridors' stores, BEFORE the mint
-    // side effect below: a hash live anywhere else is spoken for.
-    for (const peer of this.deps.peerStores ?? []) {
-      if (await peer.findLiveByPaymentHash(request.paymentHash)) {
-        return { accepted: false, reason: 'duplicate_swap' }
-      }
-    }
-    // A coupling is receive-then-send, so a live send on this hash is a conflict.
-    // Refuse before createHoldInvoice so a declined quote leaves no hold invoice.
-    if (await this.deps.coupledSendStore?.findLiveByPaymentHash(request.paymentHash)) {
-      return { accepted: false, reason: 'duplicate_swap' }
-    }
+    // Before the mint below: a hash live anywhere is spoken for, and a declined
+    // quote must not leave a hold invoice.
+    const spokenFor = await Promise.all([
+      store.findLiveByPaymentHash(request.paymentHash),
+      ...(this.deps.peerStores ?? []).map((peer) => peer.findLiveByPaymentHash(request.paymentHash)),
+      ...(this.deps.coupledSendStore ? [this.deps.coupledSendStore.findLiveByPaymentHash(request.paymentHash)] : []),
+    ])
+    if (spokenFor.some(Boolean)) return { accepted: false, reason: 'duplicate_swap' }
     if (request.requesterKey !== undefined && !this.quoteLimiter.take(request.requesterKey)) {
       return { accepted: false, reason: 'rate_limited' }
     }
@@ -893,7 +886,7 @@ export class ReceiveSwapService {
     }
 
     // Re-polled HERE, immediately before funding — not trusted from whenQuoted's
-    // observation, which can be minutes stale. Only 'armed' status's E is
+    // observation, nor sampled beside the adoption scan. Only 'armed' status's E is
     // trusted; any other status (cancelled, or a backend quirk) is treated as
     // "nothing real to fund against" for this gate.
     const fresh = await ln.getHoldState(row.paymentHash)
@@ -1073,8 +1066,15 @@ export class ReceiveSwapService {
     const { store, arkade } = this.deps
     const observeStarted = performance.now()
     const outputs = await arkade.findLockups(row.pkScript)
+    if (row.arkadeLockupTxid === null || row.arkadeLockupVout === null) {
+      await store.fail(row.id, 'funded', 'funded state with no funded outpoint recorded')
+      return false
+    }
+    // Gate on the RECORDED funded output, not an empty script: dust on the public
+    // lockup address must not defer claim detection to the refund deadline.
+    const fundedSpendable = outputs.some((o) => o.txid === row.arkadeLockupTxid && o.vout === row.arkadeLockupVout)
 
-    if (outputs.length > 0) {
+    if (fundedSpendable) {
       // The refund-deadline check comes BEFORE the reveal attempt, not after:
       // revealToCovclaimd can throw (covclaimd unreachable), and if that check
       // ran second it would never be reached while covclaimd stays down —
@@ -1082,7 +1082,7 @@ export class ReceiveSwapService {
       // is that the provider's own refund path must open regardless of
       // whether settlement is still going well. Past the deadline there is
       // also no point revealing any more: `whenRefunding`'s own recheck still
-      // catches a claim that lands right at the boundary.
+      // catches a claim that lands right at the boundary. Read AFTER the lockup.
       if (await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip)) {
         return store.transition(row.id, 'funded', 'refunding', {})
       }
@@ -1094,14 +1094,6 @@ export class ReceiveSwapService {
       return false
     }
 
-    // Nothing spendable left — most likely covclaimd's claim landed.
-    if (row.arkadeLockupTxid === null || row.arkadeLockupVout === null) {
-      // Unreachable by construction: `funded` is only ever entered with these
-      // set (whenArmed polls until it finds them). Guarded so a bad edit
-      // fails loudly rather than reading null silently.
-      await store.fail(row.id, 'funded', 'funded state with no funded outpoint recorded')
-      return false
-    }
     // ALL historical outpoints, not just the recorded one. The recorded
     // outpoint is this row's refund target, but it is not guaranteed to be the
     // one that got claimed — a row adopted out of a crashed funding attempt
@@ -1283,7 +1275,10 @@ export class ReceiveSwapService {
     }
 
     const outputs = await arkade.findLockups(row.pkScript)
-    if (outputs.length === 0) {
+    // Keyed on the RECORDED funded output, not an empty script: dust must not be
+    // refunded into terminal `refunded` while a claim trails the `late` recheck.
+    const fundedOutput = outputs.find((o) => o.txid === row.arkadeLockupTxid && o.vout === row.arkadeLockupVout)
+    if (!fundedOutput) {
       // Our own refund, finalized (one-shot) or accepted before its response reached us. A throw keeps
       // the row refunding, so the sweep retries a finalize arkd refused.
       const own = await arkade.finalizePendingRefund?.(receiveCovenantRowFor(row))
@@ -1306,7 +1301,11 @@ export class ReceiveSwapService {
       if (row.htlcExpiresAt !== null && this.now() < row.htlcExpiresAt) return false
       // Still nothing, and nothing left to collect. A human needs to look, same
       // posture the onchain leg takes for its own ambiguous-witness case.
-      await store.fail(row.id, 'refunding', 'lockup empty during refunding with no matching claim found; needs review')
+      await store.fail(
+        row.id,
+        'refunding',
+        'funded output gone during refunding with no matching claim found; needs review',
+      )
       return false
     }
 
