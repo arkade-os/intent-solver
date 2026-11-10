@@ -27,6 +27,22 @@ const swap = (over: { id: string; give: number; spread: number; cost?: number; c
     ...(over.cost === undefined ? {} : { realizedCostSats: over.cost }),
   })
 
+const nativeSwap = () =>
+  economicsOf({
+    id: 'native',
+    corridor: 'arkade:usdt->arkade:eurt',
+    state: 'filled',
+    phase: 'done',
+    quotedAt: T0 - 30,
+    settledAt: T0,
+    inbound: { assetId: 'usdt', amount: '1000000000', decimals: 6 },
+    outbound: { assetId: 'eurt', amount: '995000000', decimals: 6 },
+    nativePnl: [
+      { assetId: 'usdt', amount: '30000000', decimals: 6, source: 'input_flat_fee' },
+      { assetId: 'eurt', amount: '5000000', decimals: 6, source: 'output_spread' },
+    ],
+  })
+
 const report = (records: ReturnType<typeof swap>[], over: Partial<Parameters<typeof pnlReportLines>[0]> = {}) =>
   pnlReportLines({
     records,
@@ -129,6 +145,15 @@ describe('the corridor table', () => {
       .find((l) => l.includes('arkade:BTC->lightning:BTC'))!
     expect(line).toMatch(/\+300/)
     expect(line).toMatch(/\+200/)
+  })
+})
+
+describe('native asset P&L', () => {
+  it('prints each asset in its own units without a BTC conversion', () => {
+    const out = report([nativeSwap()])
+    expect(out).toContain('native   1 filled swap with a fee split; gross, no BTC conversion')
+    expect(out).toMatch(/usdt\s+\+30 input flat\s+0 output spread\s+\+30 total/)
+    expect(out).toMatch(/eurt\s+0 input flat\s+\+5 output spread\s+\+5 total/)
   })
 })
 

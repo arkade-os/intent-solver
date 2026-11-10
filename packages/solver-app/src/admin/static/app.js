@@ -3975,6 +3975,70 @@ const pnlToolbar = () =>
     ),
   )
 
+const nativeAmount = (amount, assetId, decimals) => {
+  const value = BigInt(amount)
+  const display = reconAtomic(value < 0n ? -value : value, Number.isSafeInteger(decimals) ? decimals : 0)
+  return h(
+    'span',
+    value > 0n ? '+' : value < 0n ? '−' : '',
+    display,
+    ' ',
+    assetId === null ? h('span.muted', 'BTC') : legNode(assetId),
+  )
+}
+
+const nativePnlBreakdown = (components) => {
+  if (!components || components.length === 0) return null
+  return h(
+    'div.faint',
+    'native fee revenue before execution fees: ',
+    components.map((component, index) => [
+      index === 0 ? null : ' / ',
+      component.source === 'input_flat_fee' ? 'input flat fee ' : 'output spread ',
+      nativeAmount(component.amount, component.assetId, component.decimals),
+    ]),
+  )
+}
+
+const nativePnlPanel = (nativePnl) => {
+  if (!nativePnl || nativePnl.assets.length === 0) return null
+  return h(
+    'section.panel',
+    h('h2', 'native P&L by asset'),
+    h(
+      'p.faint',
+      `${nativePnl.recordCount} filled swap${nativePnl.recordCount === 1 ? '' : 's'} with a recorded fee split. ` +
+        'These are gross fee amounts; execution fees are reported separately. ' +
+        'Each amount stays in the asset where it was charged, with no BTC conversion.',
+    ),
+    h(
+      'table',
+      h(
+        'thead',
+        h(
+          'tr',
+          h('th', 'asset'),
+          h('th.right', 'input flat fee'),
+          h('th.right', 'output spread'),
+          h('th.right', 'total'),
+        ),
+      ),
+      h(
+        'tbody',
+        ...nativePnl.assets.map((row) =>
+          h(
+            'tr',
+            h('td', row.assetId === null ? h('span.muted', 'BTC') : legNode(row.assetId)),
+            h('td.right', nativeAmount(row.inputFlatFee, row.assetId, row.decimals)),
+            h('td.right', nativeAmount(row.outputSpread, row.assetId, row.decimals)),
+            h('td.right', h('b', nativeAmount(row.total, row.assetId, row.decimals))),
+          ),
+        ),
+      ),
+    ),
+  )
+}
+
 const pnlFigures = (summary) =>
   h(
     'div.figures',
@@ -4025,7 +4089,9 @@ const pnlFigures = (summary) =>
     // Realized but not expressible in sats — an asset-to-asset fill. Shown only
     // when there are any, because on a sats-only deployment it is always zero
     // and a permanent zero teaches the reader to stop looking.
-    summary.unpricedCount > 0 ? figure('unpriced', String(summary.unpricedCount), 'cross-asset, see FX below') : null,
+    summary.unpricedCount > 0
+      ? figure('not in sats', String(summary.unpricedCount), 'native asset P&L is shown separately below')
+      : null,
   )
 
 // The headline caveat stays on screen; the paragraph behind it is one hover away.
@@ -4041,7 +4107,7 @@ const pnlBasis = (coverage) =>
     },
     h('b', coverage.basis === 'mixed' ? 'Some execution fees are included.' : 'Execution fees are not included.'),
     ' A swap keeps the spread between what it receives and delivers; that spread includes our fee and market margin. ',
-    'Only fees a rail actually reported are deducted.',
+    'Only fees a rail actually reported are deducted. Native asset revenue is never converted into BTC.',
     coverage.unmeasured.length > 0
       ? h('span', h('br'), h('b', 'Not measured: '), coverage.unmeasured.join(', '), ' — unknown, not zero.')
       : null,
@@ -4791,6 +4857,7 @@ const swapEconomicsTable = (data) => {
               h('span', ' / delivered '),
               reconLeg(record.outbound),
             ),
+            nativePnlBreakdown(record.nativePnl),
           ),
           h('td.right', record.grossSats === null ? h('span.faint', 'not in sats') : signedSats(record.grossSats)),
           h('td.right', record.quotedCostSats === null ? h('span.faint', 'not set') : sats(record.quotedCostSats)),
@@ -4860,6 +4927,7 @@ const pnlView = () => {
     pnlToolbar(),
     pnlBasis(data.coverage),
     pnlFigures(data.summary),
+    nativePnlPanel(data.summary.nativePnl),
     h(
       'section.panel',
       h('h2', 'cumulative spread kept'),

@@ -24,6 +24,25 @@ withdrawals, and rebalances.
   checkpoint movement is incoming balance, but checkpoints do not record the
   sender. The page therefore calls it incoming balance, not an external deposit.
 
+## Native asset P&L
+
+Asset quotes keep their fee revenue in the units where it was charged:
+
+- **Input flat fee** is charged in the FROM asset.
+- **Output spread** is earned in the TO asset.
+
+The P&L page and each reconciliation swap row report those amounts by asset. They
+do not convert them to BTC or combine different assets into one headline. A
+USDT/EURT swap can therefore report `+30 USDT` from the input flat fee and
+`+5 EURT` from the output spread as two separate facts.
+
+The split is written with the quote terms, so a later market configuration
+change cannot rewrite it. Rows quoted before this field shipped report no native
+split, so their fee revenue is unknown rather than zero.
+
+The native amounts are gross fee revenue before execution costs. A cost a rail
+actually reported remains separate in the **fee paid** column.
+
 ## Read this first: what is net and what is gross
 
 A figure is **net** only where a rail reported what execution actually cost.
@@ -75,8 +94,8 @@ is a number nobody can stand behind:
   deposit txid, a held-HTLC deadline, or — where no column records the client's
   side — its own lifecycle. Such a row is counted in `openCount`.
 - A realized fill that cannot be priced in sats — a genuine asset-to-asset one —
-  is excluded from the totals and counted in `unpricedCount`, so a stablecoin
-  book never reads as having made nothing.
+  is excluded from the sats totals and counted in `unpricedCount`. Its recorded
+  native fee components remain in `summary.nativePnl` and `record.nativePnl`.
 
 ## What a swap contributes
 
@@ -287,6 +306,11 @@ there is no generic deposit journal today.
 All three routes are read-only, like everything on the console but `actions.ts`,
 and they sit behind the same deployment assumption as the rest of this port: no
 authentication, a reverse proxy in front. See [runbook.md](./runbook.md).
+
+`GET /api/pnl` carries `summary.nativePnl.assets`, grouped by `assetId`, with
+`inputFlatFee`, `outputSpread`, and `total` as exact atomic-unit strings.
+`summary.nativePnl.recordCount` says how many realized swaps carried a native
+split. The values are never exchange-rate converted.
 
 ## From a terminal
 

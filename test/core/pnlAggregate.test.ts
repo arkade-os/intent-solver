@@ -65,6 +65,22 @@ const fx = (over: { id: string; at: number; give: number; get: string; took?: nu
     outbound: token(over.get),
   })
 
+const nativeAsset = (over: { id: string; at: number; usdtFee: string; eurtSpread: string }) =>
+  economicsOf({
+    id: over.id,
+    corridor: 'arkade:usdt->arkade:eurt',
+    state: 'filled',
+    phase: 'done',
+    quotedAt: over.at - 30,
+    settledAt: over.at,
+    inbound: token('1000000000', 'usdt'),
+    outbound: token('995000000', 'eurt'),
+    nativePnl: [
+      { assetId: 'usdt', amount: over.usdtFee, decimals: 6, source: 'input_flat_fee' },
+      { assetId: 'eurt', amount: over.eurtSpread, decimals: 6, source: 'output_spread' },
+    ],
+  })
+
 describe('summarise', () => {
   it('totals the priced rows and reports the volume they are a margin of', () => {
     const summary = summarise(
@@ -88,6 +104,25 @@ describe('summarise', () => {
     expect(summary.realizedCount).toBe(2)
     expect(summary.pricedCount).toBe(1)
     expect(summary.unpricedCount).toBe(1)
+  })
+
+  it('groups native P&L by asset without converting either leg', () => {
+    const summary = summarise(
+      [
+        nativeAsset({ id: 'a', at: T0, usdtFee: '30000000', eurtSpread: '5000000' }),
+        nativeAsset({ id: 'b', at: T0 + 1, usdtFee: '4000000', eurtSpread: '2000000' }),
+      ],
+      T0 - HOUR,
+      T0 + HOUR,
+    )
+    expect(summary.grossSats).toBe(0)
+    expect(summary.nativePnl).toEqual({
+      recordCount: 2,
+      assets: [
+        { assetId: 'eurt', decimals: 6, inputFlatFee: '0', outputSpread: '7000000', total: '7000000' },
+        { assetId: 'usdt', decimals: 6, inputFlatFee: '34000000', outputSpread: '0', total: '34000000' },
+      ],
+    })
   })
 
   it('reports what is gone separately from what was earned', () => {

@@ -19,6 +19,7 @@ import {
   assetRfqEnvStem,
   assetRfqReader,
 } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
+import { assetRfqEconomics } from '@arkade-os/solver-corridors/corridors/economics.js'
 
 const ASSET_A = `${'aa'.repeat(32)}0100`
 const PK_SCRIPT = `5120${'c'.repeat(64)}`
@@ -327,6 +328,40 @@ describe('park — the one lever that stops the sweep', () => {
 })
 
 describe('the read half', () => {
+  it('projects the native fee split only after a fill', async () => {
+    const { store } = await harness()
+    await store.insertQuote({
+      id: 'swap-1',
+      rfqId: RFQ_ID,
+      pair: BUY.pair,
+      fromAssetId: null,
+      fromAmount: 100_000_000n,
+      fromDecimals: 8,
+      fromFlatFee: 300n,
+      toAssetId: ASSET_A,
+      toAmount: 99_500_000_000n,
+      toDecimals: 6,
+      toSpread: 500_000_000n,
+      makerPkScript: PK_SCRIPT,
+      makerPublicKey: XONLY,
+      offerPkScript: `5120${'d'.repeat(64)}`,
+      offerAddress: 'ark1qoffer',
+      solverPubkey: 'e'.repeat(64),
+      validUntil: 2_000,
+    })
+    expect(assetRfqEconomics(await store.get('swap-1'), BUY).nativePnl).toEqual([])
+
+    await store.transition('swap-1', 'quoted', 'funded')
+    await store.transition('swap-1', 'funded', 'filling')
+    await store.transition('swap-1', 'filling', 'filled')
+
+    expect(assetRfqEconomics(await store.get('swap-1'), BUY).nativePnl).toEqual([
+      { assetId: null, amount: '300', decimals: 8, source: 'input_flat_fee' },
+      { assetId: ASSET_A, amount: '500000000', decimals: 6, source: 'output_spread' },
+    ])
+    await store.close()
+  })
+
   it('pages its own rows and no other corridor rows', async () => {
     const { store, service, corridor } = await harness()
     await corridor.quote(rfqRequest())
