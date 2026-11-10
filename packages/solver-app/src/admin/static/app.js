@@ -3976,14 +3976,22 @@ const pnlToolbar = () =>
   )
 
 const nativeAmount = (amount, assetId, decimals) => {
-  const value = BigInt(amount)
-  const display = reconAtomic(value < 0n ? -value : value, Number.isSafeInteger(decimals) ? decimals : 0)
+  const asset = assetId === null ? h('span.muted', 'BTC') : legNode(assetId)
+  let value
+  try {
+    value = BigInt(amount)
+  } catch {
+    return h('span.faint', String(amount), ' ', asset, ' (unreadable amount)')
+  }
+  const hasScale = Number.isSafeInteger(decimals) && decimals >= 0 && decimals <= 36
+  const display = reconAtomic(value < 0n ? -value : value, hasScale ? decimals : 0, 36)
   return h(
     'span',
     value > 0n ? '+' : value < 0n ? '−' : '',
     display,
     ' ',
-    assetId === null ? h('span.muted', 'BTC') : legNode(assetId),
+    asset,
+    hasScale ? null : ' (atomic units; decimals unknown)',
   )
 }
 
@@ -4454,9 +4462,9 @@ const reconTime = (at) => (at === null || at === undefined ? h('span.faint', 'un
 const sectionFailure = (data, section) =>
   (data.coverage.failedSections ?? []).find((failure) => failure.section === section)?.reason ?? null
 
-const reconAtomic = (raw, decimals) => {
+const reconAtomic = (raw, decimals, maxDecimals = 20) => {
   try {
-    if (decimals > 20) return String(raw)
+    if (decimals > maxDecimals) return String(raw)
     const value = BigInt(raw)
     const scale = 10n ** BigInt(decimals)
     const whole = value / scale

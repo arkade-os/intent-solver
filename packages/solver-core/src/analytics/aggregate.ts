@@ -333,27 +333,58 @@ const priced = (record: SwapEconomics): boolean => record.realized && record.gro
  */
 const costed = (record: SwapEconomics): boolean => priced(record) && record.realizedCostSats !== null
 
+const integerOf = (value: string): bigint | null => {
+  if (value.trim() === '') return null
+  try {
+    return BigInt(value)
+  } catch {
+    return null
+  }
+}
+
 const nativePnlOf = (records: readonly SwapEconomics[]): NativePnlSummary => {
   const totals = new Map<
     string,
-    { assetId: string | null; decimals: number | null; inputFlatFee: bigint; outputSpread: bigint }
+    {
+      assetId: string | null
+      decimals: number | null
+      scaleMismatch: boolean
+      inputFlatFee: bigint
+      outputSpread: bigint
+    }
   >()
   let recordCount = 0
 
   for (const record of records) {
     if (!record.realized || record.nativePnl.length === 0) continue
-    recordCount += 1
+    let counted = false
     for (const component of record.nativePnl) {
+      const amount = integerOf(component.amount)
+      if (amount === null) continue
       const key = component.assetId ?? 'btc'
       let total = totals.get(key)
       if (!total) {
-        total = { assetId: component.assetId, decimals: component.decimals, inputFlatFee: 0n, outputSpread: 0n }
+        total = {
+          assetId: component.assetId,
+          decimals: component.decimals,
+          scaleMismatch: false,
+          inputFlatFee: 0n,
+          outputSpread: 0n,
+        }
         totals.set(key, total)
       }
-      if (total.decimals === null) total.decimals = component.decimals
-      if (component.source === 'input_flat_fee') total.inputFlatFee += BigInt(component.amount)
-      else total.outputSpread += BigInt(component.amount)
+      if (!total.scaleMismatch) {
+        if (total.decimals === null) total.decimals = component.decimals
+        else if (component.decimals !== null && total.decimals !== component.decimals) {
+          total.decimals = null
+          total.scaleMismatch = true
+        }
+      }
+      if (component.source === 'input_flat_fee') total.inputFlatFee += amount
+      else if (component.source === 'output_spread') total.outputSpread += amount
+      counted = true
     }
+    if (counted) recordCount += 1
   }
 
   return {

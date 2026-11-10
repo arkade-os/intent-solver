@@ -125,6 +125,27 @@ describe('summarise', () => {
     })
   })
 
+  it('skips a malformed native component instead of failing the whole summary', () => {
+    const record = economicsOf({
+      id: 'malformed-native',
+      corridor: 'arkade:usdt->arkade:eurt',
+      state: 'filled',
+      phase: 'done',
+      quotedAt: T0 - 30,
+      settledAt: T0,
+      inbound: token('1000000000', 'usdt'),
+      outbound: token('995000000', 'eurt'),
+      nativePnl: [
+        { assetId: 'usdt', amount: 'not-a-number', decimals: 6, source: 'input_flat_fee' },
+        { assetId: 'eurt', amount: '5000000', decimals: 6, source: 'output_spread' },
+      ],
+    })
+    expect(summarise([record], T0 - HOUR, T0 + HOUR).nativePnl).toEqual({
+      recordCount: 1,
+      assets: [{ assetId: 'eurt', decimals: 6, inputFlatFee: '0', outputSpread: '5000000', total: '5000000' }],
+    })
+  })
+
   it('reports what is gone separately from what was earned', () => {
     const summary = summarise(
       [won({ id: 'a', at: T0, give: 100_300, spread: 300 }), lost({ id: 'x', at: T0, payout: 50_151 })],

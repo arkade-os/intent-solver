@@ -41,7 +41,7 @@ const bps = (value: number | null): string => (value === null ? '-' : `${value >
 
 const nativeAmount = (amount: string, decimals: number | null): string => {
   try {
-    if (decimals === null || !Number.isSafeInteger(decimals) || decimals < 0 || decimals > 20) return amount
+    if (decimals === null || !Number.isSafeInteger(decimals) || decimals < 0 || decimals > 36) return amount
     const value = BigInt(amount)
     const absolute = value < 0n ? -value : value
     const scale = 10n ** BigInt(decimals)
@@ -104,11 +104,14 @@ export const pnlReportLines = (input: PnlReportInput): string[] => {
         'with a fee split; gross, no BTC conversion',
     )
     for (const asset of summary.nativePnl.assets) {
+      const hasScale =
+        asset.decimals !== null && Number.isSafeInteger(asset.decimals) && asset.decimals >= 0 && asset.decimals <= 36
+      lines.push(`  asset  ${asset.assetId ?? 'BTC'}`)
       lines.push(
-        `  ${(asset.assetId ?? 'BTC').padEnd(34)}` +
-          `${nativeAmount(asset.inputFlatFee, asset.decimals).padStart(16)} input flat` +
-          `${nativeAmount(asset.outputSpread, asset.decimals).padStart(18)} output spread` +
-          `${nativeAmount(asset.total, asset.decimals).padStart(16)} total`,
+        `         input flat ${nativeAmount(asset.inputFlatFee, asset.decimals)}` +
+          ` / output spread ${nativeAmount(asset.outputSpread, asset.decimals)}` +
+          ` / total ${nativeAmount(asset.total, asset.decimals)}` +
+          (hasScale ? '' : ' (atomic units; scale unknown)'),
       )
     }
   }

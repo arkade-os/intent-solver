@@ -43,6 +43,24 @@ const nativeSwap = () =>
     ],
   })
 
+const nativeAtScale = (decimals: number) => {
+  const one = 10n ** BigInt(decimals)
+  return economicsOf({
+    id: `native-${decimals}`,
+    corridor: 'arkade:usdt->arkade:eurt',
+    state: 'filled',
+    phase: 'done',
+    quotedAt: T0 - 30,
+    settledAt: T0,
+    inbound: { assetId: 'usdt', amount: one.toString(), decimals },
+    outbound: { assetId: 'eurt', amount: one.toString(), decimals },
+    nativePnl: [
+      { assetId: 'usdt', amount: one.toString(), decimals, source: 'input_flat_fee' },
+      { assetId: 'eurt', amount: (one * 2n).toString(), decimals, source: 'output_spread' },
+    ],
+  })
+}
+
 const report = (records: ReturnType<typeof swap>[], over: Partial<Parameters<typeof pnlReportLines>[0]> = {}) =>
   pnlReportLines({
     records,
@@ -152,8 +170,32 @@ describe('native asset P&L', () => {
   it('prints each asset in its own units without a BTC conversion', () => {
     const out = report([nativeSwap()])
     expect(out).toContain('native   1 filled swap with a fee split; gross, no BTC conversion')
-    expect(out).toMatch(/usdt\s+\+30 input flat\s+0 output spread\s+\+30 total/)
-    expect(out).toMatch(/eurt\s+0 input flat\s+\+5 output spread\s+\+5 total/)
+    expect(out).toMatch(/asset\s+usdt\s+input flat \+30 \/ output spread 0 \/ total \+30/)
+    expect(out).toMatch(/asset\s+eurt\s+input flat 0 \/ output spread \+5 \/ total \+5/)
+  })
+
+  it('formats the highest supported market precisions as asset units', () => {
+    for (const decimals of [21, 36]) {
+      const out = report([nativeAtScale(decimals)])
+      expect(out).toMatch(/asset\s+usdt\s+input flat \+1 \/ output spread 0 \/ total \+1/)
+      expect(out).toMatch(/asset\s+eurt\s+input flat 0 \/ output spread \+2 \/ total \+2/)
+    }
+  })
+
+  it('labels an unknown scale instead of presenting atomic units as whole assets', () => {
+    const record = nativeSwap()
+    const withoutScale = economicsOf({
+      id: 'native-without-scale',
+      corridor: 'arkade:usdt->arkade:eurt',
+      state: 'filled',
+      phase: 'done',
+      quotedAt: T0 - 30,
+      settledAt: T0,
+      inbound: { assetId: 'usdt', amount: '1000000000', decimals: null },
+      outbound: { assetId: 'eurt', amount: '995000000', decimals: null },
+      nativePnl: record.nativePnl.map((component) => ({ ...component, decimals: null })),
+    })
+    expect(report([withoutScale])).toContain('(atomic units; scale unknown)')
   })
 })
 
