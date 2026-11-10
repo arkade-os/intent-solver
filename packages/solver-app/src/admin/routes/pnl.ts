@@ -34,7 +34,9 @@
 
 import type { Hono } from 'hono'
 import type { AdminDeps } from '../server.js'
+import type { OperatorWithdrawal } from '../db.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { balanceCheckpointScope, type BalanceCheckpoint } from '../../ops/balanceCheckpoints.js'
 import {
   DEFAULT_LEDGER_LIMIT,
   MAX_LEDGER_LIMIT,
@@ -75,6 +77,8 @@ const DEFAULT_WINDOW = '7d'
  * alongside, so a capped list is never mistaken for the whole set.
  */
 const MAX_RECORDS = 2_000
+const CHECKPOINT_LIMIT = 2_000
+const CHECKPOINT_CADENCE_SECONDS = 60
 
 /**
  * A bucket width narrow enough to show shape and wide enough to stay readable.
@@ -141,6 +145,117 @@ const bucketFrom = (raw: string | undefined, windowSeconds: number): { name: Buc
     throw new BadRequest(`unknown bucket '${raw}'; try one of ${Object.keys(BUCKETS).join(', ')}`)
   return { name, seconds }
 }
+
+const satsValue = (value: string | null | undefined): number | null => {
+  if (value === null || value === undefined) return null
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null
+}
+
+const satsDelta = (before: number | null, after: number | null): number | null =>
+  before === null || after === null ? null : after - before
+
+const onchainSats = (checkpoint: BalanceCheckpoint): number | null => {
+  if (!checkpoint.onchain) return null
+  const confirmed = satsValue(checkpoint.onchain.confirmedSats)
+  const unconfirmed = satsValue(checkpoint.onchain.unconfirmedSats)
+  return confirmed === null || unconfirmed === null ? null : confirmed + unconfirmed
+}
+
+const checkpointRailSats = (checkpoint: BalanceCheckpoint) => ({
+  arkadeSats: satsValue(checkpoint.arkade?.totalSats),
+  lightningSats: satsValue(checkpoint.lightningSats),
+  onchainSats: onchainSats(checkpoint),
+})
+
+const checkpointSummary = (checkpoint: BalanceCheckpoint, previous: BalanceCheckpoint | undefined) => {
+  const totalSats = satsValue(checkpoint.totalSats)
+  const previousTotalSats = satsValue(previous?.totalSats)
+  const rails = checkpointRailSats(checkpoint)
+  const previousRails = previous ? checkpointRailSats(previous) : null
+  const gapSeconds = previous ? Math.max(0, checkpoint.startedAt - previous.finishedAt) : null
+  return {
+    id: checkpoint.id,
+    at: checkpoint.startedAt,
+    finishedAt: checkpoint.finishedAt,
+    totalSats,
+    complete: totalSats !== null,
+    deltaSats: satsDelta(previousTotalSats, totalSats),
+    arkadeSats: rails.arkadeSats,
+    lightningSats: rails.lightningSats,
+    onchainSats: rails.onchainSats,
+    arkadeDeltaSats: satsDelta(previousRails?.arkadeSats ?? null, rails.arkadeSats),
+    lightningDeltaSats: satsDelta(previousRails?.lightningSats ?? null, rails.lightningSats),
+    onchainDeltaSats: satsDelta(previousRails?.onchainSats ?? null, rails.onchainSats),
+    errors: checkpoint.errors,
+    gapSeconds,
+    gap: gapSeconds !== null && gapSeconds > CHECKPOINT_CADENCE_SECONDS * 2,
+  }
+}
+
+const checkpointLedger = async (
+  deps: AdminDeps,
+  window: LedgerWindow & { label: string },
+): Promise<{
+  scope: string
+  checkpoints: ReturnType<typeof checkpointSummary>[]
+  gaps: { afterId: number; beforeId: number; from: number; to: number; seconds: number }[]
+  windowCount: number
+  observedFrom: number | null
+  observedTo: number | null
+  openingSats: number | null
+  closingSats: number | null
+  changeSats: number | null
+  limited: boolean
+  incompleteCount: number
+}> => {
+  const scope = balanceCheckpointScope(deps.services)
+  const rows = await deps.services.adminStore.listBalanceCheckpoints(scope, CHECKPOINT_LIMIT)
+  const ascending = [...rows].reverse()
+  let prior: BalanceCheckpoint | undefined
+  for (const checkpoint of ascending) {
+    if (checkpoint.startedAt >= window.since) break
+    prior = checkpoint
+  }
+  const inWindow = ascending.filter(
+    (checkpoint) => checkpoint.startedAt >= window.since && checkpoint.startedAt < window.until,
+  )
+  const selected = prior ? [prior, ...inWindow] : inWindow
+  const checkpoints = selected.map((checkpoint, index) => checkpointSummary(checkpoint, selected[index - 1]))
+  const gaps = checkpoints.flatMap((checkpoint, index) => {
+    if (index === 0 || checkpoint.gapSeconds === null || !checkpoint.gap) return []
+    const previous = checkpoints[index - 1]!
+    return [
+      {
+        afterId: previous.id,
+        beforeId: checkpoint.id,
+        from: previous.finishedAt,
+        to: checkpoint.at,
+        seconds: checkpoint.gapSeconds,
+      },
+    ]
+  })
+  const opening = checkpoints[0]
+  const closing = checkpoints.at(-1)
+  return {
+    scope,
+    checkpoints,
+    gaps,
+    windowCount: inWindow.length,
+    observedFrom: opening?.at ?? null,
+    observedTo: closing?.finishedAt ?? null,
+    openingSats: opening?.totalSats ?? null,
+    closingSats: closing?.totalSats ?? null,
+    changeSats: satsDelta(opening?.totalSats ?? null, closing?.totalSats ?? null),
+    limited: rows.length >= CHECKPOINT_LIMIT && (ascending[0]?.startedAt ?? Number.POSITIVE_INFINITY) > window.since,
+    incompleteCount: checkpoints.filter((checkpoint) => !checkpoint.complete).length,
+  }
+}
+
+const withdrawalRow = (withdrawal: OperatorWithdrawal) => ({
+  ...withdrawal,
+  debitSats: withdrawal.feeSats === null ? null : withdrawal.amountSats + withdrawal.feeSats,
+})
 
 interface Scan {
   records: SwapEconomics[]
@@ -312,6 +427,89 @@ export const registerPnlRoutes = (app: Hono, deps: AdminDeps): void => {
         unmeasured: scanned.unmeasured,
         failed: scanned.failed,
         truncated: scanned.truncated,
+      },
+    })
+  })
+
+  app.get('/api/reconciliation', async (c) => {
+    let window: LedgerWindow & { label: string }
+    try {
+      window = windowFrom(c.req.query(), now())
+    } catch (error) {
+      if (!(error instanceof BadRequest)) throw error
+      return c.json({ error: 'bad_request', message: error.message }, 400)
+    }
+
+    const [scanned, ledger] = await Promise.all([scan(deps, window), checkpointLedger(deps, window)])
+    const records = [...scanned.records].sort((a, b) => b.settledAt - a.settledAt || a.id.localeCompare(b.id))
+    const summary = summarise(records, window.since, window.until)
+    const since = ledger.observedFrom ?? window.since
+    const [withdrawals, rebalances] = await Promise.all([
+      deps.services.adminStore.listOperatorWithdrawals(ledger.scope, since),
+      deps.services.rebalanceStore?.checkpointTransfers(since) ?? Promise.resolve([]),
+    ])
+    const withdrawalRows = withdrawals.filter((withdrawal) => withdrawal.createdAt < window.until).map(withdrawalRow)
+    const rebalanceRows = rebalances
+      .filter((transfer) => (transfer.chargedAt ?? transfer.createdAt) < window.until)
+      .map((transfer) => ({
+        id: transfer.id,
+        origin: transfer.origin,
+        poolId: transfer.poolId,
+        kind: transfer.deposit.kind,
+        state: transfer.state,
+        netSats: transfer.netSats,
+        debitSats: transfer.debitSats,
+        feeSats: transfer.feeSats,
+        creditedSats: transfer.creditedSats ?? null,
+        at: transfer.chargedAt ?? transfer.createdAt,
+        updatedAt: transfer.updatedAt,
+      }))
+
+    const sentWithdrawals = withdrawalRows.filter((withdrawal) => withdrawal.state === 'sent')
+    const completedRebalances = rebalanceRows.filter((transfer) => transfer.state === 'completed')
+    return c.json({
+      window: { since: window.since, until: window.until, label: window.label },
+      balance: {
+        ...ledger,
+        limit: CHECKPOINT_LIMIT,
+        cadenceSeconds: CHECKPOINT_CADENCE_SECONDS,
+        incoming: ledger.checkpoints
+          .filter((checkpoint) => (checkpoint.deltaSats ?? 0) > 0)
+          .map((checkpoint) => ({
+            id: checkpoint.id,
+            at: checkpoint.at,
+            amountSats: checkpoint.deltaSats,
+            arkadeSats: checkpoint.arkadeDeltaSats,
+            lightningSats: checkpoint.lightningDeltaSats,
+            onchainSats: checkpoint.onchainDeltaSats,
+          })),
+      },
+      swaps: {
+        summary,
+        records: records.slice(0, MAX_RECORDS),
+        matchedCount: records.length,
+        returnedCount: Math.min(records.length, MAX_RECORDS),
+        recordLimit: MAX_RECORDS,
+      },
+      withdrawals: {
+        records: withdrawalRows,
+        sentCount: sentWithdrawals.length,
+        amountSats: sentWithdrawals.reduce((total, withdrawal) => total + withdrawal.amountSats, 0),
+        feeSats: sentWithdrawals.reduce((total, withdrawal) => total + (withdrawal.feeSats ?? 0), 0),
+        debitSats: sentWithdrawals.reduce((total, withdrawal) => total + (withdrawal.debitSats ?? 0), 0),
+        unreportedFeeCount: sentWithdrawals.filter((withdrawal) => withdrawal.feeSats === null).length,
+      },
+      rebalances: {
+        records: rebalanceRows,
+        completedCount: completedRebalances.length,
+        feeSats: completedRebalances.reduce((total, transfer) => total + transfer.feeSats, 0),
+      },
+      coverage: {
+        measured: scanned.measured,
+        unmeasured: scanned.unmeasured,
+        failed: scanned.failed,
+        truncated: scanned.truncated,
+        basis: summary.costedCount === 0 ? 'gross' : 'mixed',
       },
     })
   })

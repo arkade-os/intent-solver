@@ -1,7 +1,28 @@
-# Profit and loss
+# Profit and loss and reconciliation
 
 What this solver made, where, and where it went wrong — on the console's **p&l**
 tab and at `GET /api/pnl`.
+
+The **reconciliation** tab answers the wallet question that a P&L cannot:
+what the checkpoint balances were, when they changed, which changes have a
+journal entry, and which intervals have no checkpoint at all. It reads the same
+swap economics as the P&L screen and adds checkpoint history, operator
+withdrawals, and rebalances.
+
+## Plain-language labels
+
+- **Spread kept** is what the solver received minus what it delivered. It
+  includes the quoted fee and the market margin; the swap row does not record
+  those two parts separately.
+- **Fee budget** is the ceiling recorded at quote time. It was never deducted
+  from the result.
+- **Fee paid** is execution cost the rail actually reported. A blank means no
+  rail reported a cost; it does not mean the fee was zero.
+- **After reported fees** is spread minus reported execution fees, but only over
+  the swaps that have both figures. It is not net profit over the whole book.
+- **Balance change** is the difference between checkpoint totals. A positive
+  checkpoint movement is incoming balance, but checkpoints do not record the
+  sender. The page therefore calls it incoming balance, not an external deposit.
 
 ## Read this first: what is net and what is gross
 
@@ -239,8 +260,22 @@ scatter back to the swap that made it. The body is capped at 2,000 records with
 `matchedCount` alongside, so a truncated list can never read as the whole set —
 the per-corridor cap bounds each scan, not their concatenation.
 
-Both routes are read-only, like everything on the console but `actions.ts`, and
-both sit behind the same deployment assumption as the rest of this port: no
+`GET /api/reconciliation` returns the full reconciliation view in one read:
+the same swap summary and record list, checkpoint totals with per-rail deltas,
+checkpoint cadence gaps, incomplete samples, journaled operator withdrawals, and
+rebalance transfers. It accepts the same `window`, `since`, `until`, and
+`limit` parameters as `/api/pnl`.
+
+The checkpoint history is bounded to the latest 2,000 samples. When that bound
+truncates a longer window, the response sets `balance.limited` and the console
+says so instead of presenting the visible history as complete.
+
+The reconciliation route is read-only. In particular, an incoming checkpoint
+increase is an observed balance movement, not proof of an external deposit:
+there is no generic deposit journal today.
+
+All three routes are read-only, like everything on the console but `actions.ts`,
+and they sit behind the same deployment assumption as the rest of this port: no
 authentication, a reverse proxy in front. See [runbook.md](./runbook.md).
 
 ## From a terminal

@@ -214,13 +214,15 @@ engine-strict` returns `undefined`, and `.npmrc` does not set it), so an
   [Wallet rebalancing](docs/wallet-rebalancing.md), including policy limits and
   recovery of uncertain submissions.
 
-  Its **p&l** tab (and `GET /api/pnl`) charts what the book made, by corridor,
-  by time to fill, and per cross-asset fill against the window's own mean rate —
+  Its **p&l** tab (and `GET /api/pnl`) charts the spread kept by corridor, by
+  time to fill, and per cross-asset fill against the window's own mean rate,
   which is how a drawn-out swap that priced against a stale view becomes
-  visible. **Every figure there is GROSS: no corridor records what execution
-  cost, so chain and routing fees are missing from the totals rather than
-  deducted from them.** That caveat, and what each corridor counts as its
-  intake, are in [`docs/pnl.md`](docs/pnl.md).
+  visible. The spread includes the quoted fee and market margin; only execution
+  fees a rail actually reported are deducted. Unreported chain and routing fees
+  remain missing rather than being treated as zero. The **reconciliation** tab
+  (`GET /api/reconciliation`) shows checkpoint balances and gaps, incoming
+  balance changes, operator withdrawals, rebalances, and per-swap economics.
+  The definitions and API are in [`docs/pnl.md`](docs/pnl.md).
 
   `admin.host` chooses that bind, and defaults to `127.0.0.1` — which is the
   whole of the console's access control. Setting it to `0.0.0.0` publishes an

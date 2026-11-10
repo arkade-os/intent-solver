@@ -348,6 +348,7 @@ const state = {
   filters: { corridor: '', phase: '', q: '' },
   /** The P&L view's own controls. Bucket empty means "let the server choose from the window". */
   pnl: { window: '7d', bucket: '' },
+  reconciliation: { window: '24h' },
   detail: null,
   dialog: null,
   /** The action currently in flight, or null. See `runAction`. */
@@ -360,6 +361,7 @@ const VIEWS = [
   ['overview', 'overview'],
   ['activity', 'activity'],
   ['pnl', 'p&l'],
+  ['reconciliation', 'reconciliation'],
   ['wallet', 'wallet'],
   ['pricing', 'pricing'],
   ['health', 'health'],
@@ -371,6 +373,7 @@ const PAGES = {
   overview: 'Overview',
   activity: 'Activity',
   pnl: 'Profit & loss',
+  reconciliation: 'Reconciliation',
   wallet: 'Wallet',
   pricing: 'Pricing',
   health: 'Health',
@@ -3976,27 +3979,27 @@ const pnlFigures = (summary) =>
   h(
     'div.figures',
     figure(
-      'gross, sats',
+      'spread kept, sats',
       signedSats(summary.grossSats),
-      `over ${summary.pricedCount} priced swap${summary.pricedCount === 1 ? '' : 's'}`,
+      `received minus delivered, over ${summary.pricedCount} priced swap${summary.pricedCount === 1 ? '' : 's'}`,
       summary.grossSats < 0 ? 'c-loss' : null,
     ),
-    // Named GROSS margin. Unqualified beside a net figure it reads as the net
-    // one, which is the same misreading the net column guards against.
-    figure('gross margin', bps(summary.marginBps), `on ${sats(summary.volumeSats)} sat volume`),
+    // Named the spread margin. Unqualified beside a net figure it reads as the
+    // net one, which is the same misreading the after-fee column guards against.
+    figure('spread margin', bps(summary.marginBps), `on ${sats(summary.volumeSats)} sat volume`),
     // NET, and only where a rail actually reported what execution cost. Shown
     // beside the gross rather than instead of it, with the covered count on the
     // label: a net figure that silently covers a third of the book, standing
     // where the gross used to, is the one misreading this screen must prevent.
     summary.costedCount > 0
       ? figure(
-          'net, sats',
+          'after reported fees, sats',
           signedSats(summary.netSats),
-          `${bps(summary.netMarginBps)} after ${sats(summary.realizedCostSats)} sat cost · ` +
+          `${bps(summary.netMarginBps)} after ${sats(summary.realizedCostSats)} sat in reported execution fees · ` +
             `${summary.costedCount} of ${summary.pricedCount} priced`,
           summary.netSats !== null && summary.netSats < 0 ? 'c-loss' : null,
         )
-      : figure('net', 'unknown', 'no rail reported an execution cost'),
+      : figure('after reported fees', 'unknown', 'no rail reported an execution fee'),
     // Only rendered when non-zero. A permanent "0 at risk" is a position the
     // eye learns to skip, which is exactly where this number needs to be seen —
     // the same rule the status bar's stuck count follows.
@@ -4036,8 +4039,9 @@ const pnlBasis = (coverage) =>
             'total here rather than deducted from it.') +
         ' A corridor whose cost is unreported shows a profit here even where a fee market took more than its spread.',
     },
-    h('b', coverage.basis === 'mixed' ? 'Part net, part gross.' : 'Gross figures.'),
-    ' Unreported execution costs are missing, not deducted.',
+    h('b', coverage.basis === 'mixed' ? 'Some execution fees are included.' : 'Execution fees are not included.'),
+    ' A swap keeps the spread between what it receives and delivers; that spread includes our fee and market margin. ',
+    'Only fees a rail actually reported are deducted.',
     coverage.unmeasured.length > 0
       ? h('span', h('br'), h('b', 'Not measured: '), coverage.unmeasured.join(', '), ' — unknown, not zero.')
       : null,
@@ -4148,12 +4152,12 @@ const corridorTable = (corridors) =>
       h(
         'tr',
         h('th', 'corridor'),
-        h('th.right', 'gross'),
+        h('th.right', 'spread kept'),
         // Each margin sits beside the figure it describes. A single `margin`
-        // column next to `net` reads as the net margin, and it is the gross.
-        h('th.right', 'gross bp'),
-        h('th.right', 'net'),
-        h('th.right', 'net bp'),
+        // column next to the after-fee result would read as that result's margin.
+        h('th.right', 'spread bp'),
+        h('th.right', 'after fees'),
+        h('th.right', 'after-fee bp'),
         h('th.right', 'volume'),
         h('th.right', 'settled'),
         h('th.right', 'failed'),
@@ -4356,6 +4360,441 @@ const fxPanel = (leg) => {
   )
 }
 
+const reconciliationToolbar = () =>
+  h(
+    'div.toolbar',
+    h('span.muted', 'window'),
+    h(
+      'span.seg',
+      { role: 'group', 'aria-label': 'reconciliation window' },
+      ['1h', '6h', '24h', '7d', '30d', '90d'].map((name) =>
+        h(
+          'button',
+          {
+            'aria-pressed': String(state.reconciliation.window === name),
+            onclick: () => {
+              state.reconciliation.window = name
+              load('reconciliation')
+            },
+          },
+          name,
+        ),
+      ),
+    ),
+  )
+
+const reconTime = (at) => (at === null || at === undefined ? h('span.faint', 'unknown') : bucketLabel(at))
+
+const reconAtomic = (raw, decimals) => {
+  try {
+    const value = BigInt(raw)
+    const scale = 10n ** BigInt(decimals)
+    const whole = value / scale
+    const fraction = String(value % scale)
+      .padStart(decimals, '0')
+      .replace(/0+$/, '')
+    return `${whole.toLocaleString('en-US')}${fraction ? `.${fraction}` : ''}`
+  } catch {
+    return String(raw)
+  }
+}
+
+const reconDelta = (value) => (value === null || value === undefined ? h('span.faint', 'not known') : signedSats(value))
+
+const reconLeg = (leg) => {
+  if (leg.amount === null) return h('span.faint', 'not funded')
+  const unit = leg.assetId === null ? 'sats' : shortId(leg.assetId)
+  const amount =
+    leg.assetId !== null && Number.isSafeInteger(leg.decimals)
+      ? reconAtomic(leg.amount, leg.decimals)
+      : fundAmount(leg.amount)
+  return h('span', amount, ' ', h('span.faint', unit))
+}
+
+const reconFigures = (data) => {
+  const balance = data.balance
+  const summary = data.swaps.summary
+  const checkpointCount = balance.windowCount ?? balance.checkpoints.length
+  return h(
+    'div.figures',
+    figure(
+      'balance change',
+      reconDelta(balance.changeSats),
+      balance.openingSats === null || balance.closingSats === null
+        ? 'opening or closing checkpoint is incomplete'
+        : `${sats(balance.openingSats)} to ${sats(balance.closingSats)} sat`,
+      balance.changeSats !== null && balance.changeSats < 0 ? 'c-loss' : null,
+    ),
+    figure(
+      'closing balance',
+      balance.closingSats === null ? 'unknown' : sats(balance.closingSats),
+      balance.observedTo === null
+        ? 'no usable checkpoint in this view'
+        : `${checkpointCount} checkpoint(s) in window; latest ${ago(balance.observedTo)} ago`,
+    ),
+    figure(
+      'swap spread kept',
+      signedSats(summary.grossSats),
+      `received minus delivered over ${summary.pricedCount} priced swap(s)`,
+      summary.grossSats < 0 ? 'c-loss' : null,
+    ),
+    figure(
+      'execution fees paid',
+      summary.costedCount === 0 ? 'not reported' : sats(summary.realizedCostSats),
+      summary.costedCount === 0
+        ? 'no rail reported an actual fee'
+        : `${summary.costedCount} of ${summary.pricedCount} priced swaps include a fee`,
+    ),
+    figure(
+      'after reported fees',
+      summary.netSats === null ? 'unknown' : signedSats(summary.netSats),
+      summary.netSats === null
+        ? 'spread alone is not net'
+        : `${summary.pricedCount - summary.costedCount} priced swap(s) still have no reported fee`,
+      summary.netSats !== null && summary.netSats < 0 ? 'c-loss' : null,
+    ),
+    figure(
+      'withdrawn',
+      data.withdrawals.sentCount === 0 ? 'none' : sats(data.withdrawals.debitSats),
+      data.withdrawals.sentCount === 0
+        ? 'no sent operator withdrawals in this view'
+        : `${data.withdrawals.sentCount} sent, including ${sats(data.withdrawals.feeSats)} sat in fees`,
+    ),
+    figure(
+      'checkpoint gaps',
+      String(balance.gaps.length),
+      balance.gaps.length === 0 ? 'cadence is continuous' : 'intervals have no checkpoint',
+      balance.gaps.length > 0 ? 'c-risk' : null,
+    ),
+    figure(
+      'incomplete checkpoints',
+      String(balance.incompleteCount),
+      balance.incompleteCount === 0 ? 'all samples are usable' : 'a rail could not be read',
+      balance.incompleteCount > 0 ? 'c-risk' : null,
+    ),
+  )
+}
+
+const reconExplanation = (data) =>
+  h(
+    'p.basis',
+    {
+      title:
+        'Balance change is the difference between checkpoint totals. A checkpoint increase is incoming balance, but the checkpoint does not record who sent it. Swap spread is the amount kept before execution fees.',
+    },
+    h('b', 'Read the balance and the swap result together.'),
+    ' Balance change is what the wallet actually held between checkpoints. Swap spread is what each settled swap kept before its execution fee. ',
+    'Those are related, but a balance also moves for deposits, withdrawals, transfers, and funds still in flight. ',
+    'A missing reported fee means unknown, not zero.',
+    data.coverage.unmeasured.length > 0
+      ? h('span', h('br'), h('b', 'Not measured: '), data.coverage.unmeasured.join(', '), '.')
+      : null,
+    data.coverage.failed.length > 0
+      ? h(
+          'span',
+          h('br'),
+          h('b', 'Failed to read: '),
+          data.coverage.failed.map((entry) => `${entry.corridor} (${entry.reason})`).join('; '),
+          '.',
+        )
+      : null,
+  )
+
+const checkpointRow = (checkpoint, baselineAt) =>
+  h(
+    'tr',
+    h(
+      'td',
+      h('span', reconTime(checkpoint.at)),
+      checkpoint.at === baselineAt ? h('span.faint', ' baseline') : null,
+      checkpoint.gap ? h('span.at-risk', ' gap') : null,
+    ),
+    h('td.right', checkpoint.totalSats === null ? h('span.faint', 'not usable') : sats(checkpoint.totalSats)),
+    h('td.right', reconDelta(checkpoint.deltaSats)),
+    h('td.right', reconDelta(checkpoint.arkadeDeltaSats)),
+    h('td.right', reconDelta(checkpoint.lightningDeltaSats)),
+    h('td.right', reconDelta(checkpoint.onchainDeltaSats)),
+    h(
+      'td',
+      checkpoint.gap
+        ? h('span.at-risk', `${duration(checkpoint.gapSeconds)} without a checkpoint`)
+        : checkpoint.complete
+          ? checkpoint.deltaSats === null
+            ? h('span.faint', checkpoint.at === baselineAt ? 'baseline' : 'change unknown')
+            : h('span.muted', 'ok')
+          : h('span.at-risk', 'incomplete'),
+      checkpoint.errors && Object.keys(checkpoint.errors).length > 0
+        ? h(
+            'div.faint',
+            Object.entries(checkpoint.errors)
+              .map(([rail, reason]) => `${rail}: ${reason}`)
+              .join('; '),
+          )
+        : null,
+    ),
+  )
+
+const checkpointTable = (data) => {
+  const rows = [...data.balance.checkpoints].reverse()
+  const baselineAt = data.balance.checkpoints[0]?.at ?? null
+  const table = (subset) =>
+    h(
+      'table',
+      h(
+        'thead',
+        h(
+          'tr',
+          h('th', 'checked'),
+          h('th.right', 'total sat'),
+          h('th.right', 'change'),
+          h('th.right', 'Arkade'),
+          h('th.right', 'Lightning'),
+          h('th.right', 'Bitcoin'),
+          h('th', 'status'),
+        ),
+      ),
+      h('tbody', ...subset.map((checkpoint) => checkpointRow(checkpoint, baselineAt))),
+    )
+  if (rows.length === 0) return h('p.muted', 'No checkpoints exist for this deployment in the selected window.')
+  const recent = rows.slice(0, 120)
+  return h(
+    'div',
+    table(recent),
+    rows.length > recent.length
+      ? h(
+          'details',
+          h('summary', `${rows.length - recent.length} earlier checkpoint(s)`),
+          table(rows.slice(recent.length)),
+        )
+      : null,
+  )
+}
+
+const checkpointGapPanel = (data) =>
+  h(
+    'section.panel',
+    h('h2', 'Checkpoint gaps'),
+    data.balance.gaps.length === 0
+      ? h('p.muted', 'No gap longer than two checkpoint intervals in this view.')
+      : h(
+          'table',
+          h('thead', h('tr', h('th', 'from'), h('th', 'to'), h('th.right', 'gap'))),
+          h(
+            'tbody',
+            data.balance.gaps.map((gap) =>
+              h(
+                'tr',
+                h('td', reconTime(gap.from)),
+                h('td', reconTime(gap.to)),
+                h('td.right', h('span.at-risk', duration(gap.seconds))),
+              ),
+            ),
+          ),
+        ),
+  )
+
+const incomingTable = (data) => {
+  const rows = [...data.balance.incoming].reverse()
+  if (rows.length === 0) return h('p.muted', 'No checkpoint increases in this view.')
+  return h(
+    'table',
+    h(
+      'thead',
+      h(
+        'tr',
+        h('th', 'when'),
+        h('th.right', 'increase'),
+        h('th.right', 'Arkade'),
+        h('th.right', 'Lightning'),
+        h('th.right', 'Bitcoin'),
+        h('th', 'source'),
+      ),
+    ),
+    h(
+      'tbody',
+      rows.map((row) =>
+        h(
+          'tr',
+          h('td', reconTime(row.at)),
+          h('td.right', signedSats(row.amountSats)),
+          h('td.right', reconDelta(row.arkadeSats)),
+          h('td.right', reconDelta(row.lightningSats)),
+          h('td.right', reconDelta(row.onchainSats)),
+          h('td.faint', 'checkpoint increase, sender not journaled'),
+        ),
+      ),
+    ),
+  )
+}
+
+const withdrawalTable = (data) => {
+  if (data.withdrawals.records.length === 0) return h('p.muted', 'No operator withdrawals in this view.')
+  return h(
+    'table',
+    h(
+      'thead',
+      h(
+        'tr',
+        h('th', 'when'),
+        h('th', 'source'),
+        h('th', 'destination'),
+        h('th.right', 'amount'),
+        h('th.right', 'fee'),
+        h('th.right', 'total debit'),
+        h('th', 'state'),
+      ),
+    ),
+    h(
+      'tbody',
+      data.withdrawals.records
+        .slice()
+        .reverse()
+        .map((row) =>
+          h(
+            'tr',
+            h('td', reconTime(row.createdAt)),
+            h('td.muted', row.source),
+            h('td', { title: row.address }, h('span.clip', row.address)),
+            h('td.right', sats(row.amountSats)),
+            h('td.right', row.feeSats === null ? h('span.faint', 'not reported') : sats(row.feeSats)),
+            h('td.right', row.debitSats === null ? h('span.faint', 'unknown') : sats(row.debitSats)),
+            h('td', row.state),
+          ),
+        ),
+    ),
+  )
+}
+
+const rebalanceTable = (data) => {
+  if (data.rebalances.records.length === 0) return h('p.muted', 'No rebalances in this view.')
+  return h(
+    'table',
+    h(
+      'thead',
+      h(
+        'tr',
+        h('th', 'when'),
+        h('th', 'into pool'),
+        h('th', 'route'),
+        h('th.right', 'debit'),
+        h('th.right', 'fee'),
+        h('th.right', 'credited'),
+        h('th', 'state'),
+      ),
+    ),
+    h(
+      'tbody',
+      data.rebalances.records
+        .slice()
+        .reverse()
+        .map((row) =>
+          h(
+            'tr',
+            h('td', reconTime(row.at)),
+            h('td.muted', row.poolId),
+            h('td', row.kind),
+            h('td.right', sats(row.debitSats)),
+            h('td.right', sats(row.feeSats)),
+            h('td.right', row.creditedSats === null ? h('span.faint', 'pending') : sats(row.creditedSats)),
+            h('td', row.state),
+          ),
+        ),
+    ),
+  )
+}
+
+const swapEconomicsTable = (data) => {
+  if (data.swaps.records.length === 0) return h('p.muted', 'No swaps settled in this view.')
+  return h(
+    'table',
+    h(
+      'thead',
+      h(
+        'tr',
+        h('th', 'settled'),
+        h('th', 'swap'),
+        h('th.right', 'spread kept'),
+        h('th.right', 'fee budget'),
+        h('th.right', 'fee paid'),
+        h('th.right', 'after fees'),
+      ),
+    ),
+    h(
+      'tbody',
+      data.swaps.records.map((record) =>
+        h(
+          'tr',
+          h('td', { title: record.id }, h('div', reconTime(record.settledAt)), h('div.faint', shortId(record.id))),
+          h(
+            'td',
+            h('div', corridorLabel(record.corridor), h('span.faint', ` ${record.state}`)),
+            h(
+              'div.faint',
+              h('span', 'received '),
+              reconLeg(record.inbound),
+              h('span', ' / delivered '),
+              reconLeg(record.outbound),
+            ),
+          ),
+          h('td.right', record.grossSats === null ? h('span.faint', 'not in sats') : signedSats(record.grossSats)),
+          h('td.right', record.quotedCostSats === null ? h('span.faint', 'not set') : sats(record.quotedCostSats)),
+          h(
+            'td.right',
+            record.realizedCostSats === null ? h('span.faint', 'not reported') : sats(record.realizedCostSats),
+          ),
+          h('td.right', record.netSats === null ? h('span.faint', 'unknown') : signedSats(record.netSats)),
+        ),
+      ),
+    ),
+  )
+}
+
+const reconciliationView = () => {
+  const data = state.data.reconciliation
+  if (!data) return h('section.panel', h('p.muted', 'loading…'))
+  const checkpointCount = data.balance.windowCount ?? data.balance.checkpoints.length
+  return h(
+    'div',
+    reconciliationToolbar(),
+    reconExplanation(data),
+    reconFigures(data),
+    h(
+      'section.panel',
+      h('h2', 'Checkpoint balances'),
+      h(
+        'p.faint',
+        data.balance.limited
+          ? `Showing the latest ${data.balance.limit} checkpoints. Narrow the window to cover the whole period.`
+          : `Showing ${checkpointCount} checkpoint(s) in the window${
+              data.balance.checkpoints.length > checkpointCount ? ' plus one baseline' : ''
+            }, newest first.`,
+      ),
+      checkpointTable(data),
+    ),
+    checkpointGapPanel(data),
+    h('section.panel', h('h2', 'Deposits / incoming balance'), incomingTable(data)),
+    h(
+      'section.panel',
+      h('h2', 'Operator withdrawals'),
+      h(
+        'p.faint',
+        'Amounts and fees come from the operator withdrawal journal. A pending send is not counted as withdrawn.',
+      ),
+      withdrawalTable(data),
+    ),
+    h('section.panel', h('h2', 'Rebalances'), rebalanceTable(data)),
+    h(
+      'section.panel',
+      h('h2', 'Swap economics'),
+      h(
+        'p.faint',
+        'Spread kept is received minus delivered, before execution fees. It includes the quoted fee and market margin; the swap row does not split those two. Fee paid is what the rail reported, not the budget.',
+      ),
+      swapEconomicsTable(data),
+    ),
+  )
+}
+
 const pnlView = () => {
   const data = state.data.pnl
   if (!data) return h('section.panel', h('p.muted', 'loading…'))
@@ -4367,9 +4806,13 @@ const pnlView = () => {
     pnlFigures(data.summary),
     h(
       'section.panel',
-      h('h2', 'cumulative gross'),
+      h('h2', 'cumulative spread kept'),
       cumulativeChart(data.series),
-      h('h2', { title: 'Profit up, sats at risk down. A loss is not a smaller profit.' }, 'per bucket'),
+      h(
+        'h2',
+        { title: 'Spread kept, including pricing fee and market margin. Reported execution fees are separate.' },
+        'per bucket',
+      ),
       barsChart(data.series),
       h('details', h('summary', 'table'), seriesTable(data.series)),
     ),
@@ -4377,10 +4820,11 @@ const pnlView = () => {
       'section.panel',
       h('h2', 'by corridor'),
       categoryChart(data.corridors, {
-        title: 'Gross profit by corridor, in sats',
+        title: 'Spread kept by corridor, in sats',
         label: (row) => row.corridor,
         value: (row) => row.grossSats,
-        note: (row) => `${row.corridor}: ${signedSats(row.grossSats)} sats over ${row.realizedCount} settled swap(s)`,
+        note: (row) =>
+          `${row.corridor}: ${signedSats(row.grossSats)} sats kept over ${row.realizedCount} settled swap(s)`,
       }),
       corridorTable(data.corridors),
     ),
@@ -4407,6 +4851,7 @@ const ENDPOINTS = {
     if (state.pnl.bucket) params.set('bucket', state.pnl.bucket)
     return `/api/pnl?${params}`
   },
+  reconciliation: () => `/api/reconciliation?window=${state.reconciliation.window}`,
   offers: () => '/api/offers',
   refusals: () => '/api/rfq-refusals',
   quotes: () => '/api/quotes',
@@ -4558,6 +5003,7 @@ const BODIES = {
   pricing: pricingView,
   overview: overviewView,
   pnl: pnlView,
+  reconciliation: reconciliationView,
   activity: activityView,
   wallet: walletView,
   health: healthView,
@@ -4735,18 +5181,18 @@ const listen = () => {
     // reload buys nothing — and a render would reset the draft preview of an
     // open market form.
     //
-    // `pnl` joins them for a different reason, and a stronger one. It IS
-    // derived from swap state, but it is the most expensive read this console
-    // has — one full window scan of every swap store per request — and it
-    // answers a question about a window rather than about right now. Reloading
-    // it on every swap event turns the console into a load generator against
-    // the one endpoint built to avoid that. An operator who wants it fresher
-    // re-picks the window, which reloads.
+    // `pnl` and `reconciliation` join them for a different reason. They are
+    // derived from swap state, but each runs a full window scan of every swap
+    // store per request and answers a question about a window rather than right
+    // now. Reloading either on every swap event turns the console into a load
+    // generator against the endpoints built to avoid that. An operator who wants
+    // it fresher re-picks the window, which reloads.
     if (
       state.view !== 'pricing' &&
       state.view !== 'settings' &&
       state.view !== 'markets' &&
       state.view !== 'pnl' &&
+      state.view !== 'reconciliation' &&
       !state.dialog
     )
       load(state.view)
