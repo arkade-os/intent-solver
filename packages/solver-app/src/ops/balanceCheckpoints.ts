@@ -115,6 +115,7 @@ export const rebalanceOverlapReady = (
 // ponytail: oldest dropped past this; a time window instead if late follow-ups turn into noise.
 const UNRECOVERED_LIMIT = 20
 const DEFERRAL_REMINDER_SECONDS = 30 * 60
+export const BALANCE_CHECKPOINT_INTERVAL_SECONDS = 60
 
 type CheckpointServices = Pick<
   Services,
@@ -1059,7 +1060,7 @@ export const withBalanceCheckpoints = async (input: {
   onCheckpoint?(checkpoint: BalanceCheckpoint): void
 }): Promise<void> => {
   const cadence = startCadence({
-    intervalMs: 60_000,
+    intervalMs: BALANCE_CHECKPOINT_INTERVAL_SECONDS * 1_000,
     signal: input.signal,
     pass: async () => {
       const checkpoint = await input.checkpoint()
