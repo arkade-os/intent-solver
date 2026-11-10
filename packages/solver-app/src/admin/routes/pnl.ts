@@ -36,7 +36,11 @@ import type { Hono } from 'hono'
 import type { AdminDeps } from '../server.js'
 import type { OperatorWithdrawal } from '../db.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
-import { balanceCheckpointScope, type BalanceCheckpoint } from '../../ops/balanceCheckpoints.js'
+import {
+  BALANCE_CHECKPOINT_INTERVAL_SECONDS,
+  balanceCheckpointScope,
+  type BalanceCheckpoint,
+} from '../../ops/balanceCheckpoints.js'
 import {
   DEFAULT_LEDGER_LIMIT,
   MAX_LEDGER_LIMIT,
@@ -78,7 +82,6 @@ const DEFAULT_WINDOW = '7d'
  */
 const MAX_RECORDS = 2_000
 const CHECKPOINT_LIMIT = 2_000
-const CHECKPOINT_CADENCE_SECONDS = 60
 
 /**
  * A bucket width narrow enough to show shape and wide enough to stay readable.
@@ -189,7 +192,7 @@ const checkpointSummary = (checkpoint: BalanceCheckpoint, previous: BalanceCheck
     onchainDeltaSats: satsDelta(previousRails?.onchainSats ?? null, rails.onchainSats),
     errors: checkpoint.errors,
     gapSeconds,
-    gap: gapSeconds !== null && gapSeconds > CHECKPOINT_CADENCE_SECONDS * 2,
+    gap: gapSeconds !== null && gapSeconds > BALANCE_CHECKPOINT_INTERVAL_SECONDS * 2,
   }
 }
 
@@ -498,7 +501,7 @@ export const registerPnlRoutes = (app: Hono, deps: AdminDeps): void => {
       balance: {
         ...ledger,
         limit: CHECKPOINT_LIMIT,
-        cadenceSeconds: CHECKPOINT_CADENCE_SECONDS,
+        cadenceSeconds: BALANCE_CHECKPOINT_INTERVAL_SECONDS,
         incoming: ledger.checkpoints
           .filter((checkpoint) => (checkpoint.deltaSats ?? 0) > 0)
           .map((checkpoint) => ({
