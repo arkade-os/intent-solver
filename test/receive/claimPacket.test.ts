@@ -1,6 +1,12 @@
 import { describe, it, expect } from 'vitest'
 import { base64 } from '@scure/base'
-import { claimPacketShape } from '@arkade-os/swap'
+import { appendArkadeScript, claimPacketShape } from '@arkade-os/swap'
+import {
+  claimPacketShape as solverClaimPacketShape,
+  claimPacketStamp,
+} from '@arkade-os/solver-corridors/receive/claimPacket.js'
+import type { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import vector from './fixtures/delegateeReceiveTerms.json' with { type: 'json' }
 
 /** `ephPub(33) || nonce(12) || AES-GCM of a 32-byte preimage (48)` — the shape `sealClaimPacket` emits. */
 const sealedCiphertext = (): Uint8Array => Uint8Array.from({ length: 93 }, (_, i) => i & 0xff)
@@ -80,5 +86,66 @@ describe('claimPacketShape', () => {
     ['a value that is not base64 at all', 'not base64 !!'],
   ])('falls back to the ciphertext path for %s', (_name, input) => {
     expect(claimPacketShape(input)).toEqual({ kind: 'ciphertext' })
+  })
+})
+
+describe('extended sealed-terms claim packets', () => {
+  const body = base64.decode(vector.packet)
+  const ciphertext = body.subarray(3, 3 + ((body[1]! << 8) | body[2]!))
+  const key = body.subarray(body.length - 33)
+  const tree = Uint8Array.of(1, 2, 3)
+  const script = { nonInteractiveClaimArkadeScript: ARKADE_SCRIPT, encode: () => tree } as CovenantSwapScript
+
+  it('stamps the SDK binary terms vector without changing the opaque body', () => {
+    expect(solverClaimPacketShape(vector.packet)).toEqual({
+      kind: 'packet',
+      body,
+      covclaimdPubKey: key,
+      needsArkadeScript: true,
+    })
+    expect(claimPacketStamp(vector.packet, script)).toEqual({
+      packet: appendArkadeScript(body, ARKADE_SCRIPT),
+      tapTree: tree,
+    })
+    expect(claimPacketStamp(base64.encode(appendArkadeScript(body, ARKADE_SCRIPT)), script)).toEqual({
+      packet: appendArkadeScript(body, ARKADE_SCRIPT),
+      tapTree: tree,
+    })
+    expect(solverClaimPacketShape(base64.encode(ciphertext))).toEqual({ kind: 'ciphertext' })
+  })
+
+  it.each([94, 256, 65535])('accepts a complete %i-byte ciphertext TLV', (length) => {
+    const packet = concat(tlv(1, new Uint8Array(length)), tlv(3, PUBKEY))
+    expect(solverClaimPacketShape(base64.encode(packet))).toMatchObject({ kind: 'packet', needsArkadeScript: true })
+  })
+
+  it.each([
+    ['short ciphertext', concat(tlv(1, new Uint8Array(92)), tlv(3, PUBKEY))],
+    ['missing key', tlv(1, ciphertext)],
+    ['short key', concat(tlv(1, ciphertext), tlv(3, PUBKEY.subarray(1)))],
+    ['bad duplicate key followed by valid key', concat(tlv(1, ciphertext), tlv(3, Uint8Array.of(2)), tlv(3, PUBKEY))],
+    ['truncated header', concat(body, Uint8Array.of(2, 0))],
+    ['truncated value', concat(body, Uint8Array.of(2, 0, 2, 0))],
+    ['last ciphertext is short', concat(body, tlv(1, Uint8Array.of(1)))],
+  ])('preserves ciphertext fallback for %s', (_name, packet) => {
+    expect(solverClaimPacketShape(base64.encode(packet))).toEqual({ kind: 'ciphertext' })
+    expect(claimPacketStamp(base64.encode(packet), script)).toBeUndefined()
+  })
+
+  it('keeps the final ciphertext/key and existing script semantics', () => {
+    const packet = concat(tlv(1, Uint8Array.of(1)), body, tlv(3, PUBKEY), tlv(2, new Uint8Array()))
+    expect(solverClaimPacketShape(base64.encode(packet))).toEqual({
+      kind: 'packet',
+      body: packet,
+      covclaimdPubKey: PUBKEY,
+      needsArkadeScript: false,
+    })
+    const legacyLast = concat(body, tlv(1, sealedCiphertext()))
+    expect(solverClaimPacketShape(base64.encode(legacyLast))).toEqual({
+      kind: 'packet',
+      body: legacyLast,
+      covclaimdPubKey: key,
+      needsArkadeScript: true,
+    })
   })
 })

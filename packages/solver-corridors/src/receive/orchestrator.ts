@@ -52,7 +52,7 @@ import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilater
 import { parseUnrolledSpend, type UnrolledSpendRecord } from '@arkade-os/solver-arkade/arkade/unrolledSpend.js'
 import { covenantScriptFromRow } from '../send/arkadeOps.js'
 import type { CovenantScriptRow } from '../send/orchestrator.js'
-import { claimPacketStamp } from './claimPacket.js'
+import { claimPacketStamp, isExtendedClaimPacket } from './claimPacket.js'
 import type { ReceiveArkadeOps } from './arkadeOps.js'
 import { LockupPreimageReader } from './lockupPreimage.js'
 import { applyUnrolledSpendStep } from '../unrolledSpendStep.js'
@@ -1132,9 +1132,8 @@ export class ReceiveSwapService {
   private async revealToCovclaimd(row: ReceiveSwapRow): Promise<void> {
     const { store, covclaimd } = this.deps
     if (!covclaimd || row.claimPacket === null) return
-    // `stampedAt`, NOT the packet shape: an adopted output carries nothing the
-    // shape promises, and skipping the reveal on it strands the swap.
-    if (row.stampedAt !== null) return
+    // Adopted legacy funding still needs Reveal; covclaimd cannot decrypt extended terms.
+    if (row.stampedAt !== null || isExtendedClaimPacket(row.claimPacket)) return
     const script = covenantScriptFromRow(receiveCovenantRowFor(row))
     if (!script.nonInteractiveClaimArkadeScript) {
       // Unreachable: every receive-leg row is quoted with the solver's own

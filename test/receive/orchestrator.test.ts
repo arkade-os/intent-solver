@@ -7,6 +7,8 @@ import { schnorr } from '@noble/curves/secp256k1.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { base64, hex } from '@scure/base'
 import { ArkAddress } from '@arkade-os/sdk'
+import { appendArkadeScript } from '@arkade-os/swap'
+import delegateeTerms from './fixtures/delegateeReceiveTerms.json' with { type: 'json' }
 import {
   EMPTY_LOCKUP_GRACE,
   REFUND_CENSORSHIP_GRACE,
@@ -1258,6 +1260,28 @@ describe('ReceiveSwapService.tick — concurrent workers: no double-funding', ()
 })
 
 describe('ReceiveSwapService.tick — reveal to covclaimd', () => {
+  it.each([false, true])('never sends sealed terms to legacy Reveal (adopted: %s)', async (adopted) => {
+    const outcome = await service.quote(quoteRequest({ claimPacket: delegateeTerms.packet }))
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    ln.armHold(paymentHash, now + 4 * 3600)
+    if (adopted) arkade.state.outputs = [{ txid: 'adopted-terms-funding', vout: 0, value: 5_000 }]
+    const row = await service.tick(outcome.swap.id)
+    expect(row.state).toBe('funded')
+    expect(covclaimd.state.revealCalls).toBe(0)
+    expect(row.revealedAt).toBeNull()
+    if (adopted) {
+      expect(arkade.state.fundCalls).toHaveLength(0)
+      expect(row.stampedAt).toBeNull()
+    } else {
+      const script = covenantScriptFromRow(receiveCovenantRowFor(row))
+      expect(arkade.state.fundCalls[0]?.stamp).toEqual({
+        packet: appendArkadeScript(base64.decode(delegateeTerms.packet), script.nonInteractiveClaimArkadeScript!),
+        tapTree: script.encode(),
+      })
+      expect(row.stampedAt).not.toBeNull()
+    }
+  })
+
   /** covclaimd's three-TLV body: ciphertext, arkade script, and the covclaimd it is sealed to. */
   const tlvClaimPacket = (): Uint8Array => {
     const tlv = (type: number, value: number[]) => [type, (value.length >> 8) & 0xff, value.length & 0xff, ...value]
