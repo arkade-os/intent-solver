@@ -154,7 +154,10 @@ export const offerSettleFor = (
         `${intent.offerTxid} names want asset ${terms.wantAssetId ?? 'BTC'}, not ${intent.wantAssetId ?? 'BTC'}`,
       )
     }
-    if (terms.offerAssetId !== intent.offerAssetId) {
+    // An asset-for-asset intent took its deposit asset from what the deposit held, and no packet names
+    // that. `heldOf` below checks it on the live deposit.
+    const namedByDeposit = terms.wantAssetId !== null && terms.offerAssetId === null
+    if (terms.offerAssetId !== intent.offerAssetId && !namedByDeposit) {
       throw new Error(
         `${intent.offerTxid} names deposit asset ${terms.offerAssetId ?? 'BTC'}, not ${intent.offerAssetId ?? 'BTC'}`,
       )
@@ -192,7 +195,7 @@ export const offerSettleFor = (
     // identical offers derive an identical address — so two deposits at one
     // script are summed into a decision that only ever spends one of them. The
     // fill still pays `wantAmount` in full, so the shortfall is ours.
-    if (terms.offerAssetId === null && terms.offerAmount < intent.offerAmount) {
+    if (intent.offerAssetId === null && terms.offerAmount < intent.offerAmount) {
       throw new Error(
         `${intent.offerTxid}:${found.vout} holds ${terms.offerAmount} sats, ` +
           `but the intent was priced against ${intent.offerAmount}`,
@@ -201,8 +204,8 @@ export const offerSettleFor = (
 
     // The asset leg, which the tx cannot show: amounts ride in the packet's receivers.
     let assetAmount: bigint | undefined
-    if (terms.offerAssetId !== null) {
-      assetAmount = heldOf(deposit, terms.offerAssetId)
+    if (intent.offerAssetId !== null) {
+      assetAmount = heldOf(deposit, intent.offerAssetId)
       if (assetAmount < intent.offerAmount) {
         throw new Error(
           `${intent.offerTxid}:${intent.offerVout} holds ${assetAmount} of the deposit leg, ` +

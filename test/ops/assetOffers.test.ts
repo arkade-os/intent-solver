@@ -114,6 +114,23 @@ describe('consider', () => {
     expect(await service.consider(found)).toEqual({ fill: false, reason: 'offer_unfunded' })
   })
 
+  it('records the deposit asset of an offer that swaps one asset for another', async () => {
+    const EURT = '33'.repeat(34)
+    const { store, service } = await build({
+      markets: [{ a: USDT, b: EURT }],
+      pricing: [{ ...pricing[0]!, quote: EURT }],
+      fetchPrice: async () => priceFrom('1.12'),
+      balance: async () => ({ available: 0, availableAssets: [{ assetId: EURT, amount: 5_000n }] }),
+    })
+    const wantsEur = offer({ offerAsset: undefined, wantAsset: asset.AssetId.fromString(EURT) })
+    expect(await service.consider({ ...found, offer: wantsEur })).toEqual({ fill: true, id: 'fill-1' })
+    expect(await store.findById('fill-1')).toMatchObject({
+      wantAssetId: EURT,
+      offerAssetId: USDT,
+      offerAmount: 900n,
+    })
+  })
+
   it('does not open a second intent against the same outpoint', async () => {
     const { store, service } = await build()
     await service.consider(found)
