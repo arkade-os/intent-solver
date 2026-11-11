@@ -103,6 +103,45 @@ describe('the deposit is observed, never taken on trust', () => {
   })
 })
 
+describe('an asset on both legs', () => {
+  // The packet names one asset, so only what the deposit HOLDS can say it is asset-for-asset.
+  const THIRD = 'aaaaaaaa'.repeat(8) + '0002'
+  const want = offerOf({ wantAsset: id(ASSET) })
+
+  it('names the deposit by the asset it holds, when that pair is served', () => {
+    const input = offerFillInputFrom(want, { sats: 330n, assets: [{ assetId: OTHER, amount: 7_000n }] }, [
+      { a: OTHER, b: ASSET },
+    ])
+    expect(input).toEqual({ wantAssetId: ASSET, wantAmount: 100_000n, offerAssetId: OTHER, offerAmount: 7_000n })
+  })
+
+  it('still reads the sats as the deposit when the pair is not served', () => {
+    // An asset nobody serves against the wanted one is the worthless mint the header describes.
+    const input = offerFillInputFrom(want, { sats: 330n, assets: [{ assetId: OTHER, amount: 7_000n }] }, [
+      { a: null, b: ASSET },
+    ])
+    expect(input).toMatchObject({ offerAssetId: null, offerAmount: 330n })
+  })
+
+  it('does not guess between two served deposit assets', () => {
+    const input = offerFillInputFrom(
+      want,
+      {
+        sats: 330n,
+        assets: [
+          { assetId: OTHER, amount: 7_000n },
+          { assetId: THIRD, amount: 9_000n },
+        ],
+      },
+      [
+        { a: OTHER, b: ASSET },
+        { a: ASSET, b: THIRD },
+      ],
+    )
+    expect(input).toMatchObject({ offerAssetId: null, offerAmount: 330n })
+  })
+})
+
 describe('feeding the decision it was written for', () => {
   const policy: OfferFillPolicy = {
     markets: [{ a: null, b: ASSET }],

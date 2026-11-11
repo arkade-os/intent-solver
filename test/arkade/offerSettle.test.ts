@@ -199,6 +199,25 @@ describe('offerSettleFor — it refuses before it spends', () => {
     expect(fulfill).not.toHaveBeenCalled()
   })
 
+  it('settles an asset-for-asset intent against the asset the deposit holds', async () => {
+    // A want-asset packet names no deposit asset, so the row's one was read off the deposit.
+    const both = offer({ offerAsset: undefined, wantAsset: asset.AssetId.fromString(EUR) })
+    const bothRaw = fundingTx(both, 330)
+    const { settle, fulfill } = build(bothRaw, { outpointsAt: async () => liveUsd(bothRaw, 900n) })
+    await settle(intentFor(both, bothRaw, { offerAssetId: USD }))
+    expect((fulfill.mock.calls[0]! as unknown as unknown[])[3]).toMatchObject({ assetAmount: 900n })
+  })
+
+  it('when an asset-for-asset deposit holds less of that asset than the intent was priced against', async () => {
+    const both = offer({ offerAsset: undefined, wantAsset: asset.AssetId.fromString(EUR) })
+    const bothRaw = fundingTx(both, 330)
+    const { settle, fulfill } = build(bothRaw, { outpointsAt: async () => liveUsd(bothRaw, 400n) })
+    await expect(settle(intentFor(both, bothRaw, { offerAssetId: USD }))).rejects.toThrow(
+      /holds 400 of the deposit leg/,
+    )
+    expect(fulfill).not.toHaveBeenCalled()
+  })
+
   it('when a SATS deposit holds less than the intent was priced against', async () => {
     // `offerDepositFrom` sums every live output at the offer's script, and
     // identical offers derive an identical address — so a row can be priced

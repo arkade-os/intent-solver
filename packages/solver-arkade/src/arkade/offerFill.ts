@@ -82,9 +82,28 @@ export const heldOf = (deposit: OfferDeposit, assetId: string | null): bigint =>
  * `deposit`. That is deliberate — the read is an indexer round trip with its own
  * failure modes, and burying it here would make this untestable without one.
  */
-export const offerFillInputFrom = (offer: Offer, deposit: OfferDeposit): OfferFillInput => {
+export const offerFillInputFrom = (
+  offer: Offer,
+  deposit: OfferDeposit,
+  /** Served markets. An asset-for-asset one lets a want-asset offer name its deposit by what it holds. */
+  markets: readonly { a: string | null; b: string | null }[] = [],
+): OfferFillInput => {
   const wantAssetId = idOf(offer.wantAsset)
-  const offerAssetId = idOf(offer.offerAsset)
+  let offerAssetId = idOf(offer.offerAsset)
+  // The packet names one asset (§ 2.1), so a want-asset offer cannot say what it deposits. When
+  // exactly one asset it holds is SERVED against the wanted one, that asset is the deposit leg.
+  // Any other asset still counts for nothing, so the header's worthless-mint guard holds.
+  if (wantAssetId !== null && offerAssetId === null) {
+    const served = (deposit.assets ?? []).filter(
+      (entry) =>
+        entry.amount > 0n &&
+        markets.some(
+          (m) => (m.a === entry.assetId && m.b === wantAssetId) || (m.b === entry.assetId && m.a === wantAssetId),
+        ),
+    )
+    const ids = [...new Set(served.map((entry) => entry.assetId))]
+    if (ids.length === 1) offerAssetId = ids[0]!
+  }
   return {
     wantAssetId,
     wantAmount: offer.wantAmount,

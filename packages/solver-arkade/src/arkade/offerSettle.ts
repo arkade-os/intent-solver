@@ -124,11 +124,15 @@ export const offerSettleFor = (
         `${intent.offerTxid} names want asset ${terms.wantAssetId ?? 'BTC'}, not ${intent.wantAssetId ?? 'BTC'}`,
       )
     }
-    if (terms.offerAssetId !== intent.offerAssetId) {
+    // A want-asset packet names no deposit asset, so an asset-for-asset intent was named by what the
+    // deposit held. The live deposit is checked against that asset below.
+    const namedByDeposit = terms.wantAssetId !== null && terms.offerAssetId === null && intent.offerAssetId !== null
+    if (!namedByDeposit && terms.offerAssetId !== intent.offerAssetId) {
       throw new Error(
         `${intent.offerTxid} names deposit asset ${terms.offerAssetId ?? 'BTC'}, not ${intent.offerAssetId ?? 'BTC'}`,
       )
     }
+    const depositAssetId = namedByDeposit ? intent.offerAssetId : terms.offerAssetId
 
     // BOTH LEGS, because the funding transaction outlives the spend: on its own
     // it reads a cancelled or already-filled deposit as still fundable.
@@ -143,7 +147,7 @@ export const offerSettleFor = (
     // identical offers derive an identical address — so two deposits at one
     // script are summed into a decision that only ever spends one of them. The
     // fill still pays `wantAmount` in full, so the shortfall is ours.
-    if (terms.offerAssetId === null && terms.offerAmount < intent.offerAmount) {
+    if (depositAssetId === null && terms.offerAmount < intent.offerAmount) {
       throw new Error(
         `${intent.offerTxid}:${found.vout} holds ${terms.offerAmount} sats, ` +
           `but the intent was priced against ${intent.offerAmount}`,
@@ -152,8 +156,8 @@ export const offerSettleFor = (
 
     // The asset leg, which the tx cannot show: amounts ride in the packet's receivers.
     let assetAmount: bigint | undefined
-    if (terms.offerAssetId !== null) {
-      assetAmount = heldOf(deposit, terms.offerAssetId)
+    if (depositAssetId !== null) {
+      assetAmount = heldOf(deposit, depositAssetId)
       if (assetAmount < intent.offerAmount) {
         throw new Error(
           `${intent.offerTxid}:${intent.offerVout} holds ${assetAmount} of the deposit leg, ` +

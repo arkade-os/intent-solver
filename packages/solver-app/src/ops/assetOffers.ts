@@ -315,7 +315,7 @@ export class AssetOfferService {
     // `OfferOutputView.script` and the store persists.
     const pkScript = hex.encode(offer.swapPkScript)
     const outputs = await this.deps.outputsAt(pkScript)
-    const input = offerFillInputFrom(offer, offerDepositFrom(pkScript, outputs))
+    const input = offerFillInputFrom(offer, offerDepositFrom(pkScript, outputs), this.markets)
     const bounds = this.boundsIn(input)
     const decision = evaluateOfferFill(input, await this.policy(bounds))
     if (!decision.fill) return this.refuse(outpoint, decision.reason, refusalDetail(input, decision.reason, bounds))
