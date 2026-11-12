@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { adoptFunding, providerKeyCurrent, uncollected } from '@arkade-os/solver-corridors/legs/arkadeLockup.js'
+import {
+  adoptFunding,
+  adoptedOnly,
+  providerKeyCurrent,
+  uncollected,
+} from '@arkade-os/solver-corridors/legs/arkadeLockup.js'
 
 const out = (txid: string, value: number, spent = false) => ({ txid, vout: 0, value, spent })
 
@@ -61,5 +66,18 @@ describe('uncollected', () => {
       spentByUs: none,
     })
     expect(left).toEqual([{ txid: 'u', vout: 0, value: 1 }])
+  })
+})
+
+describe('adoptedOnly', () => {
+  const outputs = [out('a', 1_000), out('second', 1_000)]
+
+  it('keeps only the outputs recorded at adoption', () => {
+    expect(adoptedOnly(outputs, JSON.stringify([{ txid: 'a', vout: 0, value: 1_000 }]))).toEqual([outputs[0]])
+    expect(adoptedOnly(outputs, '[]')).toEqual([])
+  })
+
+  it('passes everything through for a row with nothing recorded', () => {
+    expect(adoptedOnly(outputs, null)).toEqual(outputs)
   })
 })
