@@ -56,8 +56,8 @@ export const unadopted = <O extends { txid: string; vout: number }>(
   lockupOutpoints: string | null,
 ): O[] => {
   if (lockupOutpoints === null) return []
-  const adopted = new Set(adoptedOnly(outputs, lockupOutpoints))
-  return outputs.filter((output) => !adopted.has(output))
+  const adopted = new Set(adoptedOnly(outputs, lockupOutpoints).map(outpointKey))
+  return outputs.filter((output) => !adopted.has(outpointKey(output)))
 }
 
 /** Adopted outputs not yet collected on either rail. One the read does not show is unknown, never collected. */

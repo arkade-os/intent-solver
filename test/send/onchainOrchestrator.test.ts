@@ -1431,6 +1431,7 @@ describe('OnchainSendSwapService', () => {
   })
 
   describe('a second payment to the lockup, found at claim time', () => {
+    const SECOND_PAYMENT = { txid: 'second-payment', vout: 0, value: 50_000 }
     const claimWithSecondPayment = async (refund: typeof deps.arkade.refund) => {
       const outcome = await service.quote({
         paymentHash,
@@ -1455,7 +1456,6 @@ describe('OnchainSendSwapService', () => {
       ])
       return service.tick(outcome.swap.id)
     }
-    const SECOND_PAYMENT = { txid: 'second-payment', vout: 0, value: 50_000 }
 
     it('goes back to the client at once', async () => {
       const refunded: unknown[] = []

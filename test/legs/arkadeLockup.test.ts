@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   adoptFunding,
   adoptedOnly,
+  unadopted,
   providerKeyCurrent,
   uncollected,
 } from '@arkade-os/solver-corridors/legs/arkadeLockup.js'
@@ -79,5 +80,14 @@ describe('adoptedOnly', () => {
 
   it('passes everything through for a row with nothing recorded', () => {
     expect(adoptedOnly(outputs, null)).toEqual(outputs)
+  })
+})
+
+describe('unadopted', () => {
+  it('returns what the adopted set leaves, matched by outpoint rather than by object', () => {
+    const outputs = [out('a', 1_000), out('second', 1_000)]
+    const recorded = JSON.stringify([{ txid: 'a', vout: 0, value: 1_000 }])
+    expect(unadopted(outputs, recorded)).toEqual([outputs[1]])
+    expect(unadopted(outputs, null)).toEqual([])
   })
 })
