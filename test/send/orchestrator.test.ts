@@ -851,6 +851,20 @@ describe('tick: the full drive', () => {
     expect(arkade.claimCalls.map((c) => c.outputs)).toEqual([[funding]])
   })
 
+  it('claims only the adopted funding when the client pays the lockup again after it was paid', async () => {
+    const outcome = await service.quote(FORGED.invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+    if (!outcome.accepted) throw new Error(`forged quote refused: ${outcome.reason}`)
+    const funding = { txid: 'f1', vout: 0, value: AMOUNT }
+    arkade.lockups = [funding]
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
+    expect((await service.tick(outcome.swap.id)).state).toBe('paid')
+
+    arkade.lockups = [funding, { txid: 'f2', vout: 0, value: AMOUNT }]
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'succeeded', preimage: FORGED_PREIMAGE })
+    expect((await service.tick(outcome.swap.id)).state).toBe('claimed')
+    expect(arkade.claimCalls.map((c) => c.outputs)).toEqual([[funding]])
+  })
+
   it('claims the asset vtxo too when the asset-free outputs cannot cover what was paid', async () => {
     const outcome = await service.quote(FORGED.invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
     if (!outcome.accepted) throw new Error(`forged quote refused: ${outcome.reason}`)
