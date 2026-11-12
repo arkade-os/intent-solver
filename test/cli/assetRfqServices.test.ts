@@ -73,7 +73,7 @@ describe('the four Arkade seams', () => {
   it('normalises the emulator key to x-only', () => {
     // The emulator advertises a compressed key; the covenant takes 32 bytes, so
     // the raw form quotes an address no client ever derives.
-    expect(body()).toContain('emulatorPubkey: xOnlyPubkey(hex.decode(emulatorInfo.signerPubkey))')
+    expect(body()).toContain('emulatorPubkey: xOnlyPubkey(hex.decode(emulatorPubkey))')
   })
 
   it('takes the exit closure from the ADVERTISED delay, never the local override', () => {
