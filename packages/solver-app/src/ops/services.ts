@@ -824,11 +824,7 @@ export const createServices = async (
   // The emulator key is read at startup and snapshotted per swap; a rotation
   // only affects new quotes, never the reconstruction of funded scripts.
   const emulatorInfo = await new RestEmulatorProvider(config.emulatorUrl).getInfo()
-  const emulatorPubkey = covenantCosignerKey(
-    config.network,
-    emulatorInfo.signerPubkey,
-    arkade.wallet.arkServerPublicKey,
-  )
+  const emulatorPubkey = covenantCosignerKey(config.network, emulatorInfo.signerPubkey)
   if (emulatorPubkey !== emulatorInfo.signerPubkey) {
     log(`emulator reports ${emulatorInfo.signerPubkey}; covenants keep the pinned ${emulatorPubkey}`)
   }
