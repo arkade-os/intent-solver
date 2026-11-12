@@ -36,6 +36,7 @@
  */
 
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
+import { offerFillsSql } from './offerFills.sql.js'
 import { addColumns, assertColumns, text, type FillPhase } from './baseSwapStore.js'
 import { pageQuery, takePage, type PageOptions, type PageRawFields } from '@arkade-os/solver-core/core/page.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
@@ -107,49 +108,6 @@ export interface OfferFillRecord {
   rfqId?: string | null
 }
 
-const OFFER_FILL_COLUMNS = `
-  id              TEXT PRIMARY KEY,
-  state           TEXT NOT NULL,
-  created_at      INTEGER NOT NULL,
-  updated_at      INTEGER NOT NULL,
-  offer_txid      TEXT NOT NULL,
-  offer_vout      INTEGER NOT NULL,
-  offer_pk_script TEXT NOT NULL,
-  want_asset_id   TEXT,
-  want_amount     TEXT NOT NULL,
-  offer_asset_id  TEXT,
-  offer_amount    TEXT NOT NULL,
-  fill_txid       TEXT,
-  failure_reason  TEXT,
-  rfq_id          TEXT,
-  fill_phase      TEXT
-`
-
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS offer_fill (${OFFER_FILL_COLUMNS});
-CREATE INDEX IF NOT EXISTS idx_offer_fill_state ON offer_fill(state);
-
--- The whole reason a row exists before anything is submitted. Two workers that
--- both like the same offer must not both send fulfill for it: the second insert
--- loses here, before either spends. Partial on the live states so a lost or
--- stuck row does not block a later, legitimate re-attempt at the same outpoint.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_offer_fill_live_outpoint
-  ON offer_fill(offer_txid, offer_vout) WHERE state IN ('fillable', 'filling', 'filled');
-
-CREATE INDEX IF NOT EXISTS idx_offer_fill_rfq_id
-  ON offer_fill(rfq_id) WHERE rfq_id IS NOT NULL;
-
-CREATE TABLE IF NOT EXISTS offer_fill_event (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  fill_id    TEXT NOT NULL REFERENCES offer_fill(id),
-  at         INTEGER NOT NULL,
-  from_state TEXT,
-  to_state   TEXT NOT NULL,
-  detail     TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_offer_fill_event_fill ON offer_fill_event(fill_id);
-`
-
 type Raw = Record<string, string | number | null>
 
 // Amounts are TEXT, not INTEGER. An asset amount is a bigint in atomic units
@@ -174,7 +132,27 @@ const toRow = (raw: Raw): OfferFillRow => ({
   rfqId: raw.rfq_id === null ? null : String(raw.rfq_id),
 })
 
-export class OfferFillStore {
+export interface OfferFillRepository {
+  onTransition?: TransitionHook
+  insertIntent(record: OfferFillRecord): Promise<OfferFillRow>
+  close(): Promise<void>
+  findById(id: string): Promise<OfferFillRow | undefined>
+  findLiveByOutpoint(txid: string, vout: number): Promise<OfferFillRow | undefined>
+  findByRfqId(rfqId: string): Promise<OfferFillRow | undefined>
+  listNonTerminal(): Promise<OfferFillRow[]>
+  page(options?: PageOptions): Promise<{ rows: OfferFillRow[]; nextCursor: string | null }>
+  transition(
+    id: string,
+    from: OfferFillState,
+    to: OfferFillState,
+    fields?: Partial<Record<string, unknown>>,
+  ): Promise<boolean>
+  revertUnsubmitted(id: string): Promise<boolean>
+  markSubmitting(id: string): Promise<boolean>
+  fail(id: string, from: OfferFillState, reason: string): Promise<void>
+}
+
+export class OfferFillStore implements OfferFillRepository {
   private constructor(
     readonly driver: SqlDriver,
     private readonly now: () => number,
@@ -182,7 +160,7 @@ export class OfferFillStore {
 
   static async open(driver: SqlDriver | string, now: () => number = nowSeconds): Promise<OfferFillStore> {
     const store = new OfferFillStore(typeof driver === 'string' ? betterSqliteDriver(driver) : driver, now)
-    await store.driver.exec(SCHEMA)
+    await store.driver.exec(offerFillsSql.schema)
     await store.migrate()
     return store
   }
@@ -207,25 +185,19 @@ export class OfferFillStore {
    */
   async insertIntent(record: OfferFillRecord): Promise<OfferFillRow> {
     const at = this.now()
-    await this.driver.run(
-      `INSERT INTO offer_fill (
-         id, state, created_at, updated_at, offer_txid, offer_vout, offer_pk_script,
-         want_asset_id, want_amount, offer_asset_id, offer_amount, fill_txid, failure_reason, rfq_id
-       ) VALUES (?, 'fillable', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
-      [
-        record.id,
-        at,
-        at,
-        record.offerTxid,
-        record.offerVout,
-        record.offerPkScript,
-        record.wantAssetId,
-        record.wantAmount.toString(),
-        record.offerAssetId,
-        record.offerAmount.toString(),
-        record.rfqId ?? null,
-      ],
-    )
+    await this.driver.run(offerFillsSql.insertIntent, [
+      record.id,
+      at,
+      at,
+      record.offerTxid,
+      record.offerVout,
+      record.offerPkScript,
+      record.wantAssetId,
+      record.wantAmount.toString(),
+      record.offerAssetId,
+      record.offerAmount.toString(),
+      record.rfqId ?? null,
+    ])
     await this.recordEvent(record.id, null, 'fillable', null)
     const row = await this.findById(record.id)
     if (!row) throw new Error(`offer fill ${record.id} vanished immediately after insert`)
@@ -237,16 +209,13 @@ export class OfferFillStore {
   }
 
   async findById(id: string): Promise<OfferFillRow | undefined> {
-    const raw = await this.driver.get<Raw>(`SELECT * FROM offer_fill WHERE id = ?`, [id])
+    const raw = await this.driver.get<Raw>(offerFillsSql.selectById, [id])
     return raw ? toRow(raw) : undefined
   }
 
   /** The live row for an outpoint, if this service is already acting on it. */
   async findLiveByOutpoint(txid: string, vout: number): Promise<OfferFillRow | undefined> {
-    const raw = await this.driver.get<Raw>(
-      `SELECT * FROM offer_fill WHERE offer_txid = ? AND offer_vout = ? AND state IN ('fillable', 'filling', 'filled')`,
-      [txid, vout],
-    )
+    const raw = await this.driver.get<Raw>(offerFillsSql.selectLiveByOutpoint, [txid, vout])
     return raw ? toRow(raw) : undefined
   }
 
@@ -269,20 +238,13 @@ export class OfferFillStore {
    * orders by `created_at DESC, rowid DESC`; this is that, not a new idea.
    */
   async findByRfqId(rfqId: string): Promise<OfferFillRow | undefined> {
-    const raw = await this.driver.get<Raw>(
-      `SELECT * FROM offer_fill WHERE rfq_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`,
-      [rfqId],
-    )
+    const raw = await this.driver.get<Raw>(offerFillsSql.selectNewestByRfqId, [rfqId])
     return raw ? toRow(raw) : undefined
   }
 
   /** Rows a tick must still resolve. */
   async listNonTerminal(): Promise<OfferFillRow[]> {
-    const placeholders = NON_TERMINAL.map(() => '?').join(', ')
-    const raws = await this.driver.all<Raw>(
-      `SELECT * FROM offer_fill WHERE state IN (${placeholders}) ORDER BY created_at ASC`,
-      [...NON_TERMINAL],
-    )
+    const raws = await this.driver.all<Raw>(offerFillsSql.selectInStates(NON_TERMINAL.length), [...NON_TERMINAL])
     return raws.map(toRow)
   }
 
@@ -308,8 +270,7 @@ export class OfferFillStore {
     }
     const columns = Object.keys(fields)
     assertColumns(columns, TRANSITION_COLUMNS, 'transition()')
-    const assignments = ['state = ?', 'updated_at = ?', ...columns.map((c) => `${c} = ?`)].join(', ')
-    const result = await this.driver.run(`UPDATE offer_fill SET ${assignments} WHERE id = ? AND state = ?`, [
+    const result = await this.driver.run(offerFillsSql.updateState(columns), [
       to,
       this.now(),
       ...columns.map((c) => fields[c]),
@@ -333,11 +294,7 @@ export class OfferFillStore {
    * an edge cannot say "only when nothing was sent", so this is reached by name.
    */
   async revertUnsubmitted(id: string): Promise<boolean> {
-    const result = await this.driver.run(
-      `UPDATE offer_fill SET state = 'fillable', fill_phase = NULL, updated_at = ?
-       WHERE id = ? AND state = 'filling' AND fill_phase = 'selecting'`,
-      [this.now(), id],
-    )
+    const result = await this.driver.run(offerFillsSql.revertUnsubmitted, [this.now(), id])
     if (result.changes === 1) {
       await this.recordEvent(id, 'filling', 'fillable', null)
       announceTransition(this.onTransition, id, 'filling', 'fillable')
@@ -351,11 +308,7 @@ export class OfferFillStore {
    * transition — the row does not move, so no event row and nothing announced.
    */
   async markSubmitting(id: string): Promise<boolean> {
-    const result = await this.driver.run(
-      `UPDATE offer_fill SET fill_phase = 'submitting', updated_at = ?
-       WHERE id = ? AND state = 'filling' AND fill_phase = 'selecting'`,
-      [this.now(), id],
-    )
+    const result = await this.driver.run(offerFillsSql.markSubmitting, [this.now(), id])
     return result.changes === 1
   }
 
@@ -388,9 +341,6 @@ export class OfferFillStore {
     to: OfferFillState,
     detail: string | null,
   ): Promise<void> {
-    await this.driver.run(
-      `INSERT INTO offer_fill_event (fill_id, at, from_state, to_state, detail) VALUES (?, ?, ?, ?, ?)`,
-      [id, this.now(), from, to, detail],
-    )
+    await this.driver.run(offerFillsSql.insertEvent, [id, this.now(), from, to, detail])
   }
 }

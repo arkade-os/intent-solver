@@ -35,3 +35,9 @@ export const baseSwapSql = (table: string, eventTable: string) =>
   }) as const
 
 export type BaseSwapSql = ReturnType<typeof baseSwapSql>
+
+/** Answers empty for a missing table rather than throwing. */
+export const tableInfo = (table: string) => `PRAGMA table_info(${table})`
+
+export const addColumn = (table: string, column: string, type: string) =>
+  `ALTER TABLE ${table} ADD COLUMN ${column} ${type}`

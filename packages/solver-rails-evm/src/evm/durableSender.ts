@@ -2,6 +2,7 @@ import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js'
 import { UniqueConstraintError, type SqlDriver } from '@arkade-os/solver-core/core/driver.js'
 import type { JsonRpc } from '@arkade-os/solver-core/ports/evm.js'
 import { addressFromPrivateKey, createAddress, decodeSignedTransaction, signTransaction } from './transaction.js'
+import { evmTransactionJournalSql as sql } from './durableSender.sql.js'
 
 export interface DurableEvmRequest {
   to: Uint8Array | null
@@ -42,7 +43,7 @@ export interface DurableEvmSenderDeps {
   maxFeePerGas: bigint
   maxPriorityFeePerGas: bigint
 }
-type Row = {
+export type EvmTransactionJournalRow = {
   id: string
   chain_id: string
   account: string
@@ -52,7 +53,7 @@ type Row = {
   hash: string
   state: string
 }
-type AttemptRow = {
+export type EvmTransactionAttemptRow = {
   id: string
   sequence: number
   raw: string
@@ -62,6 +63,92 @@ type AttemptRow = {
   ceiling: string
   state: string
 }
+
+export interface EvmTransactionJournal {
+  createTables(): Promise<void>
+  all(): Promise<EvmTransactionJournalRow[]>
+  backfillFirstAttempt(attempt: Omit<EvmTransactionAttemptRow, 'sequence'>): Promise<void>
+  get(id: string): Promise<EvmTransactionJournalRow | undefined>
+  highestNonce(chain: string, account: string): Promise<{ nonce: string } | undefined>
+  forAccount(chain: string, account: string): Promise<EvmTransactionJournalRow[]>
+  reserve(row: EvmTransactionJournalRow, attempt: EvmTransactionAttemptRow): Promise<void>
+  setTransaction(id: string, raw: string, hash: string): Promise<void>
+  replaceTransaction(id: string, raw: string, hash: string): Promise<void>
+  markJournal(id: string, state: keyof typeof sql.markJournal): Promise<void>
+  attempts(id: string): Promise<EvmTransactionAttemptRow[]>
+  latestAttempt(id: string): Promise<EvmTransactionAttemptRow | undefined>
+  attemptByHash(hash: string): Promise<EvmTransactionAttemptRow | undefined>
+  insertAttempt(attempt: EvmTransactionAttemptRow): Promise<void>
+  setAttemptState(id: string, sequence: number, state: string): Promise<void>
+  markAttempt(id: string, sequence: number, state: keyof typeof sql.markAttempt): Promise<void>
+}
+
+export class SqliteEvmTransactionJournal implements EvmTransactionJournal {
+  constructor(private readonly driver: SqlDriver) {}
+
+  async createTables(): Promise<void> {
+    await this.driver.exec(sql.createJournalTable)
+    await this.driver.exec(sql.createAttemptsTable)
+  }
+  all(): Promise<EvmTransactionJournalRow[]> {
+    return this.driver.all<EvmTransactionJournalRow>(sql.selectAllJournal)
+  }
+  async backfillFirstAttempt(a: Omit<EvmTransactionAttemptRow, 'sequence'>): Promise<void> {
+    await this.driver.run(sql.backfillFirstAttempt, [a.id, a.raw, a.hash, a.max_fee, a.tip, a.ceiling, a.state])
+  }
+  get(id: string): Promise<EvmTransactionJournalRow | undefined> {
+    return this.driver.get<EvmTransactionJournalRow>(sql.selectJournalById, [id])
+  }
+  highestNonce(chain: string, account: string): Promise<{ nonce: string } | undefined> {
+    return this.driver.get<{ nonce: string }>(sql.selectHighestNonce, [chain, account])
+  }
+  forAccount(chain: string, account: string): Promise<EvmTransactionJournalRow[]> {
+    return this.driver.all<EvmTransactionJournalRow>(sql.selectJournalForAccount, [chain, account])
+  }
+  async reserve(row: EvmTransactionJournalRow, a: EvmTransactionAttemptRow): Promise<void> {
+    await this.driver.transaction(async () => {
+      await this.driver.run(sql.insertJournal, [
+        row.id,
+        row.chain_id,
+        row.account,
+        row.nonce,
+        row.request,
+        row.raw,
+        row.hash,
+        row.state,
+      ])
+      await this.insertAttempt(a)
+    })
+  }
+  async setTransaction(id: string, raw: string, hash: string): Promise<void> {
+    await this.driver.run(sql.updateJournalTransaction, [raw, hash, id])
+  }
+  async replaceTransaction(id: string, raw: string, hash: string): Promise<void> {
+    await this.driver.run(sql.replaceJournalTransaction, [raw, hash, id])
+  }
+  async markJournal(id: string, state: keyof typeof sql.markJournal): Promise<void> {
+    await this.driver.run(sql.markJournal[state], [id])
+  }
+  attempts(id: string): Promise<EvmTransactionAttemptRow[]> {
+    return this.driver.all<EvmTransactionAttemptRow>(sql.selectAttempts, [id])
+  }
+  latestAttempt(id: string): Promise<EvmTransactionAttemptRow | undefined> {
+    return this.driver.get<EvmTransactionAttemptRow>(sql.selectLatestAttempt, [id])
+  }
+  attemptByHash(hash: string): Promise<EvmTransactionAttemptRow | undefined> {
+    return this.driver.get<EvmTransactionAttemptRow>(sql.selectAttemptByHash, [hash])
+  }
+  async insertAttempt(a: EvmTransactionAttemptRow): Promise<void> {
+    await this.driver.run(sql.insertAttempt, [a.id, a.sequence, a.raw, a.hash, a.max_fee, a.tip, a.ceiling, a.state])
+  }
+  async setAttemptState(id: string, sequence: number, state: string): Promise<void> {
+    await this.driver.run(sql.updateAttemptState, [state, id, sequence])
+  }
+  async markAttempt(id: string, sequence: number, state: keyof typeof sql.markAttempt): Promise<void> {
+    await this.driver.run(sql.markAttempt[state], [id, sequence])
+  }
+}
+
 type StoredRequest = {
   chain: string
   account: string
@@ -96,31 +183,20 @@ export const createDurableEvmSender = async (deps: DurableEvmSenderDeps): Promis
   const from = addressFromPrivateKey(deps.privateKey)
   const account = hx(from)
   const chain = deps.chainId.toString()
-  await deps.driver.exec(`CREATE TABLE IF NOT EXISTS evm_transaction_journal (
-    id TEXT PRIMARY KEY, chain_id TEXT NOT NULL, account TEXT NOT NULL, nonce TEXT NOT NULL,
-    request TEXT NOT NULL, raw TEXT NOT NULL, hash TEXT NOT NULL, state TEXT NOT NULL,
-    UNIQUE(chain_id, account, nonce), UNIQUE(hash)
-  )`)
-  await deps.driver.exec(`CREATE TABLE IF NOT EXISTS evm_transaction_attempts (
-    id TEXT NOT NULL, sequence INTEGER NOT NULL, raw TEXT NOT NULL, hash TEXT NOT NULL UNIQUE,
-    max_fee TEXT NOT NULL, tip TEXT NOT NULL, ceiling TEXT NOT NULL, state TEXT NOT NULL,
-    PRIMARY KEY(id, sequence)
-  )`)
-  const oldRows = await deps.driver.all<Row>('SELECT * FROM evm_transaction_journal')
+  const journal = new SqliteEvmTransactionJournal(deps.driver)
+  await journal.createTables()
+  const oldRows = await journal.all()
   for (const row of oldRows) {
     const decoded = decodeSignedTransaction(hexToBytes(row.raw.slice(2)))
-    await deps.driver.run(
-      'INSERT OR IGNORE INTO evm_transaction_attempts (id, sequence, raw, hash, max_fee, tip, ceiling, state) VALUES (?, 0, ?, ?, ?, ?, ?, ?)',
-      [
-        row.id,
-        row.raw,
-        row.hash,
-        decoded.fields.maxFeePerGas.toString(),
-        decoded.fields.maxPriorityFeePerGas.toString(),
-        decoded.fields.maxFeePerGas.toString(),
-        row.state,
-      ],
-    )
+    await journal.backfillFirstAttempt({
+      id: row.id,
+      raw: row.raw,
+      hash: row.hash,
+      max_fee: decoded.fields.maxFeePerGas.toString(),
+      tip: decoded.fields.maxPriorityFeePerGas.toString(),
+      ceiling: decoded.fields.maxFeePerGas.toString(),
+      state: row.state,
+    })
   }
   const requestText = (request: DurableEvmRequest): string => {
     if (request.to !== null && request.to.length !== 20) throw new Error('destination must be 20 bytes')
@@ -134,13 +210,13 @@ export const createDurableEvmSender = async (deps: DurableEvmSenderDeps): Promis
       tip: deps.maxPriorityFeePerGas.toString(),
     })
   }
-  const storedRequest = (row: Row): StoredRequest => {
+  const storedRequest = (row: EvmTransactionJournalRow): StoredRequest => {
     const stored = JSON.parse(row.request) as StoredRequest
     if (stored.chain !== row.chain_id || stored.account !== row.account || !stored.gas || !stored.maxFee || !stored.tip)
       throw new Error('corrupt transaction journal')
     return stored
   }
-  const validateIdentity = (row: Row, request: DurableEvmRequest): StoredRequest => {
+  const validateIdentity = (row: EvmTransactionJournalRow, request: DurableEvmRequest): StoredRequest => {
     const stored = storedRequest(row)
     if (row.chain_id !== chain || row.account !== account || stored.chain !== chain || stored.account !== account)
       throw new Error('transaction identity reused with changed chain or account')
@@ -153,7 +229,11 @@ export const createDurableEvmSender = async (deps: DurableEvmSenderDeps): Promis
     if (!/^[0-9a-f]{16}$/.test(row.nonce)) throw new Error('corrupt transaction journal')
     return stored
   }
-  const validateAttempt = (row: Row, attempt: AttemptRow, stored: StoredRequest): DurableEvmAttempt => {
+  const validateAttempt = (
+    row: EvmTransactionJournalRow,
+    attempt: EvmTransactionAttemptRow,
+    stored: StoredRequest,
+  ): DurableEvmAttempt => {
     if (!/^0x[0-9a-f]+$/.test(attempt.raw) || !/^0x[0-9a-f]+$/.test(attempt.hash))
       throw new Error('corrupt transaction journal')
     const decoded = decodeSignedTransaction(hexToBytes(attempt.raw.slice(2)))
@@ -182,15 +262,10 @@ export const createDurableEvmSender = async (deps: DurableEvmSenderDeps): Promis
       rawTransaction: attempt.raw,
     }
   }
-  const attempts = (id: string): Promise<AttemptRow[]> =>
-    deps.driver.all<AttemptRow>('SELECT * FROM evm_transaction_attempts WHERE id = ? ORDER BY sequence', [id])
-  const latest = async (id: string): Promise<AttemptRow> => {
-    const row = await deps.driver.get<AttemptRow>(
-      'SELECT * FROM evm_transaction_attempts WHERE id = ? ORDER BY sequence DESC LIMIT 1',
-      [id],
-    )
+  const latest = async (id: string): Promise<EvmTransactionAttemptRow> => {
+    const row = await journal.latestAttempt(id)
     if (!row) throw new Error('transaction has no durable signed attempt')
-    await deps.driver.run('UPDATE evm_transaction_journal SET raw = ?, hash = ? WHERE id = ?', [row.raw, row.hash, id])
+    await journal.setTransaction(id, row.raw, row.hash)
     return row
   }
   const canonicalReceipt = async (hash: string): Promise<'success' | 'reverted' | null> => {
@@ -218,19 +293,18 @@ export const createDurableEvmSender = async (deps: DurableEvmSenderDeps): Promis
     if (status > 1n) throw new Error('invalid transaction receipt status')
     return status === 1n ? 'success' : 'reverted'
   }
-  const reconcile = async (row: Row, request: DurableEvmRequest): Promise<DurableEvmAttempt | null> => {
+  const reconcile = async (
+    row: EvmTransactionJournalRow,
+    request: DurableEvmRequest,
+  ): Promise<DurableEvmAttempt | null> => {
     const stored = validateIdentity(row, request)
     await latest(row.id)
-    const history = await attempts(row.id)
+    const history = await journal.attempts(row.id)
     for (const item of history) {
       const attempt = validateAttempt(row, item, stored)
       const outcome = await canonicalReceipt(attempt.hash)
       if (outcome) {
-        await deps.driver.run('UPDATE evm_transaction_attempts SET state = ? WHERE id = ? AND sequence = ?', [
-          outcome,
-          row.id,
-          item.sequence,
-        ])
+        await journal.setAttemptState(row.id, item.sequence, outcome)
         return { ...attempt, state: outcome }
       }
     }
@@ -241,17 +315,14 @@ export const createDurableEvmSender = async (deps: DurableEvmSenderDeps): Promis
     const encodedRequest = requestText(request)
     if (quantity(await deps.rpc('eth_chainId', [])) !== deps.chainId) throw new Error('signing RPC chain mismatch')
     for (let attempt = 0; attempt < 64; attempt++) {
-      const existing = await deps.driver.get<Row>('SELECT * FROM evm_transaction_journal WHERE id = ?', [id])
+      const existing = await journal.get(id)
       if (existing) {
         validateIdentity(existing, request)
         const winner = await reconcile(existing, request)
         return winner ?? validateAttempt(existing, await latest(id), storedRequest(existing))
       }
       const pending = quantity(await deps.rpc('eth_getTransactionCount', [account, 'pending']))
-      const high = await deps.driver.get<{ nonce: string }>(
-        'SELECT nonce FROM evm_transaction_journal WHERE chain_id = ? AND account = ? ORDER BY nonce DESC LIMIT 1',
-        [chain, account],
-      )
+      const high = await journal.highestNonce(chain, account)
       const mark = high ? BigInt(`0x${high.nonce}`) + 1n : 0n
       if (high && mark > pending)
         throw new Error('unresolved earlier nonce blocks this signing account; reconcile its durable transaction')
@@ -269,7 +340,7 @@ export const createDurableEvmSender = async (deps: DurableEvmSenderDeps): Promis
         },
         deps.privateKey,
       )
-      const row: Row = {
+      const row: EvmTransactionJournalRow = {
         id,
         chain_id: chain,
         account,
@@ -279,7 +350,7 @@ export const createDurableEvmSender = async (deps: DurableEvmSenderDeps): Promis
         hash: hx(signed.hash),
         state: 'prepared',
       }
-      const initial: AttemptRow = {
+      const initial: EvmTransactionAttemptRow = {
         id,
         sequence: 0,
         raw: row.raw,
@@ -291,25 +362,7 @@ export const createDurableEvmSender = async (deps: DurableEvmSenderDeps): Promis
       }
       validateAttempt(row, initial, storedRequest(row))
       try {
-        await deps.driver.transaction(async () => {
-          await deps.driver.run(
-            'INSERT INTO evm_transaction_journal (id, chain_id, account, nonce, request, raw, hash, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            [id, chain, account, row.nonce, encodedRequest, row.raw, row.hash, row.state],
-          )
-          await deps.driver.run(
-            'INSERT INTO evm_transaction_attempts (id, sequence, raw, hash, max_fee, tip, ceiling, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            [
-              id,
-              initial.sequence,
-              initial.raw,
-              initial.hash,
-              initial.max_fee,
-              initial.tip,
-              initial.ceiling,
-              initial.state,
-            ],
-          )
-        })
+        await journal.reserve(row, initial)
         return validateAttempt(row, initial, storedRequest(row))
       } catch (error) {
         if (!(error instanceof UniqueConstraintError)) throw error
@@ -320,38 +373,29 @@ export const createDurableEvmSender = async (deps: DurableEvmSenderDeps): Promis
   const submit = async (id: string, request: DurableEvmRequest): Promise<DurableEvmAttempt> => {
     const prepared = await prepare(id, request)
     if (prepared.state === 'success' || prepared.state === 'reverted') return prepared
-    const row = await deps.driver.get<Row>('SELECT * FROM evm_transaction_journal WHERE id = ?', [id])
+    const row = await journal.get(id)
     if (!row) throw new Error('transaction journal disappeared')
     validateIdentity(row, request)
     const item = await latest(id)
     const current = validateAttempt(row, item, storedRequest(row))
-    await deps.driver.run("UPDATE evm_transaction_attempts SET state = 'submitting' WHERE id = ? AND sequence = ?", [
-      id,
-      item.sequence,
-    ])
+    await journal.markAttempt(id, item.sequence, 'submitting')
     try {
       const returnedHash = await deps.rpc('eth_sendRawTransaction', [item.raw])
       if (typeof returnedHash !== 'string' || returnedHash.toLowerCase() !== current.hash)
         throw new Error('RPC returned wrong transaction hash')
-      await deps.driver.run("UPDATE evm_transaction_attempts SET state = 'submitted' WHERE id = ? AND sequence = ?", [
-        id,
-        item.sequence,
-      ])
-      await deps.driver.run("UPDATE evm_transaction_journal SET state = 'submitted' WHERE id = ?", [id])
+      await journal.markAttempt(id, item.sequence, 'submitted')
+      await journal.markJournal(id, 'submitted')
       return { ...current, state: 'submitted' }
     } catch {
-      await deps.driver.run("UPDATE evm_transaction_attempts SET state = 'unknown' WHERE id = ? AND sequence = ?", [
-        id,
-        item.sequence,
-      ])
-      await deps.driver.run("UPDATE evm_transaction_journal SET state = 'unknown' WHERE id = ?", [id])
+      await journal.markAttempt(id, item.sequence, 'unknown')
+      await journal.markJournal(id, 'unknown')
       const winner = await reconcile(row, request)
       return winner ?? { ...current, state: 'unknown' }
     }
   }
   return {
     async getPrepared(id, request) {
-      const row = await deps.driver.get<Row>('SELECT * FROM evm_transaction_journal WHERE id = ?', [id])
+      const row = await journal.get(id)
       if (!row) return null
       validateIdentity(row, request)
       return (await reconcile(row, request)) ?? validateAttempt(row, await latest(id), storedRequest(row))
@@ -359,7 +403,7 @@ export const createDurableEvmSender = async (deps: DurableEvmSenderDeps): Promis
     prepare,
     submit,
     async replace(id, request, fees, maxFeeCeiling) {
-      const row = await deps.driver.get<Row>('SELECT * FROM evm_transaction_journal WHERE id = ?', [id])
+      const row = await journal.get(id)
       if (!row) throw new Error('transaction identity has no original authorization')
       const stored = validateIdentity(row, request)
       const winner = await reconcile(row, request)
@@ -391,7 +435,7 @@ export const createDurableEvmSender = async (deps: DurableEvmSenderDeps): Promis
         deps.privateKey,
       )
       const sequence = prior.sequence + 1
-      const replacement: AttemptRow = {
+      const replacement: EvmTransactionAttemptRow = {
         id,
         sequence,
         raw: hx(signed.raw),
@@ -402,37 +446,18 @@ export const createDurableEvmSender = async (deps: DurableEvmSenderDeps): Promis
         state: 'prepared',
       }
       validateAttempt(row, replacement, stored)
-      await deps.driver.run(
-        'INSERT INTO evm_transaction_attempts (id, sequence, raw, hash, max_fee, tip, ceiling, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        [
-          id,
-          sequence,
-          replacement.raw,
-          replacement.hash,
-          replacement.max_fee,
-          replacement.tip,
-          replacement.ceiling,
-          replacement.state,
-        ],
-      )
-      await deps.driver.run("UPDATE evm_transaction_journal SET raw = ?, hash = ?, state = 'prepared' WHERE id = ?", [
-        replacement.raw,
-        replacement.hash,
-        id,
-      ])
+      await journal.insertAttempt(replacement)
+      await journal.replaceTransaction(id, replacement.raw, replacement.hash)
       return submit(id, request)
     },
     async replay(id, request) {
-      const row = await deps.driver.get<Row>('SELECT * FROM evm_transaction_journal WHERE id = ?', [id])
+      const row = await journal.get(id)
       if (!row) throw new Error('original transaction has no durable authorization')
       validateIdentity(row, request)
       return submit(id, request)
     },
     async pending() {
-      const rows = await deps.driver.all<Row>(
-        'SELECT * FROM evm_transaction_journal WHERE chain_id = ? AND account = ? ORDER BY nonce',
-        [chain, account],
-      )
+      const rows = await journal.forAccount(chain, account)
       const pending: (DurableEvmAttempt & { request: DurableEvmRequest; operation: 'deployment' | 'call' })[] = []
       for (const row of rows) {
         const stored = storedRequest(row)
@@ -446,12 +471,10 @@ export const createDurableEvmSender = async (deps: DurableEvmSenderDeps): Promis
     async broadcastRawTransaction(rawTransaction) {
       if (!/^0x(?:[0-9a-f]{2})+$/i.test(rawTransaction)) throw new Error('invalid signed transaction bytes')
       const decoded = decodeSignedTransaction(hexToBytes(rawTransaction.slice(2)))
-      const item = await deps.driver.get<AttemptRow>('SELECT * FROM evm_transaction_attempts WHERE hash = ?', [
-        hx(decoded.hash),
-      ])
+      const item = await journal.attemptByHash(hx(decoded.hash))
       if (!item || item.raw !== rawTransaction.toLowerCase())
         throw new Error('signed transaction has no matching durable authorization')
-      const row = await deps.driver.get<Row>('SELECT * FROM evm_transaction_journal WHERE id = ?', [item.id])
+      const row = await journal.get(item.id)
       if (!row) throw new Error('signed transaction has no matching durable authorization')
       return submit(row.id, requestBytes(storedRequest(row)))
     },

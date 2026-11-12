@@ -16,7 +16,7 @@
  * relaxed into a subclass hook.
  */
 import type { SqlDriver } from './driver.js'
-import { baseSwapSql, type BaseSwapSql } from './baseSwapStore.sql.js'
+import { addColumn, baseSwapSql, tableInfo, type BaseSwapSql } from './baseSwapStore.sql.js'
 import {
   clampLimit,
   decodeCursor,
@@ -103,9 +103,9 @@ export const addColumns = async (
   for (const [, type] of columns) {
     if (!SQL_COLUMN_TYPE.test(type)) throw new Error(`addColumns: not a plain column type: ${type}`)
   }
-  const existing = new Set((await driver.all<{ name: string }>(`PRAGMA table_info(${table})`)).map((c) => c.name))
+  const existing = new Set((await driver.all<{ name: string }>(tableInfo(table))).map((c) => c.name))
   for (const [column, type] of columns) {
-    if (!existing.has(column)) await driver.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`)
+    if (!existing.has(column)) await driver.exec(addColumn(table, column, type))
   }
 }
 

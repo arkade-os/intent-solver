@@ -22,6 +22,7 @@
  */
 
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
+import { onchainSwapsSql } from './onchainSwaps.sql.js'
 import {
   BaseSwapStore,
   addColumns,
@@ -32,6 +33,9 @@ import {
   type StoreShape,
 } from './baseSwapStore.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import type { FindByStatesOptions, PageOptions } from '@arkade-os/solver-core/core/page.js'
+import type { TransitionHook } from '@arkade-os/solver-core/core/businessEvent.js'
+import type { LedgerWindow } from '@arkade-os/solver-core/analytics/economics.js'
 import { CLIENT_LOCKUP_RELEASE_DELAY_SECONDS } from '@arkade-os/solver-core/core/onchainSend.js'
 import { OnchainSendMachine, type OnchainSendSwapState } from '../machines/onchainSend.js'
 
@@ -166,75 +170,6 @@ export interface OnchainSendSwapRow {
   /** The signed funding, recorded before it is broadcast: every later pass resends this one. */
   fundingTx: string | null
 }
-
-const SEND_ONCHAIN_SWAP_COLUMNS = `
-  id                            TEXT PRIMARY KEY,
-  state                         TEXT NOT NULL,
-  created_at                    INTEGER NOT NULL,
-  updated_at                    INTEGER NOT NULL,
-  payment_hash                  TEXT NOT NULL,
-  amount_sats                   INTEGER NOT NULL,
-  payout_sats                   INTEGER NOT NULL,
-  refund_locktime               INTEGER NOT NULL,
-  provider_pubkey               TEXT NOT NULL,
-  server_pubkey                 TEXT NOT NULL,
-  claim_delay                   INTEGER NOT NULL,
-  refund_delay                  INTEGER NOT NULL,
-  refund_without_receiver_delay INTEGER NOT NULL,
-  pk_script                     TEXT NOT NULL,
-  lockup_address                TEXT NOT NULL,
-  refund_pk_script              TEXT NOT NULL,
-  emulator_pubkey               TEXT NOT NULL,
-  client_refund_pubkey          TEXT NOT NULL,
-  receiver_pk_script            TEXT NOT NULL,
-  non_interactive_parameters TEXT,
-  payout_pubkey                 TEXT NOT NULL,
-  htlc_pubkey                   TEXT NOT NULL,
-  htlc_locktime                 INTEGER NOT NULL,
-  min_confirmations             INTEGER NOT NULL,
-  onchain_address                TEXT NOT NULL,
-  onchain_pk_script              TEXT NOT NULL,
-  onchain_lockup_txid           TEXT,
-  onchain_lockup_vout           INTEGER,
-  onchain_lockup_value          INTEGER,
-  funding_txid                  TEXT,
-  funding_vout                  INTEGER,
-  preimage                      TEXT,
-  claim_ark_txid                TEXT,
-  onchain_refund_txid           TEXT,
-  onchain_refund_fee_rate       REAL,
-  onchain_refund_broadcast_at   INTEGER,
-  onchain_refund_prior_txids    TEXT,
-  refund_ark_txid               TEXT,
-  refund_outcome                TEXT,
-  failure_reason                TEXT,
-  rfq_id                        TEXT,
-  fund_started_at               INTEGER,
-  funding_tx                    TEXT,
-  unrolled_claim                TEXT,
-  lockup_outpoints              TEXT
-`
-
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS send_onchain_swap (${SEND_ONCHAIN_SWAP_COLUMNS});
-CREATE INDEX IF NOT EXISTS idx_send_onchain_swap_state ON send_onchain_swap(state);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_send_onchain_swap_live_hash
-  ON send_onchain_swap(payment_hash) WHERE state != 'refused';
--- Partial for the same reason as send_swap's: findByRfqId runs on every
--- inbound rfq_status_request, which falls through all four corridors' stores.
-CREATE INDEX IF NOT EXISTS idx_send_onchain_swap_rfq_id
-  ON send_onchain_swap(rfq_id) WHERE rfq_id IS NOT NULL;
-
-CREATE TABLE IF NOT EXISTS send_onchain_swap_event (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  swap_id    TEXT NOT NULL REFERENCES send_onchain_swap(id),
-  at         INTEGER NOT NULL,
-  from_state TEXT,
-  to_state   TEXT NOT NULL,
-  detail     TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_send_onchain_swap_event_swap ON send_onchain_swap_event(swap_id);
-`
 
 type Raw = Record<string, string | number | null>
 
@@ -374,12 +309,52 @@ const SHAPE: StoreShape<OnchainSendSwapRow, OnchainSendSwapState> = {
   toRow: (raw: RawRow) => toRow(raw as Raw),
 }
 
-export class OnchainSendSwapStore extends BaseSwapStore<OnchainSendSwapRow, OnchainSendSwapState> {
+export interface OnchainSendSwapRepository {
+  onTransition?: TransitionHook
+  close(): Promise<void>
+  get(id: string): Promise<OnchainSendSwapRow>
+  findByRfqId(rfqId: string): Promise<OnchainSendSwapRow | null>
+  findByPkScript(pkScript: string): Promise<OnchainSendSwapRow | null>
+  findByPaymentHash(paymentHash: string): Promise<OnchainSendSwapRow | null>
+  findLiveByPaymentHash(paymentHash: string): Promise<OnchainSendSwapRow | null>
+  committedSats(): Promise<number>
+  countByStates(states: readonly OnchainSendSwapState[]): Promise<number>
+  findByStates(states: readonly OnchainSendSwapState[], options?: FindByStatesOptions): Promise<OnchainSendSwapRow[]>
+  findRecoverable(): Promise<OnchainSendSwapRow[]>
+  pageRecoverable(
+    options?: Pick<PageOptions, 'cursor' | 'limit'>,
+  ): Promise<{ rows: OnchainSendSwapRow[]; nextCursor: string | null }>
+  ledgerRows(window: LedgerWindow): Promise<{ rows: OnchainSendSwapRow[]; truncated: boolean }>
+  page(options?: PageOptions): Promise<{ rows: OnchainSendSwapRow[]; nextCursor: string | null }>
+  history(swapId: string): Promise<{ at: number; from: string | null; to: string; detail: string | null }[]>
+  transition(
+    id: string,
+    from: OnchainSendSwapState,
+    to: OnchainSendSwapState,
+    fields?: Partial<Record<string, unknown>>,
+  ): Promise<boolean>
+  patch(id: string, fields: Record<string, unknown>): Promise<void>
+  fail(id: string, from: OnchainSendSwapState, reason: string): Promise<void>
+  owedPayoutSats(): Promise<number>
+  claimFundLease(id: string, from: OnchainSendSwapState): Promise<boolean>
+  refuseUnrecorded(id: string, reason: string): Promise<boolean>
+  recordFundingTx(id: string, tx: string): Promise<boolean>
+  releaseFundLease(id: string): Promise<void>
+  enterFunding(id: string): Promise<boolean>
+  insertQuote(quote: OnchainQuoteRecord): Promise<OnchainSendSwapRow>
+  findRefundable(now: number): Promise<OnchainSendSwapRow[]>
+  findReleasable(now: number): Promise<OnchainSendSwapRow[]>
+}
+
+export class OnchainSendSwapStore
+  extends BaseSwapStore<OnchainSendSwapRow, OnchainSendSwapState>
+  implements OnchainSendSwapRepository
+{
   protected readonly shape = SHAPE
 
   static async open(driver: SqlDriver | string, now: () => number = nowSeconds): Promise<OnchainSendSwapStore> {
     const store = new OnchainSendSwapStore(typeof driver === 'string' ? betterSqliteDriver(driver) : driver, now)
-    await store.driver.exec(SCHEMA)
+    await store.driver.exec(onchainSwapsSql.schema)
     await store.migrate()
     return store
   }
@@ -426,12 +401,7 @@ export class OnchainSendSwapStore extends BaseSwapStore<OnchainSendSwapRow, Onch
    */
   async owedPayoutSats(): Promise<number> {
     const owes = OnchainSendMachine.where('owesPayout')
-    const placeholders = owes.map(() => '?').join(',')
-    const row = await this.driver.get<{ total: number }>(
-      `SELECT COALESCE(SUM(COALESCE(payout_sats, amount_sats)), 0) AS total
-         FROM send_onchain_swap WHERE state IN (${placeholders})`,
-      [...owes],
-    )
+    const row = await this.driver.get<{ total: number }>(onchainSwapsSql.sumOwedPayoutInStates(owes.length), [...owes])
     return Number(row?.total ?? 0)
   }
 
@@ -442,16 +412,18 @@ export class OnchainSendSwapStore extends BaseSwapStore<OnchainSendSwapRow, Onch
 
   /** Never over a recorded funding: a worker past an expired lease may be broadcasting it. */
   async refuseUnrecorded(id: string, reason: string): Promise<boolean> {
-    return this.transitionWhere(id, 'funding_onchain', 'refused', { failure_reason: reason }, 'funding_tx IS NULL')
+    return this.transitionWhere(
+      id,
+      'funding_onchain',
+      'refused',
+      { failure_reason: reason },
+      onchainSwapsSql.fundingTxUnrecorded,
+    )
   }
 
   /** Single-winner, so a worker that loses it never broadcasts the funding it signed. */
   async recordFundingTx(id: string, tx: string): Promise<boolean> {
-    const result = await this.driver.run(
-      `UPDATE send_onchain_swap SET funding_tx = ?, updated_at = ?
-       WHERE id = ? AND state = 'funding_onchain' AND funding_tx IS NULL`,
-      [tx, this.now(), id],
-    )
+    const result = await this.driver.run(onchainSwapsSql.recordFundingTx, [tx, this.now(), id])
     return result.changes === 1
   }
 
@@ -466,69 +438,49 @@ export class OnchainSendSwapStore extends BaseSwapStore<OnchainSendSwapRow, Onch
 
   async insertQuote(quote: OnchainQuoteRecord): Promise<OnchainSendSwapRow> {
     const at = this.now()
-    await this.driver.run(
-      `INSERT INTO send_onchain_swap (
-        id, state, created_at, updated_at, payment_hash, amount_sats, payout_sats, refund_locktime,
-        provider_pubkey, server_pubkey, claim_delay, refund_delay, refund_without_receiver_delay,
-        pk_script, lockup_address, refund_pk_script, emulator_pubkey, client_refund_pubkey, receiver_pk_script,
-        non_interactive_parameters,
-        payout_pubkey, htlc_pubkey, htlc_locktime, min_confirmations,
-        onchain_address, onchain_pk_script, rfq_id
-      ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        quote.id,
-        at,
-        at,
-        quote.paymentHash,
-        quote.amountSats,
-        quote.payoutSats,
-        quote.refundLocktime,
-        quote.providerPubkey,
-        quote.serverPubkey,
-        quote.claimDelay,
-        quote.refundDelay,
-        quote.refundWithoutReceiverDelay,
-        quote.pkScript,
-        quote.lockupAddress,
-        quote.refundPkScript,
-        quote.emulatorPubkey,
-        quote.clientRefundPubkey,
-        quote.receiverPkScript,
-        quote.nonInteractiveParameters ? '1' : null,
-        quote.payoutPubkey,
-        quote.htlcPubkey,
-        quote.htlcLocktime,
-        quote.minConfirmations,
-        quote.onchainAddress,
-        quote.onchainPkScript,
-        quote.rfqId ?? null,
-      ],
-    )
+    await this.driver.run(onchainSwapsSql.insertQuote, [
+      quote.id,
+      at,
+      at,
+      quote.paymentHash,
+      quote.amountSats,
+      quote.payoutSats,
+      quote.refundLocktime,
+      quote.providerPubkey,
+      quote.serverPubkey,
+      quote.claimDelay,
+      quote.refundDelay,
+      quote.refundWithoutReceiverDelay,
+      quote.pkScript,
+      quote.lockupAddress,
+      quote.refundPkScript,
+      quote.emulatorPubkey,
+      quote.clientRefundPubkey,
+      quote.receiverPkScript,
+      quote.nonInteractiveParameters ? '1' : null,
+      quote.payoutPubkey,
+      quote.htlcPubkey,
+      quote.htlcLocktime,
+      quote.minConfirmations,
+      quote.onchainAddress,
+      quote.onchainPkScript,
+      quote.rfqId ?? null,
+    ])
     await this.recordEvent(quote.id, null, 'quoted', null)
     return this.get(quote.id)
   }
 
   /** `refused` only (never exposed); `client_refund_pubkey` means an untimelocked refund leaf. */
   async findRefundable(now: number): Promise<OnchainSendSwapRow[]> {
-    const rows = await this.driver.all<Raw>(
-      `SELECT * FROM send_onchain_swap
-       WHERE state = 'refused'
-         AND refund_outcome IS NULL
-         AND (client_refund_pubkey IS NOT NULL OR refund_locktime <= ?)
-       ORDER BY created_at`,
-      [now],
-    )
+    const rows = await this.driver.all<Raw>(onchainSwapsSql.selectRefundable, [now])
     return rows.map(toRow)
   }
 
   /** Still-held client lockups behind a landed L1 refund — the preimage can never arrive now. */
   async findReleasable(now: number): Promise<OnchainSendSwapRow[]> {
-    const rows = await this.driver.all<Raw>(
-      `SELECT * FROM send_onchain_swap
-       WHERE state = 'refunded' AND refund_outcome IS NULL AND updated_at <= ?
-       ORDER BY created_at`,
-      [now - CLIENT_LOCKUP_RELEASE_DELAY_SECONDS],
-    )
+    const rows = await this.driver.all<Raw>(onchainSwapsSql.selectReleasable, [
+      now - CLIENT_LOCKUP_RELEASE_DELAY_SECONDS,
+    ])
     return rows.map(toRow)
   }
 }

@@ -41,7 +41,8 @@
 import { betterSqliteDriver, type SqlDriver } from '@arkade-os/solver-db/driver.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { EVM_SEND_NON_TERMINAL, type EvmSendSwapState } from '@arkade-os/solver-core/core/evmSwapState.js'
-import { EvmSwapStore, commonFields, text, type Raw } from './evmSwapStore.js'
+import { EvmSwapStore, commonFields, text, type EvmSwapRepository, type Raw } from './evmSwapStore.js'
+import { evmSendSwapSql } from './evmSendSwaps.sql.js'
 
 export interface EvmSendSwapRow {
   id: string
@@ -112,93 +113,6 @@ export interface EvmSendSwapRow {
   failureReason: string | null
 }
 
-// SCHEMA HISTORY. `valid_until` and `refund_outcome` were added after these
-// tables first shipped on the feat/evm-corridors branch. CREATE TABLE IF NOT
-// EXISTS does not extend an already-created table, so an environment whose
-// database predates those two columns needs, once, before this code
-// deploys against it:
-//
-//   ALTER TABLE send_evm_swap ADD COLUMN valid_until INTEGER NOT NULL DEFAULT 0;
-//   ALTER TABLE send_evm_swap ADD COLUMN refund_outcome TEXT;
-//
-// Without them the failure modes are: pre-existing rows read valid_until as
-// NaN and never expire (fail-safe, but silent), and any insert or refund-sweep
-// patch throws "no such column". Fresh databases get both columns from the
-// CREATE below — no runtime migration on purpose: the gap can only exist on a
-// staging box that ran unreleased corridor code, and it should be fixed
-// deliberately, not self-healed invisibly.
-//
-// EXPECT PENDING QUOTES TO TERMINATE. `DEFAULT 0` dates existing rows to 1970,
-// so the first tick after the ALTER refuses every `quoted` row as expired.
-// Correct — the alternative is filling at a pre-restart rate — but an operator
-// not told will read the refusals as breakage. Only `quoted` rows are affected;
-// anything funded has already passed that check.
-const COLUMNS = `
-  id                            TEXT PRIMARY KEY,
-  state                         TEXT NOT NULL,
-  created_at                    INTEGER NOT NULL,
-  updated_at                    INTEGER NOT NULL,
-  payment_hash                  TEXT NOT NULL,
-  amount_sats                   INTEGER NOT NULL,
-  payout_sats                   INTEGER,
-  evm_amount                    TEXT NOT NULL,
-  token_address                 TEXT NOT NULL,
-  evm_contract_address          TEXT NOT NULL,
-  evm_chain_id                   INTEGER NOT NULL,
-  evm_timeout                    INTEGER NOT NULL,
-  valid_until                    INTEGER NOT NULL,
-  min_confirmations              INTEGER NOT NULL,
-  min_age_seconds               INTEGER NOT NULL,
-  evm_lock_txid                 TEXT,
-  evm_refund_txid               TEXT,
-  evm_claim_txid                TEXT,
-  evm_claim_address             TEXT NOT NULL,
-  evm_refund_address            TEXT NOT NULL,
-  refund_locktime               INTEGER NOT NULL,
-  provider_pubkey               TEXT NOT NULL,
-  server_pubkey                 TEXT NOT NULL,
-  claim_delay                   INTEGER NOT NULL,
-  refund_delay                  INTEGER NOT NULL,
-  refund_without_receiver_delay INTEGER NOT NULL,
-  pk_script                     TEXT NOT NULL,
-  lockup_address                TEXT NOT NULL,
-  refund_pk_script              TEXT NOT NULL,
-  emulator_pubkey               TEXT NOT NULL,
-  client_refund_pubkey          TEXT NOT NULL,
-  receiver_pk_script            TEXT NOT NULL,
-  non_interactive_parameters TEXT,
-  preimage                      TEXT,
-  claim_ark_txid                TEXT,
-  refund_ark_txid               TEXT,
-  refund_outcome                TEXT,
-  rfq_id                        TEXT,
-  failure_reason                TEXT
-`
-
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS send_evm_swap (${COLUMNS});
-CREATE INDEX IF NOT EXISTS idx_send_evm_swap_state ON send_evm_swap(state);
--- One LIVE row per payment hash, as in every other corridor: two lockups
--- against one hash means whichever client loses the race is claimed with no
--- refund.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_send_evm_swap_live_hash
-  ON send_evm_swap(payment_hash) WHERE state != 'refused';
--- Partial for the reason the other corridors give: findByRfqId runs on every
--- inbound rfq_status_request and falls through every store.
-CREATE INDEX IF NOT EXISTS idx_send_evm_swap_rfq_id
-  ON send_evm_swap(rfq_id) WHERE rfq_id IS NOT NULL;
-
-CREATE TABLE IF NOT EXISTS send_evm_swap_event (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  swap_id    TEXT NOT NULL REFERENCES send_evm_swap(id),
-  at         INTEGER NOT NULL,
-  from_state TEXT,
-  to_state   TEXT NOT NULL,
-  detail     TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_send_evm_swap_event_swap ON send_evm_swap_event(swap_id);
-`
-
 const toRow = (raw: Raw): EvmSendSwapRow => ({
   ...commonFields(raw),
   state: String(raw.state) as EvmSendSwapState,
@@ -236,7 +150,14 @@ export type EvmSendQuoteRecord = Omit<
   nonInteractiveParameters: boolean
 }
 
-export class EvmSendSwapStore extends EvmSwapStore<EvmSendSwapRow, EvmSendSwapState> {
+export interface EvmSendSwapRepository extends EvmSwapRepository<EvmSendSwapRow, EvmSendSwapState> {
+  insertQuote(quote: EvmSendQuoteRecord): Promise<EvmSendSwapRow>
+  findRefundable(): Promise<EvmSendSwapRow[]>
+  findClosedOverLock(nowSeconds: number): Promise<EvmSendSwapRow[]>
+  claimRefundTxid(id: string, txid: string): Promise<boolean>
+}
+
+export class EvmSendSwapStore extends EvmSwapStore<EvmSendSwapRow, EvmSendSwapState> implements EvmSendSwapRepository {
   private constructor(driver: SqlDriver, now: () => number) {
     super(driver, now, {
       table: 'send_evm_swap',
@@ -258,7 +179,7 @@ export class EvmSendSwapStore extends EvmSwapStore<EvmSendSwapRow, EvmSendSwapSt
 
   static async open(driver: SqlDriver | string, now: () => number = nowSeconds): Promise<EvmSendSwapStore> {
     const store = new EvmSendSwapStore(typeof driver === 'string' ? betterSqliteDriver(driver) : driver, now)
-    await store.driver.exec(SCHEMA)
+    await store.driver.exec(evmSendSwapSql.createSchema)
     return store
   }
 
@@ -278,37 +199,20 @@ export class EvmSendSwapStore extends EvmSwapStore<EvmSendSwapRow, EvmSendSwapSt
    * before locking), so pushing the refund cannot pay twice.
    */
   async findRefundable(): Promise<EvmSendSwapRow[]> {
-    const rows = (await this.driver.all(
-      `SELECT * FROM send_evm_swap
-       WHERE state = 'refused' AND refund_outcome IS NULL
-       ORDER BY created_at`,
-    )) as Raw[]
+    const rows = (await this.driver.all(evmSendSwapSql.selectRefundable)) as Raw[]
     return rows.map(toRow)
   }
 
   /** Closed rows that reached a lock call, while their refund window is open.
    * `refunded` counts: the word rests on the refund receipt's status alone. */
   async findClosedOverLock(nowSeconds: number): Promise<EvmSendSwapRow[]> {
-    // Keyed on the ENTRY into `locking_evm`, never on `evm_lock_txid`: that is
-    // patched after the broadcast, so a crash leaves it null over the very lock
-    // still in the mempool this must not skip.
-    const rows = (await this.driver.all(
-      `SELECT * FROM send_evm_swap AS s
-       WHERE s.state IN ('stuck', 'refunded') AND s.refund_locktime > ?
-         AND EXISTS (SELECT 1 FROM send_evm_swap_event AS e
-                     WHERE e.swap_id = s.id AND e.to_state = 'locking_evm')
-       ORDER BY s.created_at`,
-      [nowSeconds],
-    )) as Raw[]
+    const rows = (await this.driver.all(evmSendSwapSql.selectClosedOverLock, [nowSeconds])) as Raw[]
     return rows.map(toRow)
   }
 
   /** First writer wins, true when that was us: the resend has no state CAS to ride. */
   async claimRefundTxid(id: string, txid: string): Promise<boolean> {
-    const result = await this.driver.run(
-      'UPDATE send_evm_swap SET updated_at = ?, evm_refund_txid = ? WHERE id = ? AND evm_refund_txid IS NULL',
-      [this.now(), txid, id],
-    )
+    const result = await this.driver.run(evmSendSwapSql.claimRefundTxid, [this.now(), txid, id])
     return (result?.changes ?? 0) > 0
   }
 }
