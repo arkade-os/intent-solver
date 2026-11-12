@@ -865,6 +865,32 @@ describe('tick: the full drive', () => {
     expect(arkade.claimCalls.map((c) => c.outputs)).toEqual([[funding]])
   })
 
+  describe('a second payment to a paid lockup, found at claim time', () => {
+    const SECOND_PAYMENT = { txid: 'f2', vout: 0, value: AMOUNT }
+    const claimWithSecondPayment = async () => {
+      const outcome = await service.quote(FORGED.invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+      if (!outcome.accepted) throw new Error(`forged quote refused: ${outcome.reason}`)
+      const funding = { txid: 'f1', vout: 0, value: AMOUNT }
+      arkade.lockups = [funding]
+      ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
+      expect((await service.tick(outcome.swap.id)).state).toBe('paid')
+
+      arkade.lockups = [funding, SECOND_PAYMENT]
+      ln.payments.set('pay-1', { id: 'pay-1', status: 'succeeded', preimage: FORGED_PREIMAGE })
+      return service.tick(outcome.swap.id)
+    }
+
+    it('goes back to the client at once', async () => {
+      expect((await claimWithSecondPayment()).state).toBe('claimed')
+      expect(arkade.refundCalls.map((c) => c.outputs)).toEqual([[SECOND_PAYMENT]])
+    })
+
+    it('does not hold the claim back when that refund fails', async () => {
+      arkade.refund = async () => Promise.reject(new Error('emulator down'))
+      expect((await claimWithSecondPayment()).state).toBe('claimed')
+    })
+  })
+
   it('claims the asset vtxo too when the asset-free outputs cannot cover what was paid', async () => {
     const outcome = await service.quote(FORGED.invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
     if (!outcome.accepted) throw new Error(`forged quote refused: ${outcome.reason}`)

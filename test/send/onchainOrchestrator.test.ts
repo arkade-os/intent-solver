@@ -1430,6 +1430,51 @@ describe('OnchainSendSwapService', () => {
     expect(claimed).toEqual([[funding]])
   })
 
+  describe('a second payment to the lockup, found at claim time', () => {
+    const claimWithSecondPayment = async (refund: typeof deps.arkade.refund) => {
+      const outcome = await service.quote({
+        paymentHash,
+        amountSats: 50_000,
+        payoutPubkey,
+        refundAddress: REFUND_ADDRESS,
+        clientRefundPubkey,
+      })
+      if (!outcome.accepted) throw new Error('expected acceptance')
+      const funding = { txid: 'lockup-tx', vout: 0, value: 50_000 }
+      deps.outputs.set(outcome.swap.pkScript, [funding])
+      const row = await service.tick(outcome.swap.id)
+      expect(row.state).toBe('awaiting_claim')
+
+      deps.outputs.set(outcome.swap.pkScript, [funding, SECOND_PAYMENT])
+      deps.arkade.refund = refund
+      deps.onchain.spendClaim(row.fundingTxid!, 0, [
+        new Uint8Array([0xaa]),
+        P,
+        new Uint8Array([0xbb]),
+        new Uint8Array([0xcc]),
+      ])
+      return service.tick(outcome.swap.id)
+    }
+    const SECOND_PAYMENT = { txid: 'second-payment', vout: 0, value: 50_000 }
+
+    it('goes back to the client at once', async () => {
+      const refunded: unknown[] = []
+      const row = await claimWithSecondPayment(async (_row, outputs) => {
+        refunded.push(outputs)
+        return 'refund-ark-txid'
+      })
+      expect(row.state).toBe('claimed')
+      expect(refunded).toEqual([[SECOND_PAYMENT]])
+    })
+
+    it('does not hold the claim back when that refund fails', async () => {
+      const row = await claimWithSecondPayment(async () => {
+        throw new Error('emulator down')
+      })
+      expect(row.state).toBe('claimed')
+    })
+  })
+
   it('claims the asset vtxo too when the asset-free outputs cannot cover what was paid', async () => {
     const outcome = await service.quote({
       paymentHash,
