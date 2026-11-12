@@ -870,6 +870,12 @@ emulator key among its signers (`signerPubkey` or `deprecatedSigners`).
 Anything else is refused: `unsupported_payload`, `error_code`
 `unsupported_emulator_pubkey`.
 
+Two limits apply for now. The asset RFQ corridor (§ 7.2.1) accepts only the
+default key: its fills still co-sign through the emulator, which cannot sign
+for the server's key. And a receive leg's non-interactive claim by covclaimd
+(§ 7.1.2) works on a server-key lockup only if covclaimd submits that claim
+to the Arkade server; the client's own interactive claim works either way.
+
 ## 7. Settlement profiles
 
 A profile defines the `profile` objects of request/quote/status, the funding
@@ -1837,7 +1843,7 @@ fixed by the code; `unit`, when present, is `blocks`, `characters` or `sats`.
 | `invoice_sub_satoshi_amount`   | use an invoice whose amount is a whole number of sats                                                 |
 | `invoice_too_long`             | use an invoice no longer than `limit` characters                                                      |
 | `invoice_wrong_network`        | use an invoice for the pair's network                                                                 |
-| `unsupported_emulator_pubkey`  | omit `emulator_pubkey`, or name the Arkade server's signer while it lists the network's pinned key    |
+| `unsupported_emulator_pubkey`  | omit `emulator_pubkey` (and derive with the default key), or name the server's signer while it lists the pin |
 
 Solvers MUST NOT return free-form diagnostic text, raw request values, backend
 errors, inventory levels or pricing configuration in a refusal. Those belong in
