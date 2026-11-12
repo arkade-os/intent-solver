@@ -133,6 +133,8 @@ export interface AssetRfqSwapRow {
   fillPriceScale: number | null
   /** The contract version negotiated for this quote; null is the baseline, asset-swap-v2. */
   contractVersion: string | null
+  /** The offer's co-signer key, x-only. Null on rows quoted before it was stored: the deployment's own. */
+  emulatorPubkey: string | null
 }
 
 export interface AssetRfqQuoteRecord {
@@ -164,6 +166,7 @@ export interface AssetRfqQuoteRecord {
   quotePrice?: { impliedMantissa: bigint; scale: number; givesBase: boolean }
   /** Omitted when the request named no `contract_versions`. */
   contractVersion?: string
+  emulatorPubkey?: string | null
 }
 
 type Raw = Record<string, string | number | null>
@@ -209,6 +212,7 @@ const toRow = (raw: Raw): AssetRfqSwapRow => ({
   fillPriceMantissa: bigIntOrNull(raw.fill_price_mantissa),
   fillPriceScale: numberOrNull(raw.fill_price_scale),
   contractVersion: text(raw.contract_version),
+  emulatorPubkey: text(raw.emulator_pubkey),
 })
 
 const bigIntOrNull = (value: string | number | null | undefined): bigint | null =>
@@ -322,6 +326,7 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
       record.quotePrice?.scale ?? null,
       record.quotePrice === undefined ? null : record.quotePrice.givesBase ? 1 : 0,
       record.contractVersion ?? null,
+      record.emulatorPubkey ?? null,
     ])
     await this.recordEvent(record.id, null, 'quoted', null)
     const row = await this.findById(record.id)

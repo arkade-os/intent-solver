@@ -37,6 +37,7 @@ import { fixedFeePricing, type PricingStrategy } from '@arkade-os/solver-core/co
 import { paymentHashFromPreimage } from '@arkade-os/solver-core/core/preimage.js'
 import { arkadeAddressPkScript, clientFundedLockupScript } from '@arkade-os/solver-arkade/arkade/quoteLockup.js'
 import { claimOutputs, satsOutputs, type FundedOutput } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { quoteCosignerKey } from '@arkade-os/solver-arkade/arkade/cosignerKey.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
 import { advanceUnrolledClaims, awaitLeftover, lockupLeftover, settleUnrolledClaims } from '../unrolledSpendStep.js'
 import { MAX_LOCKUP_SPEND_INPUTS, refundRecord } from '@arkade-os/solver-arkade/arkade/wallet.js'
@@ -142,6 +143,7 @@ export type QuoteRefusal =
   | 'provider_at_capacity'
   | 'insufficient_float'
   | 'invalid_refund_address'
+  | 'unsupported_emulator_pubkey'
 
 export type QuoteOutcome =
   { accepted: true; swap: OnchainSendSwapRow; lockupDeadline: number } | { accepted: false; reason: QuoteRefusal }
@@ -169,6 +171,8 @@ export interface OnchainQuoteRequest {
    * script.
    */
   clientRefundPubkey: string
+  /** The co-signer key the client derived with, x-only. Absent: the default. */
+  emulatorPubkey?: string
   rfqId?: string
 }
 
@@ -360,6 +364,8 @@ export class OnchainSendSwapService {
     if (request.requesterKey !== undefined && !this.quoteLimiter.take(request.requesterKey)) {
       return { accepted: false, reason: 'rate_limited' }
     }
+    const emulatorPubkey = await quoteCosignerKey(arkade, request.emulatorPubkey)
+    if (emulatorPubkey === null) return { accepted: false, reason: 'unsupported_emulator_pubkey' }
     // RESERVED, not merely observed: the row below is what makes this swap
     // visible to `totalCommitted()`, and until it lands a concurrent quote
     // would read the same headroom and take it too. Held until the
@@ -378,13 +384,16 @@ export class OnchainSendSwapService {
       // The client's solo refund leaf has no CLTV: opening before our last claim, they could unroll, refund, then claim the HTLC.
       const ladder = unilateralLadderFor(arkade.delays, arkadeClaimDeadline(acceptance.htlcLocktime), this.now())
       const serverKey = hex.decode(arkade.serverPubkey)
-      const arkadeScript = clientFundedLockupScript(arkade, {
-        paymentHash: request.paymentHash,
-        refundLocktime: acceptance.refundLocktime,
-        delays: ladder,
-        clientRefundPubkey: request.clientRefundPubkey,
-        refundPkScript,
-      })
+      const arkadeScript = clientFundedLockupScript(
+        { ...arkade, emulatorPubkey },
+        {
+          paymentHash: request.paymentHash,
+          refundLocktime: acceptance.refundLocktime,
+          delays: ladder,
+          clientRefundPubkey: request.clientRefundPubkey,
+          refundPkScript,
+        },
+      )
 
       // acceptance.htlcLocktime is ALREADY an absolute unix-seconds CLTV
       // (src/core/onchainSend.ts's htlcLocktimeFor) — no block-height/chain-tip
@@ -425,7 +434,7 @@ export class OnchainSendSwapService {
           pkScript: hex.encode(arkadeScript.pkScript),
           lockupAddress: arkadeScript.address(arkade.hrp, serverKey).encode(),
           refundPkScript: hex.encode(refundPkScript),
-          emulatorPubkey: arkade.emulatorPubkey,
+          emulatorPubkey,
           clientRefundPubkey: request.clientRefundPubkey,
           receiverPkScript: arkade.receiverPkScript,
           nonInteractiveParameters: true,

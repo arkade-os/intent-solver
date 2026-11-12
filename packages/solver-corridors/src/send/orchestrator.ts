@@ -53,6 +53,7 @@ import {
 } from '@arkade-os/solver-core/invoice/decode.js'
 import { preimageMatchesHash } from '@arkade-os/solver-core/core/preimage.js'
 import { arkadeAddressPkScript, clientFundedLockupScript } from '@arkade-os/solver-arkade/arkade/quoteLockup.js'
+import { quoteCosignerKey } from '@arkade-os/solver-arkade/arkade/cosignerKey.js'
 import { claimOutputs, satsOutputs } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import type { FundedOutput } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import {
@@ -366,6 +367,7 @@ export type QuoteRefusal =
   | 'provider_at_capacity'
   | 'insufficient_float'
   | 'invalid_refund_address'
+  | 'unsupported_emulator_pubkey'
   | 'rate_limited'
   // A coupled self-payment whose two refund deadlines are too close together
   // to be claimed safely. See `evaluateCouplingDeadlines`.
@@ -445,6 +447,11 @@ export class SendSwapService {
     this.sendHintScidDenylist = deps.sendHintScidDenylist ?? new Set()
   }
 
+  /** The co-signer key a quote builds on for the client's `emulator_pubkey`, or null to refuse. Public for the RFQ re-serve. */
+  cosignerKey(requested?: string): Promise<string | null> {
+    return quoteCosignerKey(this.deps.arkade, requested)
+  }
+
   /**
    * An open-RFQ bid: the most {@link quote} charges, so the binding quote can only meet or beat it. An estimated
    * quote swaps the flat for the routing estimate, priced here at the routing cap; past that cap the quote can lose.
@@ -512,7 +519,7 @@ export class SendSwapService {
   async quote(
     rawInvoice: string,
     refundAddress: string,
-    options: { rfqId?: string; requesterKey?: string; clientRefundPubkey: string },
+    options: { rfqId?: string; requesterKey?: string; clientRefundPubkey: string; emulatorPubkey?: string },
   ): Promise<QuoteOutcome> {
     const { store, arkade, limits, invoicePrefix } = this.deps
 
@@ -591,6 +598,8 @@ export class SendSwapService {
     if (options.requesterKey !== undefined && !this.quoteLimiter.take(options.requesterKey)) {
       return { accepted: false, reason: 'rate_limited' }
     }
+    const emulatorPubkey = await this.cosignerKey(options.emulatorPubkey)
+    if (emulatorPubkey === null) return { accepted: false, reason: 'unsupported_emulator_pubkey' }
     // The Lightning receive corridor, asked FIRST and by name, because its
     // answer is the one that can be something other than a refusal: a live row
     // there means this client is refreshing Arkade funds through us.
@@ -712,13 +721,16 @@ export class SendSwapService {
         this.now,
         this.deps.chainTip,
       )
-      const script = clientFundedLockupScript(arkade, {
-        paymentHash: decoded.paymentHash,
-        refundLocktime,
-        delays: ladder,
-        clientRefundPubkey: options.clientRefundPubkey,
-        refundPkScript,
-      })
+      const script = clientFundedLockupScript(
+        { ...arkade, emulatorPubkey },
+        {
+          paymentHash: decoded.paymentHash,
+          refundLocktime,
+          delays: ladder,
+          clientRefundPubkey: options.clientRefundPubkey,
+          refundPkScript,
+        },
+      )
 
       try {
         // Awaited inside the try, so the driver's rejection lands in the catch.
@@ -746,7 +758,7 @@ export class SendSwapService {
           pkScript: hex.encode(script.pkScript),
           lockupAddress: script.address(arkade.hrp, serverKey).encode(),
           refundPkScript: hex.encode(refundPkScript),
-          emulatorPubkey: arkade.emulatorPubkey,
+          emulatorPubkey,
           clientRefundPubkey: options.clientRefundPubkey,
           receiverPkScript: arkade.receiverPkScript,
           nonInteractiveParameters: true,
