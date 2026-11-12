@@ -40,6 +40,16 @@ export interface CollectionEvidence {
 
 export const outpointKey = (o: { txid: string; vout: number }): string => `${o.txid}:${o.vout}`
 
+/** What a claim may spend: the outputs adopted at funding. A later payment to the public lockup is the client's to refund. */
+export const adoptedOnly = <O extends { txid: string; vout: number }>(
+  outputs: readonly O[],
+  lockupOutpoints: string | null,
+): O[] => {
+  if (lockupOutpoints === null) return [...outputs]
+  const adopted = new Set((JSON.parse(lockupOutpoints) as AdoptedOutput[]).map(outpointKey))
+  return outputs.filter((output) => adopted.has(outpointKey(output)))
+}
+
 /** Adopted outputs not yet collected on either rail. One the read does not show is unknown, never collected. */
 export const uncollected = (adopted: readonly AdoptedOutput[], evidence: CollectionEvidence): AdoptedOutput[] =>
   adopted.filter((output) => {
