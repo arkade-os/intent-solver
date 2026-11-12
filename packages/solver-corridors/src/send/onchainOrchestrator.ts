@@ -67,7 +67,7 @@ import { askApproval, type ApprovalCheck } from '@arkade-os/solver-core/core/app
 import { guardedTick, sweep } from '@arkade-os/solver-core/util/sweep.js'
 import { stepFor } from '@arkade-os/solver-core/core/stateMachine.js'
 import { OnchainSendMachine } from '../machines/onchainSend.js'
-import { adoptedOnly, providerKeyCurrent } from '../legs/arkadeLockup.js'
+import { adoptedOnly, providerKeyCurrent, unadopted } from '../legs/arkadeLockup.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
@@ -1109,7 +1109,8 @@ export class OnchainSendSwapService {
     }
     const lockupsP = capture(arkade.findLockups(row.pkScript))
     const unrolled = await advanceUnrolledClaims(store, row, arkade, covenantRowFor(row), row.preimage)
-    const outputs = claimOutputs(adoptedOnly(unwrap(await lockupsP), row.lockupOutpoints), row.amountSats)
+    const lockups = unwrap(await lockupsP)
+    const outputs = claimOutputs(adoptedOnly(lockups, row.lockupOutpoints), row.amountSats)
     // claimOutputs falls back to EVERY adopted output when the asset-free ones fall short, so a
     // dust asset vtxo left after the clean funding was swept reads non-empty yet cannot
     // cover the amount. Guard on value, not emptiness — held 0 is the empty case.
@@ -1160,6 +1161,10 @@ export class OnchainSendSwapService {
         return false
       }
       throw error
+    }
+    const extra = unadopted(lockups, row.lockupOutpoints)
+    if (txid !== null && extra.length > 0) {
+      await arkade.refund(covenantRowFor(row), extra).catch((error: unknown) => this.onTickError?.(row.id, error))
     }
     const recourse = () => unilateralExitRecourse(covenantRowFor(row), { solverPubkey: arkade.providerPubkey })
     if (unrolled === null || unrolled.settled) {

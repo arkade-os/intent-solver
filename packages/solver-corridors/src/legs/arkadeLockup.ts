@@ -50,6 +50,16 @@ export const adoptedOnly = <O extends { txid: string; vout: number }>(
   return outputs.filter((output) => adopted.has(outpointKey(output)))
 }
 
+/** The rest of the lockup: the client's, returned at claim time rather than left to its refund deadline. */
+export const unadopted = <O extends { txid: string; vout: number }>(
+  outputs: readonly O[],
+  lockupOutpoints: string | null,
+): O[] => {
+  if (lockupOutpoints === null) return []
+  const adopted = new Set(adoptedOnly(outputs, lockupOutpoints))
+  return outputs.filter((output) => !adopted.has(output))
+}
+
 /** Adopted outputs not yet collected on either rail. One the read does not show is unknown, never collected. */
 export const uncollected = (adopted: readonly AdoptedOutput[], evidence: CollectionEvidence): AdoptedOutput[] =>
   adopted.filter((output) => {
