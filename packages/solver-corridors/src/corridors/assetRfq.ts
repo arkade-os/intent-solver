@@ -237,6 +237,7 @@ export const respondToAssetRfqRequest = async (
     amountSide: request.amount_side,
     makerPkScript: request.profile.maker_pk_script,
     makerPublicKey: request.profile.maker_public_key,
+    emulatorPubkey: request.profile.emulator_pubkey,
     requesterKey: options?.requesterKey,
   })
   if (outcome.accepted) {

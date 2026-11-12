@@ -171,6 +171,21 @@ describe('quote', () => {
     })
   })
 
+  it('derives on an accepted co-signer key and records it, refusing one it does not accept', async () => {
+    const operator = 'ab'.repeat(32)
+    const { service } = await harness({
+      cosignerKey: async (requested) => (requested === operator ? operator : null),
+      deriveOffer: (terms) => ({ pkScript: OFFER_SCRIPT, address: 'ark1qoffer', emulatorPubkey: terms.emulatorPubkey }),
+    })
+    expect(await service.quote(request({ emulatorPubkey: 'cd'.repeat(32) }))).toEqual({
+      accepted: false,
+      reason: 'unsupported_emulator_pubkey',
+    })
+    const outcome = await service.quote(request({ emulatorPubkey: operator }))
+    if (!outcome.accepted) throw new Error('expected a quote')
+    expect(outcome.swap.emulatorPubkey).toBe(operator)
+  })
+
   it.each([
     ['a pair on another corridor', { pair: 'arkade:BTC->lightning:BTC' }],
     [

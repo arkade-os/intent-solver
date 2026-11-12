@@ -43,6 +43,7 @@ import {
 } from '@arkade-os/solver-core/core/evmReceive.js'
 import { deadlineSecondsForBlock, type EvmBlockCadence } from '@arkade-os/solver-rails-evm/evm/blockTime.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { quoteCosignerKey } from '@arkade-os/solver-arkade/arkade/cosignerKey.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
@@ -139,6 +140,8 @@ export interface EvmReceiveQuoteRequest {
   payoutAddress: string
   /** The client's Arkade x-only key. */
   payoutPubkey: string
+  /** The co-signer key the client derived with, x-only. Absent: the default. */
+  emulatorPubkey?: string
   /**
    * The transport's requester identity (socket IP, relay author), for quote
    * admission control. Absent for operator-local callers, who are never
@@ -152,6 +155,7 @@ export type EvmReceiveQuoteRefusal =
   | EvmReceiveFundRefusal
   | 'unsupported_token'
   | 'invalid_payout_address'
+  | 'unsupported_emulator_pubkey'
   | 'amount_out_of_range'
   | 'fee_consumes_swap'
   | 'duplicate_swap'
@@ -345,6 +349,8 @@ export class EvmReceiveSwapService {
     } catch {
       return { accepted: false, reason: 'invalid_payout_address' }
     }
+    const emulatorPubkey = await quoteCosignerKey(arkade, request.emulatorPubkey)
+    if (emulatorPubkey === null) return { accepted: false, reason: 'unsupported_emulator_pubkey' }
 
     // The client's own figure, parsed rather than trusted: a non-decimal would
     // otherwise reach `BigInt` and throw out of the quote instead of being
@@ -444,7 +450,7 @@ export class EvmReceiveSwapService {
       refundWithoutServerDelay: arkade.delays.unilateralRefundDelay,
       // Every quote from here on carries the current, full covenant suite.
       nonInteractiveParameters: {
-        emulatorPubkey: hex.decode(arkade.emulatorPubkey),
+        emulatorPubkey: hex.decode(emulatorPubkey),
         receiverPkScript: payoutPkScript,
         senderPkScript: hex.decode(arkade.solverRefundPkScript),
       },
@@ -485,7 +491,7 @@ export class EvmReceiveSwapService {
         pkScript: hex.encode(arkadeScript.pkScript),
         lockupAddress: arkadeScript.address(arkade.hrp, serverKey).encode(),
         refundPkScript: arkade.solverRefundPkScript,
-        emulatorPubkey: arkade.emulatorPubkey,
+        emulatorPubkey,
         clientRefundPubkey: arkade.solverPubkey,
         receiverPkScript: hex.encode(payoutPkScript),
         payoutPubkey: request.payoutPubkey,

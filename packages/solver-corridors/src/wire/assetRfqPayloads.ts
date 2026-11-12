@@ -28,6 +28,7 @@
 import { z } from 'zod'
 import { WIRE_ASSET_AMOUNT } from '@arkade-os/solver-core/core/wireAmount.js'
 import { MAX_PAIR_LENGTH } from '@arkade-os/solver-core/core/marketKey.js'
+import { EMULATOR_PUBKEY } from '@arkade-os/solver-core/core/rfqProtocol.js'
 import type { AssetLeg } from '@arkade-os/solver-core/core/assetRfq.js'
 import type { AssetRfqSwapRow } from '../db/assetRfqSwaps.js'
 import { type RfqState } from './payloads.js'
@@ -91,6 +92,7 @@ export const AssetRfqRequest = z
         maker_pk_script: PK_SCRIPT_HEX,
         /** The client's x-only key: the `cancel` path's `user` signer. */
         maker_public_key: XONLY_HEX,
+        emulator_pubkey: EMULATOR_PUBKEY,
       })
       .strict(),
   })

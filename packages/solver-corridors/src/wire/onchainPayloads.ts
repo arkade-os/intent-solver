@@ -18,6 +18,7 @@
 import { z } from 'zod'
 import { WIRE_AMOUNT } from '@arkade-os/solver-core/core/wireAmount.js'
 import { MAX_PAIR_LENGTH } from '@arkade-os/solver-core/core/marketKey.js'
+import { EMULATOR_PUBKEY } from '@arkade-os/solver-core/core/rfqProtocol.js'
 import type { OnchainSendSwapRow } from '../db/onchainSwaps.js'
 import type { RfqState } from './payloads.js'
 
@@ -52,6 +53,7 @@ export const OnchainRfqRequest = z
         payout_pubkey: XONLY_HEX,
         refund_address: z.string().min(1).max(200),
         client_refund_pubkey: XONLY_HEX,
+        emulator_pubkey: EMULATOR_PUBKEY,
       })
       .strict(),
   })

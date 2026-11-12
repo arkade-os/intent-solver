@@ -96,6 +96,7 @@ const stack = (options: {
   beforeStreamStarted?: () => Promise<void>
   omitStreamStarted?: boolean
   streamError?: Error
+  operatorHolds?: boolean
 }): Stack => {
   const virtualTxs = new Map<string, string>()
   for (const output of options.swept) virtualTxs.set(output.txid, sourceTx(output.vout, BigInt(output.value)).b64)
@@ -130,6 +131,8 @@ const stack = (options: {
       arkProvider: {
         getInfo: async () => ({
           network: 'regtest',
+          signerPubkey: hex.encode(SERVER),
+          deprecatedSigners: options.operatorHolds ? [{ pubkey: hex.encode(key(9)), cutoffDate: 0n }] : [],
           dust: 330n,
           vtxoTreeExpiry: 180n,
           forfeitPubkey: hex.encode(SERVER),
@@ -245,6 +248,17 @@ describe('refundSweptSwapScript builds an intent the covenant can satisfy', () =
     submitIntent.mockClear()
     join.mockClear()
     submitIntent.mockImplementation(async ({ proof }: { proof: string }) => proof)
+  })
+
+  it('skips the emulator and registers straight with arkd when arkd holds the co-signer key, and only then', async () => {
+    const swept: FundedOutput[] = [{ txid: sourceTx(0, 1976n).id, vout: 0, value: 1976 }]
+    for (const operatorHolds of [true, false]) {
+      submitIntent.mockClear()
+      const { ctx, registered } = stack({ swept, operatorHolds })
+      await refundSweptSwapScript(ctx, 'http://emulator', swapScript(), swept, CLIENT_REFUND)
+      expect(submitIntent).toHaveBeenCalledTimes(operatorHolds ? 0 : 1)
+      expect(registered).toHaveLength(1)
+    }
   })
 
   it('puts the extension at output 0 with value 0, naming every lockup vin', async () => {

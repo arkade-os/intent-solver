@@ -44,6 +44,7 @@ type OrchestratorRefusal =
   | 'insufficient_float'
   | 'invalid_refund_address'
   | 'invalid_payout_address'
+  | 'unsupported_emulator_pubkey'
   | 'rate_limited'
   | 'coupled_deadline_unsafe'
   | 'coupled_invoice_mismatch'
@@ -179,6 +180,11 @@ export const REFUSAL_EXPLANATIONS: Record<RefusalReason, RefusalExplanation> = {
   invalid_payout_address: {
     meaning: 'The payout address the client asked to be paid at did not decode for this network.',
     whatToDo: 'Nothing. The client supplied an address we could not pay.',
+  },
+  unsupported_emulator_pubkey: {
+    meaning:
+      "The client named a covenant co-signer key that is neither this deployment's default nor arkd's current signer while arkd holds the network's pinned key.",
+    whatToDo: "Nothing, unless clients expect arkd's key: check that arkd lists the network's pinned emulator key.",
   },
   rate_limited: {
     meaning: 'This requester key exceeded the quote quota for the current window.',

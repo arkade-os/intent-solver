@@ -76,6 +76,10 @@ describe('the four Arkade seams', () => {
     expect(body()).toContain('emulatorPubkey: xOnlyPubkey(hex.decode(emulatorPubkey))')
   })
 
+  it("accepts only the default co-signer key, since fills cannot yet co-sign arkd's", () => {
+    expect(body()).toContain('quoteCosignerKey({ emulatorPubkey: arkadeOps.emulatorPubkey }, requested)')
+  })
+
   it('takes the exit closure from the ADVERTISED delay, never the local override', () => {
     expect(body()).toContain('exitDelay: offerExitDelay(arkade.advertisedExitDelay)')
     expect(body()).not.toContain('offerExitDelay(arkade.unilateralDelays')

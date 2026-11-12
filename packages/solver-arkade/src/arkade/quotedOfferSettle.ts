@@ -17,13 +17,7 @@ import type { ArkadeContext } from './wallet.js'
 import { fulfillOffer, type FulfillOptions } from './offerFulfill.js'
 import { heldOf } from './offerFill.js'
 import { liveOfferOutpoints, type OfferOutpoint } from './offerOutpoints.js'
-import {
-  offerFromTerms,
-  offerScriptFrom,
-  xOnlyPubkey,
-  type OfferDerivation,
-  type QuotedOfferTerms,
-} from './offerTerms.js'
+import { offerFromTerms, offerScriptFrom, type OfferDerivation, type QuotedOfferTerms } from './offerTerms.js'
 
 const assertSafeSats = (sats: bigint): number => {
   if (sats > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error(`deposit of ${sats} sats exceeds a safe integer`)
@@ -41,6 +35,8 @@ export interface QuotedOfferIntent {
   makerPublicKey: string
   depositTxid: string | null
   depositVout: number | null
+  /** Null on a row quoted before the key was stored: it was derived with the deployment's own. */
+  emulatorPubkey?: string | null
 }
 
 export interface QuotedOfferSettleDeps {
@@ -58,6 +54,7 @@ const termsOf = (intent: QuotedOfferIntent): QuotedOfferTerms => ({
   offerAssetId: intent.fromAssetId,
   makerPkScript: intent.makerPkScript,
   makerPublicKey: intent.makerPublicKey,
+  emulatorPubkey: intent.emulatorPubkey,
 })
 
 export const quotedOfferSettleFor = (
@@ -66,9 +63,6 @@ export const quotedOfferSettleFor = (
   const outpointsAt = deps.outpointsAt ?? ((pkScript: string) => liveOfferOutpoints(deps.ctx, pkScript))
   const fulfill = deps.fulfill ?? fulfillOffer
   const derive = offerScriptFrom(deps.derivation)
-  // The same normalisation `offerScriptFrom` applies, or the offer handed to
-  // `fulfillOffer` would carry a key the derived script was not compiled from.
-  const emulatorPubkey = xOnlyPubkey(deps.derivation.emulatorPubkey)
 
   return async (intent, options) => {
     if (intent.depositTxid === null || intent.depositVout === null) {
@@ -105,7 +99,8 @@ export const quotedOfferSettleFor = (
       deps.ctx,
       deps.emulatorUrl,
       {
-        ...offerFromTerms(termsOf(intent), emulatorPubkey, deps.derivation.exitDelay),
+        // The key the derivation used, or the offer would carry one the script was not compiled from.
+        ...offerFromTerms(termsOf(intent), hex.decode(derived.emulatorPubkey), deps.derivation.exitDelay),
         swapPkScript: hex.decode(derived.pkScript),
       },
       {

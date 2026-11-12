@@ -52,6 +52,7 @@ import {
   type EvmSendAcceptanceRefusal,
 } from '@arkade-os/solver-core/core/evmSend.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { quoteCosignerKey } from '@arkade-os/solver-arkade/arkade/cosignerKey.js'
 import { evmSendCovenantRowFor } from '../evm/covenantRow.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
@@ -193,6 +194,8 @@ export interface EvmSendQuoteRequest {
   refundAddress: string
   /** The client's own refund key - the `refundWithoutReceiver` leaf. */
   clientRefundPubkey: string
+  /** The co-signer key the client derived with, x-only. Absent: the default. */
+  emulatorPubkey?: string
   /**
    * The transport's requester identity (socket IP, relay author), for quote
    * admission control. Absent for operator-local callers, who are never
@@ -206,6 +209,7 @@ export type EvmSendQuoteRefusal =
   | EvmSendAcceptanceRefusal
   | 'exact_out_unsupported'
   | 'invalid_refund_address'
+  | 'unsupported_emulator_pubkey'
   | 'fee_consumes_swap'
   | 'duplicate_swap'
   | 'provider_at_capacity'
@@ -562,6 +566,8 @@ export class EvmSendSwapService {
     } catch {
       return { accepted: false, reason: 'invalid_refund_address' }
     }
+    const emulatorPubkey = await quoteCosignerKey(arkade, request.emulatorPubkey)
+    if (emulatorPubkey === null) return { accepted: false, reason: 'unsupported_emulator_pubkey' }
 
     const nowSeconds = this.now()
     const acceptance = evaluateEvmSendAcceptance({
@@ -678,7 +684,7 @@ export class EvmSendSwapService {
         // no legacy selector. See `NonInteractiveParameters.legacy`'s own doc comment
         // for why that is not simply always omitted.
         nonInteractiveParameters: {
-          emulatorPubkey: hex.decode(arkade.emulatorPubkey),
+          emulatorPubkey: hex.decode(emulatorPubkey),
           receiverPkScript: hex.decode(arkade.receiverPkScript),
           senderPkScript: refundPkScript,
         },
@@ -721,7 +727,7 @@ export class EvmSendSwapService {
         pkScript: hex.encode(arkadeScript.pkScript),
         lockupAddress: arkadeScript.address(arkade.hrp, serverKey).encode(),
         refundPkScript: hex.encode(refundPkScript),
-        emulatorPubkey: arkade.emulatorPubkey,
+        emulatorPubkey,
         clientRefundPubkey: request.clientRefundPubkey,
         receiverPkScript: arkade.receiverPkScript,
         nonInteractiveParameters: true,

@@ -31,6 +31,8 @@ export interface QuotedOfferTerms {
   offerAssetId: string | null
   makerPkScript: string
   makerPublicKey: string
+  /** The co-signer key, x-only hex. Absent or null: the derivation's own. */
+  emulatorPubkey?: string | null
 }
 
 export interface OfferDerivation {
@@ -105,13 +107,18 @@ export const offerFromTerms = (
  */
 export const offerScriptFrom = (
   deps: OfferDerivation,
-): ((terms: QuotedOfferTerms) => { pkScript: string; address: string }) => {
-  const emulatorPubkey = xOnlyPubkey(deps.emulatorPubkey)
+): ((terms: QuotedOfferTerms) => { pkScript: string; address: string; emulatorPubkey: string }) => {
+  const fallback = xOnlyPubkey(deps.emulatorPubkey)
   return (terms) => {
+    const emulatorPubkey = terms.emulatorPubkey ? xOnlyPubkey(hex.decode(terms.emulatorPubkey)) : fallback
     const script = offerVtxoScript(offerFromTerms(terms, emulatorPubkey, deps.exitDelay), deps.serverPubkey)
     // Both from the SAME compiled script: the address is what the client is
     // told and the pkScript is what the deposit is recognised by, so two
     // compilations could disagree about one covenant.
-    return { pkScript: hex.encode(script.pkScript), address: script.address(deps.hrp, deps.serverPubkey).encode() }
+    return {
+      pkScript: hex.encode(script.pkScript),
+      address: script.address(deps.hrp, deps.serverPubkey).encode(),
+      emulatorPubkey: hex.encode(emulatorPubkey),
+    }
   }
 }

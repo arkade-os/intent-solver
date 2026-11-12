@@ -124,6 +124,7 @@ const row = (over: Partial<AssetRfqSwapRow> = {}): AssetRfqSwapRow => ({
   quoteGivesBase: null,
   fillPriceMantissa: null,
   fillPriceScale: null,
+  emulatorPubkey: null,
   ...over,
 })
 

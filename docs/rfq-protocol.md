@@ -859,6 +859,17 @@ Corollaries:
 - Quote non-repudiation comes free from the transport (§ 3.1): a quote is a
   signed solver statement.
 
+**The co-signer key.** Every profile whose contract carries an emulator-tweaked
+leaf (all of § 7.1 and § 7.2.1) accepts an OPTIONAL `profile.emulator_pubkey`:
+the x-only key, 64 lowercase hex, the client derived with. Absent means the
+solver's default co-signer — the network's pinned emulator key on a standard
+deployment — and the quote is byte-identical to one for a request without the
+field. A solver builds on a named key only if it is that default, or the Arkade
+server's current `signerPubkey` while the server lists the network's pinned
+emulator key among its signers (`signerPubkey` or `deprecatedSigners`).
+Anything else is refused: `unsupported_payload`, `error_code`
+`unsupported_emulator_pubkey`.
+
 ## 7. Settlement profiles
 
 A profile defines the `profile` objects of request/quote/status, the funding
@@ -1826,6 +1837,7 @@ fixed by the code; `unit`, when present, is `blocks`, `characters` or `sats`.
 | `invoice_sub_satoshi_amount`   | use an invoice whose amount is a whole number of sats                                                 |
 | `invoice_too_long`             | use an invoice no longer than `limit` characters                                                      |
 | `invoice_wrong_network`        | use an invoice for the pair's network                                                                 |
+| `unsupported_emulator_pubkey`  | omit `emulator_pubkey`, or name the Arkade server's signer while it lists the network's pinned key    |
 
 Solvers MUST NOT return free-form diagnostic text, raw request values, backend
 errors, inventory levels or pricing configuration in a refusal. Those belong in

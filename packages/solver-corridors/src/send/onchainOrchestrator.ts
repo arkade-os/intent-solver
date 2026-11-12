@@ -37,6 +37,7 @@ import { FREE, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { fixedFeePricing, type PricingStrategy } from '@arkade-os/solver-core/core/pricing.js'
 import { paymentHashFromPreimage, scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { quoteCosignerKey } from '@arkade-os/solver-arkade/arkade/cosignerKey.js'
 import { claimOutputs, satsOutputs } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
 import { advanceUnrolledClaims, awaitLeftover, lockupLeftover, settleUnrolledClaims } from '../unrolledSpendStep.js'
@@ -133,6 +134,7 @@ export type QuoteRefusal =
   | 'provider_at_capacity'
   | 'insufficient_float'
   | 'invalid_refund_address'
+  | 'unsupported_emulator_pubkey'
 
 export type QuoteOutcome =
   { accepted: true; swap: OnchainSendSwapRow; lockupDeadline: number } | { accepted: false; reason: QuoteRefusal }
@@ -160,6 +162,8 @@ export interface OnchainQuoteRequest {
    * script.
    */
   clientRefundPubkey: string
+  /** The co-signer key the client derived with, x-only. Absent: the default. */
+  emulatorPubkey?: string
   rfqId?: string
 }
 
@@ -358,6 +362,8 @@ export class OnchainSendSwapService {
     if (request.requesterKey !== undefined && !this.quoteLimiter.take(request.requesterKey)) {
       return { accepted: false, reason: 'rate_limited' }
     }
+    const emulatorPubkey = await quoteCosignerKey(arkade, request.emulatorPubkey)
+    if (emulatorPubkey === null) return { accepted: false, reason: 'unsupported_emulator_pubkey' }
     // RESERVED, not merely observed: the row below is what makes this swap
     // visible to `totalCommitted()`, and until it lands a concurrent quote
     // would read the same headroom and take it too. Held until the
@@ -395,7 +401,7 @@ export class OnchainSendSwapService {
         refundWithoutServerDelay: ladder.unilateralRefundDelay,
         // Every quote from here on carries the current, full covenant suite.
         nonInteractiveParameters: {
-          emulatorPubkey: hex.decode(arkade.emulatorPubkey),
+          emulatorPubkey: hex.decode(emulatorPubkey),
           receiverPkScript: hex.decode(arkade.receiverPkScript),
           senderPkScript: refundPkScript,
         },
@@ -440,7 +446,7 @@ export class OnchainSendSwapService {
           pkScript: hex.encode(arkadeScript.pkScript),
           lockupAddress: arkadeScript.address(arkade.hrp, serverKey).encode(),
           refundPkScript: hex.encode(refundPkScript),
-          emulatorPubkey: arkade.emulatorPubkey,
+          emulatorPubkey,
           clientRefundPubkey: request.clientRefundPubkey,
           receiverPkScript: arkade.receiverPkScript,
           nonInteractiveParameters: true,
