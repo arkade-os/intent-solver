@@ -8,8 +8,9 @@
 import { createHash } from 'node:crypto'
 import type { Config } from '../config.js'
 import { servingFor, type ServingFields } from '../ops/assetRfqMarkets.js'
-import type { AdminStore, AssetMarketRow } from './db.js'
+import type { AssetMarketRow } from './db.js'
 import { editableKeys, editableKnobValues, LIVE_KEYS } from './settings.js'
+import type { AdminRepository } from './db.js'
 
 export type RevertScope = { scope: 'all' } | { scope: 'market'; marketKey: string }
 
@@ -40,7 +41,7 @@ const shown = (value: unknown): string => (value === null || value === undefined
 /** Null when the scope names a market that does not exist. */
 export const planRevert = async (
   scope: RevertScope,
-  { config, store }: { config: Config; store: AdminStore },
+  { config, store }: { config: Config; store: AdminRepository },
 ): Promise<RevertPlan | null> => {
   const rows = await store.listMarkets()
   const inScope = scope.scope === 'all' ? rows : rows.filter((row) => row.marketKey === scope.marketKey)

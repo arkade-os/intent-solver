@@ -143,6 +143,15 @@ import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInvento
 import { offerExitDelay, offerScriptFrom, xOnlyPubkey } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
 import { largestOfferOutpoint, liveOfferOutpoints } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
 import { quotedOfferSettleFor } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
+import type { RebalanceRepository } from './rebalanceStore.js'
+import type { ReceiveSwapRepository } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
+import type { SendSwapRepository } from '@arkade-os/solver-corridors/db/swaps.js'
+import type { OnchainSendSwapRepository } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
+import type { OfferFillRepository } from '@arkade-os/solver-corridors/db/offerFills.js'
+import type { EvmReceiveSwapRepository } from '@arkade-os/solver-corridors-evm/db/evmReceiveSwaps.js'
+import type { AdminRepository } from '../admin/db.js'
+import type { EvmSendSwapRepository } from '@arkade-os/solver-corridors-evm/db/evmSendSwaps.js'
+import type { AssetRfqSwapRepository } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 
 export interface Services {
   /**
@@ -175,9 +184,9 @@ export interface Services {
    * {@link Services.replaceMarkets} refreshes it without a restart; EMPTY when none are configured.
    */
   assetMarkets: readonly AssetMarketPricingView[]
-  store: SwapStore
-  onchainStore: OnchainSendSwapStore
-  receiveStore: ReceiveSwapStore
+  store: SendSwapRepository
+  onchainStore: OnchainSendSwapRepository
+  receiveStore: ReceiveSwapRepository
   /**
    * The EVM corridors' stores, or NULL when this deployment serves no token.
    *
@@ -190,8 +199,8 @@ export interface Services {
    * One store per DIRECTION, not per token: `token_address` is a column, so all
    * of a deployment's tokens share these two.
    */
-  evmSendStore: EvmSendSwapStore | null
-  evmReceiveStore: EvmReceiveSwapStore | null
+  evmSendStore: EvmSendSwapRepository | null
+  evmReceiveStore: EvmReceiveSwapRepository | null
   /**
    * The EVM corridors' orchestrators, or NULL on a deployment serving no token.
    *
@@ -221,7 +230,7 @@ export interface Services {
    * a deployment serving no market would otherwise get an `offer_fill` table it
    * never asked for and a subscription to a stream it has no use for.
    */
-  offerStore: OfferFillStore | null
+  offerStore: OfferFillRepository | null
   assetOffers: AssetOfferService | null
   /** Priced subset of `OFFER_MARKETS` this process will actually fill. */
   liveOfferMarkets: readonly AssetMarket[]
@@ -242,7 +251,7 @@ export interface Services {
    * DIRECTION — the shape the EVM family already has, and for the same reason:
    * the pair carries the asset id, so the registry key is per market.
    */
-  assetRfqStore: AssetRfqSwapStore
+  assetRfqStore: AssetRfqSwapRepository
   assetRfqService: AssetRfqSwapService
   assetRfqMarkets: readonly AssetRfqMarket[]
   /** Rebuild in-memory markets from the console store and swap the live corridor set. */
@@ -253,7 +262,7 @@ export interface Services {
    * whether or not the console is running: operator actions are auditable from
    * the CLI too.
    */
-  adminStore: AdminStore
+  adminStore: AdminRepository
   arkade: ArkadeContext
   /**
    * Per-swap failure state: what is failing, how often, and which swaps are held off.
@@ -262,7 +271,7 @@ export interface Services {
    */
   tickErrors: TickErrorTracker
   rebalance?: RebalanceService
-  rebalanceStore?: RebalanceStore
+  rebalanceStore?: RebalanceRepository
   /**
    * The BTC rail's two legs, or NULL on a deployment that serves no BTC corridor.
    *

@@ -42,10 +42,10 @@ import {
   lightningReceiveRfqQuotePayload,
   RFQ_PAIR_RECEIVE,
 } from '../wire/lightningReceivePayloads.js'
-import type { SwapStore } from '../db/swaps.js'
-import type { OnchainSendSwapStore } from '../db/onchainSwaps.js'
 import { RFQ_PAIR_SEND, RfqRequest, rfqQuotePayload, rfqRefusalPayload } from '../wire/payloads.js'
 import { RFQ_PAIR_ONCHAIN_SEND, OnchainRfqRequest, onchainRfqQuotePayload } from '../wire/onchainPayloads.js'
+import type { OnchainSendSwapRepository } from '../db/onchainSwaps.js'
+import type { SendSwapRepository } from '../db/swaps.js'
 
 const INVOICE_ERROR_CODES: Record<InvoiceRejection, RfqRefusalErrorCode> = {
   too_long: 'invoice_too_long',
@@ -124,7 +124,7 @@ export const respondToLightningReceiveRfqRequest = async (
 
 export const respondToLightningRfqRequest = async (
   service: SendSwapService,
-  store: SwapStore,
+  store: SendSwapRepository,
   payload: unknown,
   /** The transport's requester identity, for quote admission control. */
   options?: { requesterKey?: string },
@@ -262,7 +262,7 @@ export const respondToLightningRfqRequest = async (
 
 export const respondToOnchainRfqRequest = async (
   service: OnchainSendSwapService,
-  store: OnchainSendSwapStore,
+  store: OnchainSendSwapRepository,
   payload: unknown,
   options?: QuoteOptions,
 ): Promise<RfqOutcome> => {

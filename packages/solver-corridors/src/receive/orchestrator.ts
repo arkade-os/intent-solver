@@ -60,13 +60,14 @@ import type { OnchainBackend } from '@arkade-os/solver-core/ports/onchain.js'
 import { FundNotSubmittedError } from './fundLockup.js'
 import type { CovclaimdClient } from './covclaimd.js'
 import type { LightningBackend } from '@arkade-os/solver-core/ports/lightning.js'
-import { EXPOSED, type ReceiveSwapRow, type ReceiveSwapStore } from '../db/receiveSwaps.js'
+import { EXPOSED, type ReceiveSwapRow } from '../db/receiveSwaps.js'
 import type { SendSwapRow } from '../db/swaps.js'
 import { GiveUp, json, log, messageOf, nowSeconds, poll } from '@arkade-os/solver-core/util/poll.js'
 import { sweep } from '@arkade-os/solver-core/util/sweep.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 import { adoptFunding } from '../legs/arkadeLockup.js'
+import type { ReceiveSwapRepository } from '../db/receiveSwaps.js'
 
 const DEADLINE_SECONDS_PURPOSE = 'order the refund deadline against the HTLC'
 
@@ -170,7 +171,7 @@ export interface ReceiveServiceDeps {
    * which is what every deployment used before pricing became injectable.
    */
   pricing?: PricingStrategy
-  store: ReceiveSwapStore
+  store: ReceiveSwapRepository
   backendName?: string
   ln: Pick<
     LightningBackend,

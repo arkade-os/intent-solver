@@ -36,11 +36,6 @@ import {
 import type { SendSwapService } from '@arkade-os/solver-corridors/send/orchestrator.js'
 import type { ReceiveSwapService } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import type { OnchainSendSwapService } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
-import type { SwapStore } from '@arkade-os/solver-corridors/db/swaps.js'
-import type { ReceiveSwapStore } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
-import type { OnchainSendSwapStore } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
-import type { EvmSendSwapStore } from '@arkade-os/solver-corridors-evm/db/evmSendSwaps.js'
-import type { EvmReceiveSwapStore } from '@arkade-os/solver-corridors-evm/db/evmReceiveSwaps.js'
 import type { EvmSendSwapService } from '@arkade-os/solver-corridors-evm/send/evmOrchestrator.js'
 import type { EvmReceiveSwapService } from '@arkade-os/solver-corridors-evm/receive/evmOrchestrator.js'
 import {
@@ -51,7 +46,12 @@ import {
   type ReadableAssetRfqMarket,
 } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
 import type { AssetRfqMarket, AssetRfqSwapService } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
-import type { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
+import type { ReceiveSwapRepository } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
+import type { SendSwapRepository } from '@arkade-os/solver-corridors/db/swaps.js'
+import type { OnchainSendSwapRepository } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
+import type { EvmReceiveSwapRepository } from '@arkade-os/solver-corridors-evm/db/evmReceiveSwaps.js'
+import type { EvmSendSwapRepository } from '@arkade-os/solver-corridors-evm/db/evmSendSwaps.js'
+import type { AssetRfqSwapRepository } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 
 /**
  * Both directions of every asset market, always in this order.
@@ -68,11 +68,11 @@ const ASSET_RFQ_DIRECTIONS: readonly AssetRfqDirection[] = ['sell_base', 'buy_ba
 /** The flat service+store shape both transports and `Services` already carry. */
 export interface FlatCorridorDeps {
   service?: SendSwapService
-  store: SwapStore
+  store: SendSwapRepository
   onchainService?: OnchainSendSwapService
-  onchainStore: OnchainSendSwapStore
+  onchainStore: OnchainSendSwapRepository
   receiveService?: ReceiveSwapService
-  receiveStore?: ReceiveSwapStore
+  receiveStore?: ReceiveSwapRepository
   /**
    * The EVM family: one store and one service per DIRECTION (both absent when
    * no chain is configured), and the per-token policies they serve. A corridor
@@ -80,9 +80,9 @@ export interface FlatCorridorDeps {
    * corridors the registry can dispatch by pair.
    */
   evmSendService?: EvmSendSwapService | null
-  evmSendStore?: EvmSendSwapStore | null
+  evmSendStore?: EvmSendSwapRepository | null
   evmReceiveService?: EvmReceiveSwapService | null
-  evmReceiveStore?: EvmReceiveSwapStore | null
+  evmReceiveStore?: EvmReceiveSwapRepository | null
   evmCorridors?: readonly EvmCorridorPolicy[]
   /**
    * The atomic class: ONE store and ONE service for every asset market, and the
@@ -90,7 +90,7 @@ export interface FlatCorridorDeps {
    * is what turns one service into corridors the registry can dispatch by pair.
    */
   assetRfqService?: AssetRfqSwapService | null
-  assetRfqStore?: AssetRfqSwapStore | null
+  assetRfqStore?: AssetRfqSwapRepository | null
   assetRfqMarkets?: readonly AssetRfqMarket[]
   /** Whether the three BTC corridors' LND answers. Unset means always. */
   railUp?: () => boolean

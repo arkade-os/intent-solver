@@ -51,7 +51,7 @@ import {
 import { refundSpendVsize } from '@arkade-os/solver-rails/onchain/sizing.js'
 import { affordableFee, bumpDue, outcomeOfAny, urgencyFeeRate } from '@arkade-os/solver-rails/onchain/feeBump.js'
 import type { OnchainSendBackend, ReceiveSettlement } from '@arkade-os/solver-core/ports/onchain.js'
-import type { OnchainSendSwapRow, OnchainSendSwapStore } from '../db/onchainSwaps.js'
+import type { OnchainSendSwapRow } from '../db/onchainSwaps.js'
 import type { SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
 import type { ArkadeOps, CovenantScriptRow } from './orchestrator.js'
 import {
@@ -70,6 +70,7 @@ import { OnchainSendMachine } from '../machines/onchainSend.js'
 import { providerKeyCurrent } from '../legs/arkadeLockup.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
+import type { OnchainSendSwapRepository } from '../db/onchainSwaps.js'
 
 export type { ArkadeOps as OnchainArkadeOps } from './orchestrator.js'
 
@@ -80,7 +81,7 @@ export interface OnchainSendServiceDeps {
    * which is what every deployment used before pricing became injectable.
    */
   pricing?: PricingStrategy
-  store: OnchainSendSwapStore
+  store: OnchainSendSwapRepository
   onchain: OnchainSendBackend
   arkade: ArkadeOps
   limits: Limits

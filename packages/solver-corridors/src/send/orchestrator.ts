@@ -69,7 +69,7 @@ import { boundedSpendInputs, MAX_LOCKUP_SPEND_INPUTS } from '@arkade-os/solver-a
 import type { HoldState, ReceiveBackend, SendBackend, SendHtlcState } from '@arkade-os/solver-core/ports/lightning.js'
 import { PaymentHashRegistered, PaymentNotStarted } from '@arkade-os/solver-core/ports/lightning.js'
 import type { ReceiveSwapRow } from '../db/receiveSwaps.js'
-import type { SendSwapRow, SendSwapState, SwapStore } from '../db/swaps.js'
+import type { SendSwapRow, SendSwapState } from '../db/swaps.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { sweep } from '@arkade-os/solver-core/util/sweep.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
@@ -87,6 +87,7 @@ import {
   type SweptLockupRefund,
   type SweptRefundDecision,
 } from '@arkade-os/solver-arkade/arkade/sweptLockupRefund.js'
+import type { SendSwapRepository } from '../db/swaps.js'
 
 /** Each has a legal edge to `refused`. `claiming` must stay absent: it holds a revealed preimage, so a refund there pays twice. */
 export const RECONCILABLE_SWEPT_STATES: readonly SendSwapState[] = ['paying', 'paid', 'stuck']
@@ -153,7 +154,7 @@ export type CoupledReceiveRow = Pick<
 > & { invoiceWalletFingerprint?: string | null; invoiceBackendName?: string | null }
 
 export interface SendServiceDeps {
-  store: SwapStore
+  store: SendSwapRepository
   /**
    * The send half drives payments; `getOwnInvoiceState` is the receive half's
    * self-payment probe, and optional there: a backend without it resolves a

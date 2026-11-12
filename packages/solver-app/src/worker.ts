@@ -42,8 +42,8 @@ import { buildApp } from '@arkade-os/solver-transport/http/server.js'
 import { corridorSetFromDeps, readerSetFromDeps } from './ops/corridorSet.js'
 import type { SendSwapService } from '@arkade-os/solver-corridors/send/orchestrator.js'
 import type { OnchainSendSwapService } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
-import type { SwapStore } from '@arkade-os/solver-corridors/db/swaps.js'
-import type { OnchainSendSwapStore } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
+import type { OnchainSendSwapRepository } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
+import type { SendSwapRepository } from '@arkade-os/solver-corridors/db/swaps.js'
 
 /** One unit of scheduled work. Versioned like every other payload. `leg`
  * discriminates which store/service a `tick_swap` job belongs to — swap ids
@@ -67,9 +67,9 @@ export interface MessageBatchLike<T> {
 
 export interface WorkerDeps {
   service: SendSwapService
-  store: SwapStore
+  store: SendSwapRepository
   onchainService: OnchainSendSwapService
-  onchainStore: OnchainSendSwapStore
+  onchainStore: OnchainSendSwapRepository
   network: string
   /**
    * Queue binding for fan-out. Optional on purpose: a small fleet is fine
