@@ -1399,6 +1399,37 @@ describe('OnchainSendSwapService', () => {
     expect(claimed).toEqual([[funding]])
   })
 
+  it('claims only the adopted funding when the client pays the lockup again before the claim', async () => {
+    const outcome = await service.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    const funding = { txid: 'lockup-tx', vout: 0, value: 50_000 }
+    deps.outputs.set(outcome.swap.pkScript, [funding])
+    let row = await service.tick(outcome.swap.id)
+    expect(row.state).toBe('awaiting_claim')
+
+    deps.outputs.set(outcome.swap.pkScript, [funding, { txid: 'second-payment', vout: 0, value: 50_000 }])
+    const claimed: unknown[] = []
+    deps.arkade.claim = ((_row: unknown, outputs: unknown) => {
+      claimed.push(outputs)
+      return Promise.resolve('claim-ark-txid')
+    }) as typeof deps.arkade.claim
+    deps.onchain.spendClaim(row.fundingTxid!, 0, [
+      new Uint8Array([0xaa]),
+      P,
+      new Uint8Array([0xbb]),
+      new Uint8Array([0xcc]),
+    ])
+    row = await service.tick(outcome.swap.id)
+    expect(row.state).toBe('claimed')
+    expect(claimed).toEqual([[funding]])
+  })
+
   it('claims the asset vtxo too when the asset-free outputs cannot cover what was paid', async () => {
     const outcome = await service.quote({
       paymentHash,
