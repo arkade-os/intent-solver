@@ -6,16 +6,17 @@ const PIN = REGTEST_EMULATOR_PUBKEY
 const OPERATOR = `03${'11'.repeat(32)}`
 const xOnly = (key: string) => key.slice(-64)
 
-const arkd = (deprecated: string[], network = 'regtest'): ArkadeInfo =>
+const NOW = 1_800_000_000
+const arkd = (deprecated: [string, bigint][]): ArkadeInfo =>
   ({
-    network,
+    network: 'regtest',
     signerPubkey: OPERATOR,
-    deprecatedSigners: deprecated.map((pubkey) => ({ pubkey, cutoffDate: 0n })),
+    deprecatedSigners: deprecated.map(([pubkey, cutoffDate]) => ({ pubkey, cutoffDate })),
   }) as unknown as ArkadeInfo
 
 const opsOver = (info: ArkadeInfo) => ({
   emulatorPubkey: PIN,
-  cosignerKeyFor: async (requested: string) => operatorCosignerKey(requested, info),
+  cosignerKeyFor: async (requested: string) => operatorCosignerKey(requested, info, NOW),
 })
 
 describe('the co-signer key allowlist', () => {
@@ -26,14 +27,16 @@ describe('the co-signer key allowlist', () => {
     expect(ops.cosignerKeyFor).not.toHaveBeenCalled()
   })
 
-  it("takes arkd's current signer only while arkd lists the network pin", async () => {
-    expect(await quoteCosignerKey(opsOver(arkd([PIN])), xOnly(OPERATOR))).toBe(OPERATOR)
-    expect(await quoteCosignerKey(opsOver(arkd([])), xOnly(OPERATOR))).toBeNull()
-    expect(await quoteCosignerKey(opsOver(arkd([PIN], 'signet')), xOnly(OPERATOR))).toBeNull()
+  it('takes a key arkd signs for: its current signer, or a deprecated one before its cutoff', async () => {
+    const OLD = `02${'22'.repeat(32)}`
+    expect(await quoteCosignerKey(opsOver(arkd([])), xOnly(OPERATOR))).toBe(OPERATOR)
+    expect(await quoteCosignerKey(opsOver(arkd([[OLD, 0n]])), xOnly(OLD))).toBe(OLD)
+    expect(await quoteCosignerKey(opsOver(arkd([[OLD, BigInt(NOW + 1)]])), xOnly(OLD))).toBe(OLD)
+    expect(await quoteCosignerKey(opsOver(arkd([[OLD, BigInt(NOW)]])), xOnly(OLD))).toBeNull()
   })
 
   it('refuses any other key, and every non-default key when nothing can vouch for it', async () => {
-    expect(await quoteCosignerKey(opsOver(arkd([PIN])), 'cd'.repeat(32))).toBeNull()
+    expect(await quoteCosignerKey(opsOver(arkd([[PIN, 0n]])), 'cd'.repeat(32))).toBeNull()
     expect(await quoteCosignerKey({ emulatorPubkey: PIN }, xOnly(OPERATOR))).toBeNull()
   })
 })
