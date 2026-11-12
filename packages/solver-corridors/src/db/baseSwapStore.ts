@@ -16,6 +16,7 @@
  * relaxed into a subclass hook.
  */
 import type { SqlDriver } from './driver.js'
+import { baseSwapSql, type BaseSwapSql } from './baseSwapStore.sql.js'
 import {
   clampLimit,
   decodeCursor,
@@ -108,8 +109,6 @@ export const addColumns = async (
   }
 }
 
-const sqlStringLiteral = (value: string): string => `'${value.replaceAll("'", "''")}'`
-
 export abstract class BaseSwapStore<Row, State extends string> {
   protected constructor(
     protected readonly driver: SqlDriver,
@@ -127,12 +126,17 @@ export abstract class BaseSwapStore<Row, State extends string> {
    */
   protected abstract readonly shape: StoreShape<Row, State> & FailStatesIn<State>
 
+  #sql?: BaseSwapSql
+  protected get sql(): BaseSwapSql {
+    return (this.#sql ??= baseSwapSql(this.shape.table, this.shape.eventTable))
+  }
+
   async close(): Promise<void> {
     await this.driver.close()
   }
 
   async get(id: string): Promise<Row> {
-    const raw = await this.driver.get<RawRow>(`SELECT * FROM ${this.shape.table} WHERE id = ?`, [id])
+    const raw = await this.driver.get<RawRow>(this.sql.selectById, [id])
     if (!raw) throw new Error(`${this.shape.noun} ${id} not found`)
     return this.shape.toRow(raw)
   }
@@ -147,71 +151,47 @@ export abstract class BaseSwapStore<Row, State extends string> {
    * refused quote in place of the live one.
    */
   async findByRfqId(rfqId: string): Promise<Row | null> {
-    const raw = await this.driver.get<RawRow>(
-      `SELECT * FROM ${this.shape.table} WHERE rfq_id = ? ORDER BY created_at DESC LIMIT 1`,
-      [rfqId],
-    )
+    const raw = await this.driver.get<RawRow>(this.sql.selectNewestByRfqId, [rfqId])
     return raw ? this.shape.toRow(raw) : null
   }
 
   /** Newest first for `findByRfqId`'s reason: two rows share a script only through a re-quote against one secret, and then the live row is the later. */
   async findByPkScript(pkScript: string): Promise<Row | null> {
-    const raw = await this.driver.get<RawRow>(
-      `SELECT * FROM ${this.shape.table} WHERE pk_script = ? ORDER BY created_at DESC LIMIT 1`,
-      [pkScript],
-    )
+    const raw = await this.driver.get<RawRow>(this.sql.selectNewestByPkScript, [pkScript])
     return raw ? this.shape.toRow(raw) : null
   }
 
   /** Most recent swap for a hash, any state — the status lookup's view. */
   async findByPaymentHash(paymentHash: string): Promise<Row | null> {
-    const raw = await this.driver.get<RawRow>(
-      `SELECT * FROM ${this.shape.table} WHERE payment_hash = ? ORDER BY created_at DESC LIMIT 1`,
-      [paymentHash],
-    )
+    const raw = await this.driver.get<RawRow>(this.sql.selectNewestByPaymentHash, [paymentHash])
     return raw ? this.shape.toRow(raw) : null
   }
 
   /** The swap that BLOCKS a new quote for this hash, if any — mirrors the partial unique index. */
   async findLiveByPaymentHash(paymentHash: string): Promise<Row | null> {
-    const raw = await this.driver.get<RawRow>(
-      `SELECT * FROM ${this.shape.table} WHERE payment_hash = ? AND state != 'refused' LIMIT 1`,
-      [paymentHash],
-    )
+    const raw = await this.driver.get<RawRow>(this.sql.selectLiveByPaymentHash, [paymentHash])
     return raw ? this.shape.toRow(raw) : null
   }
 
   async committedSats(): Promise<number> {
-    const placeholders = this.shape.live.map(() => '?').join(',')
-    const row = await this.driver.get<{ total: number }>(
-      `SELECT COALESCE(SUM(amount_sats), 0) AS total FROM ${this.shape.table} WHERE state IN (${placeholders})`,
-      [...this.shape.live],
-    )
+    const row = await this.driver.get<{ total: number }>(this.sql.sumAmountInStates(this.shape.live.length), [
+      ...this.shape.live,
+    ])
     return Number(row?.total ?? 0)
   }
 
   async countByStates(states: readonly State[]): Promise<number> {
     if (states.length === 0) return 0
-    const placeholders = states.map(() => '?').join(',')
-    const row = await this.driver.get<{ total: number }>(
-      `SELECT COUNT(*) AS total FROM ${this.shape.table} WHERE state IN (${placeholders})`,
-      [...states],
-    )
+    const row = await this.driver.get<{ total: number }>(this.sql.countInStates(states.length), [...states])
     return Number(row?.total ?? 0)
   }
 
   async findByStates(states: readonly State[], options: FindByStatesOptions = {}): Promise<Row[]> {
     if (states.length === 0) return []
-    const placeholders = states.map(() => '?').join(',')
     // Oldest-first and unbounded by default: that is what the sweep wants, and
     // the sweep is the caller that matters. The options exist for the console,
     // which reads a TERMINAL set that only ever grows.
-    const order = options.newestFirst === true ? 'updated_at DESC' : 'created_at'
-    const cap = options.limit === undefined ? '' : ` LIMIT ${Math.max(0, Math.trunc(options.limit))}`
-    const rows = await this.driver.all<RawRow>(
-      `SELECT * FROM ${this.shape.table} WHERE state IN (${placeholders}) ORDER BY ${order}${cap}`,
-      [...states],
-    )
+    const rows = await this.driver.all<RawRow>(this.sql.selectInStates(states.length, options), [...states])
     return rows.map((raw) => this.shape.toRow(raw))
   }
 
@@ -224,18 +204,10 @@ export abstract class BaseSwapStore<Row, State extends string> {
   ): Promise<{ rows: Row[]; nextCursor: string | null }> {
     const limit = clampLimit(options.limit)
     const cursor = decodeCursor(options.cursor)
-    const placeholders = this.shape.live.map(() => '?').join(',')
-    const indexClause = this.shape.recoveryOrderIndex ? ` INDEXED BY ${this.shape.recoveryOrderIndex}` : ''
-    const stateClause = this.shape.recoveryOrderIndex
-      ? `state IN (${this.shape.live.map(sqlStringLiteral).join(',')})`
-      : `state IN (${placeholders})`
-    const cursorClause = cursor ? ' AND (created_at, rowid) > (?, ?)' : ''
     const params: unknown[] = this.shape.recoveryOrderIndex ? [] : [...this.shape.live]
     if (cursor) params.push(cursor.createdAt, cursor.rowid)
     const raw = await this.driver.all<RawRow & PageRawFields>(
-      `SELECT *, rowid AS _rowid FROM ${this.shape.table}${indexClause}
-       WHERE ${stateClause}${cursorClause}
-       ORDER BY created_at ASC, rowid ASC LIMIT ?`,
+      this.sql.pageInStates(this.shape.live, this.shape.recoveryOrderIndex, cursor !== null),
       [...params, limit + 1],
     )
     const { page, nextCursor } = takePage(raw, limit)
@@ -259,10 +231,7 @@ export abstract class BaseSwapStore<Row, State extends string> {
    */
   async ledgerRows(window: LedgerWindow): Promise<{ rows: Row[]; truncated: boolean }> {
     const limit = clampLedgerLimit(window.limit)
-    const raw = await this.driver.all<RawRow>(
-      `SELECT * FROM ${this.shape.table} WHERE updated_at >= ? AND updated_at < ? ORDER BY updated_at DESC LIMIT ?`,
-      [window.since, window.until, limit + 1],
-    )
+    const raw = await this.driver.all<RawRow>(this.sql.selectUpdatedInWindow, [window.since, window.until, limit + 1])
     return { rows: raw.slice(0, limit).map((r) => this.shape.toRow(r)), truncated: raw.length > limit }
   }
 
@@ -286,10 +255,7 @@ export abstract class BaseSwapStore<Row, State extends string> {
    * is additive — a caller that ignored the field still ignores it.
    */
   async history(swapId: string): Promise<{ at: number; from: string | null; to: string; detail: string | null }[]> {
-    const rows = await this.driver.all<RawRow>(
-      `SELECT at, from_state, to_state, detail FROM ${this.shape.eventTable} WHERE swap_id = ? ORDER BY id`,
-      [swapId],
-    )
+    const rows = await this.driver.all<RawRow>(this.sql.selectHistory, [swapId])
     return rows.map((r) => ({
       at: Number(r.at),
       from: r.from_state === null ? null : String(r.from_state),
@@ -331,9 +297,7 @@ export abstract class BaseSwapStore<Row, State extends string> {
     }
     const columns = Object.keys(fields)
     assertColumns(columns, this.shape.transitionColumns, 'transition()')
-    const assignments = ['state = ?', 'updated_at = ?', ...columns.map((c) => `${c} = ?`)].join(', ')
-    const where = `id = ? AND state = ?${guard ? ` AND ${guard}` : ''}`
-    const result = await this.driver.run(`UPDATE ${this.shape.table} SET ${assignments} WHERE ${where}`, [
+    const result = await this.driver.run(this.sql.updateState(columns, guard), [
       to,
       this.now(),
       ...columns.map((c) => fields[c]),
@@ -358,12 +322,7 @@ export abstract class BaseSwapStore<Row, State extends string> {
     const columns = Object.keys(fields)
     if (columns.length === 0) return
     assertColumns(columns, this.shape.patchColumns, 'patch()')
-    const assignments = ['updated_at = ?', ...columns.map((c) => `${c} = ?`)].join(', ')
-    await this.driver.run(`UPDATE ${this.shape.table} SET ${assignments} WHERE id = ?`, [
-      this.now(),
-      ...columns.map((c) => fields[c]),
-      id,
-    ])
+    await this.driver.run(this.sql.updateFields(columns), [this.now(), ...columns.map((c) => fields[c]), id])
   }
 
   /**
@@ -382,22 +341,15 @@ export abstract class BaseSwapStore<Row, State extends string> {
    * `send_swap` has no `fund_started_at`; stores with the column widen it.
    */
   protected async claimFundLease(id: string, from: State, staleBefore?: number): Promise<boolean> {
-    const result = await this.driver.run(
-      `UPDATE ${this.shape.table} SET fund_started_at = ?, updated_at = ?
-       WHERE id = ? AND state = ? AND (fund_started_at IS NULL OR fund_started_at <= ?)`,
-      [this.now(), this.now(), id, from, staleBefore ?? -1],
-    )
+    const result = await this.driver.run(this.sql.claimFundLease, [this.now(), this.now(), id, from, staleBefore ?? -1])
     return result.changes === 1
   }
 
   protected async releaseFundLease(id: string): Promise<void> {
-    await this.driver.run(`UPDATE ${this.shape.table} SET fund_started_at = NULL WHERE id = ?`, [id])
+    await this.driver.run(this.sql.releaseFundLease, [id])
   }
 
   protected async recordEvent(swapId: string, from: State | null, to: State, detail: string | null): Promise<void> {
-    await this.driver.run(
-      `INSERT INTO ${this.shape.eventTable} (swap_id, at, from_state, to_state, detail) VALUES (?, ?, ?, ?, ?)`,
-      [swapId, this.now(), from, to, detail],
-    )
+    await this.driver.run(this.sql.insertEvent, [swapId, this.now(), from, to, detail])
   }
 }
