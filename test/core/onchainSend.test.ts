@@ -7,6 +7,7 @@ import {
   latestClaimArrival,
   arkadeClaimDeadline,
   expiryBeforeClaimDeadline,
+  HTLC_REFUND_MTP_MARGIN,
   ARKADE_CLAIM_WINDOW_SECONDS,
   ONCHAIN_SECONDS_PER_BLOCK,
   ONCHAIN_CLAIM_MARGIN_SECONDS,
@@ -99,6 +100,12 @@ describe('expiryBeforeClaimDeadline', () => {
     expect(
       expiryBeforeClaimDeadline([{ expiresAt: deadline + 86_400 }, { expiresAt: deadline - 600 }], htlcLocktime),
     ).toBe(deadline - 600)
+  })
+
+  it('refuses a lockup that expires before the L1 refund it would race could confirm', () => {
+    const expiresAt = htlcLocktime + HTLC_REFUND_MTP_MARGIN + 2 * HOUR
+    expect(expiresAt).toBeGreaterThan(arkadeClaimDeadline(htlcLocktime))
+    expect(expiryBeforeClaimDeadline([{ expiresAt }], htlcLocktime)).toBe(expiresAt)
   })
 
   it('passes a lockup that outlives the deadline, an empty one, and an expiry it was not told', () => {
