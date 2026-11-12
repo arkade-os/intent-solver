@@ -37,7 +37,7 @@ export {
   type RfqRefusalError,
   type RfqRefusalErrorCode,
 } from '@arkade-os/solver-core/core/rfqProtocol.js'
-import { RFQ_ID, RFQ_PAIR, AMOUNT_SIDE, RFQ_AMOUNT } from '@arkade-os/solver-core/core/rfqProtocol.js'
+import { RFQ_ID, RFQ_PAIR, AMOUNT_SIDE, RFQ_AMOUNT, EMULATOR_PUBKEY } from '@arkade-os/solver-core/core/rfqProtocol.js'
 
 /**
  * RFQ request for the send profile. Strict per the spec: unknown fields
@@ -63,6 +63,7 @@ export const RfqRequest = z
           .string()
           .length(64)
           .regex(/^[0-9a-f]{64}$/),
+        emulator_pubkey: EMULATOR_PUBKEY,
       })
       .strict(),
   })

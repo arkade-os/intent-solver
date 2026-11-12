@@ -24,7 +24,7 @@
 import { z } from 'zod'
 import type { EvmSendSwapRow } from '../db/evmSendSwaps.js'
 import type { EvmReceiveSwapRow } from '../db/evmReceiveSwaps.js'
-import { RFQ_ID, RFQ_PAIR } from '@arkade-os/solver-core/core/rfqProtocol.js'
+import { EMULATOR_PUBKEY, RFQ_ID, RFQ_PAIR } from '@arkade-os/solver-core/core/rfqProtocol.js'
 
 /** 32 bytes as lowercase hex — the same shape as an rfq id. */
 const HEX64 = RFQ_ID
@@ -80,6 +80,7 @@ export const EvmSendRfqRequest = z
         /** The client's Arkade refund destination. */
         refund_address: z.string().min(1).max(200),
         client_refund_pubkey: HEX64,
+        emulator_pubkey: EMULATOR_PUBKEY,
       })
       .strict(),
   })
@@ -120,6 +121,7 @@ export const EvmReceiveRfqRequest = z
         evm_refund_address: EVM_ADDRESS,
         payout_address: z.string().min(1).max(200),
         payout_pubkey: HEX64,
+        emulator_pubkey: EMULATOR_PUBKEY,
       })
       .strict(),
   })

@@ -11,6 +11,8 @@
 import Database from 'better-sqlite3'
 import {
   ArkAddress,
+  assertAllowedSighashTypes,
+  assertSubmittedArkTxid,
   buildOffchainTx,
   claimWithPreimageIdentity,
   ConditionWitness,
@@ -20,6 +22,7 @@ import {
   Extension,
   getArkPsbtFields,
   isVtxoSpent,
+  matchServerCheckpoints,
   MnemonicIdentity,
   PrevArkTxField,
   RestArkProvider,
@@ -45,6 +48,7 @@ import { log, nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { latencyDiagnosticsEnabled } from '@arkade-os/solver-core/util/diagnostics.js'
 import { ensureDatabaseDir } from '@arkade-os/solver-core/util/sqlite.js'
 import type { CovenantSwapScript } from './covenant.js'
+import { operatorHolds } from './cosignerKey.js'
 import { virtualTxPages, vtxoPages } from './indexerPaging.js'
 import { SharedSyncIndexerProvider, TimedArkadeProvider, TimedIndexerProvider } from './latencyProviders.js'
 import { createReservationLedger, type ReservationLedger } from './reservations.js'
@@ -814,8 +818,9 @@ export const refundAssetPacket = (
  * its ABSOLUTE timelock is the same `refundLocktime` the receive orchestrators
  * already gate on.
  *
- * Once signed (or left alone), the transaction is submitted to the emulator,
- * which executes the ArkadeScript against it, co-signs for the tweaked key
+ * Once signed (or left alone), the transaction is submitted to the emulator —
+ * or to arkd itself when arkd lists the covenant's co-signer key — which
+ * executes the ArkadeScript against it, co-signs for the tweaked key
  * when it passes, and finalizes with the Arkade server. If the covenant does
  * not hold (wrong destination, short value), the emulator refuses, which is
  * the security model working, not an error to route around.
@@ -881,28 +886,43 @@ export const refundSwapScript = async (
   // signed" internally and only surfaces an aggregate "No inputs signed",
   // which the SDK's identity wrapper specifically swallows.
   const signedArkTx = await ctx.identity.sign(arkTx)
-  // The emulator verifies "non-arkd" signatures on checkpoints BEFORE it does
-  // its own arkd-side handshake —
-  // this is a single submitTx call, so the receiver's checkpoint signature
-  // has to be in place upfront. Each checkpoint carries exactly one relevant
-  // input, index 0.
-  //
+  // Each checkpoint carries exactly one relevant input, index 0.
   // Unlike the arkTx above, an INDEXED sign call (`[0]`) goes straight to
   // `signIdx`, bypassing `Transaction.sign()`'s per-input try/catch — so on
   // the base program's refund leaf (no receiver signer), `signIdx` throws
   // "No taproot scripts signed" uncaught instead of leaving the checkpoint
   // untouched. Caught here to restore that same "sign what's ours, skip the
   // rest" contract claimSwapScript's checkpoint round gets for free.
-  const signedCheckpoints = await Promise.all(
-    checkpoints.map(async (c) => {
-      try {
-        return await ctx.identity.sign(c, [0])
-      } catch (error) {
-        if (error instanceof Error && error.message.includes('No taproot scripts signed')) return c
-        throw error
-      }
-    }),
-  )
+  const signOurs = async (checkpoint: Transaction): Promise<Transaction> => {
+    try {
+      return await ctx.identity.sign(checkpoint, [0])
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('No taproot scripts signed')) return checkpoint
+      throw error
+    }
+  }
+
+  const covenantKey = script.vhtlcOptions.nonInteractiveParameters?.emulatorPubkey
+  if (covenantKey && operatorHolds(hex.encode(covenantKey), await ctx.wallet.arkProvider.getInfo())) {
+    const response = await ctx.wallet.arkProvider.submitTx(
+      base64.encode(signedArkTx.toPSBT()),
+      checkpoints.map((c) => base64.encode(c.toPSBT())),
+    )
+    assertSubmittedArkTxid(response, signedArkTx, 'submitTx')
+    const finals = await Promise.all(
+      matchServerCheckpoints(response.signedCheckpointTxs, checkpoints, 'submitTx').map(async ({ server }) => {
+        assertAllowedSighashTypes(server)
+        return base64.encode((await signOurs(server)).toPSBT())
+      }),
+    )
+    await ctx.wallet.arkProvider.finalizeTx(response.arkTxid, finals)
+    return response.arkTxid
+  }
+
+  // The emulator verifies "non-arkd" signatures on checkpoints BEFORE it does
+  // its own arkd-side handshake — this is a single submitTx call, so the
+  // receiver's checkpoint signature has to be in place upfront.
+  const signedCheckpoints = await Promise.all(checkpoints.map(signOurs))
 
   const emulator = new RestEmulatorProvider(emulatorUrl)
   const result = await emulator.submitTx(
