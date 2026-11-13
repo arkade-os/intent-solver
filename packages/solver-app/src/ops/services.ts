@@ -30,6 +30,7 @@ import { RebalanceStore } from './rebalanceStore.js'
 import { createArkadeRebalanceSource } from './rebalanceRoutes.js'
 import { createLndRebalanceBackend } from '@arkade-os/solver-rails-lnd/rebalance.js'
 import { arkadeFundableSats, arkadeFundingOwed } from './pool.js'
+import { covenantCosignerKey } from './cosigner.js'
 import { RestEmulatorProvider } from '@arkade-os/sdk'
 import { hex } from '@scure/base'
 import { Address, OutScript } from '@scure/btc-signer'
@@ -823,7 +824,11 @@ export const createServices = async (
   // The emulator key is read at startup and snapshotted per swap; a rotation
   // only affects new quotes, never the reconstruction of funded scripts.
   const emulatorInfo = await new RestEmulatorProvider(config.emulatorUrl).getInfo()
-  const arkadeOps = await arkadeOpsFromContext(arkade, { url: config.emulatorUrl, pubkey: emulatorInfo.signerPubkey })
+  const emulatorPubkey = covenantCosignerKey(config.network, emulatorInfo.signerPubkey)
+  if (emulatorPubkey !== emulatorInfo.signerPubkey) {
+    log(`emulator reports ${emulatorInfo.signerPubkey}; covenants keep the pinned ${emulatorPubkey}`)
+  }
+  const arkadeOps = await arkadeOpsFromContext(arkade, { url: config.emulatorUrl, pubkey: emulatorPubkey })
 
   /**
    * The offer-packet path. Off unless a market is named, like the EVM pair, and
@@ -936,7 +941,7 @@ export const createServices = async (
     serverPubkey: arkade.wallet.arkServerPublicKey,
     // X-ONLY. The emulator advertises a compressed key and the covenant takes
     // 32 bytes, so the wrong spelling compiles an address no client derives.
-    emulatorPubkey: xOnlyPubkey(hex.decode(emulatorInfo.signerPubkey)),
+    emulatorPubkey: xOnlyPubkey(hex.decode(emulatorPubkey)),
     hrp: arkade.hrp,
     // Boot-captured beside the two keys above, all three from one `getInfo()`.
     exitDelay: offerExitDelay(arkade.advertisedExitDelay),
@@ -1207,7 +1212,7 @@ export const createServices = async (
   // context, which works and gives the corridors two places to drift apart.
   const receiveOps = await receiveArkadeOpsFromContext(arkade, {
     url: config.emulatorUrl,
-    pubkey: emulatorInfo.signerPubkey,
+    pubkey: emulatorPubkey,
   })
   const receiveService = enabled('lightning:BTC->arkade:BTC')
     ? new ReceiveSwapService({
@@ -1663,7 +1668,7 @@ export const createServices = async (
     onBalanceCheckpoint:
       notifySinks.length > 0 ? checkpointNotices(config.network, (text) => notifier.post(text)) : undefined,
     tickErrors,
-    emulatorPubkey: emulatorInfo.signerPubkey,
+    emulatorPubkey,
     providerPubkey: arkadeOps.providerPubkey,
     close: async () => {
       // Each step isolated: one resource's close() throwing must never skip
