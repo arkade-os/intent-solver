@@ -56,6 +56,7 @@ import { tapLeafHash } from '@scure/btc-signer/payment.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { base64, hex } from '@scure/base'
 import type { CovenantSwapScript } from './covenant.js'
+import { operatorHolds } from './cosignerKey.js'
 import { offchainInputFeeParams } from './vtxoLifecycle.js'
 import { EMPTY_RAW_WITNESS, type ArkadeContext, type FundedOutput } from './wallet.js'
 
@@ -327,10 +328,15 @@ export const refundSweptSwapScript = async (
     ])
     const signedProof = await ctx.identity.sign(proof)
 
-    const introSignedProof = await new RestEmulatorProvider(emulatorUrl).submitIntent({
-      proof: base64.encode(signedProof.toPSBT()),
-      message,
-    })
+    const covenantKey = script.vhtlcOptions.nonInteractiveParameters?.emulatorPubkey
+    // arkd introspects an Arkade proof itself once it holds the covenant's co-signer key.
+    const introSignedProof =
+      covenantKey && operatorHolds(hex.encode(covenantKey), info)
+        ? base64.encode(signedProof.toPSBT())
+        : await new RestEmulatorProvider(emulatorUrl).submitIntent({
+            proof: base64.encode(signedProof.toPSBT()),
+            message,
+          })
     // `refundSwapScript`'s rule: a witness cannot change a txid, so any other
     // value is a forged or misrouted proof.
     const returned = Transaction.fromPSBT(base64.decode(introSignedProof))

@@ -55,6 +55,7 @@ import {
 } from '@arkade-os/solver-core/invoice/decode.js'
 import { preimageMatchesHash, scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { quoteCosignerKey } from '@arkade-os/solver-arkade/arkade/cosignerKey.js'
 import { claimOutputs, satsOutputs } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import type { FundedOutput } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import {
@@ -360,6 +361,7 @@ export type QuoteRefusal =
   | 'provider_at_capacity'
   | 'insufficient_float'
   | 'invalid_refund_address'
+  | 'unsupported_emulator_pubkey'
   | 'rate_limited'
   // A coupled self-payment whose two refund deadlines are too close together
   // to be claimed safely. See `evaluateCouplingDeadlines`.
@@ -446,6 +448,11 @@ export class SendSwapService {
     this.sendHintScidDenylist = deps.sendHintScidDenylist ?? new Set()
   }
 
+  /** The co-signer key a quote builds on for the client's `emulator_pubkey`, or null to refuse. Public for the RFQ re-serve. */
+  cosignerKey(requested?: string): Promise<string | null> {
+    return quoteCosignerKey(this.deps.arkade, requested)
+  }
+
   /**
    * Quote a send swap and persist it BEFORE returning the lockup address.
    *
@@ -475,7 +482,7 @@ export class SendSwapService {
   async quote(
     rawInvoice: string,
     refundAddress: string,
-    options: { rfqId?: string; requesterKey?: string; clientRefundPubkey: string },
+    options: { rfqId?: string; requesterKey?: string; clientRefundPubkey: string; emulatorPubkey?: string },
   ): Promise<QuoteOutcome> {
     const { store, arkade, limits, invoicePrefix } = this.deps
 
@@ -569,6 +576,8 @@ export class SendSwapService {
     if (options.requesterKey !== undefined && !this.quoteLimiter.take(options.requesterKey)) {
       return { accepted: false, reason: 'rate_limited' }
     }
+    const emulatorPubkey = await this.cosignerKey(options.emulatorPubkey)
+    if (emulatorPubkey === null) return { accepted: false, reason: 'unsupported_emulator_pubkey' }
     // The Lightning receive corridor, asked FIRST and by name, because its
     // answer is the one that can be something other than a refusal: a live row
     // there means this client is refreshing Arkade funds through us.
@@ -704,7 +713,7 @@ export class SendSwapService {
         // no legacy selector. See `NonInteractiveParameters.legacy`'s own doc comment
         // for why that is not simply always omitted.
         nonInteractiveParameters: {
-          emulatorPubkey: hex.decode(arkade.emulatorPubkey),
+          emulatorPubkey: hex.decode(emulatorPubkey),
           receiverPkScript: hex.decode(arkade.receiverPkScript),
           senderPkScript: refundPkScript,
         },
@@ -736,7 +745,7 @@ export class SendSwapService {
           pkScript: hex.encode(script.pkScript),
           lockupAddress: script.address(arkade.hrp, serverKey).encode(),
           refundPkScript: hex.encode(refundPkScript),
-          emulatorPubkey: arkade.emulatorPubkey,
+          emulatorPubkey,
           clientRefundPubkey: options.clientRefundPubkey,
           receiverPkScript: arkade.receiverPkScript,
           nonInteractiveParameters: true,

@@ -24,6 +24,7 @@ import {
   type ArkadeContext,
 } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { unrolledSpenderFor, type UnrolledSpender } from '@arkade-os/solver-arkade/arkade/unrolledSpend.js'
+import { operatorCosignerKey } from '@arkade-os/solver-arkade/arkade/cosignerKey.js'
 import {
   assertScriptMatchesRow,
   covenantScriptFromRow,
@@ -62,6 +63,7 @@ export const receiveArkadeOpsFromContext = async (
     solverPubkey,
     serverPubkey: hex.encode(ctx.wallet.arkServerPublicKey),
     emulatorPubkey: emulator.pubkey,
+    cosignerKeyFor: async (requested) => operatorCosignerKey(requested, await ctx.wallet.arkProvider.getInfo()),
     solverRefundPkScript,
     delays: ctx.unilateralDelays,
     hrp: ctx.hrp,

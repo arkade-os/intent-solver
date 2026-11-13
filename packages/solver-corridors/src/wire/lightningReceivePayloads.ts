@@ -34,6 +34,7 @@
 import { z } from 'zod'
 import { WIRE_AMOUNT } from '@arkade-os/solver-core/core/wireAmount.js'
 import { MAX_PAIR_LENGTH } from '@arkade-os/solver-core/core/marketKey.js'
+import { EMULATOR_PUBKEY } from '@arkade-os/solver-core/core/rfqProtocol.js'
 import type { ReceiveSwapRow } from '../db/receiveSwaps.js'
 import type { RfqState } from './payloads.js'
 
@@ -82,6 +83,7 @@ export const LightningReceiveRfqRequest = z
         payout_address: z.string().min(1).max(200),
         payout_pubkey: XONLY_HEX,
         claim_packet: z.string().min(1).max(2048).optional(),
+        emulator_pubkey: EMULATOR_PUBKEY,
       })
       .strict(),
   })

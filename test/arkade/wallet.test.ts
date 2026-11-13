@@ -145,11 +145,16 @@ const rebuiltCheckpoint = (psbt: string): Promise<string> => {
 const signerKeys = (tx: Transaction): string[] =>
   (tx.getInput(0).tapScriptSig ?? []).map(([sigKey]) => hex.encode(sigKey.pubKey))
 
+const arkdSigning = (signer: Uint8Array) => ({
+  getInfo: async () => ({ network: 'regtest', signerPubkey: hex.encode(signer), deprecatedSigners: [] }),
+})
+
 const ctx = (virtualTxs: Record<string, string> = { [FUNDING.id]: FUNDING.b64 }): ArkadeContext =>
   ({
     identity: receiverIdentity,
     wallet: {
       serverUnrollScript,
+      arkProvider: arkdSigning(SERVER),
       indexerProvider: {
         getVirtualTxs: vi.fn(async (txids: string[]) => ({
           txs: txids.map((id) => virtualTxs[id]).filter((tx): tx is string => tx !== undefined),
@@ -224,6 +229,44 @@ describe('refundSwapScript', () => {
       /virtual tx/,
     )
     expect(submitTx).not.toHaveBeenCalled()
+  })
+
+  it('goes to arkd, submit then finalize, when arkd holds the co-signer key, current or deprecated, and to the emulator otherwise', async () => {
+    const arkdSubmitTx = vi.fn(async (arkadeTxB64: string, checkpointsB64: string[]) => ({
+      arkTxid: Transaction.fromPSBT(base64.decode(arkadeTxB64)).id,
+      finalArkTx: await cosign(arkadeTxB64),
+      signedCheckpointTxs: await Promise.all(checkpointsB64.map(cosign)),
+    }))
+    const finalizeTx = vi.fn(async (_arkTxid: string, _checkpointsB64: string[]) => undefined)
+    const routed = (signer: Uint8Array, deprecated: Uint8Array[] = []): ArkadeContext => {
+      const base = ctx()
+      const info = {
+        network: 'regtest',
+        signerPubkey: hex.encode(signer),
+        deprecatedSigners: deprecated.map((pubkey) => ({ pubkey: hex.encode(pubkey), cutoffDate: 0n })),
+      }
+      const arkProvider = { getInfo: async () => info, submitTx: arkdSubmitTx, finalizeTx }
+      return { ...base, wallet: { ...base.wallet, arkProvider } } as unknown as ArkadeContext
+    }
+
+    submitTx.mockClear()
+    const txid = await refundSwapScript(routed(EMULATOR), 'http://emulator.test', extendedScript(), FUNDED, DEST)
+    expect(submitTx).not.toHaveBeenCalled()
+    const [finalized, checkpointsB64] = finalizeTx.mock.calls[0]!
+    expect(finalized).toBe(txid)
+    expect(signerKeys(Transaction.fromPSBT(base64.decode(checkpointsB64[0]!)))).toEqual(
+      expect.arrayContaining([hex.encode(SERVER), hex.encode(RECEIVER)]),
+    )
+
+    finalizeTx.mockClear()
+    await refundSwapScript(routed(SERVER, [EMULATOR]), 'http://emulator.test', extendedScript(), FUNDED, DEST)
+    expect(submitTx).not.toHaveBeenCalled()
+    expect(finalizeTx).toHaveBeenCalledOnce()
+
+    arkdSubmitTx.mockClear()
+    await refundSwapScript(routed(SERVER), 'http://emulator.test', extendedScript(), FUNDED, DEST)
+    expect(arkdSubmitTx).not.toHaveBeenCalled()
+    expect(submitTx).toHaveBeenCalledOnce()
   })
 })
 

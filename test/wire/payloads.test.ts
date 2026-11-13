@@ -95,6 +95,7 @@ const QUOTE_REFUSALS = [
   'provider_at_capacity',
   'rate_limited',
   'recourse_window_unservable',
+  'unsupported_emulator_pubkey',
   'unsupported_payload',
   'wrong_network',
   'zero_amount_invoice',

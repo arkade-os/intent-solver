@@ -59,8 +59,13 @@ const fillingSats = async (store: AssetRfqSwapStore, id: string, pair: string, f
 describe('insertQuote', () => {
   it('records the terms as quoted, before anything is funded', async () => {
     const store = await open()
-    const row = await store.insertQuote(quote())
-    expect(row).toMatchObject({ state: 'quoted', offerPkScript: OFFER_SCRIPT, validUntil: 2_000 })
+    const row = await store.insertQuote(quote({ emulatorPubkey: 'ab'.repeat(32) }))
+    expect(row).toMatchObject({
+      state: 'quoted',
+      offerPkScript: OFFER_SCRIPT,
+      validUntil: 2_000,
+      emulatorPubkey: 'ab'.repeat(32),
+    })
     await store.close()
   })
 
@@ -359,7 +364,7 @@ describe('the fill phase', () => {
     )
 
     const legacy = await AssetRfqSwapStore.open(driver, () => 1_000)
-    expect(await legacy.get('old')).toMatchObject({ state: 'filling', fillPhase: null })
+    expect(await legacy.get('old')).toMatchObject({ state: 'filling', fillPhase: null, emulatorPubkey: null })
     await expect(AssetRfqSwapStore.open(driver, () => 1_000)).resolves.toBeInstanceOf(AssetRfqSwapStore)
     expect((await legacy.get('old')).fillPhase).toBeNull()
     await legacy.close()

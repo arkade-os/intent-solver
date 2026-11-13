@@ -38,6 +38,7 @@ export const RFQ_REFUSAL_ERROR_CODES = [
   'invoice_sub_satoshi_amount',
   'invoice_too_long',
   'invoice_wrong_network',
+  'unsupported_emulator_pubkey',
 ]
 
 const REFUSAL_ERROR_CODES = new Set(RFQ_REFUSAL_ERROR_CODES)

@@ -24,6 +24,8 @@ export interface ArkadeOps {
   serverPubkey: string
   /** Emulator pubkey (compressed hex) the refund covenant is built against. */
   emulatorPubkey: string
+  /** A client-named co-signer key other than {@link emulatorPubkey}, or null to refuse. Absent: refuse every such key. */
+  cosignerKeyFor?(requested: string): Promise<string | null>
   /**
    * The provider's own Arkade receiving address, decoded to its pkScript
    * (hex) — where `nonInteractiveClaim` must pay. The same general-purpose
@@ -113,6 +115,8 @@ export interface ReceiveArkadeOps {
   solverPubkey: string
   serverPubkey: string
   emulatorPubkey: string
+  /** @see ArkadeOps.cosignerKeyFor */
+  cosignerKeyFor?(requested: string): Promise<string | null>
   /** Where the solver's own refund must land — the `refundWithoutReceiver` leaf's destination on this leg. */
   solverRefundPkScript: string
   delays: UnilateralDelays

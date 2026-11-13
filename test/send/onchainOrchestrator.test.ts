@@ -336,6 +336,31 @@ describe('OnchainSendSwapService', () => {
     }
   })
 
+  it("derives, persists and rebuilds the lockup on the client's co-signer key", async () => {
+    const operator = `02${hex.encode(keyBytes(12))}`
+    deps.arkade.cosignerKeyFor = async (requested) => (requested === operator.slice(2) ? operator : null)
+    const request = (key: string) => ({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+      emulatorPubkey: key,
+    })
+
+    expect(await service.quote(request('cd'.repeat(32)))).toEqual({
+      accepted: false,
+      reason: 'unsupported_emulator_pubkey',
+    })
+    const outcome = await service.quote(request(operator.slice(2)))
+    expect(outcome.accepted).toBe(true)
+    if (!outcome.accepted) return
+    const row = covenantRowFor(await deps.store.get(outcome.swap.id))
+    expect(row.emulatorPubkey).toBe(operator)
+    expect(hex.encode(covenantScriptFromRow(row).pkScript)).toBe(outcome.swap.pkScript)
+    expect(hex.encode(covenantScriptFromRow({ ...row, emulatorPubkey }).pkScript)).not.toBe(outcome.swap.pkScript)
+  })
+
   describe('the corridor fee', () => {
     // 100bps plus 50 flat against a 50_000 sat lockup: the client locks
     // 50_000, the solver funds the onchain HTLC with 50_000 - 500 - 50 = 49_450.

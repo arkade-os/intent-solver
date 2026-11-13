@@ -154,6 +154,8 @@ export interface AssetRfqSwapRow {
    */
   fillPriceMantissa: bigint | null
   fillPriceScale: number | null
+  /** The offer's co-signer key, x-only. Null on rows quoted before it was stored: the deployment's own. */
+  emulatorPubkey: string | null
 }
 
 export interface AssetRfqQuoteRecord {
@@ -183,6 +185,7 @@ export interface AssetRfqQuoteRecord {
    * @see AssetRfqSwapRow.quoteImpliedMantissa
    */
   quotePrice?: { impliedMantissa: bigint; scale: number; givesBase: boolean }
+  emulatorPubkey?: string | null
 }
 
 const COLUMNS = `
@@ -215,7 +218,8 @@ const COLUMNS = `
   quote_gives_base       INTEGER,
   fill_price_mantissa    TEXT,
   fill_price_scale       INTEGER,
-  fill_phase             TEXT
+  fill_phase             TEXT,
+  emulator_pubkey        TEXT
 `
 
 const SCHEMA = `
@@ -290,6 +294,7 @@ const toRow = (raw: Raw): AssetRfqSwapRow => ({
     raw.quote_gives_base === null || raw.quote_gives_base === undefined ? null : Number(raw.quote_gives_base) === 1,
   fillPriceMantissa: bigIntOrNull(raw.fill_price_mantissa),
   fillPriceScale: numberOrNull(raw.fill_price_scale),
+  emulatorPubkey: text(raw.emulator_pubkey),
 })
 
 const bigIntOrNull = (value: string | number | null | undefined): bigint | null =>
@@ -350,6 +355,7 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
       ['fill_price_mantissa', 'TEXT'],
       ['fill_price_scale', 'INTEGER'],
       ['fill_phase', 'TEXT'],
+      ['emulator_pubkey', 'TEXT'],
     ])
   }
 
@@ -393,8 +399,8 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
          from_decimals, from_flat_fee, to_asset_id, to_amount, to_decimals, to_spread,
          maker_pk_script, maker_public_key, offer_pk_script,
          offer_address, solver_pubkey, valid_until, deposit_txid, deposit_vout, fill_txid, failure_reason,
-         quote_implied_mantissa, quote_implied_scale, quote_gives_base
-       ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?)`,
+         quote_implied_mantissa, quote_implied_scale, quote_gives_base, emulator_pubkey
+       ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?)`,
       [
         record.id,
         at,
@@ -420,6 +426,7 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
         record.quotePrice?.impliedMantissa.toString() ?? null,
         record.quotePrice?.scale ?? null,
         record.quotePrice === undefined ? null : record.quotePrice.givesBase ? 1 : 0,
+        record.emulatorPubkey ?? null,
       ],
     )
     await this.recordEvent(record.id, null, 'quoted', null)

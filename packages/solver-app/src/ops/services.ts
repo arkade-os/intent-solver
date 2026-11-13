@@ -142,6 +142,7 @@ import {
 import { marketServingDivergence } from './marketDivergence.js'
 import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
 import { offerExitDelay, offerScriptFrom, xOnlyPubkey } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
+import { quoteCosignerKey } from '@arkade-os/solver-arkade/arkade/cosignerKey.js'
 import { largestOfferOutpoint, liveOfferOutpoints } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
 import { quotedOfferSettleFor } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
 
@@ -954,6 +955,12 @@ export const createServices = async (
     quoteValiditySeconds: policy.assetQuoteValiditySeconds,
     dustSats: arkade.dustSats,
     deriveOffer: offerScriptFrom(assetRfqDerivation),
+    // Fills still go through the emulator (the SDK's fillOffer), which cannot co-sign arkd's key, so
+    // only the default is accepted here until fills can be submitted to arkd.
+    cosignerKey: async (requested) => {
+      const key = await quoteCosignerKey({ emulatorPubkey: arkadeOps.emulatorPubkey }, requested)
+      return key === null ? null : hex.encode(xOnlyPubkey(hex.decode(key)))
+    },
     depositAt: async (offerPkScript, depositLeg) =>
       largestOfferOutpoint(await liveOfferOutpoints(arkade, offerPkScript), depositLeg),
     // AVAILABLE, never total, and read fresh per decision. @see offerInventory.ts
