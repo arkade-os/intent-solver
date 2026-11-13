@@ -17,6 +17,7 @@ import {
   ARKADE_CLAIM_WINDOW_SECONDS,
   CLIENT_LOCKUP_RELEASE_DELAY_SECONDS,
   arkadeClaimDeadline,
+  lockupExpiryFloor,
   DEFAULT_ONCHAIN_LOCKUP_TIMEOUT,
   ONCHAIN_DUST_SATS,
   ONCHAIN_CLAIM_MARGIN_SECONDS,
@@ -630,7 +631,7 @@ describe('OnchainSendSwapService', () => {
       clientRefundPubkey,
     })
     if (!outcome.accepted) throw new Error('expected acceptance')
-    const expiresAt = expiry(arkadeClaimDeadline(outcome.swap.htlcLocktime))
+    const expiresAt = expiry(lockupExpiryFloor(outcome.swap.htlcLocktime))
     deps.outputs.set(outcome.swap.pkScript, [
       { txid: 'lockup-tx', vout: 0, value: 50_000, ...(expiresAt === undefined ? {} : { expiresAt }) },
     ])
@@ -654,6 +655,7 @@ describe('OnchainSendSwapService', () => {
   })
 
   it.each([
+    ['expires exactly at the floor', (deadline: number) => deadline],
     ['outlives the deadline', (deadline: number) => deadline + 86_400],
     ['carries no expiry at all', () => undefined],
   ])('still adopts a lockup that %s', async (_case, expiry) => {
