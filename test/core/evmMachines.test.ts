@@ -106,6 +106,14 @@ describe('EVM stores enforce the machine', () => {
     expect((await store.get('swap-1')).state).toBe('quoted')
   })
 
+  it('names a state the machine does not know rather than crashing on it', async () => {
+    const store = await EvmSendSwapStore.open(betterSqliteDriver(':memory:'), () => 1)
+    await store.insertQuote(quote as never)
+    await expect(store.transition('swap-1', 'legacy' as never, 'refused')).rejects.toThrow(
+      /illegal transition legacy -> refused/,
+    )
+  })
+
   it('refuses leaving a terminal receive state', async () => {
     const store = await EvmReceiveSwapStore.open(betterSqliteDriver(':memory:'), () => 1)
     await store.insertQuote(quote as never)
