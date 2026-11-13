@@ -1,17 +1,6 @@
 /**
- * Admin-owned durable state: settings overrides, asset markets, and the action
- * audit log.
- *
- * Its own database file, derived from SWAP_DB_PATH the same way the other four
- * swap databases are. Separate because those are the money-critical files —
- * the ones on the Docker volume, the ones whose schema every orchestrator
- * depends on — and an operator convenience has no business sharing a schema
- * with them. Losing this file loses preferences and history; losing a swap
- * database loses funds. The two deserve different blast radii.
- *
- * Follows the same shape as the swap stores (statements in a sibling `db.sql.ts`,
- * private constructor, `open()` taking a driver or a path) so it is read and
- * maintained like the rest of `src/db/`.
+ * Admin-owned state (overrides, asset markets, audit log) in its own file, apart from the swap
+ * databases: losing it loses preferences, losing a swap database loses funds.
  */
 
 import { betterSqliteDriver, type SqlDriver } from '@arkade-os/solver-corridors/db/driver.js'
@@ -49,7 +38,7 @@ export interface SwapApprovalRow extends SwapApprovalRequest {
 
 export interface AuditEntry {
   action: string
-  /** What it acted on — a swap id, usually. Null for whole-wallet actions. */
+  /** Null for whole-wallet actions. */
   target: string | null
   /** JSON, ALREADY REDACTED by the caller. Never carries key material. */
   params: string
@@ -134,9 +123,8 @@ export interface BalanceReportCheckpointRow {
   checkpoint_id: number
 }
 
-/** A stored market, plus the key it is filed under and when it last moved. */
 export interface AssetMarketRow extends AssetMarketConfig {
-  /** The canonical § 2 market key — derived from the legs, never supplied. */
+  /** Derived from the legs, never supplied. */
   marketKey: string
   createdAt: number
   updatedAt: number
@@ -144,20 +132,12 @@ export interface AssetMarketRow extends AssetMarketConfig {
 
 type MarketRaw = Record<string, string | number | null>
 
-/**
- * Bounds are TEXT, not INTEGER, for the reason `db/offerFills.ts` states: an
- * asset amount is a bigint in atomic units and SQLite's INTEGER is a signed
- * 64-bit, so a bound the protocol admits is one the column would silently
- * mangle. Stored as the canonical decimal string and parsed back.
- */
+/** Bounds are decimal TEXT: asset amounts are bigints that overflow SQLite's signed 64-bit INTEGER. */
 const boundsFrom = (
   min: string | number | null | undefined,
   max: string | number | null | undefined,
 ): AssetMarketConfig['sellBase'] =>
-  // `undefined` as well as null, because `noUncheckedIndexedAccess` is on and a
-  // column absent from a row reads as undefined rather than throwing. Treated as
-  // "unbounded" — the same answer as NULL — so a driver that omits nulls cannot
-  // turn an inherited bound into a crash inside BigInt().
+  // A driver that omits nulls yields undefined; unbounded, like NULL, rather than a BigInt() crash.
   min === null || min === undefined || max === null || max === undefined
     ? null
     : { min: BigInt(String(min)), max: BigInt(String(max)) }
@@ -168,8 +148,7 @@ const carrierModeFrom = (raw: string | number | null | undefined): CarrierMode =
 
 const marketFrom = (raw: MarketRaw): AssetMarketRow => ({
   marketKey: String(raw.market_key),
-  // NULL is the BTC leg, and `String(null)` would turn it into the four-letter
-  // string "null" — a leg id nothing matches and nothing refuses.
+  // NULL is the BTC leg; `String(null)` would yield a leg id "null" that nothing refuses.
   base: raw.base === null ? null : String(raw.base),
   quote: raw.quote === null ? null : String(raw.quote),
   baseDecimals: Number(raw.base_decimals),
@@ -199,11 +178,7 @@ const marketFrom = (raw: MarketRaw): AssetMarketRow => ({
   updatedAt: Number(raw.updated_at),
 })
 
-/**
- * Beside the swap database, never inside it — the same suffixing rule
- * `onchainDbPath`/`receiveDbPath` in `src/cli.ts` use, including the
- * extensionless case, so all five database paths are derived identically.
- */
+/** Same suffixing as `onchainDbPath`/`receiveDbPath` in `src/cli.ts`, extensionless case included. */
 export const adminDbPath = (swapDbPath: string): string =>
   swapDbPath.endsWith('.sqlite') ? swapDbPath.replace(/\.sqlite$/, '-admin.sqlite') : `${swapDbPath}-admin`
 
@@ -213,8 +188,7 @@ const dropLegacyApprovals = async (driver: SqlDriver): Promise<void> => {
   try {
     columns = await driver.all<{ name: string }>(adminSql.selectSwapApprovalColumns)
   } catch {
-    // A driver that cannot answer the pragma leaves the table alone rather than
-    // failing the boot: `d1Driver` is a SqlDriver too, and this runs at startup.
+    // `d1Driver` may not answer the pragma; leave the table rather than fail the boot.
     return
   }
   if (columns.some((column) => column.name === 'amount_sats')) {
@@ -300,12 +274,8 @@ export class AdminStore implements AdminRepository {
     return store
   }
 
-  /**
-   * Read the environment into the rows, ONCE. The marker is explicit (every
-   * candidate signal in the data is a supported state) and written in the SAME
-   * transaction, so no crash half-seeds rows beneath a marker saying they are
-   * done. `carrier_mode` is left out: `inherit` IS the environment's answer.
-   */
+  /** An explicit marker, since no data state can mean "seeded", written in the same transaction.
+   * `carrier_mode` is left out: `inherit` IS the environment's answer. */
   private async seedServing(seed: ServingSeed): Promise<void> {
     const done = await this.driver.get<Pick<AdminMigrationRow, 'name'>>(adminSql.selectMigration, [MARKET_SERVING_SEED])
     if (done) return
@@ -333,16 +303,9 @@ export class AdminStore implements AdminRepository {
   }
 
   /**
-   * Make every row's serving fields internally coherent, whatever wrote them.
-   * NOT marker-gated and NOT env-gated, unlike `seedServing`: `serves_rfq = 1`
-   * beside a NULL symbol is unreachable through `validateAssetMarket`, so it
-   * means only that a binary predating these columns INSERTed the row, which a
-   * rollback allows long after the marker was written. Throwing instead would
-   * be a permanent boot failure fixable only by hand SQL. Each row's repair is
-   * independent and idempotent, so no transaction wraps them.
-   * A row this fails closed STOPS quoting: `assetRfqMarketsFrom` drops it on
-   * `servesRfq`. The notes record what was written to the row, so an operator
-   * can see exactly what the boot touched.
+   * Not marker-gated: after a rollback an older binary can insert incoherent rows long after the seed.
+   * Throwing would be a boot failure fixable only by hand SQL. A row this closes STOPS quoting.
+   * Each repair is independent and idempotent, so no transaction.
    */
   private async repairServing(): Promise<void> {
     const rows = await this.listMarkets()
@@ -379,19 +342,12 @@ export class AdminStore implements AdminRepository {
     await this.driver.close()
   }
 
-  /** Every override, as raw strings. Interpreting them is `settings.ts`'s job. */
   async getOverrides(): Promise<Record<string, string>> {
     const rows = await this.driver.all<Pick<AdminOverrideRow, 'key' | 'value'>>(adminSql.selectOverrides)
     return Object.fromEntries(rows.map((row) => [String(row.key), String(row.value)]))
   }
 
-  /**
-   * Set an override, or clear it with null.
-   *
-   * Clearing DELETES rather than storing an empty string, so "no override"
-   * has exactly one representation and `getOverrides()` never hands the
-   * layering code a value it has to special-case.
-   */
+  /** Null DELETES rather than storing '', so "no override" has exactly one representation. */
   async setOverride(key: string, value: string | null): Promise<void> {
     if (value === null) {
       await this.driver.run(adminSql.deleteOverride, [key])
@@ -407,7 +363,6 @@ export class AdminStore implements AdminRepository {
     })
   }
 
-  /** The console's own state put back to what the config implies, in one transaction with its audit row. */
   async revertToConfig(
     serving: readonly { marketKey: string; fields: ServingFields }[],
     overrideKeys: readonly string[],
@@ -434,17 +389,7 @@ export class AdminStore implements AdminRepository {
     })
   }
 
-  /**
-   * Every configured market, disabled ones included.
-   *
-   * Ordered by key so two reads of an unchanged table answer identically — the
-   * console lists these and a set that reshuffles between polls is unreadable.
-   *
-   * NOT validated here. The store's job is what is on disk; deciding whether a
-   * row is one this solver may act on belongs to `assetMarketConfig.ts`, and
-   * putting it here would leave a bad row unreadable and therefore
-   * un-deletable from the console.
-   */
+  /** NOT validated (that is `assetMarketConfig.ts`'s job): a bad row must stay readable to be deletable. */
   async listMarkets(): Promise<AssetMarketRow[]> {
     const rows = await this.driver.all<MarketRaw>(adminSql.selectMarkets)
     return rows.map(marketFrom)
@@ -455,15 +400,7 @@ export class AdminStore implements AdminRepository {
     return rows[0] ? marketFrom(rows[0]) : null
   }
 
-  /**
-   * Insert or replace one market, filed under the key its own legs derive.
-   *
-   * UPSERT rather than separate create and update, because the key is derived:
-   * an operator re-submitting a pair they already have is editing it, and there
-   * is no third thing that could mean. `created_at` survives an edit — a market
-   * edited today is not a market added today, and the audit question an
-   * operator asks of this table is "how long have we been trading this pair".
-   */
+  /** UPSERT on the derived key: re-submitting a pair edits it, and `created_at` survives the edit. */
   async putMarket(market: AssetMarketConfig): Promise<AssetMarketRow> {
     const key = assetMarketKey(market.base, market.quote)
     const at = this.now()
@@ -481,8 +418,7 @@ export class AdminStore implements AdminRepository {
       String(market.buyBaseFeeFlat ?? 0n),
       market.sellBaseFeeBps ?? null,
       market.buyBaseFeeBps ?? null,
-      // Decimal strings, per the note on `boundsFrom`. `null` for both halves
-      // when the direction inherits the deployment-wide pair.
+      // Null for both halves when the direction inherits the deployment-wide pair.
       market.sellBase === null ? null : String(market.sellBase.min),
       market.sellBase === null ? null : String(market.sellBase.max),
       market.buyBase === null ? null : String(market.buyBase.min),
@@ -497,15 +433,12 @@ export class AdminStore implements AdminRepository {
       at,
       at,
     ])
-    // Read back rather than returned from the argument: `created_at` is the
-    // ORIGINAL insert's on an edit, and echoing `at` would report a market as
-    // added at the moment its spread was last nudged.
+    // Read back: on an edit `created_at` is the original insert's, not `at`.
     const row = await this.getMarket(key)
     if (!row) throw new Error(`market ${key} vanished immediately after being written`)
     return row
   }
 
-  /** True when a row was removed, false when the key named nothing. */
   async deleteMarket(marketKey: string): Promise<boolean> {
     const before = await this.getMarket(marketKey)
     if (!before) return false
@@ -644,11 +577,7 @@ export class AdminStore implements AdminRepository {
     return rows.map(operatorWithdrawalFrom)
   }
 
-  /**
-   * Idempotent; answers whether the row was NEW, which is what stops the
-   * notifier firing once per tick. `DO NOTHING` so a re-record cannot move
-   * `requested_at` — its age is the operator's remaining window.
-   */
+  /** True only when NEW, so the notifier fires once. `DO NOTHING` keeps `requested_at`: its age is the operator's window. */
   async recordApprovalRequest(request: SwapApprovalRequest): Promise<boolean> {
     const result = await this.driver.run(adminSql.insertApprovalRequest, [
       request.swapId,
@@ -660,11 +589,7 @@ export class AdminStore implements AdminRepository {
     return result.changes === 1
   }
 
-  /**
-   * False when there was nothing to approve: an operator cannot pre-authorise an
-   * id the gate never held, which is the one way this table could wave a swap
-   * through before anyone saw it.
-   */
+  /** False when the gate never held `swapId`: pre-authorising would wave a swap through unseen. */
   async approveSwap(swapId: string): Promise<boolean> {
     const result = await this.driver.run(adminSql.approveSwap, [this.now(), swapId])
     return result.changes === 1
@@ -676,7 +601,6 @@ export class AdminStore implements AdminRepository {
     return row !== undefined && row !== null && row.approved_at !== null
   }
 
-  /** What is waiting on a human, oldest first — the order they should be answered in. */
   async listPendingApprovals(): Promise<SwapApprovalRow[]> {
     const rows = await this.driver.all<Record<string, string | number | null>>(adminSql.selectPendingApprovals)
     return rows.map((row) => ({
@@ -688,11 +612,7 @@ export class AdminStore implements AdminRepository {
     }))
   }
 
-  /**
-   * Newest first. The `id` tie-break matters: several actions can land in the
-   * same second, and an operator reading a refund followed by its retry needs
-   * them in the order they happened.
-   */
+  /** `id` breaks same-second ties, so a refund and its retry stay in order. */
   async listActions(limit = 200): Promise<AuditRow[]> {
     const rows = await this.driver.all<Record<string, string | number | null>>(adminSql.selectNewestActions, [limit])
     return rows.map((row) => ({

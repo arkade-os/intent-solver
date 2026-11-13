@@ -1,39 +1,5 @@
-/**
- * Durable state for an Arkade offer FILL — the atomic class, `arkade:X->arkade:Y`.
- *
- * Deliberately much smaller than its four siblings, and the reason is
- * structural rather than a shortcut. In every other corridor this service goes
- * first: it funds its own lockup, or holds an htlc, and most of those stores is
- * machinery for capital that is committed and not yet made whole — a refund
- * locktime, a deadline sweep, an EXPOSED set, a stuck-capital accounting.
- *
- * None of that exists here. `docs/rfq-protocol.md` § 7.2:
- *
- *   Neither program carries a timelock. An unfilled deposit keeps its place at
- *   the swap address instead of expiring: no deadline to miss and no `expired`
- *   state to unwind.
- *
- * The client funds an offer covenant; the covenant enforces that ANY spend of
- * it pays `wantAmount` to the client. So this service takes the deposit only by
- * delivering, in the same transaction. There is no window in which it has paid
- * and not been paid, which is why there is no refund column, no locktime, and
- * no EXPOSED set. Copying the nearest sibling would import all of it and then
- * need it explained away.
- *
- * Lifecycle, forward-only:
- *
- * - `fillable`  we decided to fill and recorded the intent; NOTHING submitted
- * - `filling`   an attempt holds the row; `fill_phase` says how far it got (@see
- *               FillPhase). Only `selecting` may be walked back, by the one
- *               refusal above the submission; @see OfferFillStore.revertUnsubmitted
- * - `filled`    the spend confirmed and `classifySpend` read it as a fill
- * - `lost`      the offer output was spent by someone else, or cancelled by its
- *               funder — either way it is gone and this service committed
- *               nothing (see the note on why these are one state)
- * - `refused`   a client asked and this service declined
- * - `stuck`     `fulfill` failed, or the spend classified as `indeterminate`;
- *               needs a human
- */
+// `arkade:X->arkade:Y` offer fill. No refund, locktime or EXPOSED set: the covenant makes any spend pay
+// `wantAmount` to the client, so the deposit is taken only by delivering in the same transaction.
 
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
 import { offerFillsSql } from './offerFills.sql.js'
@@ -50,11 +16,9 @@ export type OfferFillState = (typeof OFFER_FILL_STATES)[number]
 export const NON_TERMINAL: readonly OfferFillState[] = ['fillable', 'filling']
 
 const LEGAL_EDGES: Record<OfferFillState, readonly OfferFillState[]> = {
-  // `lost` from `fillable` too: an offer can be filled by another solver or
-  // cancelled by its funder between the decision and the submission.
+  // `fillable -> lost`: another solver or the funder can spend the offer before we submit.
   fillable: ['filling', 'refused', 'lost'],
-  // Never `fillable`: a `filling` row may have spent, and an edge cannot see the one
-  // phase that provably did not — `revertUnsubmitted`, off the graph for its own reason.
+  // Never back to `fillable`: a `filling` row may have spent (see `revertUnsubmitted`).
   filling: ['filled', 'lost', 'stuck'],
   filled: [],
   lost: [],
@@ -62,40 +26,28 @@ const LEGAL_EDGES: Record<OfferFillState, readonly OfferFillState[]> = {
   stuck: [],
 }
 
-/**
- * Columns a transition may set. The offer's own identity — its outpoint, script
- * and the amounts the covenant binds — is fixed at insert and never moves: the
- * covenant is derived from those values, so a row that could edit them could
- * describe a contract that was never funded.
- */
+/** The offer's identity is fixed at insert: the covenant is derived from it. */
 const TRANSITION_COLUMNS = new Set(['fill_txid', 'failure_reason', 'fill_phase'])
 
 export interface OfferFillRow {
   id: string
   state: OfferFillState
-  /** How far the attempt holding a `filling` row got. @see FillPhase */
   fillPhase: FillPhase | null
   createdAt: number
   updatedAt: number
   /** The funded offer output this row is about: `txid:vout`, the natural key. */
   offerTxid: string
   offerVout: number
-  /** The offer covenant's script, hex. What a spend must come from. */
   offerPkScript: string
-  /** What the covenant obliges a filler to pay, and to whom. */
   wantAssetId: string | null
   wantAmount: bigint
-  /** What the offer holds, and this service receives by filling it. */
   offerAssetId: string | null
   offerAmount: bigint
-  /** Set once `fulfill` is submitted. */
   fillTxid: string | null
   failureReason: string | null
-  /** Correlates with an `rfq_status_request`, when the fill came from one. */
   rfqId: string | null
 }
 
-/** What a caller must know to record the intent to fill. */
 export interface OfferFillRecord {
   id: string
   offerTxid: string
@@ -110,10 +62,7 @@ export interface OfferFillRecord {
 
 type Raw = Record<string, string | number | null>
 
-// Amounts are TEXT, not INTEGER. An asset amount is a bigint in atomic units
-// (`docs/rfq-protocol.md` § 2.1) and SQLite's INTEGER is a signed 64-bit, so a
-// value the protocol admits can be one a column silently mangles. Stored as the
-// canonical decimal string and parsed back, which is also what the wire does.
+// Amounts are TEXT: an asset amount can exceed SQLite's signed 64-bit INTEGER.
 const toRow = (raw: Raw): OfferFillRow => ({
   id: String(raw.id),
   state: String(raw.state) as OfferFillState,
@@ -164,24 +113,11 @@ export class OfferFillStore implements OfferFillRepository {
     return store
   }
 
-  /** Additive: `CREATE TABLE IF NOT EXISTS` never alters an existing table. No backfill. */
   private async migrate(): Promise<void> {
     await addColumns(this.driver, 'offer_fill', [['fill_phase', 'TEXT']])
   }
 
-  /**
-   * Record the intent to fill, BEFORE `fulfill` is submitted.
-   *
-   * Order is the point, and it is the same discipline the send orchestrator
-   * states for its own refund push: intent before the irreversible side effect.
-   * A crash between this insert and the submission leaves a `fillable` row a
-   * later tick can resolve against the chain; the reverse order leaves a spend
-   * nothing knows about.
-   *
-   * Throws on a duplicate live outpoint rather than returning — two workers
-   * racing the same offer is exactly what the unique index is for, and the
-   * loser must not proceed to submit.
-   */
+  /** Before `fulfill` is submitted. Throws on a duplicate live outpoint: the racing loser must not submit. */
   async insertIntent(record: OfferFillRecord): Promise<OfferFillRow> {
     const at = this.now()
     await this.driver.run(offerFillsSql.insertIntent, [
@@ -212,13 +148,11 @@ export class OfferFillStore implements OfferFillRepository {
     return raw ? toRow(raw) : undefined
   }
 
-  /** The live row for an outpoint, if this service is already acting on it. */
   async findLiveByOutpoint(txid: string, vout: number): Promise<OfferFillRow | undefined> {
     const raw = await this.driver.get<Raw>(offerFillsSql.selectLiveByOutpoint, [txid, vout])
     return raw ? toRow(raw) : undefined
   }
 
-  /** Rows a tick must still resolve. */
   async listNonTerminal(): Promise<OfferFillRow[]> {
     const raws = await this.driver.all<Raw>(offerFillsSql.selectInStates(NON_TERMINAL.length), [...NON_TERMINAL])
     return raws.map(toRow)
@@ -231,10 +165,6 @@ export class OfferFillStore implements OfferFillRepository {
     return { rows: page.map(toRow), nextCursor }
   }
 
-  /**
-   * Compare-and-swap on `state`, so two ticks racing one row cannot both win.
-   * Returns whether this caller was the one that moved it.
-   */
   async transition(
     id: string,
     from: OfferFillState,
@@ -261,13 +191,9 @@ export class OfferFillStore implements OfferFillRepository {
   }
 
   /**
-   * The ONE edge back out of `filling`, and sound only for its one caller: a fill
-   * refused with `OfferNotSubmittedError`, raised above the call that submits.
-   * Compare-and-swap on the state AND the phase: the state alone would re-offer a fill
-   * a crashed attempt had latched, and the phase is CLEARED so a claim written
-   * without one cannot inherit it. Deliberately
-   * absent from `LEGAL_EDGES`, so the generic `filling -> fillable` keeps throwing —
-   * an edge cannot say "only when nothing was sent", so this is reached by name.
+   * Off `LEGAL_EDGES` on purpose: valid only after `OfferNotSubmittedError`, which an edge cannot express.
+   * CAS on state AND phase, since state alone would re-offer a latched fill; the phase is cleared so a
+   * later claim cannot inherit it.
    */
   async revertUnsubmitted(id: string): Promise<boolean> {
     const result = await this.driver.run(offerFillsSql.revertUnsubmitted, [this.now(), id])
@@ -278,31 +204,15 @@ export class OfferFillStore implements OfferFillRepository {
     return result.changes === 1
   }
 
-  /**
-   * THE LATCH, won immediately before the call that submits: from here on no
-   * recovery may walk this row back, and one attempt per claim wins it. NOT a
-   * transition — the row does not move, so no event row and nothing announced.
-   */
+  /** The latch before submission: no recovery may walk the row back past it. Not a transition, so no event. */
   async markSubmitting(id: string): Promise<boolean> {
     const result = await this.driver.run(offerFillsSql.markSubmitting, [this.now(), id])
     return result.changes === 1
   }
 
-  /** @see BaseSwapStore.onTransition — this store carries its own `transition`. */
   onTransition?: TransitionHook
 
-  /**
-   * Terminal failure with a reason a human will read.
-   *
-   * `refused` when nothing was submitted and `stuck` when something was, which
-   * is the distinction an operator acts on: a refused row spent nothing and
-   * needs nobody.
-   *
-   * The guard is for the error message, not for safety — `LEGAL_EDGES` already
-   * refuses every terminal `from`, but it says "illegal transition filled ->
-   * stuck", which sends a reader looking at the lifecycle graph rather than at
-   * the call that asked a finished row to fail.
-   */
+  /** The terminal guard only improves the error; `LEGAL_EDGES` already refuses a terminal `from`. */
   async fail(id: string, from: OfferFillState, reason: string): Promise<void> {
     if (!NON_TERMINAL.includes(from)) {
       throw new Error(`fail() cannot act on ${from}: it is terminal, so there is nothing left to fail`)

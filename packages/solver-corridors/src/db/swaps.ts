@@ -1,20 +1,6 @@
 /**
- * Durable swap state.
- *
- * Every column here exists because a specific crash needs it. The one that
- * matters most is `refund_locktime`: the swap script is derived from it, so
- * without it on disk a funded lockup cannot be reconstructed after a restart —
- * and an unreconstructible script is not merely unclaimable, it is
- * **unrefundable too**. The money is gone, not delayed.
- *
- * The delays are snapshotted for the same reason. They are derived from the Arkade
- * server's reported minimum at startup; if the operator changes it between
- * funding and recovery, re-deriving produces a different script and the funded
- * one becomes unreachable.
- *
- * The rule everywhere below: commit intent BEFORE an irreversible side effect,
- * commit the outcome immediately after, and make every step re-entrant by
- * reading the row first.
+ * `refund_locktime` and the delays derive the script: without them on disk a funded lockup is
+ * unrefundable, not merely unclaimable. Commit intent BEFORE an irreversible side effect.
  */
 
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
@@ -37,21 +23,14 @@ export const NON_TERMINAL: readonly SendSwapState[] = LnSendMachine.live
 export const EXPOSED: readonly SendSwapState[] = LnSendMachine.exposed
 export const LEGAL_EDGES_FOR_TEST: Record<SendSwapState, readonly SendSwapState[]> = LnSendMachine.edges
 
-/**
- * Columns a transition may set alongside its state change, and the only ones
- * patch() may touch at all. Everything else — `state` above all — moves through
- * transition()'s compare-and-swap or not at all. The allowlists also close the
- * column-name interpolation in the UPDATE builders: caller-supplied keys never
- * reach the SQL unless they are in these sets.
- */
+/** The only caller keys that reach the column names interpolated into the UPDATE builders. */
 const TRANSITION_COLUMNS = new Set([
   'lockup_txid',
   'lockup_vout',
   'lockup_value',
   'idempotency_key',
   'pay_attempted_at',
-  // Recorded atomically with funded -> paying so the identity cannot be lost in
-  // a window between the state change and a follow-up write. Also in PATCH.
+  // Set with funded -> paying so the identity is never lost between two writes.
   'payment_backend',
   'payment_wallet',
   'payment_id',
@@ -86,12 +65,7 @@ export interface SendSwapRow {
   paymentHash: string
   amountSats: number
   invoiceExpiresAt: number
-  /**
-   * The unix-seconds deadline this quote was PRICED against, before `refundLocktime`
-   * was rewritten in the deployment's own unit. A height projected back from the live
-   * tip answers differently on every call, and `refundWithoutReceiverDelay` was sized
-   * against THIS value. Null on rows quoted before the column existed.
-   */
+  /** The unix-seconds deadline the quote was priced against; `refundLocktime` may be in another unit. */
   quotedRefundDeadline: number | null
   /** Everything below reconstructs the script. Losing any of it loses the funds. */
   refundLocktime: number
@@ -103,70 +77,25 @@ export interface SendSwapRow {
   refundWithoutReceiverDelay: number
   pkScript: string
   lockupAddress: string
-  /** Where a covenant refund must pay, hex pkScript. Null on legacy key-refund rows. */
   refundPkScript: string | null
-  /** Emulator pubkey the refund covenant was built against, hex. Null on legacy rows. */
   emulatorPubkey: string | null
-  /**
-   * The client's own refund key, hex x-only pubkey. Present only for rows
-   * quoted via the RFQ family after the client-unilateral refund leaf
-   * shipped; null for older rows and rows quoted by the CLI's own
-   * `quote`/`send` self-test commands (which carry no client key) — both
-   * reconstruct the three-leaf script.
-   */
+  /** Null on older rows and CLI self-test quotes; both rebuild the three-leaf script. */
   clientRefundPubkey: string | null
-  /**
-   * The provider's own Arkade receiving pkScript, hex — where
-   * `nonInteractiveClaim` must pay. Snapshotted at quote time, same reason as
-   * every other script-reconstruction field: rebuilt from the row, never
-   * re-fetched live. Null on rows quoted before this leaf shipped.
-   */
+  /** Where `nonInteractiveClaim` pays; snapshotted at quote time, never re-fetched. */
   receiverPkScript: string | null
-  /**
-   * Whether this lockup was funded WITH the timelocked non-interactive
-   * refund leaf. Null on rows quoted before the leaf shipped — same
-   * reconstruct-from-the-row-never-live rule, but null here means "rebuild
-   * the eight-leaf shape", not a refusal. See `CovenantScriptRow`'s doc
-   * comment on the same field.
-   */
+  /** Null means "rebuild the eight-leaf shape", not a refusal. */
   nonInteractiveParameters: boolean | null
-  /** Arkade txid of a covenant refund THIS SERVICE pushed. Only ever a txid. */
   refundArkTxid: string | null
-  /** How the refund resolved: 'pushed' by us, or 'external' (someone else moved the funds). */
+  /** `external`: someone else moved the funds. */
   refundOutcome: 'pushed' | 'external' | null
   /**
-   * What the automatic post-failure refund attempt DID — including when it
-   * failed, which `refundOutcome` cannot say.
-   *
-   * Separate from `refundOutcome` on purpose: that one is a one-way door that
-   * tells the CLIENT they were refunded, and a failed attempt must never read
-   * as one. This tells the OPERATOR what happened, on a row that is on its way
-   * to `stuck` where nothing revisits it and they are the retry.
-   *
+   * Not `refundOutcome`, which tells the CLIENT they were refunded: a failed attempt must never read as one.
    * `'pushed'` | `'nothing-at-script'` | `'failed: <reason>'` | null (never ran).
    */
   refundAttempt: string | null
-  /**
-   * Which backend minted {@link SendSwapRow.paymentId}, and which wallet it was
-   * pointed at when it did.
-   *
-   * A payment id means nothing outside the backend that issued it, and nothing
-   * even there once the seed changes: the lookup either misses local storage or
-   * resolves against a wallet that never made the payment. Recorded WITH the id
-   * so a later reader can tell "this provider has lost the record" from "this
-   * row belongs to a provider you no longer run" — which otherwise both surface
-   * as an undecided verdict and read like a backend fault.
-   *
-   * The fingerprint is the backend's own public identity (a node or identity
-   * pubkey), never a secret: it already appears in the vendor's error messages,
-   * and the point is to compare it, not to keep it.
-   *
-   * Null on rows that never reached a payment, and on rows written before this
-   * existed — an absent value is "unknown", never "matches".
-   */
+  /** A payment id means nothing outside the backend and wallet that issued it. Null is unknown, never a match. */
   paymentBackend: string | null
   paymentWallet: string | null
-  /** Routing fee learned when this quote was priced; null on legacy or unestimated rows. */
   quotedRoutingFeeSats: number | null
   lockupTxid: string | null
   lockupVout: number | null
@@ -182,47 +111,12 @@ export interface SendSwapRow {
   /** JSON `[{txid, vout, value}]`: the lockup outputs adopted at funding, each to be collected. Null on older rows. */
   lockupOutpoints: string | null
   failureReason: string | null
-  /**
-   * The backend's last word on the outbound payment — `in_flight` vs `wedged`
-   * above all, which the status alone cannot tell apart. Diagnostic: it is what
-   * an operator and the client read to know whether a fill is progressing, and
-   * it decides nothing about whether money moves.
-   *
-   * Null while nothing has been polled, and for any backend that does not
-   * report it. Kept as a plain string because `src/db` is a storage projection
-   * and does not otherwise depend on `src/ln`'s vocabulary.
-   */
+  /** Diagnostic only: decides nothing about whether money moves. */
   paymentEvidence: string | null
-  /**
-   * WHY the backend said a payment failed, in the port's vocabulary —
-   * `rejected_by_destination` above all, which is how an invoice a third party
-   * already settled comes back. Distinct from `failureReason`, which is our own
-   * operator-facing sentence about the swap; this is the backend's verdict about
-   * the payment, and the two can disagree.
-   */
+  /** The backend's verdict on the payment; `failureReason` is ours about the swap, and they can disagree. */
   paymentFailureReason: string | null
-  /**
-   * What routing this payment ACTUALLY cost, in sats, as the backend reported
-   * it once the payment settled.
-   *
-   * THE ONLY REALIZED EXECUTION COST THIS SERVICE RECORDS, and the difference
-   * from {@link SendSwapRow.quotedRoutingFeeSats} beside it is the whole point:
-   * that one is the budget this swap was quoted against and spent under as
-   * `maxFeeSats`, fixed before the payment was attempted. This is what came off
-   * the balance. A corridor priced at 30bps into a fee market that took 40 is a
-   * loss, and the two columns together are the only way to see it.
-   *
-   * NULL is UNMEASURED, never free: rows quoted before this column existed, and
-   * any backend that does not report a fee, both read null. Nothing nets a cost
-   * it was not given.
-   */
+  /** Realized routing cost. NULL is unmeasured, never free. */
   routingFeePaidSats: number | null
-  /**
-   * Client-chosen RFQ correlation id (64 hex chars), when the swap arrived as an
-   * `rfq_request`. Null for rows quoted by the CLI's own commands. NOT unique
-   * across rows: a client retrying after its quote expired legitimately reuses
-   * the id, so lookups take the most recent row.
-   */
   rfqId: string | null
 }
 
@@ -257,7 +151,6 @@ const toRow = (raw: Raw): SendSwapRow => ({
       : raw.non_interactive_parameters === '1',
   refundArkTxid: raw.refund_ark_txid === null ? null : String(raw.refund_ark_txid),
   refundOutcome: raw.refund_outcome === null ? null : (String(raw.refund_outcome) as 'pushed' | 'external'),
-  /** What the automatic post-failure refund DID, including when it failed. @see refundAfterTerminalFailure */
   refundAttempt: text(raw.refund_attempt),
   paymentBackend: text(raw.payment_backend),
   paymentWallet: text(raw.payment_wallet),
@@ -286,7 +179,6 @@ export interface QuoteRecord {
   paymentHash: string
   amountSats: number
   invoiceExpiresAt: number
-  /** @see SendSwapRow.quotedRefundDeadline. Required: a new quote knows it. */
   quotedRefundDeadline: number
   refundLocktime: number
   senderPubkey: string
@@ -301,27 +193,13 @@ export interface QuoteRecord {
   emulatorPubkey?: string
   clientRefundPubkey?: string
   receiverPkScript?: string
-  /**
-   * REQUIRED, unlike the row's field: an omitted value persists NULL, which
-   * `covenantScriptFromRow` rebuilds as eight leaves against a nine-leaf lockup.
-   * @see SendSwapRow.nonInteractiveParameters
-   */
+  /** Required: an omitted value persists NULL, rebuilt as eight leaves against a nine-leaf lockup. */
   nonInteractiveParameters: boolean
   quotedRoutingFeeSats?: number
   rfqId?: string
 }
 
-/**
- * Columns an operator search matches against, for this corridor.
- *
- * Identifiers only — every one is something a user can hand you: the swap
- * id, the payment hash, the invoice, an address, a txid, the rfq id. Amounts
- * and timestamps are deliberately absent; they are filters, not identifiers,
- * and a substring match on a number matches far too much to be a search.
- *
- * Interpolated into SQL, so it lives here beside the schema rather than
- * anywhere a request can reach.
- */
+/** Identifiers only: a substring match on a number matches too much. Interpolated into SQL, so never request-derived. */
 export const SEND_SEARCH_COLUMNS: readonly string[] = [
   'id',
   'payment_hash',
@@ -365,13 +243,6 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> impleme
     return result.changes === 1
   }
 
-  /**
-   * Open a store over a driver — or a SQLite file path, the Node convenience —
-   * and bring the schema up to date BEFORE handing the store out. Nothing can
-   * read or write a row until the columns that reconstruct its script exist.
-   * (Durability pragmas live in the Node driver, not here: they are a
-   * file-on-disk concern, and D1 manages its own.)
-   */
   static async open(driver: SqlDriver | string, now: () => number = nowSeconds): Promise<SwapStore> {
     const store = new SwapStore(typeof driver === 'string' ? betterSqliteDriver(driver) : driver, now)
     await store.driver.exec(swapsSql.schema)
@@ -379,13 +250,6 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> impleme
     return store
   }
 
-  /**
-   * Additive migration for databases created before a column existed.
-   * `CREATE TABLE IF NOT EXISTS` never alters an existing table, so columns
-   * added to the schema must also be added here. The column check goes through
-   * the driver's prepared `all` because that form works on both runtimes —
-   * D1 serves `PRAGMA table_info` via prepare().all() like any query.
-   */
   private async migrate(): Promise<void> {
     await addColumns(this.driver, 'send_swap', [
       ['refund_attempt', 'TEXT'],
@@ -404,10 +268,7 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> impleme
       ['quoted_routing_fee_sats', 'INTEGER'],
       // Nothing reads or writes it; kept because dropping a column is a table rebuild.
       ['fee_handle', 'TEXT'],
-      // INTEGER, matching the schema above rather than defaulting to TEXT: a
-      // migrated database would otherwise give this column TEXT affinity and
-      // store sats as strings, which reads back correctly through `Number()`
-      // and sorts and sums wrongly the day anything asks SQLite to do either.
+      // Not TEXT: that affinity would store sats as strings that sort and sum wrongly.
       ['routing_fee_paid_sats', 'INTEGER'],
       ['quoted_refund_deadline', 'INTEGER'],
       ['unrolled_claim', 'TEXT'],
@@ -415,31 +276,10 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> impleme
       ['lockup_outpoints', 'TEXT'],
     ])
 
-    // Databases created when payment_hash carried a column-level UNIQUE burn a
-    // hash forever once any swap — even a refused one that never moved money —
-    // exists for it. SQLite cannot drop a column constraint in place, so the
-    // table is rebuilt once. Detection must be precise: the TEXT PRIMARY KEY
-    // also creates an autoindex, so only an autoindex whose indexed column is
-    // payment_hash marks the legacy constraint.
+    // A column-level UNIQUE on payment_hash burns a hash forever; SQLite drops it only by rebuilding.
     if (await this.hasLegacyHashConstraint()) {
       const names = (await this.driver.all<{ name: string }>(swapsSql.tableInfo)).map((c) => c.name).join(', ')
-      // The SQLite-recommended table rebuild (sqlite.org/lang_altertable.html):
-      // build the replacement, copy, drop the original, rename into place. The
-      // drop is what removes the column-level UNIQUE the whole rebuild exists to
-      // shed. Two safeguards, because this moves a money table:
-      //  - FK enforcement is toggled OFF around the swap. send_swap_event holds a
-      //    foreign key into send_swap(id); the ids are preserved so the reference
-      //    stays valid, but the transient DROP would otherwise trip it. Restored
-      //    in `finally`, so an error never leaves the connection with FKs off.
-      //  - the DDL runs through `driver.transaction`, so on Node a crash rolls
-      //    back to the intact legacy table rather than stranding rows in a
-      //    half-renamed one. `IF EXISTS` also recovers from a prior crash.
-      // The transaction and PRAGMA are driver-aware: better-sqlite3 gets real
-      // atomicity and honours the FK toggle, D1 runs best-effort (a fresh D1
-      // database never carries the legacy constraint, so this path is Node-only
-      // in practice; D1 also defaults foreign_keys OFF, so the drop needs no
-      // toggle there). The PRAGMA is best-effort precisely so a driver that
-      // rejects it degrades to "leave the constraint" rather than bricking.
+      // FKs off so the transient DROP cannot trip send_swap_event's reference; D1 never has the legacy constraint.
       await this.setForeignKeys(false)
       try {
         await this.driver.transaction(async () => {
@@ -456,19 +296,12 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> impleme
       await this.driver.exec(swapsSql.schema)
     }
 
-    // Backfill the outcome discriminator from the retired 'external' sentinel,
-    // which used to be smuggled through the txid column (and leaked to clients
-    // as if it were a txid).
+    // Retired sentinel: 'external' was once stored in refund_ark_txid.
     await this.driver.run(swapsSql.backfillExternalRefundOutcome)
     await this.driver.run(swapsSql.backfillPushedRefundOutcome)
   }
 
-  /**
-   * Toggle FK enforcement, best-effort. better-sqlite3 honours it (needed so the
-   * rebuild's transient DROP does not trip send_swap_event's foreign key); D1
-   * rejects the PRAGMA but also defaults it off, so ignoring the failure there is
-   * correct rather than fatal.
-   */
+  /** Best-effort: D1 rejects the PRAGMA but already defaults foreign keys off. */
   private async setForeignKeys(on: boolean): Promise<void> {
     try {
       await this.driver.exec(swapsSql.setForeignKeys(on))
@@ -477,7 +310,7 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> impleme
     }
   }
 
-  /** True when payment_hash still carries the legacy column-level UNIQUE. */
+  /** The TEXT PRIMARY KEY has an autoindex too; only one on payment_hash is the legacy UNIQUE. */
   private async hasLegacyHashConstraint(): Promise<boolean> {
     const indexes = await this.driver.all<{ name: string }>(swapsSql.indexList)
     for (const index of indexes) {
@@ -489,14 +322,7 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> impleme
     return false
   }
 
-  /**
-   * Record a quote before anything is funded.
-   *
-   * Rejects if a non-terminal swap already exists for this payment hash. That
-   * uniqueness is load-bearing: two swaps sharing a payment hash mean two
-   * lockups and one payment, and whichever client loses the race has their
-   * lockup claimed with a valid preimage and no refund.
-   */
+  /** One live swap per hash: two lockups against one payment leave the loser claimed with no refund. */
   async insertQuote(quote: QuoteRecord): Promise<SendSwapRow> {
     const at = this.now()
     const inserted = await this.driver.run(swapsSql.insertQuoteUnlessHashLive, [
@@ -521,11 +347,7 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> impleme
       quote.emulatorPubkey ?? null,
       quote.clientRefundPubkey ?? null,
       quote.receiverPkScript ?? null,
-      // `false` collapses to NULL — the same value a row quoted before the leaf shipped
-      // carries — and so does not round-trip back as `false`. Deliberate: the only reader
-      // that matters (`covenantScriptFromRow`) treats NULL and `false` identically and
-      // rebuilds the eight-leaf shape for both, so this is not a distinction the row needs
-      // to carry. Only `true` changes what gets derived.
+      // `false` stores NULL on purpose: `covenantScriptFromRow` treats them identically.
       quote.nonInteractiveParameters ? '1' : null,
       quote.quotedRoutingFeeSats ?? null,
       quote.rfqId ?? null,
@@ -537,14 +359,6 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> impleme
     return this.get(quote.id)
   }
 
-  /**
-   * The swap funded by this Arkade transaction.
-   *
-   * The lockup txid is the one identifier an operator actually HAS: it is what
-   * a block explorer shows and what a maker can read off their own wallet. The
-   * swap id is ours and appears in no UI, so without this a completed swap —
-   * terminal, so absent from `list` — is unreachable from the outside.
-   */
   async findByLockupTxid(txid: string): Promise<SendSwapRow | null> {
     const raw = await this.driver.get<Raw>(swapsSql.selectNewestByLockupTxid, [txid])
     return raw ? toRow(raw) : null
@@ -557,26 +371,15 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> impleme
   }
 
   /**
-   * Swaps to auto-refund: `refused` only (never paid against), covenant-capable and
-   * not yet refunded. `stuck` is excluded: we may have paid, the claim leaf never
-   * expires, and refunding there could pay out twice. The deadline belongs to the
-   * SCRIPT: with `client_refund_pubkey` the `nonInteractiveRefund` leaf has no
-   * timelock; without it the `refund` leaf is gated on `refundLocktime`.
+   * `stuck` excluded: we may have paid and the claim leaf never expires. With `client_refund_pubkey`
+   * the `nonInteractiveRefund` leaf has no timelock; without it `refund` waits for `refundLocktime`.
    */
   async findRefundable(now: number): Promise<SendSwapRow[]> {
     const rows = await this.driver.all<Raw>(swapsSql.selectRefundable, [now])
     return rows.map(toRow)
   }
 
-  /**
-   * The most recently QUOTED swap, whatever state it is in now — what a
-   * read-only operator command shows when no id is named.
-   *
-   * Ordered by `created_at` and tie-broken by rowid, because `created_at` is
-   * unix seconds: two quotes minted in the same second are indistinguishable by
-   * time alone, and insertion order is then the only remaining truth about
-   * which came last.
-   */
+  /** rowid breaks ties: `created_at` is whole seconds. */
   async findMostRecent(): Promise<SendSwapRow | null> {
     const raw = await this.driver.get<Raw>(swapsSql.selectMostRecent)
     return raw ? toRow(raw) : null
@@ -599,22 +402,7 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> impleme
     }
   }
 
-  /**
-   * A refund is the one thing a patch does that MOVES MONEY, and until this
-   * existed it left no trace in the swap's own history: the timeline records
-   * transitions, and a refund is not one. An operator reading
-   * `paying -> paid -> stuck` alongside a refund transaction had no way to see
-   * where the refund came from, or when.
-   *
-   * Recorded HERE rather than at the eight call sites that push one, because a
-   * history with a gap in it is exactly what a ninth call site would
-   * reintroduce. `from === to` says plainly that nothing moved in the
-   * lifecycle — this is a note about the swap, not a step through it.
-   *
-   * The read stays BEFORE the write, and happens only when a noted column is in
-   * play, so every other patch is still a single statement. This is the ONLY
-   * store that overrides `patch`; the other three inherit it unchanged.
-   */
+  /** A refund moves money but is no transition, so it is logged here as a `from === to` note, once for every call site. */
   override async patch(id: string, fields: Record<string, unknown>): Promise<void> {
     const notable = fields.refund_outcome !== undefined
     const [before] = notable ? await this.driver.all<Raw>(this.sql.selectById, [id]) : [null]

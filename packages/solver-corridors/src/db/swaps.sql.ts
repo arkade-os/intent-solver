@@ -1,10 +1,6 @@
-// The unique index on payment_hash is PARTIAL on purpose: one LIVE swap per
-// hash, but a 'refused' swap never moved money and never learned a preimage, so
-// its still-valid invoice may be quoted again. Every other state blocks the
-// hash — including terminal 'claimed'/'stuck', whose preimage the provider may
-// KNOW: re-quoting one would invite a lockup the provider could take without
-// paying again. (No SQL comments in this string: the D1 driver's exec flattens
-// newlines, which would turn a `--` comment into a statement-eater.)
+// The payment_hash unique index skips only 'refused' (no money moved, no preimage learned): a terminal
+// 'claimed'/'stuck' hash may have a known preimage, so re-quoting it would invite a free lockup.
+// No `--` comments in this string: D1's exec flattens newlines, so one would swallow the rest.
 const SEND_SWAP_COLUMNS = `
   id                            TEXT PRIMARY KEY,
   state                         TEXT NOT NULL,
@@ -54,7 +50,6 @@ const SEND_SWAP_COLUMNS = `
   lockup_outpoints              TEXT
 `
 
-/** Every statement {@link SwapStore} runs beyond {@link baseSwapSql}, for `send_swap` and `send_swap_event`. */
 export const swapsSql = {
   schema: `
 CREATE TABLE IF NOT EXISTS send_swap (${SEND_SWAP_COLUMNS});

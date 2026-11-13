@@ -1,31 +1,4 @@
-/**
- * Durable state for the `lightning:BTC->arkade:BTC` receive leg.
- *
- * Same rule as `src/db/swaps.ts` and `src/db/onchainSwaps.ts`: every column
- * exists because a specific crash needs it. `refund_locktime` is that column
- * here too, for the mirror-image reason of the send legs': this service funds
- * its OWN Arkade lockup, so losing the row after funding loses not a claim but
- * the provider's own recourse to get that capital back.
- *
- * Lifecycle, forward-only:
- *
- * - `quoted`    hold invoice minted on H; nothing armed
- * - `armed`     an incoming HTLC is held against the invoice; `E` known
- * - `funded`    the provider's own Arkade lockup is broadcast — the exposed
- *               state; covclaimd has been (or is being) handed the sealed
- *               claim packet and this watches for its autonomous claim
- * - `claimed`   covclaimd's claim landed on Arkade; `P` extracted and verified
- * - `settled`   the held HTLC was settled with `P` — done, provider paid
- * - `refunding` `refund_locktime` passed with no claim observed; pushing the
- *               provider's own covenant refund back to itself (a late-but-valid
- *               claim can still land here — the edge back to `claimed` recovers it,
- *               mirroring `refunding_onchain` in `src/db/onchainSwaps.ts`)
- * - `refunded`  the provider's own refund landed — co-signed from `refunding`,
- *               or solo from `funded`; either way no capital is stuck
- * - `refused`   never armed, or armed but never funded — no exposure
- * - `stuck`     funded but could not settle before recourse ran out, or the
- *               funded lockup was spent by something ambiguous; needs a human
- */
+/** This service funds its OWN Arkade lockup: losing `refund_locktime` loses the provider's recourse to that capital. */
 
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
 import {
@@ -44,11 +17,9 @@ import { receiveSwapsSql } from './receiveSwaps.sql.js'
 export type ReceiveSwapState = LnReceiveSwapState
 
 export const NON_TERMINAL: readonly ReceiveSwapState[] = LnReceiveMachine.live
-/** States in which the provider's OWN Arkade lockup may be funded and not yet made whole. */
 export const EXPOSED: readonly ReceiveSwapState[] = LnReceiveMachine.exposed
 
-// `refund_locktime` is deliberately absent: it is fixed at insert and the
-// covenant's pkScript is derived from it, so no transition may move it.
+// No `refund_locktime`: the pkScript is derived from it.
 const TRANSITION_COLUMNS = new Set([
   'htlc_expires_at',
   'arkade_lockup_txid',
@@ -59,14 +30,7 @@ const TRANSITION_COLUMNS = new Set([
   'failure_reason',
   'fund_started_at',
 ])
-/**
- * `refund_ark_txid` is deliberately in BOTH sets, and the sibling store's own
- * note said why before this leg needed it: the automatic refund records it on
- * the `refunding -> refunded` edge, but the operator override
- * (`ReceiveSwapService.refundNow`) runs against rows with no outgoing edge —
- * `stuck` above all, which is the reason that override exists — and has to
- * record the audit fact without a transition.
- */
+/** `refund_ark_txid` is in both sets: `refundNow` records it on `stuck`, which has no outgoing edge. */
 const PATCH_COLUMNS = new Set([
   'revealed_at',
   'stamped_at',
@@ -82,98 +46,57 @@ export interface ReceiveSwapRow {
   createdAt: number
   updatedAt: number
 
-  /** `H = sha256(P)`, client-chosen, hex — the natural key. */
   paymentHash: string
-  /** What the client pays: the hold invoice's amount. */
   amountSats: number
-  /**
-   * What the provider FUNDS into the Arkade lockup: `amountSats` minus this
-   * corridor's fee, computed and persisted AT QUOTE TIME. A client who has
-   * already paid the hold invoice cannot have their payout recomputed against
-   * a fee that changed since — the quoted number has to be a fact on the row,
-   * the same role the send leg's persisted invoice string plays. Rows quoted
-   * before fees existed carry NULL and read back as `amountSats`, which is
-   * exactly what they were quoted at.
-   */
+  /** Fixed at quote time: a client who already paid cannot have the payout recomputed against a changed fee. */
   payoutSats: number
-  /** The hold BOLT11 this provider minted on `H`. */
   invoice: string
   invoiceWalletFingerprint: string | null
   invoiceBackendName: string | null
   invoiceExpiresAt: number
-  /** `E`: the deadline the held HTLC must be settled by. Null until `armed`. */
   htlcExpiresAt: number | null
 
-  /** The client's Arkade address — where the funds land once covclaimd claims. */
   payoutAddress: string
-  /** `payoutAddress` decoded, hex — the `nonInteractiveClaim` leaf's pinned destination. */
   payoutPkScript: string
-  /** The client's own x-only key — the covenant's `receiver` role on this leg (their interactive-claim fallback). */
+  /** The covenant's `receiver` role on this leg. */
   payoutPubkey: string
-  /** The client's preimage, ECIES-sealed to covclaimd. Opaque here — forwarded verbatim, never decrypted. */
+  /** Sealed to covclaimd; forwarded verbatim, never decrypted. */
   claimPacket: string | null
 
-  /**
-   * Absolute unix seconds, set at `quoted` (`now + MAX_REFUND_HORIZON`) and
-   * IMMUTABLE thereafter — `pkScript` below is derived from it, so a later
-   * value would describe a script other than the one actually funded. No
-   * transition may set it; `evaluateReceiveFunding` checks it against `E` at
-   * the `armed -> funded` edge instead of recomputing it.
-   */
+  /** Immutable: `pkScript` is derived from it. */
   refundLocktime: number
-  /** This provider's own key — the covenant's `client` role on this leg (the funder-refund fallback; see `src/arkade/covenant.ts`'s role-inversion note). */
+  /** The covenant's `client` role on this leg (see the role-inversion note in `src/arkade/covenant.ts`). */
   solverPubkey: string
   serverPubkey: string
   claimDelay: number
   refundDelay: number
   refundWithoutReceiverDelay: number
   emulatorPubkey: string
-  /** The derived covenant lockup's pkScript, hex. */
   pkScript: string
   lockupAddress: string
-  /** Where the provider's OWN refund must pay — the covenant's `refund`/`refundCollaborative`/`refundWithoutServer` leaves' destination. */
   solverRefundPkScript: string
-  /**
-   * Whether this lockup was funded WITH the timelocked non-interactive
-   * refund leaf. Null means "rebuild the eight-leaf shape, exactly as
-   * funded" — not a refusal case. See `CovenantScriptRow`'s doc comment on
-   * the same field.
-   */
+  /** Null means "rebuild the eight-leaf shape", not a refusal. */
   nonInteractiveParameters: boolean | null
 
-  /** When a worker won the exclusive right to fund this lockup. @see ReceiveSwapStore.claimFundLease */
   fundStartedAt: number | null
 
   arkadeLockupTxid: string | null
   arkadeLockupVout: number | null
   arkadeLockupValue: number | null
-  /** Set once `covclaimd.reveal()` has succeeded — a data fact, not a state, so a failed attempt retries without re-funding. */
+  /** A data fact, not a state, so a failed reveal retries without re-funding. */
   revealedAt: number | null
-  /** Set once THIS service funded a stamped lockup — `claim_packet` says what a
-   *  funding WOULD carry, only this says what an adopted one actually did. */
+  /** `claim_packet` says what a funding WOULD carry; only this says what an adopted one did. */
   stampedAt: number | null
-  /**
-   * When `settleHold` was CALLED — pre-committed, BEFORE the call, so a
-   * resumed process can tell "not yet attempted" apart from "already
-   * succeeded". Mirrors {@link revealedAt}, and exists for the same reason:
-   * the side effect is not reversible and the row is the only memory of it.
-   *
-   * @see ReceiveSwapService.whenClaimed
-   */
+  /** Written BEFORE `settleHold` is called, so a resumed process can tell "not attempted" from "succeeded". */
   settleAttemptedAt: number | null
 
-  /** `P`, hex — set only once extracted from the claim witness AND verified against `paymentHash`. */
+  /** Set only once verified against `paymentHash`. */
   preimage: string | null
-  /** Arkade txid of a covenant refund THIS SERVICE pushed for its own lockup. */
   refundArkTxid: string | null
   /** JSON `UnrolledSpendRecord`: the L1 refund of a lockup the client unrolled. */
   unrolledRefund: string | null
 
   failureReason: string | null
-  /**
-   * Client-chosen RFQ correlation id (64 hex chars). NOT unique across rows —
-   * same reasoning as `SendSwapRow.rfqId`.
-   */
   rfqId: string | null
 }
 
@@ -186,8 +109,7 @@ const toRow = (raw: Raw): ReceiveSwapRow => ({
   updatedAt: Number(raw.updated_at),
   paymentHash: String(raw.payment_hash),
   amountSats: Number(raw.amount_sats),
-  // Rows quoted before fees existed have no payout_sats; they charged nothing,
-  // so the payout WAS the amount. The fallback is that fact, not a default.
+  // Pre-fee rows charged nothing, so the payout WAS the amount.
   payoutSats: numberOrNull(raw.payout_sats) ?? Number(raw.amount_sats),
   invoice: String(raw.invoice),
   invoiceWalletFingerprint: text(raw.invoice_wallet_fingerprint),
@@ -197,10 +119,7 @@ const toRow = (raw: Raw): ReceiveSwapRow => ({
   payoutAddress: String(raw.payout_address),
   payoutPkScript: String(raw.payout_pk_script),
   payoutPubkey: String(raw.payout_pubkey),
-  // Absence is stored as '' rather than NULL: the column is NOT NULL in every
-  // deployed database, and SQLite cannot relax that without rebuilding a table
-  // of funded swaps. '' is unambiguous because the wire schema refuses an empty
-  // claim_packet. NULL reads as absent too, in case a column never was NOT NULL.
+  // Absence is '' because the column is NOT NULL in deployed databases; the wire schema refuses an empty packet.
   claimPacket: raw.claim_packet === '' ? null : text(raw.claim_packet),
   refundLocktime: Number(raw.refund_locktime),
   solverPubkey: String(raw.solver_pubkey),
@@ -234,7 +153,6 @@ export interface ReceiveQuoteRecord {
   id: string
   paymentHash: string
   amountSats: number
-  /** See {@link ReceiveSwapRow.payoutSats} — required, never derived here. */
   payoutSats: number
   invoice: string
   invoiceWalletFingerprint?: string | null
@@ -254,28 +172,12 @@ export interface ReceiveQuoteRecord {
   pkScript: string
   lockupAddress: string
   solverRefundPkScript: string
-  /**
-   * @see ReceiveSwapRow.nonInteractiveParameters
-   *
-   * REQUIRED, unlike the row's own field: this table has no legacy family,
-   * so nothing justifies letting a caller forget it. See
-   * OnchainSendSwapRow's identical note for what forgetting it costs.
-   */
+  /** Required: an omitted value persists NULL, rebuilt as eight leaves against a nine-leaf lockup. */
   nonInteractiveParameters: boolean
   rfqId?: string
 }
 
-/**
- * Columns an operator search matches against, for this corridor.
- *
- * Identifiers only — every one is something a user can hand you: the swap
- * id, the payment hash, the invoice, an address, a txid, the rfq id. Amounts
- * and timestamps are deliberately absent; they are filters, not identifiers,
- * and a substring match on a number matches far too much to be a search.
- *
- * Interpolated into SQL, so it lives here beside the schema rather than
- * anywhere a request can reach.
- */
+/** Identifiers only: a substring match on a number matches too much. Interpolated into SQL, so never request-derived. */
 export const RECEIVE_SEARCH_COLUMNS: readonly string[] = [
   'id',
   'payment_hash',
@@ -319,16 +221,7 @@ export class ReceiveSwapStore extends BaseSwapStore<ReceiveSwapRow, ReceiveSwapS
     return store
   }
 
-  /**
-   * Additive migration for databases created before a column existed — same
-   * rule and same technique `SwapStore.migrate()` (src/db/swaps.ts) uses:
-   * `CREATE TABLE IF NOT EXISTS` never alters an existing table. Added
-   * nullable at the SQL level even though the schema says NOT NULL, for the
-   * reason `OnchainSendSwapStore.migrate()` documents: a bare
-   * `ALTER TABLE ADD COLUMN ... NOT NULL` fails against a non-empty table,
-   * and a pre-fees row's honest payout is read back from `amount_sats` by
-   * `toRow`, not fabricated here.
-   */
+  /** Nullable despite the schema: `ADD COLUMN ... NOT NULL` fails on a non-empty table. */
   private async migrate(): Promise<void> {
     await addColumns(this.driver, 'receive_swap', [
       ['payout_sats', 'INTEGER'],
@@ -350,13 +243,6 @@ export class ReceiveSwapStore extends BaseSwapStore<ReceiveSwapRow, ReceiveSwapS
     await super.releaseFundLease(id)
   }
 
-  /**
-   * Record a quote before anything is armed.
-   *
-   * Rejects if a non-terminal swap already exists for this payment hash —
-   * same reasoning as `SwapStore.insertQuote`: two live swaps sharing a hash
-   * mean a race whichever side loses cannot recover from.
-   */
   async insertQuote(quote: ReceiveQuoteRecord): Promise<ReceiveSwapRow> {
     const at = this.now()
     await this.driver.run(receiveSwapsSql.insertQuote, [
@@ -391,7 +277,7 @@ export class ReceiveSwapStore extends BaseSwapStore<ReceiveSwapRow, ReceiveSwapS
     return this.get(quote.id)
   }
 
-  /** #161's measurement, as a NOTE (`from === to`): nothing moved. Two integers, no secrets. */
+  /** A `from === to` note: nothing moved. */
   async noteCltvHeadroom(id: string, headroomSeconds: number, spareSeconds: number): Promise<void> {
     await this.recordEvent(id, 'armed', 'armed', `cltv headroom ${headroomSeconds}s — ${spareSeconds}s spare`)
   }

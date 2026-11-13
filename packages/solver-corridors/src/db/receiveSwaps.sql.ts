@@ -1,6 +1,4 @@
-// The unique index on payment_hash is PARTIAL for the identical reason
-// `send_swap`'s is: one LIVE swap per hash, but a `refused` swap never funded
-// anything and never learned a preimage, so its hash may be re-quoted.
+// The payment_hash unique index is partial for `send_swap`'s reason.
 const RECEIVE_SWAP_COLUMNS = `
   id                            TEXT PRIMARY KEY,
   state                         TEXT NOT NULL,
@@ -43,7 +41,6 @@ const RECEIVE_SWAP_COLUMNS = `
   unrolled_refund               TEXT
 `
 
-/** Every statement {@link ReceiveSwapStore} runs beyond {@link baseSwapSql}, for `receive_swap` and `receive_swap_event`. */
 export const receiveSwapsSql = {
   schema: `
 CREATE TABLE IF NOT EXISTS receive_swap (${RECEIVE_SWAP_COLUMNS});

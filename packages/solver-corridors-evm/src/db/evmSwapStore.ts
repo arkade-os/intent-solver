@@ -8,9 +8,7 @@ import { evmSwapSql, type EvmSwapSql } from './evmSwapStore.sql.js'
 
 export type Raw = Record<string, string | number | null>
 
-// `| undefined` because `noUncheckedIndexedAccess` makes every raw column
-// lookup possibly-absent, and a column this store does not know about is
-// absent rather than null.
+// A column this store does not know about reads as undefined, not null.
 export const text = (value: string | number | null | undefined): string | null =>
   value === null || value === undefined ? null : String(value)
 
@@ -26,8 +24,7 @@ export const commonFields = (raw: Raw) => ({
   updatedAt: Number(raw.updated_at),
   paymentHash: String(raw.payment_hash),
   amountSats: Number(raw.amount_sats),
-  // Rows quoted before a fee existed carry NULL and read back as the full
-  // amount, which is exactly what they were quoted at.
+  // NULL predates fees: the row was quoted at the full amount.
   payoutSats: raw.payout_sats === null ? Number(raw.amount_sats) : Number(raw.payout_sats),
   evmAmount: String(raw.evm_amount),
   tokenAddress: String(raw.token_address),
@@ -86,7 +83,6 @@ export interface EvmSwapShape<Row, State extends string> {
   transitionColumns: ReadonlySet<string>
 }
 
-/** Every public member {@link EvmSwapStore} gives both EVM swap tables. */
 export interface EvmSwapRepository<Row, State extends string> {
   close(): Promise<void>
   get(id: string): Promise<Row>
@@ -246,7 +242,6 @@ export abstract class EvmSwapStore<Row, State extends string> implements EvmSwap
     return { rows: page.map(this.shape.toRow), nextCursor }
   }
 
-  /** Guarded on `from`: of two racing ticks, the loser's UPDATE matches no row and it throws. */
   async transition(id: string, from: State, to: State, fields: Record<string, unknown> = {}): Promise<void> {
     const { noun } = this.shape
     const columns = Object.keys(fields)

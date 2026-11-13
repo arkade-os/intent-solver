@@ -1,7 +1,4 @@
-// SCHEMA HISTORY. `valid_until` was added after this table first shipped on
-// the feat/evm-corridors branch; see the twin comment on send_evm_swap for the
-// why and the failure modes. For a database predating that column:
-//
+// Run once by hand on a database predating `valid_until`; see the note on send_evm_swap:
 //   ALTER TABLE receive_evm_swap ADD COLUMN valid_until INTEGER NOT NULL DEFAULT 0;
 const COLUMNS = `
   id                            TEXT PRIMARY KEY,

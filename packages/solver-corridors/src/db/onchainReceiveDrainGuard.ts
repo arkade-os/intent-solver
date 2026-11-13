@@ -13,7 +13,6 @@ const LIVE_STATES = [
 ] as const
 
 const liveRowsIn = async (driver: SqlDriver): Promise<number> => {
-  // PRAGMA answers empty for a missing table rather than throwing.
   if ((await driver.all(onchainReceiveDrainGuardSql.tableInfo)).length === 0) return 0
   const row = await driver.get<{ n: number }>(onchainReceiveDrainGuardSql.countInStates(LIVE_STATES.length), [
     ...LIVE_STATES,
@@ -26,8 +25,7 @@ export interface UndrainedOnchainReceive {
   readonly files: readonly string[]
 }
 
-// Both files that could hold the table: the open swap file (consolidated) and
-// the suffixed `-onchain-receive` file a split deployment no longer opens.
+// A split deployment no longer opens the `-onchain-receive` file, so it is checked here directly.
 export const findUndrainedOnchainReceive = async (
   swapDbPath: string,
   swapFile: SqlDriver,

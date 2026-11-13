@@ -1,7 +1,6 @@
 import { placeholders, tableInfo } from './baseSwapStore.sql.js'
 
-// #292 removed the onchain-receive corridor with no boot guard, so an upgrade
-// past it silently strands any row still mid-swap in the dead table below.
+// The onchain-receive corridor is gone; booting past live rows in its table would strand them.
 const TABLE = 'receive_onchain_swap'
 
 export const onchainReceiveDrainGuardSql = {

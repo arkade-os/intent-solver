@@ -2,7 +2,6 @@ import type { FindByStatesOptions } from '@arkade-os/solver-core/core/page.js'
 
 export const placeholders = (count: number): string => Array.from({ length: count }, () => '?').join(',')
 
-/** Every statement {@link BaseSwapStore} runs, for one swap table and its event table. */
 export const baseSwapSql = (table: string, eventTable: string) =>
   ({
     selectById: `SELECT * FROM ${table} WHERE id = ?`,

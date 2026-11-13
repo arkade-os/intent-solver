@@ -1,42 +1,6 @@
-/**
- * Durable state for an `arkade:<X>->arkade:<Y>` NEGOTIATION — the atomic class
- * reached over RFQ (`docs/rfq-protocol.md` § 7.2).
- *
- * Distinct from `db/offerFills.ts`, which is the same settlement reached the
- * other way, and the difference is exactly one of ORDER. That store's natural
- * key is the funded outpoint, because on the packet path an offer is only ever
- * discovered after it exists on chain. Here the negotiation comes FIRST: a row
- * is written when terms are quoted, before anything is funded and possibly
- * before anything ever is. A store keyed on an outpoint cannot hold that row.
- *
- * WHAT THE ROW IS FOR, and it is not bookkeeping. The quote commits this solver
- * to a price for `valid_until`, and the client accepts by funding an offer
- * covenant that BOTH SIDES DERIVE from those terms. So the row is the only
- * record of which address this solver promised to watch and at what price — and
- * `offer_pk_script` is what a deposit is later recognised by. Lose the row and
- * a client's funded offer is one this solver has no reason to fill.
- *
- * Lifecycle, forward-only:
- *
- * - `quoted`   terms issued; awaiting the client's deposit until `valid_until`
- * - `funded`   a deposit matching the quoted terms is at the offer's script;
- *              NOTHING submitted, and no solver capital is committed yet
- * - `filling`  an attempt holds the row — the one EXPOSED state — and
- *              `fill_phase` says how far it got (@see FillPhase). Only
- *              `selecting` may be walked back, by the one refusal above the
- *              submission; @see AssetRfqSwapStore.revertUnsubmitted
- * - `filled`   the fill landed; the client is paid and the deposit is ours
- * - `refused`  declined, or the quote lapsed unfunded; no exposure ever existed
- * - `stuck`    `fulfill` failed or its outcome is unknown; needs a human
- *
- * THERE IS NO `refunded` STATE, and its absence is the point. § 7.2's refund is
- * `cancel`, "a 2-of-2 of the funder and the Arkade Service" — no solver
- * signature is involved, so reclaiming an unfilled deposit is something the
- * CLIENT does and this solver cannot do on its behalf. A lapsed quote therefore
- * ends `refused` here while the deposit, if any, remains the client's to
- * withdraw. Recording it as `refunded` would claim an action this solver never
- * took and cannot take.
- */
+// `arkade:<X>->arkade:<Y>` negotiated over RFQ (`docs/rfq-protocol.md` § 7.2). Unlike `offerFills.ts`,
+// the row precedes any funding, so it cannot be keyed on an outpoint. No `refunded` state: § 7.2's
+// `cancel` needs no solver signature, so a lapsed quote ends `refused` and the deposit stays the client's.
 
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
 import { assetRfqSwapsSql } from './assetRfqSwaps.sql.js'
@@ -59,43 +23,21 @@ export type AssetRfqSwapState = 'quoted' | 'funded' | 'filling' | 'filled' | 're
 
 export const NON_TERMINAL: readonly AssetRfqSwapState[] = ['quoted', 'funded', 'filling']
 
-/**
- * The one state where this solver's own capital is committed and not yet
- * recovered.
- *
- * Only `filling`. Before it nothing has been submitted; after it the fill has
- * landed, and `fulfill` pays the client and takes the deposit in the SAME
- * transaction — so there is no interval where the payout is gone and the
- * deposit is not yet ours. `quoted` and `funded` hold no exposure at all: the
- * money at the offer address is the CLIENT's until a fill spends it.
- */
+/** Only `filling`: `fulfill` pays the client and takes the deposit in one transaction. */
 export const EXPOSED: readonly AssetRfqSwapState[] = ['filling']
 
 const LEGAL_EDGES: Record<AssetRfqSwapState, readonly AssetRfqSwapState[]> = {
-  // `refused` from `quoted` is the lapsed-quote path (§ 5's late funding), and
-  // from `funded` too: a deposit can be observed and the quote can still be
-  // found expired at action time, which must refuse rather than fill.
+  // `funded -> refused`: a deposit can be seen after the quote has expired.
   quoted: ['funded', 'refused'],
   funded: ['filling', 'refused'],
-  // No edge back to `funded`. Once `fulfill` is submitted its outcome is either
-  // known or unknown, and "unknown" is `stuck` — never a retry, which is how a
-  // solver double-spends its own float. An edge cannot see the one phase that
-  // provably did not submit: `revertUnsubmitted` is that case, and stays OFF the
-  // graph for the reason stated there.
+  // No edge back to `funded`: an unknown outcome is `stuck`, never a retry (`revertUnsubmitted` is off-graph).
   filling: ['filled', 'stuck'],
   filled: [],
   refused: [],
   stuck: [],
 }
 
-/**
- * Columns a transition may set.
- *
- * The negotiated terms are fixed at insert and can never move: the offer
- * covenant is DERIVED from `to_amount`, `maker_pk_script` and `maker_public_key`,
- * so a row that could edit any of them could describe a contract that was never
- * funded — and `offer_pk_script` is what a deposit is recognised by.
- */
+/** Terms are fixed at insert: the offer covenant and `offer_pk_script` are derived from them. */
 const TRANSITION_COLUMNS = new Set(['deposit_txid', 'deposit_vout', 'fill_txid', 'failure_reason', 'fill_phase'])
 
 export interface AssetRfqSwapRow {
@@ -104,52 +46,29 @@ export interface AssetRfqSwapRow {
   fillPhase: FillPhase | null
   createdAt: number
   updatedAt: number
-  /** The client-chosen correlation key for the whole negotiation (§ 4.5). */
   rfqId: string
   pair: string
   /** What the client deposits. `null` is BTC, matching the offer packet. */
   fromAssetId: string | null
   fromAmount: bigint
-  /** What the covenant obliges any spend to deliver. */
   toAssetId: string | null
   toAmount: bigint
-  /** The client's own two covenant parameters, from its request. */
   makerPkScript: string
   makerPublicKey: string
-  /** This solver's derivation of the offer covenant — what a deposit is recognised by. */
   offerPkScript: string
   offerAddress: string
   solverPubkey: string
   validUntil: number
-  /** The funding outpoint, once one is observed at `offer_pk_script`. */
   depositTxid: string | null
   depositVout: number | null
   fillTxid: string | null
   failureReason: string | null
-  /**
-   * THIS QUOTE'S OWN PRICE at the moment it was issued — quote-asset per
-   * base-asset, `mantissa / 10 ** scale`, never a float. TEXT because it is a
-   * bigint, for the reason the amount columns beside it are TEXT.
-   *
-   * Deliberately NOT the feed price it was derived from. Storing that and
-   * comparing the two is a tautology: `resolveAssetQuote` computes the payout
-   * from the feed, so the difference is always the configured spread.
-   */
+  /** This quote's own price (`mantissa / 10 ** scale`), not the feed's: comparing those always yields the spread. */
   quoteImpliedMantissa: bigint | null
   quoteImpliedScale: number | null
-  /**
-   * Whether the CLIENT gave the base asset. The one bit that makes the mark
-   * directional: paying less quote per base is good when the solver buys base
-   * and bad when it sells, so without it one subtraction means opposite things
-   * on the two legs of one market.
-   */
+  /** Signs the mark: less quote per base is good when the solver buys base, bad when it sells. */
   quoteGivesBase: boolean | null
-  /**
-   * WHAT THE MARKET SAID WHEN THE FILL LANDED — the other half of the mark.
-   *
-   * Null on every row quoted before this shipped, on a fill whose feed read
-   * failed, and on every row that never filled. Unmeasured, never zero.
-   */
+  /** Market price when the fill landed; null means unmeasured, never zero. */
   fillPriceMantissa: bigint | null
   fillPriceScale: number | null
 }
@@ -168,24 +87,12 @@ export interface AssetRfqQuoteRecord {
   offerAddress: string
   solverPubkey: string
   validUntil: number
-  /**
-   * The quote's own price and direction, recorded with the terms that fixed it.
-   *
-   * Omitted together or not at all: a price with no direction beside it cannot
-   * be signed, and an unsigned mark means opposite things on the two legs of one
-   * market.
-   * @see AssetRfqSwapRow.quoteImpliedMantissa
-   */
+  /** All or nothing: a price without its direction cannot be signed. */
   quotePrice?: { impliedMantissa: bigint; scale: number; givesBase: boolean }
 }
 
 type Raw = Record<string, string | number | null>
 
-// Amounts are TEXT, not INTEGER, for the reason `offerFills.ts` gives: an asset
-// amount is a bigint in atomic units (§ 2.1) and SQLite's INTEGER is a signed
-// 64-bit, so a value the protocol admits is one the column would silently
-// mangle. Stored as the canonical decimal string, which is also what the wire
-// carries.
 const toRow = (raw: Raw): AssetRfqSwapRow => ({
   id: String(raw.id),
   state: String(raw.state) as AssetRfqSwapState,
@@ -208,9 +115,6 @@ const toRow = (raw: Raw): AssetRfqSwapRow => ({
   depositVout: raw.deposit_vout === null ? null : Number(raw.deposit_vout),
   fillTxid: raw.fill_txid === null ? null : String(raw.fill_txid),
   failureReason: raw.failure_reason === null ? null : String(raw.failure_reason),
-  // `?? null` on every one: a row read from a database that has not been
-  // migrated yet answers `undefined`, not null, and the analytics layer reads
-  // null as "unmeasured" and undefined as a missing field.
   quoteImpliedMantissa: bigIntOrNull(raw.quote_implied_mantissa),
   quoteImpliedScale: numberOrNull(raw.quote_implied_scale),
   quoteGivesBase:
@@ -260,25 +164,12 @@ export class AssetRfqSwapStore
     return store
   }
 
-  /** A READ-ONLY caller's licence to open, since {@link open} CREATES the table
-   * and a report must add no DDL to a deployment that never served this
-   * corridor. `PRAGMA table_info` answers empty for a missing table rather than
-   * throwing, which `migrate` already relies on. */
+  /** For read-only callers: {@link open} creates the table, and a report must add no DDL. */
   static async tableExists(driver: SqlDriver): Promise<boolean> {
     return (await driver.all<{ name: string }>(assetRfqSwapsSql.tableInfo)).length > 0
   }
 
-  /**
-   * Additive migration, for the reason the other stores state: `CREATE TABLE IF
-   * NOT EXISTS` never alters an existing table, so a column added above must be
-   * added here too.
-   *
-   * This store's FIRST, and its failure mode is why it is tested rather than
-   * assumed: `insertQuote` names its columns explicitly, so a missing ALTER
-   * throws inside the orchestrator's try — whose catch maps everything to
-   * `duplicate_swap`. Every quote on every market would be refused, and the
-   * operator told it was a duplicate-id problem.
-   */
+  /** A missing column makes `insertQuote` throw, which the orchestrator reports as `duplicate_swap`. */
   private async migrate(): Promise<void> {
     await addColumns(this.driver, 'asset_rfq_swap', [
       ['quote_implied_mantissa', 'TEXT'],
@@ -290,34 +181,13 @@ export class AssetRfqSwapStore
     ])
   }
 
-  /**
-   * The market price observed just AFTER a fill landed.
-   *
-   * A named writer rather than a general `patch`: these two columns are pure
-   * observation with no bearing on the state machine, and a general column
-   * setter on a money table is a larger surface than this needs. Never touches
-   * `state`, so it cannot race a transition — the worst case is landing on a row
-   * another worker has already moved on, and the value is still true.
-   */
+  /** Observation only: never touches `state`, so it cannot race a transition. */
   async recordFillMark(id: string, mark: { mantissa: bigint; scale: number }): Promise<void> {
-    // `updated_at` is deliberately NOT touched. On this corridor it is
-    // settlement time — `assetRfqEconomics` reads it as `settledAt`, so it sets
-    // `durationSeconds`, the x-axis of the very chart this mark is plotted on.
-    // Bumping it would stretch every marked fill's duration by the feed's
-    // latency, and ONLY the marked ones, biasing exactly the rows being
-    // compared. It also windows `ledgerRows` (a fill could fall out of the
-    // window it settled in) and is published to the client in `rfq_status`.
+    // Leaves `updated_at` alone: it is settlement time for economics, ledger windows and `rfq_status`.
     await this.driver.run(assetRfqSwapsSql.recordFillMark, [mark.mantissa.toString(), mark.scale, id])
   }
 
-  /**
-   * Record the terms BEFORE they are sent to the client.
-   *
-   * Order matters for the same reason it does everywhere else in this repo:
-   * intent before the irreversible side effect. A quote is a signed commitment,
-   * and one this solver has no row for is one it will not recognise a deposit
-   * against — the client would fund an address nothing is watching.
-   */
+  /** Written before the quote is sent: a deposit with no row would go unwatched. */
   async insertQuote(record: AssetRfqQuoteRecord): Promise<AssetRfqSwapRow> {
     const at = this.now()
     await this.driver.run(assetRfqSwapsSql.insertQuote, [
@@ -336,8 +206,6 @@ export class AssetRfqSwapStore
       record.offerAddress,
       record.solverPubkey,
       record.validUntil,
-      // All three or none — the spread at the call site is all-or-nothing, so
-      // a half-recorded mark cannot reach the column.
       record.quotePrice?.impliedMantissa.toString() ?? null,
       record.quotePrice?.scale ?? null,
       record.quotePrice === undefined ? null : record.quotePrice.givesBase ? 1 : 0,
@@ -353,7 +221,6 @@ export class AssetRfqSwapStore
     return raw ? toRow(raw) : undefined
   }
 
-  /** Throws on an unknown id, matching the shape `parkVia` and `detail` expect. */
   override async get(id: string): Promise<AssetRfqSwapRow> {
     const row = await this.findById(id)
     if (!row) throw new Error(`no asset rfq swap ${id}`)
@@ -364,19 +231,7 @@ export class AssetRfqSwapStore
     return this.findRecoverable()
   }
 
-  /**
-   * Solver capital committed and not yet recovered, in sats.
-   *
-   * Zero unless a row is `filling` AND the payout leg is BTC. A payout in an
-   * ASSET commits no sats, and reporting its atomic units here would add an
-   * asset amount to a sats total — two different units summed into one number,
-   * which is worse than reporting nothing. Asset exposure is visible on the row
-   * itself; this figure is the one the float dashboard reads, and it is a sats
-   * figure by contract.
-   *
-   * One table backs every market, so a corridor asks for its own `pair` and a
-   * caller summing whole STORES omits it. Both callers exist.
-   */
+  /** BTC payouts in `filling` only: asset units must never be summed into sats. */
   override async committedSats(pair?: string): Promise<number> {
     const raws = await this.driver.all<Raw>(
       assetRfqSwapsSql.selectFillingBtcPayouts(pair !== undefined),
@@ -385,16 +240,7 @@ export class AssetRfqSwapStore
     return raws.reduce((total, raw) => total + Number(String(raw.to_amount)), 0)
   }
 
-  /**
-   * Rows whose last movement falls in a window. @see BaseSwapStore.ledgerRows
-   *
-   * `pair` NARROWS IN SQL, AND MUST. One table backs every asset market, so a
-   * caller that took the whole window and filtered afterwards would be applying
-   * `LIMIT` across every market and then discarding — a busy market's rows push
-   * a quiet one's out of the result entirely, and the quiet corridor reports no
-   * profit for a window in which it settled fills. Silent, and the screen looks
-   * healthy. The same reason `committedSats` above takes a pair.
-   */
+  /** `pair` filters in SQL, before `LIMIT`, or a busy market crowds a quiet one out of the window. */
   override async ledgerRows(
     window: LedgerWindow,
     pair?: string,
@@ -415,13 +261,7 @@ export class AssetRfqSwapStore
     return { rows: page.map(toRow), nextCursor }
   }
 
-  /**
-   * The ONE edge back out of `filling`, and sound only for its one caller: a fill
-   * refused with `OfferNotSubmittedError`, raised above the call that submits.
-   * Compare-and-swap on the state AND the phase, for the reason `OfferFillStore` gives. Deliberately
-   * absent from `LEGAL_EDGES`, so the generic `filling -> funded` keeps throwing —
-   * an edge cannot say "only when nothing was sent", so this is reached by name.
-   */
+  /** @see OfferFillStore.revertUnsubmitted */
   async revertUnsubmitted(id: string): Promise<boolean> {
     const result = await this.driver.run(assetRfqSwapsSql.revertUnsubmitted, [this.now(), id])
     if (result.changes === 1) {
@@ -431,7 +271,7 @@ export class AssetRfqSwapStore
     return result.changes === 1
   }
 
-  /** THE LATCH. @see OfferFillStore.markSubmitting */
+  /** @see OfferFillStore.markSubmitting */
   async markSubmitting(id: string): Promise<boolean> {
     const result = await this.driver.run(assetRfqSwapsSql.markSubmitting, [this.now(), id])
     return result.changes === 1

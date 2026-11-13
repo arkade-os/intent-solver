@@ -1,25 +1,5 @@
-/**
- * Durable state for the `arkade:BTC->onchain:BTC` send leg.
- *
- * Same rule as `src/db/swaps.ts`: every column exists because a specific
- * crash needs it, `refund_locktime` above all — without it on disk a funded
- * Arkade lockup cannot be reconstructed after a restart, and an
- * unreconstructible script is unrefundable, not merely unclaimable.
- *
- * Lifecycle, forward-only:
- *
- * - `quoted`          params on disk, nothing has moved
- * - `funded`          Arkade lockup seen; nothing funded onchain, so abandoning is safe
- * - `funding_onchain` the solver may be broadcasting/withdrawing to the onchain HTLC — the exposed state
- * - `awaiting_claim`  onchain HTLC funded; waiting for the client to reveal the preimage by claiming it
- * - `claiming`        preimage on disk; claiming the Arkade lockup needs nothing external any more
- * - `claimed`         done
- * - `refunding_onchain` client never claimed past `htlc_locktime`; the solver is broadcasting its own refund spend
- *                        (a late-but-valid claim can still land here — the edge back to `claiming` recovers it)
- * - `refunded`        the solver's onchain refund landed — the swap failed, but no capital is stuck
- * - `refused`         never funded onchain, no exposure
- * - `stuck`           funded onchain but could not claim the Arkade lockup before the refund deadline; needs a human
- */
+// `arkade:BTC->onchain:BTC` send leg. Without `refund_locktime` on disk a funded
+// lockup cannot be rebuilt, so it is unrefundable.
 
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
 import { onchainSwapsSql } from './onchainSwaps.sql.js'
@@ -54,15 +34,7 @@ const TRANSITION_COLUMNS = new Set([
   'fund_started_at',
   'lockup_outpoints',
 ])
-/**
- * `onchain_refund_txid` is deliberately in BOTH sets. The automatic refund
- * records it on the `refunding_onchain -> refunded` edge, but the operator
- * override (`OnchainSendSwapService.reclaimOnchainHtlc`) runs against rows in
- * any state, and its main target — `stuck` — has no outgoing edge to move
- * along. Same shape as `refund_ark_txid` above: a fact about money that moved,
- * recorded without rewriting the state machine's verdict.
- */
-/** The `onchain_refund_fee_rate`/`_broadcast_at`/`_prior_txids` trio is PATCH-only: a fee bump writes them with the row standing still in `refunding_onchain`. */
+// `onchain_refund_txid` is in both sets: the operator override records it in any state, including edge-less ones.
 const PATCH_COLUMNS = new Set([
   'onchain_lockup_value',
   'refund_ark_txid',
@@ -81,16 +53,8 @@ export interface OnchainSendSwapRow {
   createdAt: number
   updatedAt: number
   paymentHash: string
-  /** What the client locks at the Arkade covenant. */
   amountSats: number
-  /**
-   * What the solver FUNDS the onchain HTLC with: `amountSats` minus this
-   * corridor's fee, computed and persisted AT QUOTE TIME. A client who has
-   * already locked cannot have their payout recomputed against a fee that
-   * changed since — the quoted number has to be a fact on the row. Rows
-   * quoted before fees existed carry NULL and read back as `amountSats`,
-   * which is exactly what they were quoted at.
-   */
+  /** `amountSats` minus the fee, fixed at quote time: a locked client's payout is never recomputed. */
   payoutSats: number
   refundLocktime: number
   providerPubkey: string
@@ -102,26 +66,9 @@ export interface OnchainSendSwapRow {
   lockupAddress: string
   refundPkScript: string
   emulatorPubkey: string
-  /**
-   * The client's own refund key, hex x-only pubkey. Required on every row
-   * created after the client-unilateral refund leaf shipped — the onchain
-   * leg has no legacy family to accommodate an absent one.
-   */
   clientRefundPubkey: string
-  /**
-   * The provider's own Arkade receiving pkScript, hex — where
-   * `nonInteractiveClaim` must pay. Same reconstruct-from-the-row rule as
-   * every other script parameter here; required, same as `clientRefundPubkey`
-   * — this table has no legacy family to accommodate an absent one.
-   */
   receiverPkScript: string
-  /**
-   * Whether this lockup was funded WITH the timelocked non-interactive
-   * refund leaf. Unlike `clientRefundPubkey` this genuinely can be null on a
-   * row created after the leaf shipped, on any table: null means "rebuild
-   * the eight-leaf shape, exactly as funded" and is not a refusal case. See
-   * `CovenantScriptRow`'s doc comment on the same field.
-   */
+  /** Null means rebuild the eight-leaf shape exactly as funded, not a refusal. */
   nonInteractiveParameters: boolean | null
   payoutPubkey: string
   htlcPubkey: string
@@ -133,13 +80,7 @@ export interface OnchainSendSwapRow {
   onchainLockupVout: number | null
   onchainLockupValue: number | null
   fundingTxid: string | null
-  /**
-   * The vout `fundingTxid` actually pays the onchain HTLC at. A funding
-   * transaction may carry a change output, and nothing guarantees the
-   * payment output comes first — never assume 0 (confirmed live: a
-   * boltz-lnd regtest send put change at vout 0 and the HTLC payment at
-   * vout 1). Null until `fundingTxid` is.
-   */
+  /** Never assume 0: the funding may put change at any vout. */
   fundingVout: number | null
   preimage: string | null
   claimArkTxid: string | null
@@ -149,7 +90,6 @@ export interface OnchainSendSwapRow {
   lockupOutpoints: string | null
   /** Written BEFORE the broadcast: the refund ATTEMPTED, not one that landed. */
   onchainRefundTxid: string | null
-  /** The sat/vB {@link onchainRefundTxid} was built at, so the next version can be priced above it. */
   onchainRefundFeeRate: number | null
   onchainRefundBroadcastAt: number | null
   /** The refund versions {@link onchainRefundTxid} replaced, newest first: until one confirms, ANY of them can be the one that does. */
@@ -158,12 +98,7 @@ export interface OnchainSendSwapRow {
   refundOutcome: 'pushed' | 'external' | null
   failureReason: string | null
   rfqId: string | null
-  /**
-   * When a worker won the exclusive right to broadcast this swap's onchain
-   * HTLC funding. NULL until one does, and never cleared.
-   *
-   * @see OnchainSendSwapStore.claimFundLease
-   */
+  /** Set by the worker that wins the funding lease; never cleared. */
   fundStartedAt: number | null
   /** The signed funding, recorded before it is broadcast: every later pass resends this one. */
   fundingTx: string | null
@@ -178,8 +113,7 @@ const toRow = (raw: Raw): OnchainSendSwapRow => ({
   updatedAt: Number(raw.updated_at),
   paymentHash: String(raw.payment_hash),
   amountSats: Number(raw.amount_sats),
-  // Rows quoted before fees existed have no payout_sats; they charged nothing,
-  // so the payout WAS the amount. The fallback is that fact, not a default.
+  // NULL on pre-fee rows, which charged nothing.
   payoutSats: numberOrNull(raw.payout_sats) ?? Number(raw.amount_sats),
   refundLocktime: Number(raw.refund_locktime),
   providerPubkey: String(raw.provider_pubkey),
@@ -228,7 +162,6 @@ export interface OnchainQuoteRecord {
   id: string
   paymentHash: string
   amountSats: number
-  /** See {@link OnchainSendSwapRow.payoutSats} — required, never derived here. */
   payoutSats: number
   refundLocktime: number
   providerPubkey: string
@@ -240,24 +173,9 @@ export interface OnchainQuoteRecord {
   lockupAddress: string
   refundPkScript: string
   emulatorPubkey: string
-  /**
-   * The client's own refund key, hex x-only pubkey. Required on every row
-   * created after the client-unilateral refund leaf shipped — the onchain
-   * leg has no legacy family to accommodate an absent one.
-   */
   clientRefundPubkey: string
   receiverPkScript: string
-  /**
-   * @see OnchainSendSwapRow.nonInteractiveParameters
-   *
-   * REQUIRED, unlike the row's own field (which stays nullable so an old row
-   * still reads back its true history): this table has no legacy family, so
-   * there is no honest reason a caller inserting a row should be allowed to
-   * forget it. Optional here would let a future call site omit it, persist
-   * null, and have the rebuild throw on both claim and refund the moment
-   * anyone tries to spend it — the same failure this rework exists to
-   * prevent, just on a fresh row instead of an old one.
-   */
+  /** Required, unlike the row's: a fresh row persisting null would make claim and refund throw. */
   nonInteractiveParameters: boolean
   payoutPubkey: string
   htlcPubkey: string
@@ -268,17 +186,7 @@ export interface OnchainQuoteRecord {
   rfqId?: string
 }
 
-/**
- * Columns an operator search matches against, for this corridor.
- *
- * Identifiers only — every one is something a user can hand you: the swap
- * id, the payment hash, the invoice, an address, a txid, the rfq id. Amounts
- * and timestamps are deliberately absent; they are filters, not identifiers,
- * and a substring match on a number matches far too much to be a search.
- *
- * Interpolated into SQL, so it lives here beside the schema rather than
- * anywhere a request can reach.
- */
+/** Identifiers only; numbers substring-match too much. Interpolated into SQL, so never request-derived. */
 export const ONCHAIN_SEND_SEARCH_COLUMNS: readonly string[] = [
   'id',
   'payment_hash',
@@ -333,22 +241,8 @@ export class OnchainSendSwapStore
   }
 
   /**
-   * Additive migration for databases created before a column existed — same
-   * rule and same technique `SwapStore.migrate()` (src/db/swaps.ts) uses:
-   * `CREATE TABLE IF NOT EXISTS` never alters an existing table.
-   *
-   * `client_refund_pubkey`/`receiver_pk_script` are `NOT NULL` in the current
-   * schema, but a bare `ALTER TABLE ADD COLUMN ... NOT NULL` fails outright
-   * against a non-empty table with no default to backfill — and there is no
-   * honest default: a row quoted before these columns existed was quoted
-   * under a script shape that no longer matches what this code reconstructs
-   * from a row, on a corridor with no legacy family to fall back to. Adding
-   * them nullable at the SQL level (like `swaps.ts` already does for these
-   * same two columns) is the safe choice: existing rows read back with
-   * `null` here rather than a fabricated value or a crash on startup. Such a
-   * row is only ever `quoted` — the client-refund-pubkey requirement was
-   * added before `funding_vout`/`onchain_refund_txid`, so nothing predating
-   * this migration could have reached a state where real capital moved.
+   * The NOT NULL columns are added nullable: `ADD COLUMN ... NOT NULL` fails on a non-empty table,
+   * and pre-column rows (only ever `quoted`) have no honest default.
    */
   private async migrate(): Promise<void> {
     await addColumns(this.driver, 'send_onchain_swap', [
@@ -368,10 +262,7 @@ export class OnchainSendSwapStore
     ])
   }
 
-  /**
-   * Not `committedSats`, which sums `amount_sats` — the client's lockup, never
-   * the solver's to spend — over every live state. COALESCE mirrors `toRow`.
-   */
+  /** Not `committedSats`, which sums the client's lockups. COALESCE mirrors `toRow`. */
   async owedPayoutSats(): Promise<number> {
     const owes = OnchainSendMachine.where('owesPayout')
     const row = await this.driver.get<{ total: number }>(onchainSwapsSql.sumOwedPayoutInStates(owes.length), [...owes])
@@ -404,7 +295,7 @@ export class OnchainSendSwapStore
     await super.releaseFundLease(id)
   }
 
-  /** The only writer of `fund_started_at` on a transition: entry and lease in one write, so no recovery pass leases the row in between. */
+  /** Entry and lease in one write, so no recovery pass leases the row in between. */
   async enterFunding(id: string): Promise<boolean> {
     return this.transition(id, 'funded', 'funding_onchain', { fund_started_at: this.now() })
   }
@@ -449,7 +340,6 @@ export class OnchainSendSwapStore
     return rows.map(toRow)
   }
 
-  /** Still-held client lockups behind a landed L1 refund — the preimage can never arrive now. */
   async findReleasable(now: number): Promise<OnchainSendSwapRow[]> {
     const rows = await this.driver.all<Raw>(onchainSwapsSql.selectReleasable, [
       now - CLIENT_LOCKUP_RELEASE_DELAY_SECONDS,

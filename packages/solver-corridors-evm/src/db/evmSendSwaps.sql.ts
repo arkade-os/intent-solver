@@ -1,24 +1,7 @@
-// SCHEMA HISTORY. `valid_until` and `refund_outcome` were added after these
-// tables first shipped on the feat/evm-corridors branch. CREATE TABLE IF NOT
-// EXISTS does not extend an already-created table, so an environment whose
-// database predates those two columns needs, once, before this code
-// deploys against it:
-//
+// No runtime migration on purpose (only unreleased staging databases lack these); run once by hand:
 //   ALTER TABLE send_evm_swap ADD COLUMN valid_until INTEGER NOT NULL DEFAULT 0;
 //   ALTER TABLE send_evm_swap ADD COLUMN refund_outcome TEXT;
-//
-// Without them the failure modes are: pre-existing rows read valid_until as
-// NaN and never expire (fail-safe, but silent), and any insert or refund-sweep
-// patch throws "no such column". Fresh databases get both columns from the
-// CREATE below — no runtime migration on purpose: the gap can only exist on a
-// staging box that ran unreleased corridor code, and it should be fixed
-// deliberately, not self-healed invisibly.
-//
-// EXPECT PENDING QUOTES TO TERMINATE. `DEFAULT 0` dates existing rows to 1970,
-// so the first tick after the ALTER refuses every `quoted` row as expired.
-// Correct — the alternative is filling at a pre-restart rate — but an operator
-// not told will read the refusals as breakage. Only `quoted` rows are affected;
-// anything funded has already passed that check.
+// `DEFAULT 0` makes the next tick refuse every `quoted` row as expired, which is correct.
 const COLUMNS = `
   id                            TEXT PRIMARY KEY,
   state                         TEXT NOT NULL,
@@ -88,9 +71,8 @@ CREATE INDEX IF NOT EXISTS idx_send_evm_swap_event_swap ON send_evm_swap_event(s
   selectRefundable: `SELECT * FROM send_evm_swap
        WHERE state = 'refused' AND refund_outcome IS NULL
        ORDER BY created_at`,
-  // Keyed on the ENTRY into `locking_evm`, never on `evm_lock_txid`: that is
-  // patched after the broadcast, so a crash leaves it null over the very lock
-  // still in the mempool this must not skip.
+  // Keyed on entering `locking_evm`, not `evm_lock_txid`: that is patched after broadcast,
+  // so a crash leaves it null over a lock still in the mempool.
   selectClosedOverLock: `SELECT * FROM send_evm_swap AS s
        WHERE s.state IN ('stuck', 'refunded') AND s.refund_locktime > ?
          AND EXISTS (SELECT 1 FROM send_evm_swap_event AS e
