@@ -29,6 +29,7 @@ import {
   evaluateOnchainSendAcceptance,
   evaluateOnchainSendFunding,
   expiryBeforeClaimDeadline,
+  lockupExpiryFloor,
   onchainRefundConfirmDeadline,
   type OnchainSendAcceptanceRefusal,
 } from '@arkade-os/solver-core/core/onchainSend.js'
@@ -848,7 +849,7 @@ export class OnchainSendSwapService {
         await store.fail(
           row.id,
           'quoted',
-          `lockup expires at ${expiresTooSoon}, before ${arkadeClaimDeadline(row.htlcLocktime)} — the last moment ` +
+          `lockup expires at ${expiresTooSoon}, before ${lockupExpiryFloor(row.htlcLocktime)} — the last moment ` +
             'a claim answering this swap could still need it',
         )
         return false
@@ -858,7 +859,9 @@ export class OnchainSendSwapService {
         onchain_lockup_txid: first?.txid ?? null,
         onchain_lockup_vout: first?.vout ?? null,
         onchain_lockup_value: locked,
-        lockup_outpoints: JSON.stringify(outputs.map(({ txid, vout, value }) => ({ txid, vout, value }))),
+        lockup_outpoints: JSON.stringify(
+          outputs.map(({ txid, vout, value, expiresAt }) => ({ txid, vout, value, expiresAt })),
+        ),
       })
     }
     if (timedOut) {
@@ -867,6 +870,15 @@ export class OnchainSendSwapService {
       await store.fail(row.id, 'quoted', locked > 0 ? `lockup timeout with partial ${locked} sats` : 'lockup timeout')
     }
     return false
+  }
+
+  /** The adopted lockup's earliest batch expiry; regtest is exempt, as at the funding gate. */
+  private lockupExpiresAt(row: OnchainSendSwapRow): number | undefined {
+    if (this.deps.network === 'regtest' || row.lockupOutpoints === null) return undefined
+    const expiries = (JSON.parse(row.lockupOutpoints) as { expiresAt?: number }[]).flatMap((o) =>
+      o.expiresAt === undefined ? [] : [o.expiresAt],
+    )
+    return expiries.length > 0 ? Math.min(...expiries) : undefined
   }
 
   private async whenFunded(row: OnchainSendSwapRow): Promise<boolean> {
@@ -1333,7 +1345,7 @@ export class OnchainSendSwapService {
     }
     const vsize = estimateRefundTxVsize(sizingParams)
     const capRate = (row.payoutSats - ONCHAIN_DUST_SATS) / vsize
-    const deadline = onchainRefundConfirmDeadline(row.refundLocktime)
+    const deadline = onchainRefundConfirmDeadline(row.refundLocktime, this.lockupExpiresAt(row))
     const feeRate = urgencyFeeRate(version.estimate, capRate, deadline, this.now())
     const fee = affordableFee(vsize, feeRate, row.payoutSats, ONCHAIN_DUST_SATS)
     if (fee === null) {

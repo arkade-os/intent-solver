@@ -7,6 +7,10 @@ import {
   latestClaimArrival,
   arkadeClaimDeadline,
   expiryBeforeClaimDeadline,
+  HTLC_REFUND_MTP_MARGIN,
+  LOCKUP_REFUND_CONFIRM_BUDGET,
+  lockupExpiryFloor,
+  onchainRefundConfirmDeadline,
   ARKADE_CLAIM_WINDOW_SECONDS,
   ONCHAIN_SECONDS_PER_BLOCK,
   ONCHAIN_CLAIM_MARGIN_SECONDS,
@@ -88,10 +92,13 @@ describe('onchainRefundLocktimeFor', () => {
 
 describe('expiryBeforeClaimDeadline', () => {
   const htlcLocktime = 1_000_000
-  const deadline = arkadeClaimDeadline(htlcLocktime)
+  const deadline = lockupExpiryFloor(htlcLocktime)
 
-  it('is the same bound onchainRefundLocktimeFor reserves for the claim answer', () => {
-    expect(deadline).toBe(latestClaimArrival(htlcLocktime) + ARKADE_CLAIM_WINDOW_SECONDS)
+  it('leaves the L1 refund its confirm budget and the claim its answer window', () => {
+    expect(deadline).toBe(latestClaimArrival(htlcLocktime) + LOCKUP_REFUND_CONFIRM_BUDGET + ARKADE_CLAIM_WINDOW_SECONDS)
+    expect(onchainRefundConfirmDeadline(Infinity, deadline)).toBe(
+      latestClaimArrival(htlcLocktime) + LOCKUP_REFUND_CONFIRM_BUDGET,
+    )
   })
 
   it('names the earliest expiry falling before the deadline, wherever in the list it sits', () => {
@@ -99,6 +106,12 @@ describe('expiryBeforeClaimDeadline', () => {
     expect(
       expiryBeforeClaimDeadline([{ expiresAt: deadline + 86_400 }, { expiresAt: deadline - 600 }], htlcLocktime),
     ).toBe(deadline - 600)
+  })
+
+  it('refuses a lockup that expires before the L1 refund it would race could confirm', () => {
+    const expiresAt = htlcLocktime + HTLC_REFUND_MTP_MARGIN + 2 * HOUR
+    expect(expiresAt).toBeGreaterThan(arkadeClaimDeadline(htlcLocktime))
+    expect(expiryBeforeClaimDeadline([{ expiresAt }], htlcLocktime)).toBe(expiresAt)
   })
 
   it('passes a lockup that outlives the deadline, an empty one, and an expiry it was not told', () => {
