@@ -23,6 +23,7 @@ export const TERMINAL_STATES = ['settled', 'refused', 'expired', 'refunded', 'st
 
 export const RFQ_REFUSAL_ERROR_CODES = [
   'amount_side_unsupported',
+  'covenant_version_unsupported',
   'exact_out_unsupported',
   'invalid_amount',
   'invalid_payout_address',

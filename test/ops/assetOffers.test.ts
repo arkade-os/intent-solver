@@ -20,10 +20,12 @@ import type { SwapApprovalRequest } from '@arkade-os/solver-app/admin/db.js'
 import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
 import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
 import { priceFrom } from '@arkade-os/solver-core/core/priceFeed.js'
-import { encodeOffer, OFFER_PACKET_TYPE, type Offer } from '@arkade-os/swap/protocol'
+import { encodeOffer, OFFER_PACKET_TYPE, offerVtxoScript, type Offer } from '@arkade-os/swap/protocol'
 import { Extension, UnknownPacket, asset } from '@arkade-os/sdk'
 import { Transaction } from '@scure/btc-signer'
-import { base64 } from '@scure/base'
+import { base64, hex } from '@scure/base'
+import { schnorr } from '@noble/curves/secp256k1.js'
+import { OFFER_COVENANT_V1, OFFER_COVENANT_V2 } from '@arkade-os/solver-core/core/offerCovenant.js'
 
 const USDT = '11'.repeat(34)
 const SCRIPT = new Uint8Array(34).fill(0xab)
@@ -40,7 +42,7 @@ const offer = (over: Partial<Offer> = {}): Offer =>
     swapPkScript: SCRIPT,
     wantAmount: 1_000n,
     wantAsset: undefined,
-    offerAsset: { toString: () => USDT },
+    offerAsset: asset.AssetId.fromString(USDT),
     ...over,
   }) as unknown as Offer
 
@@ -157,6 +159,131 @@ describe('offer consistency — Swap Protocol V1 § 5.1', () => {
     // Documented as skipping a protocol MUST rather than silently passing it.
     const { service } = await build()
     expect(await service.consider(found)).toEqual({ fill: true, id: 'fill-1' })
+  })
+})
+
+describe('offer covenant versions', () => {
+  const xonly = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
+  const serverPubkey = xonly(2)
+  const terms = {
+    wantAmount: 1_000n,
+    wantAsset: undefined,
+    offerAsset: asset.AssetId.fromString(USDT),
+    makerPkScript: new Uint8Array([0x51, 0x20, ...xonly(3)]),
+    makerPublicKey: xonly(4),
+    emulatorPubkey: xonly(5),
+  }
+  const honest = (exit: boolean): Offer => {
+    const withoutScript = {
+      ...terms,
+      ...(exit ? { exitDelay: { type: 'seconds' as const, value: 4096n } } : {}),
+    }
+    return {
+      ...withoutScript,
+      swapPkScript: offerVtxoScript(withoutScript, serverPubkey).pkScript,
+    } as Offer
+  }
+  const at = (offer: Offer): typeof found => ({ ...found, offer })
+  const funded = (offer: Offer) => ({
+    ...found,
+    get offer() {
+      return offer
+    },
+    outputsAt: async () => [
+      { script: hex.encode(offer.swapPkScript), value: 500, assets: [{ assetId: USDT, amount: 900n }] },
+    ],
+  })
+
+  it('accepts both versions by default and records which one was priced', async () => {
+    const legacy = honest(false)
+    const current = honest(true)
+    const legacyRun = await build({ serverPubkey, outputsAt: funded(legacy).outputsAt })
+    const currentRun = await build({ serverPubkey, outputsAt: funded(current).outputsAt })
+
+    expect(await legacyRun.service.consider(at(legacy))).toEqual({ fill: true, id: 'fill-1' })
+    expect(await currentRun.service.consider(at(current))).toEqual({ fill: true, id: 'fill-1' })
+    expect(await legacyRun.store.findById('fill-1')).toMatchObject({ covenantVersion: OFFER_COVENANT_V1 })
+    expect(await currentRun.store.findById('fill-1')).toMatchObject({ covenantVersion: OFFER_COVENANT_V2 })
+  })
+
+  it('refuses a version the operator switched off', async () => {
+    const legacy = honest(false)
+    const { store, service } = await build({
+      serverPubkey,
+      covenantVersions: new Set([OFFER_COVENANT_V2]),
+      outputsAt: funded(legacy).outputsAt,
+    })
+
+    expect(await service.consider(at(legacy))).toEqual({
+      fill: false,
+      reason: 'offer_version_disabled',
+    })
+    expect(await store.listNonTerminal()).toHaveLength(0)
+  })
+
+  it('refuses an already-recorded intent when its version is no longer enabled', async () => {
+    const settle = vi.fn(async () => 'fill-txid')
+    const { store, service } = await build({
+      covenantVersions: new Set([OFFER_COVENANT_V2]),
+      settle,
+    })
+    await store.insertIntent({
+      id: 'legacy-intent',
+      offerTxid: found.txid,
+      offerVout: found.vout,
+      offerPkScript: SCRIPT_HEX,
+      covenantVersion: OFFER_COVENANT_V1,
+      wantAssetId: null,
+      wantAmount: 1_000n,
+      offerAssetId: USDT,
+      offerAmount: 900n,
+    })
+
+    expect(await service.tickAll()).toBe(0)
+    expect(settle).not.toHaveBeenCalled()
+    expect(await store.findById('legacy-intent')).toMatchObject({
+      state: 'refused',
+      failureReason: expect.stringContaining('offer_version_disabled'),
+    })
+  })
+
+  it('refuses an unversioned fillable row while still fillable when the rollout is narrowed', async () => {
+    const settle = vi.fn(async () => 'fill-txid')
+    const { store, service } = await build({
+      covenantVersions: new Set([OFFER_COVENANT_V2]),
+      settle,
+    })
+    await store.insertIntent({
+      id: 'unversioned-intent',
+      offerTxid: found.txid,
+      offerVout: found.vout,
+      offerPkScript: SCRIPT_HEX,
+      covenantVersion: null as never,
+      wantAssetId: null,
+      wantAmount: 1_000n,
+      offerAssetId: USDT,
+      offerAmount: 900n,
+    })
+
+    expect(await service.tickAll()).toBe(0)
+    expect(settle).not.toHaveBeenCalled()
+    expect(await store.findById('unversioned-intent')).toMatchObject({
+      state: 'refused',
+      failureReason: expect.stringContaining('offer_version_unverified'),
+    })
+  })
+
+  it('refuses a narrowed rollout when script identity cannot be verified', async () => {
+    const withExit = honest(true)
+    const { service } = await build({
+      covenantVersions: new Set([OFFER_COVENANT_V2]),
+      outputsAt: funded(withExit).outputsAt,
+    })
+
+    expect(await service.consider(at(withExit))).toEqual({
+      fill: false,
+      reason: 'offer_version_unverified',
+    })
   })
 })
 

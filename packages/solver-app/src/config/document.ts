@@ -5,6 +5,8 @@
  * once the document is flattened, by the same readers the environment used.
  */
 import { z } from 'zod'
+import { OFFER_COVENANT_VERSIONS } from '@arkade-os/solver-core/core/offerCovenant.js'
+import { RFQ_COVENANT_VERSION_ID } from '@arkade-os/solver-core/core/rfqCovenant.js'
 
 const UNKNOWN_KEY = 'unknown key'
 
@@ -19,6 +21,18 @@ const str = z.string()
 const num = z.number()
 const bool = z.boolean()
 const strings = z.array(z.string())
+const offerCovenantVersion = z.enum(OFFER_COVENANT_VERSIONS, {
+  errorMap: () => ({ message: `must be one of ${OFFER_COVENANT_VERSIONS.join(', ')}` }),
+})
+const offerCovenantVersions = z
+  .array(offerCovenantVersion)
+  .min(1)
+  .refine((values) => new Set(values).size === values.length, { message: 'must not repeat a version' })
+const rfqCovenantVersion = z.string().regex(RFQ_COVENANT_VERSION_ID, 'must be a version name or content hash')
+const rfqCovenantVersions = z
+  .array(rfqCovenantVersion)
+  .min(1)
+  .refine((values) => new Set(values).size === values.length, { message: 'must not repeat a version' })
 
 const section = <T extends z.ZodRawShape>(shape: T) => z.object(shape).partial().strict()
 
@@ -118,11 +132,15 @@ const buildSchema = (railNames: readonly string[]) =>
     corridors: z.record(str, corridorTerms),
     offers: section({
       markets: strings,
+      covenantVersions: offerCovenantVersions,
       minFillAmount: decimal,
       maxFillAmount: decimal,
       chargeCarrier: bool,
       carrierPricing: bool,
       quoteValiditySeconds: num,
+    }),
+    rfq: section({
+      covenantVersions: rfqCovenantVersions,
     }),
     relay: section({
       url: str,
@@ -145,9 +163,9 @@ const buildSchema = (railNames: readonly string[]) =>
     diagnostics: section({ latency: bool }),
   })
 
-export type SolverDocument = z.infer<ReturnType<typeof buildSchema>>
+export type SolverDocument = z.output<ReturnType<typeof buildSchema>>
 
-export const documentSchema = (railNames: readonly string[]): z.ZodType<SolverDocument> => buildSchema(railNames)
+export const documentSchema = (railNames: readonly string[]) => buildSchema(railNames)
 
 const IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/
 

@@ -31,6 +31,11 @@ import { offerFromFundingTx } from './offerPacket.js'
 import { heldOf, offerFillInputFrom } from './offerFill.js'
 import { fulfillOffer, type FulfillOptions } from './offerFulfill.js'
 import { liveOfferOutpoints, type OfferOutpoint } from './offerOutpoints.js'
+import {
+  OFFER_COVENANT_VERSIONS,
+  offerCovenantVersionOf,
+  type OfferCovenantVersion,
+} from '@arkade-os/solver-core/core/offerCovenant.js'
 
 /**
  * The recorded intent, structurally.
@@ -43,6 +48,7 @@ export interface OfferFillIntent {
   offerTxid: string
   offerVout: number
   offerPkScript: string
+  covenantVersion: OfferCovenantVersion | null
   wantAssetId: string | null
   wantAmount: bigint
   offerAssetId: string | null
@@ -64,6 +70,8 @@ export interface OfferSettleDeps {
   outpointsAt?: (pkScript: string) => Promise<OfferOutpoint[]>
   /** Injected so the guards are testable without an Arkade Service. */
   fulfill?: typeof fulfillOffer
+  /** Covenant versions this deployment accepts. Defaults to every version. */
+  covenantVersions?: ReadonlySet<OfferCovenantVersion>
 }
 
 /** One virtual transaction from the wallet's indexer, or null. */
@@ -86,6 +94,7 @@ export const offerSettleFor = (
   const fetchTx = deps.fetchTx ?? indexerTxSource(deps.ctx)
   const outpointsAt = deps.outpointsAt ?? ((pkScript: string) => liveOfferOutpoints(deps.ctx, pkScript))
   const fulfill = deps.fulfill ?? fulfillOffer
+  const covenantVersions = deps.covenantVersions ?? new Set(OFFER_COVENANT_VERSIONS)
 
   return async (intent, options) => {
     const rawP = capture(fetchTx(intent.offerTxid))
@@ -109,6 +118,17 @@ export const offerSettleFor = (
     }
     if (hex.encode(found.offer.swapPkScript).toLowerCase() !== intent.offerPkScript.toLowerCase()) {
       throw new Error(`${intent.offerTxid} funds a different offer script than the intent was recorded against`)
+    }
+    const covenantVersion = offerCovenantVersionOf(found.offer)
+    if (!covenantVersions.has(covenantVersion)) {
+      throw new Error(
+        `${intent.offerTxid} funds covenant ${covenantVersion}, which is disabled by offers.covenantVersions`,
+      )
+    }
+    if (intent.covenantVersion !== null && intent.covenantVersion !== covenantVersion) {
+      throw new Error(
+        `${intent.offerTxid} funds covenant ${covenantVersion}, but the intent was priced as ${intent.covenantVersion}`,
+      )
     }
 
     // The packet's terms, read through the SAME adapter the decision read them

@@ -20,6 +20,7 @@ import { endpointHost } from '@arkade-os/solver-app/ops/services.js'
 import { createServicesBody, servicesSource } from '../support/createServicesBody.js'
 import { evmCorridorFor } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import type { EvmCorridorPolicy } from '@arkade-os/solver-core/core/evmCorridorConfig.js'
+import { RFQ_EVM_RECEIVE_V1, RFQ_EVM_SEND_V1 } from '@arkade-os/solver-core/core/rfqCovenant.js'
 
 const createServices = createServicesBody
 
@@ -175,6 +176,8 @@ describe('both legs are actually driven', () => {
     })
     expect(corridors.get(SEND_PAIR)).toBeDefined()
     expect(corridors.get(RECEIVE_PAIR)).toBeDefined()
+    expect(corridors.get(SEND_PAIR)?.descriptor.covenantVersion).toBe(RFQ_EVM_SEND_V1)
+    expect(corridors.get(RECEIVE_PAIR)?.descriptor.covenantVersion).toBe(RFQ_EVM_RECEIVE_V1)
   })
 
   it('drives every enabled leg when the sweep runs the corridor set', async () => {

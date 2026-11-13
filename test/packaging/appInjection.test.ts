@@ -99,7 +99,16 @@ const solverConfig = (): Config => {
     // No market, so the offer-packet path is off and its bounds are unread.
     offerMarkets: [],
     offerMinFillAmount: 0n,
+    offerCovenantVersions: ['offer-v1', 'offer-v2'],
     offerMaxFillAmount: 0n,
+    rfqCovenantVersions: [
+      'lightning-send-v2',
+      'lightning-receive-v2',
+      'onchain-send-v2',
+      'asset-swap-v2',
+      'evm-send-v1',
+      'evm-receive-v1',
+    ],
     offerChargesDeliveredCarrier: false,
     assetCarrierPricing: false,
     // No asset named, so the atomic-class corridors are off and the window unread.

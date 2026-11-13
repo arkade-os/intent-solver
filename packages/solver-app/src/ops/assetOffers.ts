@@ -1,6 +1,9 @@
 /**
  * Wiring for Arkade asset-swap offers: the pieces exist, this composes them.
  *
+ * @deprecated Packet-style offers remain for deployed clients. New asset-swap
+ * integrations should use the RFQ path (`corridors/assetRfq.ts`).
+ *
  * `evaluateOfferFill` (core), the packet/deposit/inventory adapters (arkade) and
  * `OfferFillStore` (corridors) each landed separately and had no caller in
  * `src/`. This is that caller.
@@ -43,7 +46,12 @@ import { OfferNotSubmittedError, type FulfillOptions } from '@arkade-os/solver-a
 import { offerFromFundingTx } from '@arkade-os/solver-arkade/arkade/offerPacket.js'
 import { offerDepositFrom, type OfferOutputView } from '@arkade-os/solver-arkade/arkade/offerDeposit.js'
 import { offerInventoryFrom, type SpendableBalance } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
-import { offerIsConsistent } from '@arkade-os/solver-arkade/arkade/offerConsistency.js'
+import { offerCovenantMatch } from '@arkade-os/solver-arkade/arkade/offerConsistency.js'
+import {
+  OFFER_COVENANT_VERSIONS,
+  offerCovenantVersionOf,
+  type OfferCovenantVersion,
+} from '@arkade-os/solver-core/core/offerCovenant.js'
 import { OfferFillStore, type OfferFillRow } from '@arkade-os/solver-corridors/db/offerFills.js'
 
 /** An unordered market. `null` is BTC, matching how the packet omits the field. */
@@ -110,6 +118,8 @@ export interface AssetOfferDeps {
    * against the terms the packet states. Omitted skips a protocol MUST.
    */
   serverPubkey?: Uint8Array
+  /** Covenant versions this deployment accepts. Defaults to every version. */
+  covenantVersions?: ReadonlySet<OfferCovenantVersion>
   /**
    * Pricing per market. A market with no entry is NOT priced and is refused —
    * failing closed, because the alternative is filling at whatever the maker
@@ -189,6 +199,7 @@ export class AssetOfferService {
   private markets: readonly AssetMarket[]
   private pricing: readonly AssetMarketPricing[] | undefined
   private readonly serialise: Serialiser = createSerialiser()
+  private readonly covenantVersions: ReadonlySet<OfferCovenantVersion>
   /** Deferrals per row, pruned to the live set each sweep so it cannot grow. */
   private readonly deferrals = new Map<string, number>()
 
@@ -196,6 +207,7 @@ export class AssetOfferService {
     this.newId = deps.newId ?? (() => crypto.randomUUID())
     this.markets = deps.markets
     this.pricing = deps.pricing
+    this.covenantVersions = deps.covenantVersions ?? new Set(OFFER_COVENANT_VERSIONS)
   }
 
   /** Swap the live serve list. Recorded intents keep the amounts already stored. */
@@ -299,6 +311,13 @@ export class AssetOfferService {
 
   private async considerInner({ offer, txid, vout }: DiscoveredOffer): Promise<ConsiderOutcome> {
     const outpoint = `${txid}:${vout}`
+    if (!this.deps.serverPubkey && this.covenantVersions.size < OFFER_COVENANT_VERSIONS.length) {
+      return this.refuse(
+        outpoint,
+        'offer_version_unverified',
+        'a narrowed offers.covenantVersions needs serverPubkey so the covenant version is verified from script',
+      )
+    }
     // Idempotent on the outpoint: rediscovering a funded offer must not open a
     // second intent against the same deposit.
     const existing = await this.deps.store.findLiveByOutpoint(txid, vout)
@@ -307,8 +326,18 @@ export class AssetOfferService {
     // FIRST, because everything after it reads fields off an attacker-supplied
     // packet. An offer whose script does not compile to the terms it states can
     // oblige a filler to something it never priced (Swap Protocol V1 § 5.1).
-    if (this.deps.serverPubkey && !offerIsConsistent(offer, this.deps.serverPubkey)) {
+    const match = this.deps.serverPubkey
+      ? offerCovenantMatch(offer, this.deps.serverPubkey)
+      : { version: offerCovenantVersionOf(offer) }
+    if (match === null) {
       return this.refuse(outpoint, 'offer_inconsistent', 'its script does not encode the terms the packet states')
+    }
+    if (!this.covenantVersions.has(match.version)) {
+      return this.refuse(
+        outpoint,
+        'offer_version_disabled',
+        `offer covenant ${match.version} is disabled by offers.covenantVersions`,
+      )
     }
 
     // Hex, because that is the spelling the deposit adapter compares against
@@ -331,6 +360,7 @@ export class AssetOfferService {
       offerTxid: txid,
       offerVout: vout,
       offerPkScript: pkScript,
+      covenantVersion: match.version,
       wantAssetId: input.wantAssetId,
       wantAmount: input.wantAmount,
       offerAssetId: input.offerAssetId,
@@ -393,6 +423,32 @@ export class AssetOfferService {
     for (const row of rows) if (row.state === 'filling') await this.recoverFilling(row)
     for (const row of rows) {
       if (row.state !== 'fillable') continue
+      if (row.covenantVersion === null && this.covenantVersions.size < OFFER_COVENANT_VERSIONS.length) {
+        this.deps.onRefused?.(
+          `${row.offerTxid}:${row.offerVout}`,
+          'offer_version_unverified',
+          'an unversioned pre-migration offer cannot be admitted while offers.covenantVersions is narrowed',
+        )
+        await this.deps.store.fail(
+          row.id,
+          'fillable',
+          'offer_version_unverified; an unversioned pre-migration offer cannot be admitted while offers.covenantVersions is narrowed',
+        )
+        continue
+      }
+      if (row.covenantVersion !== null && !this.covenantVersions.has(row.covenantVersion)) {
+        this.deps.onRefused?.(
+          `${row.offerTxid}:${row.offerVout}`,
+          'offer_version_disabled',
+          `offer covenant ${row.covenantVersion} is disabled by offers.covenantVersions`,
+        )
+        await this.deps.store.fail(
+          row.id,
+          'fillable',
+          `offer_version_disabled; offer covenant ${row.covenantVersion} is disabled by offers.covenantVersions`,
+        )
+        continue
+      }
       // BEFORE the CAS: `fillable` has an edge to `refused` and `filling` has
       // none, which is also the honest shape — nothing is submitted yet.
       const terms = termsOf(row)

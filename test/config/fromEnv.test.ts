@@ -69,6 +69,8 @@ const FULL_ENV: Record<string, string> = {
   ...corridor('LN_RECEIVE'),
   ...corridor('ONCHAIN_SEND', { FEE_CAP_SATS: '20000', FEE_MIN_SATS: '500' }),
   OFFER_MARKETS: `BTC/${USDA}`,
+  OFFER_COVENANT_VERSIONS: 'offer-v1,offer-v2',
+  RFQ_COVENANT_VERSIONS: 'asset-swap-v2,evm-send-v1',
   OFFER_MIN_FILL_AMOUNT: '1000',
   OFFER_MAX_FILL_AMOUNT: '5000000',
   OFFER_CHARGE_CARRIER: 'true',
@@ -155,6 +157,16 @@ describe('envToDocument round-trips', () => {
     const doc = envToDocument(MINIMAL_ENV, [])
     expect(withoutDocumentFields(loadedFrom(doc))).toEqual(withoutDocumentFields(configFromKnobs(asKnobs(MINIMAL_ENV))))
   })
+
+  it.each([
+    { SOLVER_LATENCY_DIAGNOSTICS: 'false' },
+    { OFFER_COVENANT_VERSIONS: ' ', RFQ_COVENANT_VERSIONS: ' ' },
+  ] as Record<string, string>[])('a value the reader treats as off or unset: %j', (extra) => {
+    const env = { ...MINIMAL_ENV, ...extra }
+    expect(withoutDocumentFields(loadedFrom(envToDocument(env, [])))).toEqual(
+      withoutDocumentFields(configFromKnobs(asKnobs(env))),
+    )
+  })
 })
 
 describe('envToDocument — what it writes', () => {
@@ -163,6 +175,8 @@ describe('envToDocument — what it writes', () => {
     expect(Object.keys(doc.assets ?? {}).sort()).toEqual(['USDA', 'USDC@arbitrum'])
     expect(Object.keys(doc.rails?.evm ?? {})).toEqual(['arbitrum'])
     expect(doc.offers?.markets).toEqual(['BTC/USDA'])
+    expect(doc.offers?.covenantVersions).toEqual(['offer-v1', 'offer-v2'])
+    expect(doc.rfq?.covenantVersions).toEqual(['asset-swap-v2', 'evm-send-v1'])
   })
 
   it('names a chain it does not know evm', () => {
