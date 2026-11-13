@@ -108,9 +108,13 @@ export interface AssetRfqSwapRow {
   /** What the client deposits. `null` is BTC, matching the offer packet. */
   fromAssetId: string | null
   fromAmount: bigint
+  fromDecimals: number | null
+  fromFlatFee: bigint | null
   /** What the covenant obliges any spend to deliver. */
   toAssetId: string | null
   toAmount: bigint
+  toDecimals: number | null
+  toSpread: bigint | null
   /** The client's own two covenant parameters, from its request. */
   makerPkScript: string
   makerPublicKey: string
@@ -158,8 +162,12 @@ export interface AssetRfqQuoteRecord {
   pair: string
   fromAssetId: string | null
   fromAmount: bigint
+  fromDecimals?: number
+  fromFlatFee?: bigint
   toAssetId: string | null
   toAmount: bigint
+  toDecimals?: number
+  toSpread?: bigint
   makerPkScript: string
   makerPublicKey: string
   offerPkScript: string
@@ -186,8 +194,12 @@ const COLUMNS = `
   pair             TEXT NOT NULL,
   from_asset_id    TEXT,
   from_amount      TEXT NOT NULL,
+  from_decimals    INTEGER,
+  from_flat_fee    TEXT,
   to_asset_id      TEXT,
   to_amount        TEXT NOT NULL,
+  to_decimals      INTEGER,
+  to_spread        TEXT,
   maker_pk_script  TEXT NOT NULL,
   maker_public_key TEXT NOT NULL,
   offer_pk_script  TEXT NOT NULL,
@@ -253,8 +265,12 @@ const toRow = (raw: Raw): AssetRfqSwapRow => ({
   pair: String(raw.pair),
   fromAssetId: raw.from_asset_id === null ? null : String(raw.from_asset_id),
   fromAmount: BigInt(String(raw.from_amount)),
+  fromDecimals: numberOrNull(raw.from_decimals),
+  fromFlatFee: bigIntOrNull(raw.from_flat_fee),
   toAssetId: raw.to_asset_id === null ? null : String(raw.to_asset_id),
   toAmount: BigInt(String(raw.to_amount)),
+  toDecimals: numberOrNull(raw.to_decimals),
+  toSpread: bigIntOrNull(raw.to_spread),
   makerPkScript: String(raw.maker_pk_script),
   makerPublicKey: String(raw.maker_public_key),
   offerPkScript: String(raw.offer_pk_script),
@@ -327,6 +343,10 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
       ['quote_implied_mantissa', 'TEXT'],
       ['quote_implied_scale', 'INTEGER'],
       ['quote_gives_base', 'INTEGER'],
+      ['from_decimals', 'INTEGER'],
+      ['from_flat_fee', 'TEXT'],
+      ['to_decimals', 'INTEGER'],
+      ['to_spread', 'TEXT'],
       ['fill_price_mantissa', 'TEXT'],
       ['fill_price_scale', 'INTEGER'],
       ['fill_phase', 'TEXT'],
@@ -370,10 +390,11 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
     await this.driver.run(
       `INSERT INTO asset_rfq_swap (
          id, state, created_at, updated_at, rfq_id, pair, from_asset_id, from_amount,
-         to_asset_id, to_amount, maker_pk_script, maker_public_key, offer_pk_script,
+         from_decimals, from_flat_fee, to_asset_id, to_amount, to_decimals, to_spread,
+         maker_pk_script, maker_public_key, offer_pk_script,
          offer_address, solver_pubkey, valid_until, deposit_txid, deposit_vout, fill_txid, failure_reason,
          quote_implied_mantissa, quote_implied_scale, quote_gives_base
-       ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?)`,
+       ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?)`,
       [
         record.id,
         at,
@@ -382,8 +403,12 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
         record.pair,
         record.fromAssetId,
         record.fromAmount.toString(),
+        record.fromDecimals ?? null,
+        record.fromFlatFee?.toString() ?? null,
         record.toAssetId,
         record.toAmount.toString(),
+        record.toDecimals ?? null,
+        record.toSpread?.toString() ?? null,
         record.makerPkScript,
         record.makerPublicKey,
         record.offerPkScript,

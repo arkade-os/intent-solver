@@ -39,6 +39,23 @@ const signed = (value: number | null): string =>
 /** Basis points, or a dash where there was nothing to measure — never a zero. */
 const bps = (value: number | null): string => (value === null ? '-' : `${value >= 0 ? '+' : '-'}${Math.abs(value)}bp`)
 
+const nativeAmount = (amount: string, decimals: number | null): string => {
+  try {
+    if (decimals === null || !Number.isSafeInteger(decimals) || decimals < 0 || decimals > 36) return amount
+    const value = BigInt(amount)
+    const absolute = value < 0n ? -value : value
+    const scale = 10n ** BigInt(decimals)
+    const whole = absolute / scale
+    const fraction = String(absolute % scale)
+      .padStart(decimals, '0')
+      .replace(/0+$/, '')
+    const sign = value < 0n ? '-' : value > 0n ? '+' : ''
+    return `${sign}${whole.toLocaleString('en-US')}${fraction ? `.${fraction}` : ''}`
+  } catch {
+    return amount
+  }
+}
+
 export interface PnlReportInput {
   records: readonly SwapEconomics[]
   /** The window's own name, as the caller asked for it. */
@@ -81,6 +98,23 @@ export const pnlReportLines = (input: PnlReportInput): string[] => {
       : `net      ${signed(summary.netSats)} sats after ${summary.realizedCostSats.toLocaleString('en-US')} cost, ` +
           `over ${summary.costedCount} of ${summary.pricedCount} priced, ${bps(summary.netMarginBps)}`,
   )
+  if (summary.nativePnl.assets.length > 0) {
+    lines.push(
+      `native   ${summary.nativePnl.recordCount} filled swap${summary.nativePnl.recordCount === 1 ? '' : 's'} ` +
+        'with a fee split; gross, no BTC conversion',
+    )
+    for (const asset of summary.nativePnl.assets) {
+      const hasScale =
+        asset.decimals !== null && Number.isSafeInteger(asset.decimals) && asset.decimals >= 0 && asset.decimals <= 36
+      lines.push(`  asset  ${asset.assetId ?? 'BTC'}`)
+      lines.push(
+        `         input flat ${nativeAmount(asset.inputFlatFee, asset.decimals)}` +
+          ` / output spread ${nativeAmount(asset.outputSpread, asset.decimals)}` +
+          ` / total ${nativeAmount(asset.total, asset.decimals)}` +
+          (hasScale ? '' : ' (atomic units; scale unknown)'),
+      )
+    }
+  }
   if (summary.atRiskSats > 0 || summary.atRiskUnknownCount > 0) {
     lines.push(
       `at risk  ${summary.atRiskUpperBound ? '<=' : ''}${summary.atRiskSats.toLocaleString('en-US')} sats` +
