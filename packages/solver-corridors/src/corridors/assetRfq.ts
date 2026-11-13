@@ -43,15 +43,10 @@ import {
   assetRfqQuotePayload,
   assetRfqStatusPayload,
 } from '../wire/assetRfqPayloads.js'
-import {
-  EXPOSED,
-  NON_TERMINAL,
-  type AssetRfqSwapRow,
-  type AssetRfqSwapState,
-  type AssetRfqSwapStore,
-} from '../db/assetRfqSwaps.js'
+import { EXPOSED, NON_TERMINAL, type AssetRfqSwapRow, type AssetRfqSwapState } from '../db/assetRfqSwaps.js'
 import type { AssetRfqMarket, AssetRfqSwapService } from '../asset/assetRfqOrchestrator.js'
 import { assetRfqEconomics } from './economics.js'
+import type { AssetRfqSwapRepository } from '../db/assetRfqSwaps.js'
 
 /** Which way round a market is being served. */
 export type AssetRfqDirection = 'sell_base' | 'buy_base'
@@ -142,7 +137,7 @@ const jsonSafeBigints = (value: unknown): unknown => {
   return value
 }
 
-export const assetRfqReader = (descriptor: CorridorDescriptor, store: AssetRfqSwapStore): CorridorReader => ({
+export const assetRfqReader = (descriptor: CorridorDescriptor, store: AssetRfqSwapRepository): CorridorReader => ({
   descriptor,
   statusFor: async (rfqId) => {
     const row = await store.findByRfqId(rfqId)
@@ -193,7 +188,7 @@ const ASSET_RFQ_PARKED: readonly AssetRfqSwapState[] = ['stuck', 'refused']
 export const assetRfqCorridor = (
   descriptor: CorridorDescriptor,
   service: AssetRfqSwapService,
-  store: AssetRfqSwapStore,
+  store: AssetRfqSwapRepository,
 ): Corridor => ({
   ...assetRfqReader(descriptor, store),
   quote: (payload, options) => respondToAssetRfqRequest(service, descriptor.pair, payload, options),

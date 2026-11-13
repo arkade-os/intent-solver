@@ -12,7 +12,6 @@ import {
   arkadeRefunder,
   createRfqSwapRecord,
   lockupContractParams,
-  normalizeRfqSwapRecord,
   rebuildRfqSwap,
   requestLightningSend,
   rfqSecretsProfile,
@@ -22,12 +21,9 @@ import {
   type RfqSwapRecord,
   type RfqSwapRecordStore,
 } from '@arkade-os/swap/protocol'
-import type { RfqSwapPageCursor, RfqSwapPageFilter } from '@arkade-os/swap'
 import { nostrRfqTransport } from '@arkade-os/swap/nostr'
 import { base64, hex } from '@scure/base'
 import { Address } from '@scure/btc-signer'
-import type { PageRequest, PageResult } from '@arkade-os/sdk'
-import { pageResult } from '@arkade-os/sdk'
 import type { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import type { SqlDriver } from '@arkade-os/solver-core/core/driver.js'
 import { NETWORKS } from '@arkade-os/solver-core/core/networks.js'
@@ -38,88 +34,14 @@ import { outpointKey } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
 import { ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import { arkadeFundingOwed } from './pool.js'
 import type { RebalanceSource } from './rebalance.js'
+import { SqliteRebalanceRfqRepository, type StoredRfq } from './rebalanceStore.js'
 import type { Services } from './services.js'
 
 const now = (): number => Math.floor(Date.now() / 1000)
 const validTxid = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{64}$/i.test(value)
 const sum = (coins: readonly { value: number }[]): number => coins.reduce((total, coin) => total + coin.value, 0)
-// Rows written before swap 0.1.0 carry fundingArkTxid/refundArkTxid/lockupSpendArkTxids.
-const parseRecord = (json: string): RfqSwapRecord => normalizeRfqSwapRecord(JSON.parse(json) as RfqSwapRecord)
 const wholeSats = (value: number): void => {
   if (!Number.isSafeInteger(value) || value <= 0) throw new Error('invalid source debit')
-}
-
-interface StoredRfq {
-  record: RfqSwapRecord
-  fundAmount: number
-  validUntil: number
-}
-
-class RebalanceRfqRepository implements RfqSwapRecordStore {
-  constructor(private readonly driver: SqlDriver) {}
-
-  async init(): Promise<void> {
-    await this.driver.exec(
-      'CREATE TABLE IF NOT EXISTS rebalance_rfq (rfq_id TEXT PRIMARY KEY, record_json TEXT NOT NULL, fund_amount INTEGER NOT NULL, valid_until INTEGER NOT NULL)',
-    )
-  }
-
-  async create(value: StoredRfq): Promise<void> {
-    await this.driver.run(
-      'INSERT INTO rebalance_rfq (rfq_id, record_json, fund_amount, valid_until) VALUES (?, ?, ?, ?)',
-      [value.record.rfqId, JSON.stringify(value.record), value.fundAmount, value.validUntil],
-    )
-  }
-
-  async stored(id: string): Promise<StoredRfq | undefined> {
-    const row = await this.driver.get<{ record_json: string; fund_amount: number; valid_until: number }>(
-      'SELECT record_json, fund_amount, valid_until FROM rebalance_rfq WHERE rfq_id = ?',
-      [id],
-    )
-    return (
-      row && {
-        record: parseRecord(row.record_json),
-        fundAmount: row.fund_amount,
-        validUntil: row.valid_until,
-      }
-    )
-  }
-
-  async saveRfqSwap(record: RfqSwapRecord): Promise<void> {
-    const result = await this.driver.run('UPDATE rebalance_rfq SET record_json = ? WHERE rfq_id = ?', [
-      JSON.stringify(record),
-      record.rfqId,
-    ])
-    if (result.changes !== 1) throw new Error('rebalance recovery origin is missing')
-  }
-
-  async getRfqSwap(id: string): Promise<RfqSwapRecord | undefined> {
-    return (await this.stored(id))?.record
-  }
-  async getAllRfqSwaps(): Promise<RfqSwapRecord[]> {
-    return (await this.driver.all<{ record_json: string }>('SELECT record_json FROM rebalance_rfq')).map((row) =>
-      parseRecord(row.record_json),
-    )
-  }
-  async getRfqSwapsPage(
-    filter: RfqSwapPageFilter,
-    page: PageRequest<RfqSwapPageCursor>,
-  ): Promise<PageResult<RfqSwapRecord, RfqSwapPageCursor>> {
-    const sorted = (await this.getAllRfqSwaps())
-      .filter((record) => filter.state === undefined || record.state === filter.state)
-      .filter((record) => filter.since === undefined || record.updatedAt >= filter.since)
-      .sort((a, b) => a.updatedAt - b.updatedAt || (a.rfqId < b.rfqId ? -1 : a.rfqId > b.rfqId ? 1 : 0))
-    const after = page.after
-    const remaining = after
-      ? sorted.filter(
-          (r) => r.updatedAt > after.updatedAt || (r.updatedAt === after.updatedAt && r.rfqId > after.rfqId),
-        )
-      : sorted
-    return pageResult(remaining, page.limit, (record) => ({ updatedAt: record.updatedAt, rfqId: record.rfqId }))
-  }
-  async removeRfqSwap(id: string): Promise<void> {
-    await this.driver.run('DELETE FROM rebalance_rfq WHERE rfq_id = ?', [id])
-  }
 }
 
 export const createArkadeRebalanceSource = async (
@@ -129,7 +51,7 @@ export const createArkadeRebalanceSource = async (
   mode: 'active' | 'passive' = 'active',
 ): Promise<RebalanceSource> => {
   const { wallet, reservations } = services.arkade
-  const repository = new RebalanceRfqRepository(driver)
+  const repository = new SqliteRebalanceRfqRepository(driver)
   await repository.init()
   const held = new Map<string, NormalizedExtendedVirtualCoin[]>()
   const indexer = wallet.indexerProvider

@@ -13,8 +13,9 @@ import type {
   RebalancePool,
   RebalanceTransfer,
 } from '@arkade-os/solver-core/ports/rebalance.js'
-import type { RebalanceStore, TransferCursor } from './rebalanceStore.js'
+import type { TransferCursor } from './rebalanceStore.js'
 import { rebalanceOverlapReady, type BalanceCheckpoint } from './balanceCheckpoints.js'
+import type { RebalanceRepository } from './rebalanceStore.js'
 
 export interface RebalanceSource {
   quote(
@@ -37,7 +38,7 @@ export interface RebalanceSource {
 }
 
 interface RebalanceDeps {
-  store: RebalanceStore
+  store: RebalanceRepository
   backend: RebalanceBackend
   source: RebalanceSource
   policy: RebalancePolicy

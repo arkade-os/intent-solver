@@ -38,8 +38,8 @@ import type { RebalanceBackend } from '@arkade-os/solver-core/ports/rebalance.js
 import type { EvmPayoutFundingAdapter } from '@arkade-os/solver-core/ports/evmPayoutFunding.js'
 import type { EvmHtlcBackend, JsonRpc } from '@arkade-os/solver-core/ports/evm.js'
 import type { EvmChainConfig } from '@arkade-os/solver-rails-evm/evm/config.js'
-import type { EvmSendSwapStore } from '@arkade-os/solver-corridors-evm/db/evmSendSwaps.js'
 import type { SqlDriver } from '@arkade-os/solver-corridors/db/driver.js'
+import type { EvmSendSwapRepository } from '@arkade-os/solver-corridors-evm/db/evmSendSwaps.js'
 
 export interface LightningRailHost {
   sql: SqlDriver
@@ -52,7 +52,7 @@ export interface EvmPayoutFundingHost {
   chain: EvmChainConfig
   rpc: JsonRpc
   backend: EvmHtlcBackend
-  sendStore: EvmSendSwapStore
+  sendStore: EvmSendSwapRepository
 }
 
 export interface EvmPayoutFundingRegistration {

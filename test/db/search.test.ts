@@ -158,9 +158,10 @@ describe('each corridor searches columns it actually has', () => {
   }
 
   const declaredBy = (path: string): Set<string> => {
-    const source = readFileSync(fileURLToPath(new URL(`../../${path}`, import.meta.url)), 'utf8')
+    const schema = path.replace(/\.ts$/, '.sql.ts')
+    const source = readFileSync(fileURLToPath(new URL(`../../${schema}`, import.meta.url)), 'utf8')
     return new Set(
-      [...source.matchAll(/^\s{2}([a-z_]+)\s+(?:TEXT|INTEGER)/gm)]
+      [...source.matchAll(/^\s+([a-z_]+)\s+(?:TEXT|INTEGER)/gm)]
         .map((m) => m[1])
         .filter((v): v is string => v !== undefined),
     )

@@ -44,7 +44,8 @@ import { offerFromFundingTx } from '@arkade-os/solver-arkade/arkade/offerPacket.
 import { offerDepositFrom, type OfferOutputView } from '@arkade-os/solver-arkade/arkade/offerDeposit.js'
 import { offerInventoryFrom, type SpendableBalance } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
 import { offerIsConsistent } from '@arkade-os/solver-arkade/arkade/offerConsistency.js'
-import { OfferFillStore, type OfferFillRow } from '@arkade-os/solver-corridors/db/offerFills.js'
+import { type OfferFillRow } from '@arkade-os/solver-corridors/db/offerFills.js'
+import type { OfferFillRepository } from '@arkade-os/solver-corridors/db/offerFills.js'
 
 /** An unordered market. `null` is BTC, matching how the packet omits the field. */
 export interface AssetMarket {
@@ -95,7 +96,7 @@ export interface DiscoveredOffer {
 }
 
 export interface AssetOfferDeps {
-  store: OfferFillStore
+  store: OfferFillRepository
   /** Markets served. An empty list serves none, which is the safe default. */
   markets: readonly AssetMarket[]
   /** Inclusive bounds on the payout, in the want leg's units. */

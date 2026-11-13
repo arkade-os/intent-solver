@@ -1,24 +1,6 @@
-/**
- * What the four swap stores share, which is nearly all of them.
- *
- * Every method here had four copies that differed only in a table name, a row
- * mapper and — in `transition`'s error message — one word. Keeping four was not
- * free: `patch` grew a refund-history note in the Lightning-send copy alone
- * (`db/swaps.ts`), and `history` still read a `detail` column in that one copy
- * while the other three wrote it and never read it back.
- *
- * The differences that are REAL are named in {@link StoreShape} and passed in.
- * Anything a store cannot express through that shape stays in the store.
- *
- * This is money-path code. `transition` is a compare-and-swap whose `from`
- * predicate is what stops two sweeps acting on one row, and whose edge check is
- * what stops a retry walking a swap backwards into re-paying. Neither may be
- * relaxed into a subclass hook.
- */
 import type { SqlDriver } from './driver.js'
+import { addColumn, baseSwapSql, tableInfo, type BaseSwapSql } from './baseSwapStore.sql.js'
 import {
-  clampLimit,
-  decodeCursor,
   pageQuery,
   takePage,
   type FindByStatesOptions,
@@ -28,10 +10,8 @@ import {
 import { announceTransition, type TransitionHook } from '@arkade-os/solver-core/core/businessEvent.js'
 import { clampLedgerLimit, type LedgerWindow } from '@arkade-os/solver-core/analytics/economics.js'
 
-/** A row as the driver hands it back, before the store's own mapper narrows it. */
 export type RawRow = Record<string, unknown>
 
-/** Everything the shared methods need that genuinely differs per store. */
 /** `fail()` routes to `stuck` / `refused`, so a store whose states lack either must not compile. */
 type FailStatesIn<State extends string> = 'stuck' | 'refused' extends State
   ? unknown
@@ -40,24 +20,10 @@ type FailStatesIn<State extends string> = 'stuck' | 'refused' extends State
 export interface StoreShape<Row, State extends string> {
   readonly table: string
   readonly eventTable: string
-  /**
-   * What this store calls one of its rows in a not-found error — `swap`,
-   * `receive swap`, `onchain send swap`, `onchain receive swap`.
-   *
-   * Its own field rather than derived from {@link lifecycleLabel}, because the
-   * two do not line up: `onchain send lifecycle` would give `onchain send`, and
-   * the message has always said `onchain send swap`. Deriving it would silently
-   * reword an error operators grep for.
-   */
+  /** Not derived from {@link lifecycleLabel}: that would reword `onchain send swap`, an error operators grep for. */
   readonly noun: string
-  /**
-   * How this store names its lifecycle in an illegal-transition error, e.g.
-   * `onchain send lifecycle`. Message text is part of what operators read when
-   * a swap refuses to move, so it stays per-store rather than becoming generic.
-   */
   readonly lifecycleLabel: string
   readonly searchColumns: readonly string[]
-  readonly recoveryOrderIndex?: string
   readonly legalEdges: Readonly<Record<State, readonly State[]>>
   readonly transitionColumns: ReadonlySet<string>
   readonly patchColumns: ReadonlySet<string>
@@ -102,116 +68,95 @@ export const addColumns = async (
   for (const [, type] of columns) {
     if (!SQL_COLUMN_TYPE.test(type)) throw new Error(`addColumns: not a plain column type: ${type}`)
   }
-  const existing = new Set((await driver.all<{ name: string }>(`PRAGMA table_info(${table})`)).map((c) => c.name))
+  const existing = new Set((await driver.all<{ name: string }>(tableInfo(table))).map((c) => c.name))
   for (const [column, type] of columns) {
-    if (!existing.has(column)) await driver.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`)
+    if (!existing.has(column)) await driver.exec(addColumn(table, column, type))
   }
 }
 
-const sqlStringLiteral = (value: string): string => `'${value.replaceAll("'", "''")}'`
+export interface SwapRepository<Row, State extends string> {
+  onTransition?: TransitionHook
+  close(): Promise<void>
+  get(id: string): Promise<Row>
+  findByRfqId(rfqId: string): Promise<Row | null>
+  findByPkScript(pkScript: string): Promise<Row | null>
+  findByPaymentHash(paymentHash: string): Promise<Row | null>
+  findLiveByPaymentHash(paymentHash: string): Promise<Row | null>
+  committedSats(): Promise<number>
+  countByStates(states: readonly State[]): Promise<number>
+  findByStates(states: readonly State[], options?: FindByStatesOptions): Promise<Row[]>
+  findRecoverable(): Promise<Row[]>
+  ledgerRows(window: LedgerWindow): Promise<{ rows: Row[]; truncated: boolean }>
+  page(options?: PageOptions): Promise<{ rows: Row[]; nextCursor: string | null }>
+  history(swapId: string): Promise<{ at: number; from: string | null; to: string; detail: string | null }[]>
+  transition(id: string, from: State, to: State, fields?: Partial<Record<string, unknown>>): Promise<boolean>
+  patch(id: string, fields: Record<string, unknown>): Promise<void>
+  fail(id: string, from: State, reason: string): Promise<void>
+}
 
-export abstract class BaseSwapStore<Row, State extends string> {
+export abstract class BaseSwapStore<Row, State extends string> implements SwapRepository<Row, State> {
   protected constructor(
     protected readonly driver: SqlDriver,
     protected readonly now: () => number,
   ) {}
 
-  /**
-   * The store's own differences, supplied by the subclass as a class field.
-   *
-   * `tsconfig` targets ES2023, so `useDefineForClassFields` defaults to true and
-   * a subclass field is installed only AFTER `super()` returns. That is safe as
-   * written because nothing in this constructor reads `shape` — but it means
-   * base-constructor logic that reached for it would silently see `undefined`.
-   * If this constructor ever needs the shape, take it as a parameter instead.
-   */
+  /** A subclass field, installed only AFTER `super()` returns (`useDefineForClassFields`): the base constructor must not read it. */
   protected abstract readonly shape: StoreShape<Row, State> & FailStatesIn<State>
+
+  #sql?: BaseSwapSql
+  protected get sql(): BaseSwapSql {
+    return (this.#sql ??= baseSwapSql(this.shape.table, this.shape.eventTable))
+  }
 
   async close(): Promise<void> {
     await this.driver.close()
   }
 
   async get(id: string): Promise<Row> {
-    const raw = await this.driver.get<RawRow>(`SELECT * FROM ${this.shape.table} WHERE id = ?`, [id])
+    const raw = await this.driver.get<RawRow>(this.sql.selectById, [id])
     if (!raw) throw new Error(`${this.shape.noun} ${id} not found`)
     return this.shape.toRow(raw)
   }
 
-  /**
-   * Most recent swap carrying this RFQ correlation id, any state.
-   *
-   * The ordering is load-bearing and identical in all four stores: an rfq id is
-   * a CORRELATION id rather than a key, so a client that re-quotes reuses it and
-   * the table legitimately holds several. Dropping the `ORDER BY` returns
-   * whichever row SQLite reaches first, which is usually the oldest — a stale
-   * refused quote in place of the live one.
-   */
+  /** Newest first is required: a re-quote reuses the rfq id, and the oldest row is a stale refused quote. */
   async findByRfqId(rfqId: string): Promise<Row | null> {
-    const raw = await this.driver.get<RawRow>(
-      `SELECT * FROM ${this.shape.table} WHERE rfq_id = ? ORDER BY created_at DESC LIMIT 1`,
-      [rfqId],
-    )
+    const raw = await this.driver.get<RawRow>(this.sql.selectNewestByRfqId, [rfqId])
     return raw ? this.shape.toRow(raw) : null
   }
 
-  /** Newest first for `findByRfqId`'s reason: two rows share a script only through a re-quote against one secret, and then the live row is the later. */
+  /** Newest first: a re-quote against one secret repeats the script, and the live row is the later. */
   async findByPkScript(pkScript: string): Promise<Row | null> {
-    const raw = await this.driver.get<RawRow>(
-      `SELECT * FROM ${this.shape.table} WHERE pk_script = ? ORDER BY created_at DESC LIMIT 1`,
-      [pkScript],
-    )
+    const raw = await this.driver.get<RawRow>(this.sql.selectNewestByPkScript, [pkScript])
     return raw ? this.shape.toRow(raw) : null
   }
 
-  /** Most recent swap for a hash, any state — the status lookup's view. */
   async findByPaymentHash(paymentHash: string): Promise<Row | null> {
-    const raw = await this.driver.get<RawRow>(
-      `SELECT * FROM ${this.shape.table} WHERE payment_hash = ? ORDER BY created_at DESC LIMIT 1`,
-      [paymentHash],
-    )
+    const raw = await this.driver.get<RawRow>(this.sql.selectNewestByPaymentHash, [paymentHash])
     return raw ? this.shape.toRow(raw) : null
   }
 
-  /** The swap that BLOCKS a new quote for this hash, if any — mirrors the partial unique index. */
+  /** Mirrors the partial unique index on `payment_hash`. */
   async findLiveByPaymentHash(paymentHash: string): Promise<Row | null> {
-    const raw = await this.driver.get<RawRow>(
-      `SELECT * FROM ${this.shape.table} WHERE payment_hash = ? AND state != 'refused' LIMIT 1`,
-      [paymentHash],
-    )
+    const raw = await this.driver.get<RawRow>(this.sql.selectLiveByPaymentHash, [paymentHash])
     return raw ? this.shape.toRow(raw) : null
   }
 
   async committedSats(): Promise<number> {
-    const placeholders = this.shape.live.map(() => '?').join(',')
-    const row = await this.driver.get<{ total: number }>(
-      `SELECT COALESCE(SUM(amount_sats), 0) AS total FROM ${this.shape.table} WHERE state IN (${placeholders})`,
-      [...this.shape.live],
-    )
+    const row = await this.driver.get<{ total: number }>(this.sql.sumAmountInStates(this.shape.live.length), [
+      ...this.shape.live,
+    ])
     return Number(row?.total ?? 0)
   }
 
   async countByStates(states: readonly State[]): Promise<number> {
     if (states.length === 0) return 0
-    const placeholders = states.map(() => '?').join(',')
-    const row = await this.driver.get<{ total: number }>(
-      `SELECT COUNT(*) AS total FROM ${this.shape.table} WHERE state IN (${placeholders})`,
-      [...states],
-    )
+    const row = await this.driver.get<{ total: number }>(this.sql.countInStates(states.length), [...states])
     return Number(row?.total ?? 0)
   }
 
   async findByStates(states: readonly State[], options: FindByStatesOptions = {}): Promise<Row[]> {
     if (states.length === 0) return []
-    const placeholders = states.map(() => '?').join(',')
-    // Oldest-first and unbounded by default: that is what the sweep wants, and
-    // the sweep is the caller that matters. The options exist for the console,
-    // which reads a TERMINAL set that only ever grows.
-    const order = options.newestFirst === true ? 'updated_at DESC' : 'created_at'
-    const cap = options.limit === undefined ? '' : ` LIMIT ${Math.max(0, Math.trunc(options.limit))}`
-    const rows = await this.driver.all<RawRow>(
-      `SELECT * FROM ${this.shape.table} WHERE state IN (${placeholders}) ORDER BY ${order}${cap}`,
-      [...states],
-    )
+    const rows = await this.driver.all<RawRow>(this.sql.selectInStates(states.length, options), [...states])
     return rows.map((raw) => this.shape.toRow(raw))
   }
 
@@ -219,57 +164,19 @@ export abstract class BaseSwapStore<Row, State extends string> {
     return this.findByStates(this.shape.live)
   }
 
-  async pageRecoverable(
-    options: Pick<PageOptions, 'cursor' | 'limit'> = {},
-  ): Promise<{ rows: Row[]; nextCursor: string | null }> {
-    const limit = clampLimit(options.limit)
-    const cursor = decodeCursor(options.cursor)
-    const placeholders = this.shape.live.map(() => '?').join(',')
-    const indexClause = this.shape.recoveryOrderIndex ? ` INDEXED BY ${this.shape.recoveryOrderIndex}` : ''
-    const stateClause = this.shape.recoveryOrderIndex
-      ? `state IN (${this.shape.live.map(sqlStringLiteral).join(',')})`
-      : `state IN (${placeholders})`
-    const cursorClause = cursor ? ' AND (created_at, rowid) > (?, ?)' : ''
-    const params: unknown[] = this.shape.recoveryOrderIndex ? [] : [...this.shape.live]
-    if (cursor) params.push(cursor.createdAt, cursor.rowid)
-    const raw = await this.driver.all<RawRow & PageRawFields>(
-      `SELECT *, rowid AS _rowid FROM ${this.shape.table}${indexClause}
-       WHERE ${stateClause}${cursorClause}
-       ORDER BY created_at ASC, rowid ASC LIMIT ?`,
-      [...params, limit + 1],
-    )
-    const { page, nextCursor } = takePage(raw, limit)
-    return { rows: page.map((row) => this.shape.toRow(row)), nextCursor }
-  }
-
   /**
-   * Every row whose LAST MOVEMENT falls in a window, newest first, capped.
-   *
-   * `updated_at` rather than `created_at`, because this backs the P&L read and
-   * a swap belongs to the day its money moved, not the day it was quoted. There
-   * is no index on that column and deliberately so: this is an operator screen
-   * over a table of at most tens of thousands of rows, a scan costs
-   * milliseconds, and an index on a column every transition writes would be paid
-   * for on the money path to save time on a dashboard.
-   *
-   * One row over the cap is fetched so `truncated` is a fact rather than a
-   * guess — `rows.length === limit` cannot tell a window that exactly filled
-   * from one that overflowed, and a partial book reported as a total is the one
-   * failure a profit screen must not have.
+   * `updated_at`: a swap belongs to the day its money moved. Unindexed on purpose, since every
+   * transition writes it. `limit + 1` because a full page cannot tell filled from overflowed.
    */
   async ledgerRows(window: LedgerWindow): Promise<{ rows: Row[]; truncated: boolean }> {
     const limit = clampLedgerLimit(window.limit)
-    const raw = await this.driver.all<RawRow>(
-      `SELECT * FROM ${this.shape.table} WHERE updated_at >= ? AND updated_at < ? ORDER BY updated_at DESC LIMIT ?`,
-      [window.since, window.until, limit + 1],
-    )
+    const raw = await this.driver.all<RawRow>(this.sql.selectUpdatedInWindow, [window.since, window.until, limit + 1])
     return { rows: raw.slice(0, limit).map((r) => this.shape.toRow(r)), truncated: raw.length > limit }
   }
 
   async page(options: PageOptions = {}): Promise<{ rows: Row[]; nextCursor: string | null }> {
     const { sql, params, limit } = pageQuery(this.shape.table, {
       ...options,
-      // The store owns the column list; a caller only ever supplies a term.
       search: options.searchTerm ? { term: options.searchTerm, columns: this.shape.searchColumns } : options.search,
     })
     const raw = await this.driver.all<RawRow & PageRawFields>(sql, params)
@@ -277,37 +184,19 @@ export abstract class BaseSwapStore<Row, State extends string> {
     return { rows: page.map((r) => this.shape.toRow(r)), nextCursor }
   }
 
-  /**
-   * Always selects `detail`, on every store.
-   *
-   * Three of the four used to omit it while their event tables declared the
-   * column and their `recordEvent` already wrote it, so the note was reachable
-   * from one corridor and invisible from the others. Widening the other three
-   * is additive — a caller that ignored the field still ignores it.
-   */
   async history(swapId: string): Promise<{ at: number; from: string | null; to: string; detail: string | null }[]> {
-    const rows = await this.driver.all<RawRow>(
-      `SELECT at, from_state, to_state, detail FROM ${this.shape.eventTable} WHERE swap_id = ? ORDER BY id`,
-      [swapId],
-    )
+    const rows = await this.driver.all<RawRow>(this.sql.selectHistory, [swapId])
     return rows.map((r) => ({
       at: Number(r.at),
       from: r.from_state === null ? null : String(r.from_state),
       to: String(r.to_state),
-      // Non-null only on a note — a thing that happened TO the swap without
-      // moving it through the lifecycle. A refund is the only one today.
       detail: r.detail === null || r.detail === undefined ? null : String(r.detail),
     }))
   }
 
   /**
-   * The compare-and-swap. `WHERE id = ? AND state = ?` is what stops two sweeps
-   * acting on one row: the loser changes nothing and gets false back.
-   *
-   * The edge check throws rather than returning false, because an illegal edge
-   * is a caller BUG — a retry tool or admin command walking a swap backwards —
-   * whereas a lost race is ordinary. Collapsing the two would let the first hide
-   * inside the second's return value.
+   * Compare-and-swap: a lost race returns false; an illegal edge (a caller walking a swap
+   * backwards into re-paying) throws. Neither may be relaxed into a subclass hook.
    */
   async transition(
     id: string,
@@ -331,9 +220,7 @@ export abstract class BaseSwapStore<Row, State extends string> {
     }
     const columns = Object.keys(fields)
     assertColumns(columns, this.shape.transitionColumns, 'transition()')
-    const assignments = ['state = ?', 'updated_at = ?', ...columns.map((c) => `${c} = ?`)].join(', ')
-    const where = `id = ? AND state = ?${guard ? ` AND ${guard}` : ''}`
-    const result = await this.driver.run(`UPDATE ${this.shape.table} SET ${assignments} WHERE ${where}`, [
+    const result = await this.driver.run(this.sql.updateState(columns, guard), [
       to,
       this.now(),
       ...columns.map((c) => fields[c]),
@@ -347,57 +234,35 @@ export abstract class BaseSwapStore<Row, State extends string> {
     return result.changes === 1
   }
 
-  /**
-   * Under the same `changes === 1` guard as `recordEvent`, so it inherits the
-   * compare-and-swap's exactly-once property: the loser of a race announces
-   * nothing. Synchronous and void — an awaitable hook could delay a settlement.
-   */
+  /** Fires only for the CAS winner. Synchronous: an awaitable hook could delay a settlement. */
   onTransition?: TransitionHook
 
   async patch(id: string, fields: Record<string, unknown>): Promise<void> {
     const columns = Object.keys(fields)
     if (columns.length === 0) return
     assertColumns(columns, this.shape.patchColumns, 'patch()')
-    const assignments = ['updated_at = ?', ...columns.map((c) => `${c} = ?`)].join(', ')
-    await this.driver.run(`UPDATE ${this.shape.table} SET ${assignments} WHERE id = ?`, [
-      this.now(),
-      ...columns.map((c) => fields[c]),
-      id,
-    ])
+    await this.driver.run(this.sql.updateFields(columns), [this.now(), ...columns.map((c) => fields[c]), id])
   }
 
-  /**
-   * `stuck` rather than a generic failure when money is already exposed: those
-   * need a human, and flattening them into "failed" hides that.
-   */
   async fail(id: string, from: State, reason: string): Promise<void> {
     const to = (this.shape.exposed.includes(from) ? 'stuck' : 'refused') as State
     await this.transition(id, from, to, { failure_reason: reason })
   }
 
   /**
-   * Won by ONE caller before it spends; the `transition` CAS after gates only recording.
-   * No TTL unless `staleBefore` is given: an expiry lets a second worker pay while the first is
-   * in flight, so only a store whose payment cannot be repeated passes one. Protected because
-   * `send_swap` has no `fund_started_at`; stores with the column widen it.
+   * Won by ONE caller before it spends. Pass `staleBefore` only if the payment cannot repeat:
+   * an expiry lets a second worker pay while the first is in flight. `send_swap` lacks the column.
    */
   protected async claimFundLease(id: string, from: State, staleBefore?: number): Promise<boolean> {
-    const result = await this.driver.run(
-      `UPDATE ${this.shape.table} SET fund_started_at = ?, updated_at = ?
-       WHERE id = ? AND state = ? AND (fund_started_at IS NULL OR fund_started_at <= ?)`,
-      [this.now(), this.now(), id, from, staleBefore ?? -1],
-    )
+    const result = await this.driver.run(this.sql.claimFundLease, [this.now(), this.now(), id, from, staleBefore ?? -1])
     return result.changes === 1
   }
 
   protected async releaseFundLease(id: string): Promise<void> {
-    await this.driver.run(`UPDATE ${this.shape.table} SET fund_started_at = NULL WHERE id = ?`, [id])
+    await this.driver.run(this.sql.releaseFundLease, [id])
   }
 
   protected async recordEvent(swapId: string, from: State | null, to: State, detail: string | null): Promise<void> {
-    await this.driver.run(
-      `INSERT INTO ${this.shape.eventTable} (swap_id, at, from_state, to_state, detail) VALUES (?, ?, ?, ?, ?)`,
-      [swapId, this.now(), from, to, detail],
-    )
+    await this.driver.run(this.sql.insertEvent, [swapId, this.now(), from, to, detail])
   }
 }

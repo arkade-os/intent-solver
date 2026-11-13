@@ -53,7 +53,8 @@ import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkad
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 import { OfferNotSubmittedError, type FulfillOptions } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { assetRfqPairFor } from '../wire/assetRfqPayloads.js'
-import { AssetRfqSwapStore, type AssetRfqSwapRow } from '../db/assetRfqSwaps.js'
+import { type AssetRfqSwapRow } from '../db/assetRfqSwaps.js'
+import type { AssetRfqSwapRepository } from '../db/assetRfqSwaps.js'
 
 /**
  * A market this deployment serves, plus where its price comes from.
@@ -109,7 +110,7 @@ export interface OfferTerms {
 
 export interface AssetRfqDeps {
   quoteLimiter?: RateLimiter
-  store: AssetRfqSwapStore
+  store: AssetRfqSwapRepository
   /** Markets served. An empty list serves none, which is the safe default. */
   markets: readonly AssetRfqMarket[]
   /** This solver's settlement key, published as the quote's `solver_pubkey`. */

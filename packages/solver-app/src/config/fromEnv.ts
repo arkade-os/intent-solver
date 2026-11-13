@@ -10,6 +10,7 @@ import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { resolveDbLayout } from '@arkade-os/solver-corridors/db/layout.js'
 import { parseEvmTokens } from '@arkade-os/solver-core/core/evmCorridorConfig.js'
 import { messageOf } from '@arkade-os/solver-core/util/poll.js'
+import { adminSql } from '../admin/db.sql.js'
 import { swapDbPath } from '../config.js'
 import { parseAssetRfqTokens } from '../ops/assetRfqMarkets.js'
 import { lightningRailFor } from '../ops/rails.js'
@@ -173,7 +174,7 @@ const storedPairs = async (path: string): Promise<MarketPair[]> => {
   if (!existsSync(path)) return []
   const driver = betterSqliteDriver(path)
   try {
-    return await driver.all<MarketPair>('SELECT base, quote FROM admin_market')
+    return await driver.all<MarketPair>(adminSql.selectMarketPairs)
   } catch (error) {
     if (/no such table/.test(messageOf(error))) return []
     throw error

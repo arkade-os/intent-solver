@@ -440,21 +440,6 @@ describe('reads the sweep and the console depend on', () => {
     await store.close()
   })
 
-  it('finds the live negotiation watching an offer script', async () => {
-    const store = await open()
-    await store.insertQuote(quote())
-    expect((await store.findLiveByOfferScript(OFFER_SCRIPT))?.id).toBe('swap-1')
-    await store.close()
-  })
-
-  it('stops finding it once the negotiation is terminal', async () => {
-    const store = await open()
-    await store.insertQuote(quote())
-    await store.fail('swap-1', 'quoted', 'expired')
-    expect(await store.findLiveByOfferScript(OFFER_SCRIPT)).toBeUndefined()
-    await store.close()
-  })
-
   it('lists only non-terminal rows for the sweep', async () => {
     const store = await open()
     await store.insertQuote(quote())

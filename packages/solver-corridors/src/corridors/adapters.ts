@@ -44,9 +44,9 @@ import { onchainRfqStatusPayload } from '../wire/onchainPayloads.js'
 import type { SendSwapService } from '../send/orchestrator.js'
 import type { ReceiveSwapService } from '../receive/orchestrator.js'
 import type { OnchainSendSwapService } from '../send/onchainOrchestrator.js'
-import type { SwapStore } from '../db/swaps.js'
-import type { ReceiveSwapStore } from '../db/receiveSwaps.js'
-import type { OnchainSendSwapStore } from '../db/onchainSwaps.js'
+import type { OnchainSendSwapRepository } from '../db/onchainSwaps.js'
+import type { SendSwapRepository } from '../db/swaps.js'
+import type { ReceiveSwapRepository } from '../db/receiveSwaps.js'
 
 /** The store surface every reader needs, whichever corridor it belongs to. */
 interface ReadableStore<Row> {
@@ -126,12 +126,12 @@ const readerFor = <Row extends { id: string; pkScript: string; preimage: string 
   close: () => store.close(),
 })
 
-export const lightningSendReader = (store: SwapStore): CorridorReader => ({
+export const lightningSendReader = (store: SendSwapRepository): CorridorReader => ({
   ...readerFor(LN_SEND, store, projectSend, rfqStatusPayload, (row) => row, sendEconomics),
   outstandingArkadeSats: async () => 0,
 })
 
-export const lightningReceiveReader = (store: ReceiveSwapStore): CorridorReader => ({
+export const lightningReceiveReader = (store: ReceiveSwapRepository): CorridorReader => ({
   ...readerFor(
     LN_RECEIVE,
     store,
@@ -146,7 +146,7 @@ export const lightningReceiveReader = (store: ReceiveSwapStore): CorridorReader 
       .reduce((sum, row) => sum + row.payoutSats, 0),
 })
 
-export const onchainSendReader = (store: OnchainSendSwapStore): CorridorReader => ({
+export const onchainSendReader = (store: OnchainSendSwapRepository): CorridorReader => ({
   ...readerFor(ONCHAIN_SEND, store, projectOnchainSend, onchainRfqStatusPayload, covenantRowFor, onchainSendEconomics),
   outstandingArkadeSats: async () => 0,
 })
@@ -159,7 +159,7 @@ export const onchainSendReader = (store: OnchainSendSwapStore): CorridorReader =
  */
 const BTC_PARKED = ['stuck', 'refused'] as const
 
-export const lightningSendCorridor = (service: SendSwapService, store: SwapStore): Corridor => ({
+export const lightningSendCorridor = (service: SendSwapService, store: SendSwapRepository): Corridor => ({
   ...lightningSendReader(store),
   quote: (payload, options) => respondToLightningRfqRequest(service, store, payload, options),
   tick: async (id) => {
@@ -173,7 +173,7 @@ export const lightningSendCorridor = (service: SendSwapService, store: SwapStore
   refundSweep: () => service.refundSweep(),
 })
 
-export const lightningReceiveCorridor = (service: ReceiveSwapService, store: ReceiveSwapStore): Corridor => ({
+export const lightningReceiveCorridor = (service: ReceiveSwapService, store: ReceiveSwapRepository): Corridor => ({
   ...lightningReceiveReader(store),
   quote: (payload, options) => respondToLightningReceiveRfqRequest(service, payload, options),
   tick: async (id) => {
@@ -184,7 +184,7 @@ export const lightningReceiveCorridor = (service: ReceiveSwapService, store: Rec
   refundNow: (id) => service.refundNow(id),
 })
 
-export const onchainSendCorridor = (service: OnchainSendSwapService, store: OnchainSendSwapStore): Corridor => ({
+export const onchainSendCorridor = (service: OnchainSendSwapService, store: OnchainSendSwapRepository): Corridor => ({
   ...onchainSendReader(store),
   quote: (payload, options) => respondToOnchainRfqRequest(service, store, payload, options),
   tick: async (id) => {

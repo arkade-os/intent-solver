@@ -20,7 +20,7 @@ import {
   type EvmReceiveAction,
   type EvmReceiveObservation,
 } from '@arkade-os/solver-core/core/evmReceivePlan.js'
-import type { EvmReceiveSwapRow, EvmReceiveSwapStore } from '../db/evmReceiveSwaps.js'
+import type { EvmReceiveSwapRow } from '../db/evmReceiveSwaps.js'
 import type { EvmBroadcaster } from '../send/evmOrchestrator.js'
 import type { EvmHtlcBackend, EvmTransactionOutcome, TimelockHeight } from '@arkade-os/solver-core/ports/evm.js'
 import type { Erc20SwapLock } from '@arkade-os/solver-rails-evm/evm/erc20Swap.js'
@@ -47,9 +47,10 @@ import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { guardedTick, sweep } from '@arkade-os/solver-core/util/sweep.js'
+import type { EvmReceiveSwapRepository } from '../db/evmReceiveSwaps.js'
 
 export interface EvmReceiveServiceDeps {
-  store: EvmReceiveSwapStore
+  store: EvmReceiveSwapRepository
   evm: EvmHtlcBackend
   broadcast: EvmBroadcaster
   /** Fund the Arkade lockup for the client; resolves to the Arkade txid. */

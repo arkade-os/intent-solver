@@ -49,11 +49,13 @@ import {
 } from '@arkade-os/solver-core/core/evmSwapState.js'
 import { evmReceiveCovenantRowFor, evmSendCovenantRowFor } from '../evm/covenantRow.js'
 import type { CovenantScriptRow } from '@arkade-os/solver-arkade/arkade/covenantRow.js'
-import type { EvmSendSwapRow, EvmSendSwapStore } from '../db/evmSendSwaps.js'
-import type { EvmReceiveSwapRow, EvmReceiveSwapStore } from '../db/evmReceiveSwaps.js'
+import type { EvmSendSwapRow } from '../db/evmSendSwaps.js'
+import type { EvmReceiveSwapRow } from '../db/evmReceiveSwaps.js'
 import type { EvmSendSwapService } from '../send/evmOrchestrator.js'
 import type { EvmReceiveSwapService } from '../receive/evmOrchestrator.js'
 import { respondToEvmReceiveRfqRequest, respondToEvmSendRfqRequest } from './evmRfq.js'
+import type { EvmSendSwapRepository } from '../db/evmSendSwaps.js'
+import type { EvmReceiveSwapRepository } from '../db/evmReceiveSwaps.js'
 
 const EVM_SEND_STATES: CorridorDescriptor<EvmSendSwapState>['states'] = {
   live: EVM_SEND_NON_TERMINAL,
@@ -190,12 +192,12 @@ const evmReaderFor = <Row extends { id: string; pkScript: string; tokenAddress: 
   close: () => store.close(),
 })
 
-export const evmSendReader = (descriptor: CorridorDescriptor, store: EvmSendSwapStore): CorridorReader =>
+export const evmSendReader = (descriptor: CorridorDescriptor, store: EvmSendSwapRepository): CorridorReader =>
   evmReaderFor(descriptor, store, projectEvmSend, evmSendCovenantRowFor, (row) =>
     evmSendEconomics(row, descriptor, presentedState(row.state, row.refundOutcome as 'pushed' | 'external' | null)),
   )
 
-export const evmReceiveReader = (descriptor: CorridorDescriptor, store: EvmReceiveSwapStore): CorridorReader =>
+export const evmReceiveReader = (descriptor: CorridorDescriptor, store: EvmReceiveSwapRepository): CorridorReader =>
   evmReaderFor(descriptor, store, projectEvmReceive, evmReceiveCovenantRowFor, (row) =>
     evmReceiveEconomics(row, descriptor),
   )
@@ -214,7 +216,7 @@ export const evmReceiveReader = (descriptor: CorridorDescriptor, store: EvmRecei
 export const evmSendCorridor = (
   policy: EvmCorridorPolicy,
   service: EvmSendSwapService,
-  store: EvmSendSwapStore,
+  store: EvmSendSwapRepository,
 ): Corridor => ({
   ...evmSendReader(evmSendDescriptor(policy.token), store),
   quote: (payload, options) => respondToEvmSendRfqRequest(service, payload, options),
@@ -233,7 +235,7 @@ export const evmSendCorridor = (
 export const evmReceiveCorridor = (
   policy: EvmCorridorPolicy,
   service: EvmReceiveSwapService,
-  store: EvmReceiveSwapStore,
+  store: EvmReceiveSwapRepository,
 ): Corridor => ({
   ...evmReceiveReader(evmReceiveDescriptor(policy.token), store),
   quote: (payload, options) => respondToEvmReceiveRfqRequest(service, payload, options),

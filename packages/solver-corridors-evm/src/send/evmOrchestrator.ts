@@ -18,7 +18,7 @@
 
 import { planEvmSend, type EvmSendAction, type EvmSendObservation } from '@arkade-os/solver-core/core/evmSendPlan.js'
 import { blocksForDuration, type EvmBlockCadence } from '@arkade-os/solver-rails-evm/evm/blockTime.js'
-import type { EvmSendQuoteRecord, EvmSendSwapRow, EvmSendSwapStore } from '../db/evmSendSwaps.js'
+import type { EvmSendQuoteRecord, EvmSendSwapRow } from '../db/evmSendSwaps.js'
 import { sendLockFromRow } from '../evm/lockFromRow.js'
 import {
   EvmClaimVerificationError,
@@ -66,12 +66,13 @@ import {
   type EvmPayoutFundingAdapter,
   type EvmPayoutFundingMode,
 } from './evmPayoutFunding.js'
+import type { EvmSendSwapRepository } from '../db/evmSendSwaps.js'
 
 /** Signs and broadcasts one call, resolving to its transaction hash. */
 export type EvmBroadcaster = (call: EvmCall) => Promise<string>
 
 export interface EvmSendServiceDeps {
-  store: EvmSendSwapStore
+  store: EvmSendSwapRepository
   evm: EvmHtlcBackend
   broadcast: EvmBroadcaster
   /** Optional external funding of the SAME quoted HTLC; never provider-status settlement. */
