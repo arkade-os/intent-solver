@@ -309,9 +309,6 @@ export interface ReceiveSwapRepository {
   countByStates(states: readonly ReceiveSwapState[]): Promise<number>
   findByStates(states: readonly ReceiveSwapState[], options?: FindByStatesOptions): Promise<ReceiveSwapRow[]>
   findRecoverable(): Promise<ReceiveSwapRow[]>
-  pageRecoverable(
-    options?: Pick<PageOptions, 'cursor' | 'limit'>,
-  ): Promise<{ rows: ReceiveSwapRow[]; nextCursor: string | null }>
   ledgerRows(window: LedgerWindow): Promise<{ rows: ReceiveSwapRow[]; truncated: boolean }>
   page(options?: PageOptions): Promise<{ rows: ReceiveSwapRow[]; nextCursor: string | null }>
   history(swapId: string): Promise<{ at: number; from: string | null; to: string; detail: string | null }[]>

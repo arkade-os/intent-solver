@@ -355,9 +355,6 @@ export interface SendSwapRepository {
   countByStates(states: readonly SendSwapState[]): Promise<number>
   findByStates(states: readonly SendSwapState[], options?: FindByStatesOptions): Promise<SendSwapRow[]>
   findRecoverable(): Promise<SendSwapRow[]>
-  pageRecoverable(
-    options?: Pick<PageOptions, 'cursor' | 'limit'>,
-  ): Promise<{ rows: SendSwapRow[]; nextCursor: string | null }>
   ledgerRows(window: LedgerWindow): Promise<{ rows: SendSwapRow[]; truncated: boolean }>
   page(options?: PageOptions): Promise<{ rows: SendSwapRow[]; nextCursor: string | null }>
   history(swapId: string): Promise<{ at: number; from: string | null; to: string; detail: string | null }[]>

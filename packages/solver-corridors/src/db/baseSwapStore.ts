@@ -18,8 +18,6 @@
 import type { SqlDriver } from './driver.js'
 import { addColumn, baseSwapSql, tableInfo, type BaseSwapSql } from './baseSwapStore.sql.js'
 import {
-  clampLimit,
-  decodeCursor,
   pageQuery,
   takePage,
   type FindByStatesOptions,
@@ -58,7 +56,6 @@ export interface StoreShape<Row, State extends string> {
    */
   readonly lifecycleLabel: string
   readonly searchColumns: readonly string[]
-  readonly recoveryOrderIndex?: string
   readonly legalEdges: Readonly<Record<State, readonly State[]>>
   readonly transitionColumns: ReadonlySet<string>
   readonly patchColumns: ReadonlySet<string>
@@ -197,21 +194,6 @@ export abstract class BaseSwapStore<Row, State extends string> {
 
   async findRecoverable(): Promise<Row[]> {
     return this.findByStates(this.shape.live)
-  }
-
-  async pageRecoverable(
-    options: Pick<PageOptions, 'cursor' | 'limit'> = {},
-  ): Promise<{ rows: Row[]; nextCursor: string | null }> {
-    const limit = clampLimit(options.limit)
-    const cursor = decodeCursor(options.cursor)
-    const params: unknown[] = this.shape.recoveryOrderIndex ? [] : [...this.shape.live]
-    if (cursor) params.push(cursor.createdAt, cursor.rowid)
-    const raw = await this.driver.all<RawRow & PageRawFields>(
-      this.sql.pageInStates(this.shape.live, this.shape.recoveryOrderIndex, cursor !== null),
-      [...params, limit + 1],
-    )
-    const { page, nextCursor } = takePage(raw, limit)
-    return { rows: page.map((row) => this.shape.toRow(row)), nextCursor }
   }
 
   /**

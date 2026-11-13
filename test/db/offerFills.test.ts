@@ -343,40 +343,6 @@ describe('OfferFillStore: queries', () => {
     for (const row of live) expect(NON_TERMINAL).toContain(row.state)
   })
 
-  it('findByRfqId() correlates a fill with the request that asked for it', async () => {
-    const row = await store.insertIntent({ ...baseIntent, rfqId: 'rfq-abc' })
-    expect((await store.findByRfqId('rfq-abc'))?.id).toBe(row.id)
-    expect(await store.findByRfqId('rfq-nope')).toBeUndefined()
-  })
-
-  it('findByRfqId() returns the LIVE re-attempt, not the dead row it shares an id with', async () => {
-    // `rfq_id` is not unique, and the partial outpoint index deliberately admits
-    // a re-attempt after a `lost` row — which carries the same RFQ id. Without
-    // an ORDER BY, SQLite returns whichever row it likes, and a caller asking
-    // "is this RFQ still being worked?" gets the corpse and answers no.
-    const dead = await store.insertIntent({ ...baseIntent, rfqId: 'rfq-abc' })
-    await store.transition(dead.id, 'fillable', 'lost')
-    now += 1
-    const live = await store.insertIntent({ ...baseIntent, id: 'fill-2', rfqId: 'rfq-abc' })
-
-    const found = await store.findByRfqId('rfq-abc')
-    expect(found?.id).toBe(live.id)
-    expect(found?.state).toBe('fillable')
-  })
-
-  it('findByRfqId() stays deterministic when both rows land in the SAME second', async () => {
-    // No clock advance, so `created_at` ties and `ORDER BY created_at DESC`
-    // alone leaves an unordered pair — the same nondeterminism the ordering
-    // exists to remove, in a narrower window. `rowid DESC` breaks it toward the
-    // later insert, which is the live one.
-    const dead = await store.insertIntent({ ...baseIntent, rfqId: 'rfq-same-second' })
-    await store.transition(dead.id, 'fillable', 'lost')
-    const live = await store.insertIntent({ ...baseIntent, id: 'fill-2', rfqId: 'rfq-same-second' })
-    expect(live.createdAt).toBe(dead.createdAt)
-
-    expect((await store.findByRfqId('rfq-same-second'))?.id).toBe(live.id)
-  })
-
   it('fail() refuses a terminal row with a message about the call, not the graph', async () => {
     const row = await store.insertIntent(baseIntent)
     await store.transition(row.id, 'fillable', 'lost')

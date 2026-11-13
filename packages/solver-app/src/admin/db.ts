@@ -35,9 +35,6 @@ export interface ServingSeed {
   tokens: readonly AssetRfqToken[]
 }
 
-/** The one key {@link AdminStore.getLastAnnouncedBalance} uses. */
-const LAST_BALANCE_KEY = 'last_announced_balance_sats'
-
 /** A swap the gate is holding. `assetId` null is BTC and `amount` is sats. */
 export interface SwapApprovalRequest {
   swapId: string
@@ -264,8 +261,6 @@ export interface AdminRepository {
   recordApprovalRequest(request: SwapApprovalRequest): Promise<boolean>
   approveSwap(swapId: string): Promise<boolean>
   isSwapApproved(swapId: string): Promise<boolean>
-  getLastAnnouncedBalance(): Promise<number | null>
-  setLastAnnouncedBalance(sats: number): Promise<void>
   listPendingApprovals(): Promise<SwapApprovalRow[]>
   listActions(limit?: number): Promise<AuditRow[]>
 }
@@ -679,20 +674,6 @@ export class AdminStore implements AdminRepository {
   async isSwapApproved(swapId: string): Promise<boolean> {
     const row = await this.driver.get<{ approved_at: number | null }>(adminSql.selectSwapApprovedAt, [swapId])
     return row !== undefined && row !== null && row.approved_at !== null
-  }
-
-  /** Nothing in the notifier reads this anymore. Zero stays distinct from absent. */
-  async getLastAnnouncedBalance(): Promise<number | null> {
-    const row = await this.driver.get<Pick<AdminNotifyStateRow, 'value'>>(adminSql.selectNotifyState, [
-      LAST_BALANCE_KEY,
-    ])
-    if (row === undefined || row === null) return null
-    const value = Number(row.value)
-    return Number.isFinite(value) ? value : null
-  }
-
-  async setLastAnnouncedBalance(sats: number): Promise<void> {
-    await this.driver.run(adminSql.upsertNotifyState, [LAST_BALANCE_KEY, String(sats), this.now()])
   }
 
   /** What is waiting on a human, oldest first — the order they should be answered in. */

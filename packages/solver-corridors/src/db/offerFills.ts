@@ -138,7 +138,6 @@ export interface OfferFillRepository {
   close(): Promise<void>
   findById(id: string): Promise<OfferFillRow | undefined>
   findLiveByOutpoint(txid: string, vout: number): Promise<OfferFillRow | undefined>
-  findByRfqId(rfqId: string): Promise<OfferFillRow | undefined>
   listNonTerminal(): Promise<OfferFillRow[]>
   page(options?: PageOptions): Promise<{ rows: OfferFillRow[]; nextCursor: string | null }>
   transition(
@@ -216,29 +215,6 @@ export class OfferFillStore implements OfferFillRepository {
   /** The live row for an outpoint, if this service is already acting on it. */
   async findLiveByOutpoint(txid: string, vout: number): Promise<OfferFillRow | undefined> {
     const raw = await this.driver.get<Raw>(offerFillsSql.selectLiveByOutpoint, [txid, vout])
-    return raw ? toRow(raw) : undefined
-  }
-
-  /**
-   * The most recent row for an RFQ id.
-   *
-   * `rfq_id` is NOT unique, and the ordering is what makes this correct rather
-   * than a tidy-up. The partial index above deliberately admits a re-attempt at
-   * an outpoint whose earlier row went `lost`, and a re-attempt carries the same
-   * RFQ id — so a dead row and a live one legitimately share it. Without an
-   * order SQLite returns whichever it likes, and a caller asking "is this RFQ
-   * still being worked?" gets the corpse and answers no.
-   *
-   * Same shape and same reason as `onchainSwaps.ts`'s `findByRfqId`, plus the
-   * `rowid` tie-break that store omits. `created_at` is a second-resolution
-   * clock, so two rows can share it and `ORDER BY created_at DESC` alone leaves
-   * them an unordered pair — the same nondeterminism this ordering exists to
-   * remove, in a narrower window. `page.ts` already draws that conclusion for
-   * the cursor ("the tie-break on rowid is what makes the cursor total") and
-   * orders by `created_at DESC, rowid DESC`; this is that, not a new idea.
-   */
-  async findByRfqId(rfqId: string): Promise<OfferFillRow | undefined> {
-    const raw = await this.driver.get<Raw>(offerFillsSql.selectNewestByRfqId, [rfqId])
     return raw ? toRow(raw) : undefined
   }
 

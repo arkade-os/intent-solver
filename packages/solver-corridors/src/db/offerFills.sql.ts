@@ -50,7 +50,6 @@ CREATE INDEX IF NOT EXISTS idx_offer_fill_event_fill ON offer_fill_event(fill_id
        ) VALUES (?, 'fillable', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
   selectById: `SELECT * FROM offer_fill WHERE id = ?`,
   selectLiveByOutpoint: `SELECT * FROM offer_fill WHERE offer_txid = ? AND offer_vout = ? AND state IN ('fillable', 'filling', 'filled')`,
-  selectNewestByRfqId: `SELECT * FROM offer_fill WHERE rfq_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`,
   selectInStates: (states: number) =>
     `SELECT * FROM offer_fill WHERE state IN (${placeholders(states)}) ORDER BY created_at ASC`,
   updateState: (columns: readonly string[]) =>

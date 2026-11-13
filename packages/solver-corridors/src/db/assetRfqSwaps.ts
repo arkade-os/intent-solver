@@ -253,9 +253,6 @@ export interface AssetRfqSwapRepository {
   countByStates(states: readonly AssetRfqSwapState[]): Promise<number>
   findByStates(states: readonly AssetRfqSwapState[], options?: FindByStatesOptions): Promise<AssetRfqSwapRow[]>
   findRecoverable(): Promise<AssetRfqSwapRow[]>
-  pageRecoverable(
-    options?: Pick<PageOptions, 'cursor' | 'limit'>,
-  ): Promise<{ rows: AssetRfqSwapRow[]; nextCursor: string | null }>
   ledgerRows(window: LedgerWindow, pair?: string): Promise<{ rows: AssetRfqSwapRow[]; truncated: boolean }>
   page(options?: PageOptions): Promise<{ rows: AssetRfqSwapRow[]; nextCursor: string | null }>
   history(swapId: string): Promise<{ at: number; from: string | null; to: string; detail: string | null }[]>
@@ -270,7 +267,6 @@ export interface AssetRfqSwapRepository {
   recordFillMark(id: string, mark: { mantissa: bigint; scale: number }): Promise<void>
   insertQuote(record: AssetRfqQuoteRecord): Promise<AssetRfqSwapRow>
   findById(id: string): Promise<AssetRfqSwapRow | undefined>
-  findLiveByOfferScript(offerPkScript: string): Promise<AssetRfqSwapRow | undefined>
   listNonTerminal(): Promise<AssetRfqSwapRow[]>
   revertUnsubmitted(id: string): Promise<boolean>
   markSubmitting(id: string): Promise<boolean>
@@ -387,12 +383,6 @@ export class AssetRfqSwapStore
     const row = await this.findById(id)
     if (!row) throw new Error(`no asset rfq swap ${id}`)
     return row
-  }
-
-  /** The live negotiation watching an offer script, if this solver has one. */
-  async findLiveByOfferScript(offerPkScript: string): Promise<AssetRfqSwapRow | undefined> {
-    const raw = await this.driver.get<Raw>(assetRfqSwapsSql.selectLiveByOfferScript, [offerPkScript])
-    return raw ? toRow(raw) : undefined
   }
 
   async listNonTerminal(): Promise<AssetRfqSwapRow[]> {

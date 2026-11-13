@@ -321,9 +321,6 @@ export interface OnchainSendSwapRepository {
   countByStates(states: readonly OnchainSendSwapState[]): Promise<number>
   findByStates(states: readonly OnchainSendSwapState[], options?: FindByStatesOptions): Promise<OnchainSendSwapRow[]>
   findRecoverable(): Promise<OnchainSendSwapRow[]>
-  pageRecoverable(
-    options?: Pick<PageOptions, 'cursor' | 'limit'>,
-  ): Promise<{ rows: OnchainSendSwapRow[]; nextCursor: string | null }>
   ledgerRows(window: LedgerWindow): Promise<{ rows: OnchainSendSwapRow[]; truncated: boolean }>
   page(options?: PageOptions): Promise<{ rows: OnchainSendSwapRow[]; nextCursor: string | null }>
   history(swapId: string): Promise<{ at: number; from: string | null; to: string; detail: string | null }[]>

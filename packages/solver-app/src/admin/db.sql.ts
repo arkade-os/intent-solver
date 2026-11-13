@@ -235,9 +235,4 @@ export const adminSql = {
   approveSwap: 'UPDATE admin_swap_approval SET approved_at = ? WHERE swap_id = ?',
   selectSwapApprovedAt: 'SELECT approved_at FROM admin_swap_approval WHERE swap_id = ?',
   selectPendingApprovals: 'SELECT * FROM admin_swap_approval WHERE approved_at IS NULL ORDER BY requested_at, swap_id',
-
-  selectNotifyState: 'SELECT value FROM admin_notify_state WHERE key = ?',
-  upsertNotifyState:
-    'INSERT INTO admin_notify_state (key, value, updated_at) VALUES (?, ?, ?) ' +
-    'ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
 } as const

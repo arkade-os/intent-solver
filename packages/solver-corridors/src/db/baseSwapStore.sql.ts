@@ -1,7 +1,5 @@
 import type { FindByStatesOptions } from '@arkade-os/solver-core/core/page.js'
 
-const sqlStringLiteral = (value: string): string => `'${value.replaceAll("'", "''")}'`
-
 export const placeholders = (count: number): string => Array.from({ length: count }, () => '?').join(',')
 
 /** Every statement {@link BaseSwapStore} runs, for one swap table and its event table. */
@@ -18,10 +16,6 @@ export const baseSwapSql = (table: string, eventTable: string) =>
       `SELECT COUNT(*) AS total FROM ${table} WHERE state IN (${placeholders(states)})`,
     selectInStates: (states: number, options: FindByStatesOptions) =>
       `SELECT * FROM ${table} WHERE state IN (${placeholders(states)}) ORDER BY ${options.newestFirst === true ? 'updated_at DESC' : 'created_at'}${options.limit === undefined ? '' : ` LIMIT ${Math.max(0, Math.trunc(options.limit))}`}`,
-    pageInStates: (live: readonly string[], index: string | undefined, withCursor: boolean) =>
-      `SELECT *, rowid AS _rowid FROM ${table}${index ? ` INDEXED BY ${index}` : ''}
-       WHERE state IN (${index ? live.map(sqlStringLiteral).join(',') : placeholders(live.length)})${withCursor ? ' AND (created_at, rowid) > (?, ?)' : ''}
-       ORDER BY created_at ASC, rowid ASC LIMIT ?`,
     selectUpdatedInWindow: `SELECT * FROM ${table} WHERE updated_at >= ? AND updated_at < ? ORDER BY updated_at DESC LIMIT ?`,
     selectHistory: `SELECT at, from_state, to_state, detail FROM ${eventTable} WHERE swap_id = ? ORDER BY id`,
     updateState: (columns: readonly string[], guard: string) =>

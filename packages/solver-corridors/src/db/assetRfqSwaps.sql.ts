@@ -69,7 +69,6 @@ CREATE INDEX IF NOT EXISTS idx_asset_rfq_swap_event_swap ON asset_rfq_swap_event
          quote_implied_mantissa, quote_implied_scale, quote_gives_base
        ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?)`,
   selectById: `SELECT * FROM asset_rfq_swap WHERE id = ?`,
-  selectLiveByOfferScript: `SELECT * FROM asset_rfq_swap WHERE offer_pk_script = ? AND state IN ('quoted', 'funded', 'filling', 'filled')`,
   selectFillingBtcPayouts: (byPair: boolean) =>
     `SELECT to_amount FROM asset_rfq_swap WHERE state = 'filling' AND to_asset_id IS NULL` +
     (byPair ? ' AND pair = ?' : ''),
