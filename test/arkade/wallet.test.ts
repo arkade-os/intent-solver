@@ -231,16 +231,21 @@ describe('refundSwapScript', () => {
     expect(submitTx).not.toHaveBeenCalled()
   })
 
-  it('goes to arkd, submit then finalize, when arkd holds the co-signer key, and to the emulator otherwise', async () => {
+  it('goes to arkd, submit then finalize, when arkd holds the co-signer key, current or deprecated, and to the emulator otherwise', async () => {
     const arkdSubmitTx = vi.fn(async (arkadeTxB64: string, checkpointsB64: string[]) => ({
       arkTxid: Transaction.fromPSBT(base64.decode(arkadeTxB64)).id,
       finalArkTx: await cosign(arkadeTxB64),
       signedCheckpointTxs: await Promise.all(checkpointsB64.map(cosign)),
     }))
     const finalizeTx = vi.fn(async (_arkTxid: string, _checkpointsB64: string[]) => undefined)
-    const routed = (signer: Uint8Array): ArkadeContext => {
+    const routed = (signer: Uint8Array, deprecated: Uint8Array[] = []): ArkadeContext => {
       const base = ctx()
-      const arkProvider = { ...arkdSigning(signer), submitTx: arkdSubmitTx, finalizeTx }
+      const info = {
+        network: 'regtest',
+        signerPubkey: hex.encode(signer),
+        deprecatedSigners: deprecated.map((pubkey) => ({ pubkey: hex.encode(pubkey), cutoffDate: 0n })),
+      }
+      const arkProvider = { getInfo: async () => info, submitTx: arkdSubmitTx, finalizeTx }
       return { ...base, wallet: { ...base.wallet, arkProvider } } as unknown as ArkadeContext
     }
 
@@ -252,6 +257,11 @@ describe('refundSwapScript', () => {
     expect(signerKeys(Transaction.fromPSBT(base64.decode(checkpointsB64[0]!)))).toEqual(
       expect.arrayContaining([hex.encode(SERVER), hex.encode(RECEIVER)]),
     )
+
+    finalizeTx.mockClear()
+    await refundSwapScript(routed(SERVER, [EMULATOR]), 'http://emulator.test', extendedScript(), FUNDED, DEST)
+    expect(submitTx).not.toHaveBeenCalled()
+    expect(finalizeTx).toHaveBeenCalledOnce()
 
     arkdSubmitTx.mockClear()
     await refundSwapScript(routed(SERVER), 'http://emulator.test', extendedScript(), FUNDED, DEST)
