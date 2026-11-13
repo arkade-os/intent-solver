@@ -18,14 +18,19 @@
  */
 
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
-import { BaseSwapStore, addColumns, numberOrNull, text, type RawRow, type StoreShape } from './baseSwapStore.js'
+import {
+  BaseSwapStore,
+  addColumns,
+  numberOrNull,
+  text,
+  type RawRow,
+  type StoreShape,
+  type SwapRepository,
+} from './baseSwapStore.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 import { LnSendMachine, type LnSendSwapState } from '../machines/lnSend.js'
 import { swapsSql } from './swaps.sql.js'
-import type { FindByStatesOptions, PageOptions } from '@arkade-os/solver-core/core/page.js'
-import type { TransitionHook } from '@arkade-os/solver-core/core/businessEvent.js'
-import type { LedgerWindow } from '@arkade-os/solver-core/analytics/economics.js'
 
 export type SendSwapState = LnSendSwapState
 export const NON_TERMINAL: readonly SendSwapState[] = LnSendMachine.live
@@ -343,29 +348,7 @@ const SHAPE: StoreShape<SendSwapRow, SendSwapState> = {
   toRow: (raw: RawRow) => toRow(raw as Raw),
 }
 
-export interface SendSwapRepository {
-  onTransition?: TransitionHook
-  close(): Promise<void>
-  get(id: string): Promise<SendSwapRow>
-  findByRfqId(rfqId: string): Promise<SendSwapRow | null>
-  findByPkScript(pkScript: string): Promise<SendSwapRow | null>
-  findByPaymentHash(paymentHash: string): Promise<SendSwapRow | null>
-  findLiveByPaymentHash(paymentHash: string): Promise<SendSwapRow | null>
-  committedSats(): Promise<number>
-  countByStates(states: readonly SendSwapState[]): Promise<number>
-  findByStates(states: readonly SendSwapState[], options?: FindByStatesOptions): Promise<SendSwapRow[]>
-  findRecoverable(): Promise<SendSwapRow[]>
-  ledgerRows(window: LedgerWindow): Promise<{ rows: SendSwapRow[]; truncated: boolean }>
-  page(options?: PageOptions): Promise<{ rows: SendSwapRow[]; nextCursor: string | null }>
-  history(swapId: string): Promise<{ at: number; from: string | null; to: string; detail: string | null }[]>
-  transition(
-    id: string,
-    from: SendSwapState,
-    to: SendSwapState,
-    fields?: Partial<Record<string, unknown>>,
-  ): Promise<boolean>
-  patch(id: string, fields: Record<string, unknown>): Promise<void>
-  fail(id: string, from: SendSwapState, reason: string): Promise<void>
+export interface SendSwapRepository extends SwapRepository<SendSwapRow, SendSwapState> {
   compareAndSwapClaimBatch(id: string, expected: string | null, next: string | null): Promise<boolean>
   insertQuote(quote: QuoteRecord): Promise<SendSwapRow>
   findByLockupTxid(txid: string): Promise<SendSwapRow | null>

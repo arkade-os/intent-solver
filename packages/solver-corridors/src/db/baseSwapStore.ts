@@ -106,7 +106,27 @@ export const addColumns = async (
   }
 }
 
-export abstract class BaseSwapStore<Row, State extends string> {
+export interface SwapRepository<Row, State extends string> {
+  onTransition?: TransitionHook
+  close(): Promise<void>
+  get(id: string): Promise<Row>
+  findByRfqId(rfqId: string): Promise<Row | null>
+  findByPkScript(pkScript: string): Promise<Row | null>
+  findByPaymentHash(paymentHash: string): Promise<Row | null>
+  findLiveByPaymentHash(paymentHash: string): Promise<Row | null>
+  committedSats(): Promise<number>
+  countByStates(states: readonly State[]): Promise<number>
+  findByStates(states: readonly State[], options?: FindByStatesOptions): Promise<Row[]>
+  findRecoverable(): Promise<Row[]>
+  ledgerRows(window: LedgerWindow): Promise<{ rows: Row[]; truncated: boolean }>
+  page(options?: PageOptions): Promise<{ rows: Row[]; nextCursor: string | null }>
+  history(swapId: string): Promise<{ at: number; from: string | null; to: string; detail: string | null }[]>
+  transition(id: string, from: State, to: State, fields?: Partial<Record<string, unknown>>): Promise<boolean>
+  patch(id: string, fields: Record<string, unknown>): Promise<void>
+  fail(id: string, from: State, reason: string): Promise<void>
+}
+
+export abstract class BaseSwapStore<Row, State extends string> implements SwapRepository<Row, State> {
   protected constructor(
     protected readonly driver: SqlDriver,
     protected readonly now: () => number,

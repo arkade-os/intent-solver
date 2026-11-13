@@ -28,13 +28,18 @@
  */
 
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
-import { BaseSwapStore, addColumns, numberOrNull, text, type RawRow, type StoreShape } from './baseSwapStore.js'
+import {
+  BaseSwapStore,
+  addColumns,
+  numberOrNull,
+  text,
+  type RawRow,
+  type StoreShape,
+  type SwapRepository,
+} from './baseSwapStore.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { LnReceiveMachine, type LnReceiveSwapState } from '../machines/lnReceive.js'
 import { receiveSwapsSql } from './receiveSwaps.sql.js'
-import type { FindByStatesOptions, PageOptions } from '@arkade-os/solver-core/core/page.js'
-import type { TransitionHook } from '@arkade-os/solver-core/core/businessEvent.js'
-import type { LedgerWindow } from '@arkade-os/solver-core/analytics/economics.js'
 
 export type ReceiveSwapState = LnReceiveSwapState
 
@@ -297,29 +302,7 @@ const SHAPE: StoreShape<ReceiveSwapRow, ReceiveSwapState> = {
   toRow: (raw: RawRow) => toRow(raw as Raw),
 }
 
-export interface ReceiveSwapRepository {
-  onTransition?: TransitionHook
-  close(): Promise<void>
-  get(id: string): Promise<ReceiveSwapRow>
-  findByRfqId(rfqId: string): Promise<ReceiveSwapRow | null>
-  findByPkScript(pkScript: string): Promise<ReceiveSwapRow | null>
-  findByPaymentHash(paymentHash: string): Promise<ReceiveSwapRow | null>
-  findLiveByPaymentHash(paymentHash: string): Promise<ReceiveSwapRow | null>
-  committedSats(): Promise<number>
-  countByStates(states: readonly ReceiveSwapState[]): Promise<number>
-  findByStates(states: readonly ReceiveSwapState[], options?: FindByStatesOptions): Promise<ReceiveSwapRow[]>
-  findRecoverable(): Promise<ReceiveSwapRow[]>
-  ledgerRows(window: LedgerWindow): Promise<{ rows: ReceiveSwapRow[]; truncated: boolean }>
-  page(options?: PageOptions): Promise<{ rows: ReceiveSwapRow[]; nextCursor: string | null }>
-  history(swapId: string): Promise<{ at: number; from: string | null; to: string; detail: string | null }[]>
-  transition(
-    id: string,
-    from: ReceiveSwapState,
-    to: ReceiveSwapState,
-    fields?: Partial<Record<string, unknown>>,
-  ): Promise<boolean>
-  patch(id: string, fields: Record<string, unknown>): Promise<void>
-  fail(id: string, from: ReceiveSwapState, reason: string): Promise<void>
+export interface ReceiveSwapRepository extends SwapRepository<ReceiveSwapRow, ReceiveSwapState> {
   claimFundLease(id: string, from: ReceiveSwapState): Promise<boolean>
   releaseFundLease(id: string): Promise<void>
   insertQuote(quote: ReceiveQuoteRecord): Promise<ReceiveSwapRow>

@@ -48,16 +48,11 @@ import {
   type FillPhase,
   type RawRow,
   type StoreShape,
+  type SwapRepository,
 } from './baseSwapStore.js'
-import {
-  pageQuery,
-  takePage,
-  type FindByStatesOptions,
-  type PageOptions,
-  type PageRawFields,
-} from '@arkade-os/solver-core/core/page.js'
+import { pageQuery, takePage, type PageOptions, type PageRawFields } from '@arkade-os/solver-core/core/page.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
-import { announceTransition, type TransitionHook } from '@arkade-os/solver-core/core/businessEvent.js'
+import { announceTransition } from '@arkade-os/solver-core/core/businessEvent.js'
 import { clampLedgerLimit, type LedgerWindow } from '@arkade-os/solver-core/analytics/economics.js'
 
 export type AssetRfqSwapState = 'quoted' | 'funded' | 'filling' | 'filled' | 'refused' | 'stuck'
@@ -241,29 +236,9 @@ const SHAPE: StoreShape<AssetRfqSwapRow, AssetRfqSwapState> = {
   toRow: (raw: RawRow) => toRow(raw as Raw),
 }
 
-export interface AssetRfqSwapRepository {
-  onTransition?: TransitionHook
-  close(): Promise<void>
-  get(id: string): Promise<AssetRfqSwapRow>
-  findByRfqId(rfqId: string): Promise<AssetRfqSwapRow | null>
-  findByPkScript(pkScript: string): Promise<AssetRfqSwapRow | null>
-  findByPaymentHash(paymentHash: string): Promise<AssetRfqSwapRow | null>
-  findLiveByPaymentHash(paymentHash: string): Promise<AssetRfqSwapRow | null>
+export interface AssetRfqSwapRepository extends SwapRepository<AssetRfqSwapRow, AssetRfqSwapState> {
   committedSats(pair?: string): Promise<number>
-  countByStates(states: readonly AssetRfqSwapState[]): Promise<number>
-  findByStates(states: readonly AssetRfqSwapState[], options?: FindByStatesOptions): Promise<AssetRfqSwapRow[]>
-  findRecoverable(): Promise<AssetRfqSwapRow[]>
   ledgerRows(window: LedgerWindow, pair?: string): Promise<{ rows: AssetRfqSwapRow[]; truncated: boolean }>
-  page(options?: PageOptions): Promise<{ rows: AssetRfqSwapRow[]; nextCursor: string | null }>
-  history(swapId: string): Promise<{ at: number; from: string | null; to: string; detail: string | null }[]>
-  transition(
-    id: string,
-    from: AssetRfqSwapState,
-    to: AssetRfqSwapState,
-    fields?: Partial<Record<string, unknown>>,
-  ): Promise<boolean>
-  patch(id: string, fields: Record<string, unknown>): Promise<void>
-  fail(id: string, from: AssetRfqSwapState, reason: string): Promise<void>
   recordFillMark(id: string, mark: { mantissa: bigint; scale: number }): Promise<void>
   insertQuote(record: AssetRfqQuoteRecord): Promise<AssetRfqSwapRow>
   findById(id: string): Promise<AssetRfqSwapRow | undefined>

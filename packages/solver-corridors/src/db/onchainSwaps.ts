@@ -31,11 +31,9 @@ import {
   txidList,
   type RawRow,
   type StoreShape,
+  type SwapRepository,
 } from './baseSwapStore.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
-import type { FindByStatesOptions, PageOptions } from '@arkade-os/solver-core/core/page.js'
-import type { TransitionHook } from '@arkade-os/solver-core/core/businessEvent.js'
-import type { LedgerWindow } from '@arkade-os/solver-core/analytics/economics.js'
 import { CLIENT_LOCKUP_RELEASE_DELAY_SECONDS } from '@arkade-os/solver-core/core/onchainSend.js'
 import { OnchainSendMachine, type OnchainSendSwapState } from '../machines/onchainSend.js'
 
@@ -309,29 +307,7 @@ const SHAPE: StoreShape<OnchainSendSwapRow, OnchainSendSwapState> = {
   toRow: (raw: RawRow) => toRow(raw as Raw),
 }
 
-export interface OnchainSendSwapRepository {
-  onTransition?: TransitionHook
-  close(): Promise<void>
-  get(id: string): Promise<OnchainSendSwapRow>
-  findByRfqId(rfqId: string): Promise<OnchainSendSwapRow | null>
-  findByPkScript(pkScript: string): Promise<OnchainSendSwapRow | null>
-  findByPaymentHash(paymentHash: string): Promise<OnchainSendSwapRow | null>
-  findLiveByPaymentHash(paymentHash: string): Promise<OnchainSendSwapRow | null>
-  committedSats(): Promise<number>
-  countByStates(states: readonly OnchainSendSwapState[]): Promise<number>
-  findByStates(states: readonly OnchainSendSwapState[], options?: FindByStatesOptions): Promise<OnchainSendSwapRow[]>
-  findRecoverable(): Promise<OnchainSendSwapRow[]>
-  ledgerRows(window: LedgerWindow): Promise<{ rows: OnchainSendSwapRow[]; truncated: boolean }>
-  page(options?: PageOptions): Promise<{ rows: OnchainSendSwapRow[]; nextCursor: string | null }>
-  history(swapId: string): Promise<{ at: number; from: string | null; to: string; detail: string | null }[]>
-  transition(
-    id: string,
-    from: OnchainSendSwapState,
-    to: OnchainSendSwapState,
-    fields?: Partial<Record<string, unknown>>,
-  ): Promise<boolean>
-  patch(id: string, fields: Record<string, unknown>): Promise<void>
-  fail(id: string, from: OnchainSendSwapState, reason: string): Promise<void>
+export interface OnchainSendSwapRepository extends SwapRepository<OnchainSendSwapRow, OnchainSendSwapState> {
   owedPayoutSats(): Promise<number>
   claimFundLease(id: string, from: OnchainSendSwapState): Promise<boolean>
   refuseUnrecorded(id: string, reason: string): Promise<boolean>
