@@ -379,6 +379,22 @@ describe('the EVM refund address', () => {
  * the control was passed, never that it is consulted before the insert.
  */
 describe('the exposure cap under concurrency', () => {
+  it('holds no headroom while the price feed is answering', async () => {
+    let answer!: (price: { mantissa: bigint; scale: number }) => void
+    const fetchPrice = vi.fn(() => new Promise((resolve) => (answer = resolve)))
+    const admission = new AdmissionControl()
+    const { service } = await build({ admission, fetchPrice, maxExposedSats: 150_000 } as never)
+
+    const quoting = service.quote(request())
+    await vi.waitFor(() => expect(fetchPrice).toHaveBeenCalled())
+    const other = await admission.reserve(150_000, async () => 0, 150_000)
+    expect(other).not.toBeNull()
+    other!.release()
+
+    answer({ mantissa: 50_000n, scale: 0 })
+    expect((await quoting).accepted).toBe(true)
+  })
+
   it('admits only one of two quotes that do not both fit', async () => {
     // Room for one 100_000-sat swap, not two. `totalCommitted` stays at 0
     // throughout, which is exactly the window the race lives in: neither row is

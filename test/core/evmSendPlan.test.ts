@@ -80,6 +80,15 @@ describe('rule 5 - a quote binds only until valid_until', () => {
     const action = planEvmSend(row(), seen({ arkadeLockupFunded: true, nowSeconds: NOW + 59 }))
     expect(action).toEqual({ do: 'lock_evm' })
   })
+
+  it.each([NOW + 60, REFUND_LOCKTIME])('refuses to lock from funded at %i, past the quote', (nowSeconds) => {
+    const action = planEvmSend(row({ state: 'funded' }), seen({ arkadeLockupFunded: true, nowSeconds }))
+    expect(action).toEqual({ do: 'refuse', reason: 'lockup funded after the quote expired' })
+  })
+
+  it('still locks from funded inside the window', () => {
+    expect(planEvmSend(row({ state: 'funded' }), seen({ nowSeconds: NOW + 59 }))).toEqual({ do: 'lock_evm' })
+  })
 })
 
 describe('rule 2 - never claim the Arkade lockup past the refund locktime', () => {

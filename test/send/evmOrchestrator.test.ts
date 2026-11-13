@@ -14,6 +14,7 @@ import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { APPROVAL_REFUSAL } from '@arkade-os/solver-core/core/approvalGate.js'
 import { EvmClaimVerificationError } from '@arkade-os/solver-core/ports/evm.js'
 import { EvmPayoutFundingQuarantinedError } from '@arkade-os/solver-core/ports/evmPayoutFunding.js'
+import { seedState } from '../evm/fixtures/seedState.js'
 
 const NOW = 1_800_000_000
 const TOKEN = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
@@ -181,7 +182,7 @@ describe('the approval gate on arkade:BTC->ethereum', () => {
       broadcast,
       approvalGate: async () => ({ proceed: false, reason: APPROVAL_REFUSAL }),
     })
-    await store.transition('swap-1', 'quoted', 'funded')
+    await seedState(store, 'swap-1', 'funded')
     await service.tick('swap-1')
     expect(broadcast).not.toHaveBeenCalled()
     expect((await store.get('swap-1')).state).toBe('funded')
@@ -434,8 +435,7 @@ describe('a preimage scan the node refuses must not strand the solver’s tokens
       broadcast: vi.fn().mockResolvedValue('0xrefund'),
       onTickError: (_id, error) => void errors.push(error),
     })
-    await store.transition('swap-1', 'quoted', 'funded')
-    await store.transition('swap-1', 'funded', 'locking_evm', { evm_lock_txid: '0xtx' })
+    await store.transition('swap-1', 'quoted', 'locking_evm', { evm_lock_txid: '0xtx' })
     await store.transition('swap-1', 'locking_evm', 'awaiting_claim')
 
     await service.tick('swap-1')
@@ -466,8 +466,7 @@ describe('a preimage scan the node refuses must not strand the solver’s tokens
         ...(payoutFunding ? { payoutFunding: payoutFunding as never } : {}),
         onTickError,
       })
-      await store.transition('swap-1', 'quoted', 'funded')
-      await store.transition('swap-1', 'funded', 'locking_evm', { evm_lock_txid: '0xtx' })
+      await store.transition('swap-1', 'quoted', 'locking_evm', { evm_lock_txid: '0xtx' })
       await store.transition('swap-1', 'locking_evm', 'awaiting_claim')
 
       await service.tickAll()
@@ -518,8 +517,7 @@ describe('a failing claim scan beside the depth probe', () => {
         timelockHeight: vi.fn().mockResolvedValue(21_000_000),
         onTickError,
       })
-      await store.transition('swap-1', 'quoted', 'funded')
-      await store.transition('swap-1', 'funded', 'locking_evm', { evm_lock_txid: '0xtx' })
+      await store.transition('swap-1', 'quoted', 'locking_evm', { evm_lock_txid: '0xtx' })
       await store.transition('swap-1', 'locking_evm', 'awaiting_claim')
 
       await service.tickAll()
@@ -555,10 +553,9 @@ describe('a quarantined receiver invariant closes only the public live row', () 
         onTickError,
       })
       if (mode === 'start') {
-        await store.transition('swap-1', 'quoted', 'funded')
+        await seedState(store, 'swap-1', 'funded')
       } else {
-        await store.transition('swap-1', 'quoted', 'funded')
-        await store.transition('swap-1', 'funded', 'locking_evm', { evm_lock_txid: '0xtx' })
+        await store.transition('swap-1', 'quoted', 'locking_evm', { evm_lock_txid: '0xtx' })
       }
       const lateLockQuery = vi.spyOn(store, 'findClosedOverLock')
 
@@ -593,8 +590,7 @@ describe('a quarantined receiver invariant closes only the public live row', () 
       payoutFunding: { identity: 'test-provider', ensure } as never,
       onTickError,
     })
-    await store.transition('swap-1', 'quoted', 'funded')
-    await store.transition('swap-1', 'funded', 'locking_evm', { evm_lock_txid: '0xtx' })
+    await store.transition('swap-1', 'quoted', 'locking_evm', { evm_lock_txid: '0xtx' })
 
     await service.tickAll()
     expect((await store.get('swap-1')).state).toBe('locking_evm')
@@ -617,8 +613,7 @@ describe('a quarantined receiver invariant closes only the public live row', () 
 describe('the scan floor comes from the lock, never from the chain tip', () => {
   const exposed = async (over: Partial<EvmSendServiceDeps> = {}) => {
     const built = await build(over)
-    await built.store.transition('swap-1', 'quoted', 'funded')
-    await built.store.transition('swap-1', 'funded', 'locking_evm', { evm_lock_txid: '0xlock' })
+    await built.store.transition('swap-1', 'quoted', 'locking_evm', { evm_lock_txid: '0xlock' })
     await built.store.transition('swap-1', 'locking_evm', 'awaiting_claim')
     return built
   }
@@ -675,8 +670,7 @@ describe('the scan floor comes from the lock, never from the chain tip', () => {
     const { store, service } = await build({
       evm: { isLocked: vi.fn().mockResolvedValue(true), findClaimPreimage } as never,
     })
-    await store.transition('swap-1', 'quoted', 'funded')
-    await store.transition('swap-1', 'funded', 'locking_evm')
+    await store.transition('swap-1', 'quoted', 'locking_evm')
     await service.tick('swap-1')
     expect(findClaimPreimage).toHaveBeenCalledWith(expect.anything(), 20_000_000n - BigInt(quote().minConfirmations), {
       minConfirmations: 1,
@@ -785,8 +779,7 @@ describe('the preimage is persisted BEFORE the Arkade claim is attempted', () =>
         return 'ark-txid'
       }),
     })
-    await store.transition('swap-1', 'quoted', 'funded')
-    await store.transition('swap-1', 'funded', 'locking_evm', { evm_lock_txid: '0xtx' })
+    await store.transition('swap-1', 'quoted', 'locking_evm', { evm_lock_txid: '0xtx' })
     await store.transition('swap-1', 'locking_evm', 'awaiting_claim')
     await service.tick('swap-1')
     expect(preimageAtClaim).toBe('ab'.repeat(32))
@@ -1004,8 +997,7 @@ describe('the solver`s own lock must be BURIED before the swap advances', () => 
       } as never,
     })
     await store.insertQuote(deepRow)
-    await store.transition('deep', 'quoted', 'funded')
-    await store.transition('deep', 'funded', 'locking_evm')
+    await store.transition('deep', 'quoted', 'locking_evm')
     await service.tick('deep')
     expect((await store.get('deep')).state).toBe('locking_evm')
   })
@@ -1022,8 +1014,7 @@ describe('the solver`s own lock must be BURIED before the swap advances', () => 
       } as never,
     })
     await store.insertQuote(deepRow)
-    await store.transition('deep', 'quoted', 'funded')
-    await store.transition('deep', 'funded', 'locking_evm')
+    await store.transition('deep', 'quoted', 'locking_evm')
     await service.tick('deep')
     expect((await store.get('deep')).state).toBe('awaiting_claim')
   })
@@ -1043,8 +1034,7 @@ describe('a lock transaction that reverted is not a lock that has not landed', (
       } as never,
       ...over,
     })
-    await built.store.transition('swap-1', 'quoted', 'funded')
-    await built.store.transition('swap-1', 'funded', 'locking_evm', { evm_lock_txid: '0xlock' })
+    await built.store.transition('swap-1', 'quoted', 'locking_evm', { evm_lock_txid: '0xlock' })
     return built
   }
 
@@ -1108,8 +1098,7 @@ describe('a lock transaction that reverted is not a lock that has not landed', (
         transactionOutcome,
       } as never,
     })
-    await store.transition('swap-1', 'quoted', 'funded')
-    await store.transition('swap-1', 'funded', 'locking_evm')
+    await store.transition('swap-1', 'quoted', 'locking_evm')
     await service.tick('swap-1')
     expect(transactionOutcome).not.toHaveBeenCalled()
     expect((await store.get('swap-1')).state).toBe('locking_evm')
@@ -1150,8 +1139,7 @@ describe('provider recovery without an EVM lock', () => {
       blockHeight: vi.fn().mockResolvedValue(q.evmTimeout),
       timelockHeight: vi.fn().mockResolvedValue(q.evmTimeout),
     })
-    await store.transition('swap-1', 'quoted', 'funded')
-    await store.transition('swap-1', 'funded', 'locking_evm')
+    await store.transition('swap-1', 'quoted', 'locking_evm')
 
     await service.tick('swap-1')
 
@@ -1183,8 +1171,7 @@ describe('a refund that was broadcast is not a refund that landed', () => {
       broadcast: vi.fn().mockResolvedValue(REFUND_TXID),
       ...over,
     })
-    await built.store.transition('swap-1', 'quoted', 'funded')
-    await built.store.transition('swap-1', 'funded', 'locking_evm', { evm_lock_txid: '0xlock' })
+    await built.store.transition('swap-1', 'quoted', 'locking_evm', { evm_lock_txid: '0xlock' })
     await built.store.transition('swap-1', 'locking_evm', 'awaiting_claim')
     return built
   }
@@ -1391,8 +1378,7 @@ describe('a row holding the losing refund txid still reaches `refunded`', () => 
       timelockHeight: vi.fn().mockResolvedValue(21_000_000),
       ...over,
     })
-    await built.store.transition('swap-1', 'quoted', 'funded')
-    await built.store.transition('swap-1', 'funded', 'locking_evm', { evm_lock_txid: '0xlock' })
+    await built.store.transition('swap-1', 'quoted', 'locking_evm', { evm_lock_txid: '0xlock' })
     await built.store.transition('swap-1', 'locking_evm', 'awaiting_claim')
     await built.store.transition('swap-1', 'awaiting_claim', 'refunding_evm', { evm_refund_txid: REFUND_TXID })
     return built
@@ -1474,7 +1460,7 @@ describe('the lock call is never optional', () => {
       broadcast,
       onTickError: () => {},
     })
-    await store.transition('swap-1', 'quoted', 'funded')
+    await seedState(store, 'swap-1', 'funded')
     // Loudly: the tick fails rather than recording a lock that is not there.
     await expect(service.tick('swap-1')).rejects.toThrow(/the lock call is never optional/)
     expect(broadcast).not.toHaveBeenCalled()

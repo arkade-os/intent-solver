@@ -9,6 +9,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { EvmSendSwapStore, type EvmSendQuoteRecord } from '@arkade-os/solver-corridors-evm/db/evmSendSwaps.js'
 import { EvmSwapStore } from '@arkade-os/solver-corridors-evm/db/evmSwapStore.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
+import { seedState } from '../evm/fixtures/seedState.js'
 
 const TOKEN = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
 const TOKEN_B = '0x6b175474e89094c44da98b954eedeac495271d0f'
@@ -97,7 +98,7 @@ describe('EvmSendSwapStore', () => {
     // store states on its own committedSats.
     await store.insertQuote(quote())
     expect(await store.committedSats()).toBe(50_000)
-    await store.transition('swap-1', 'quoted', 'funded')
+    await seedState(store, 'swap-1', 'funded')
     expect(await store.committedSats()).toBe(50_000)
     await store.transition('swap-1', 'funded', 'locking_evm')
     expect(await store.committedSats()).toBe(50_000)
@@ -122,25 +123,25 @@ describe('EvmSendSwapStore', () => {
     // The from-state guard is the whole point: a second tick that read the same
     // state is TOLD it lost, rather than silently doing nothing.
     await store.insertQuote(quote())
-    await store.transition('swap-1', 'quoted', 'funded')
-    await expect(store.transition('swap-1', 'quoted', 'funded')).rejects.toThrow(/not in state quoted/)
+    await store.transition('swap-1', 'quoted', 'locking_evm')
+    await expect(store.transition('swap-1', 'quoted', 'locking_evm')).rejects.toThrow(/not in state quoted/)
   })
 
   it('refuses to write a column it does not know', async () => {
     await store.insertQuote(quote())
-    await expect(store.transition('swap-1', 'quoted', 'funded', { evm_lock_txid_typo: '0xabc' })).rejects.toThrow(
+    await expect(store.transition('swap-1', 'quoted', 'locking_evm', { evm_lock_txid_typo: '0xabc' })).rejects.toThrow(
       /unknown column/,
     )
   })
 
   it('records every transition, so a stuck row can be read back', async () => {
     await store.insertQuote(quote())
-    await store.transition('swap-1', 'quoted', 'funded')
-    await store.fail('swap-1', 'funded', 'evm lock reverted')
+    await store.transition('swap-1', 'quoted', 'locking_evm')
+    await store.fail('swap-1', 'locking_evm', 'evm lock reverted')
     const row = await store.get('swap-1')
     expect(row.state).toBe('stuck')
     expect(row.failureReason).toBe('evm lock reverted')
-    expect((await store.history('swap-1')).map((e) => e.to)).toEqual(['quoted', 'funded', 'stuck'])
+    expect((await store.history('swap-1')).map((e) => e.to)).toEqual(['quoted', 'locking_evm', 'stuck'])
   })
 
   it('finds a row by rfq id, which every status request falls through', async () => {
@@ -176,7 +177,8 @@ describe('EvmSendSwapStore', () => {
 
   it('records a refund txid only for the first claimant', async () => {
     await store.insertQuote(quote())
-    await store.transition('swap-1', 'quoted', 'refunding_evm')
+    await store.transition('swap-1', 'quoted', 'locking_evm')
+    await store.transition('swap-1', 'locking_evm', 'refunding_evm')
 
     expect(await store.claimRefundTxid('swap-1', 'first')).toBe(true)
     expect(await store.claimRefundTxid('swap-1', 'second')).toBe(false)
@@ -193,6 +195,7 @@ describe('EvmSwapStore', () => {
           noun: 'send',
           toRow: () => undefined as never,
           nonTerminal: [],
+          legalEdges: {},
           transitionColumns: new Set(),
         })
       }
@@ -208,6 +211,7 @@ describe('EvmSwapStore', () => {
           noun: 'send',
           toRow: () => undefined as never,
           nonTerminal: [],
+          legalEdges: {},
           transitionColumns: new Set(),
         })
       }

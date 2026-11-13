@@ -7,6 +7,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { EvmReceiveSwapStore, type EvmReceiveQuoteRecord } from '@arkade-os/solver-corridors-evm/db/evmReceiveSwaps.js'
+import { seedState } from '../evm/fixtures/seedState.js'
 
 let now = 1_000_000
 const clock = () => now
@@ -142,13 +143,15 @@ describe('EvmReceiveSwapStore', () => {
     // unlimited concurrent quotes slip past and all expect funding at once.
     await store.insertQuote(quote)
     expect(await store.committedSats()).toBe(50_000)
-    await store.transition('swap-1', 'quoted', 'awaiting_lock')
+    await seedState(store, 'swap-1', 'awaiting_lock')
     expect(await store.committedSats()).toBe(50_000)
-    await store.transition('swap-1', 'awaiting_lock', 'locked')
+    await seedState(store, 'swap-1', 'locked')
     expect(await store.committedSats()).toBe(50_000)
     await store.transition('swap-1', 'locked', 'funding_arkade')
     expect(await store.committedSats()).toBe(50_000)
-    await store.transition('swap-1', 'funding_arkade', 'refunding_arkade')
+    await store.transition('swap-1', 'funding_arkade', 'awaiting_claim')
+    expect(await store.committedSats()).toBe(50_000)
+    await store.transition('swap-1', 'awaiting_claim', 'refunding_arkade')
     expect(await store.committedSats()).toBe(50_000)
     await store.transition('swap-1', 'refunding_arkade', 'refunded')
     expect(await store.committedSats()).toBe(0)
