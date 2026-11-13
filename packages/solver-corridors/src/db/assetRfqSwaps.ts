@@ -51,40 +51,13 @@ import {
 import { pageQuery, takePage, type PageOptions, type PageRawFields } from '@arkade-os/solver-core/core/page.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { announceTransition } from '@arkade-os/solver-core/core/businessEvent.js'
+import { AssetRfqMachine, type AssetRfqSwapState } from '../machines/assetRfq.js'
 import { clampLedgerLimit, type LedgerWindow } from '@arkade-os/solver-core/analytics/economics.js'
 
-export type AssetRfqSwapState = 'quoted' | 'funded' | 'filling' | 'filled' | 'refused' | 'stuck'
+export type { AssetRfqSwapState }
 
-export const NON_TERMINAL: readonly AssetRfqSwapState[] = ['quoted', 'funded', 'filling']
-
-/**
- * The one state where this solver's own capital is committed and not yet
- * recovered.
- *
- * Only `filling`. Before it nothing has been submitted; after it the fill has
- * landed, and `fulfill` pays the client and takes the deposit in the SAME
- * transaction — so there is no interval where the payout is gone and the
- * deposit is not yet ours. `quoted` and `funded` hold no exposure at all: the
- * money at the offer address is the CLIENT's until a fill spends it.
- */
-export const EXPOSED: readonly AssetRfqSwapState[] = ['filling']
-
-const LEGAL_EDGES: Record<AssetRfqSwapState, readonly AssetRfqSwapState[]> = {
-  // `refused` from `quoted` is the lapsed-quote path (§ 5's late funding), and
-  // from `funded` too: a deposit can be observed and the quote can still be
-  // found expired at action time, which must refuse rather than fill.
-  quoted: ['funded', 'refused'],
-  funded: ['filling', 'refused'],
-  // No edge back to `funded`. Once `fulfill` is submitted its outcome is either
-  // known or unknown, and "unknown" is `stuck` — never a retry, which is how a
-  // solver double-spends its own float. An edge cannot see the one phase that
-  // provably did not submit: `revertUnsubmitted` is that case, and stays OFF the
-  // graph for the reason stated there.
-  filling: ['filled', 'stuck'],
-  filled: [],
-  refused: [],
-  stuck: [],
-}
+export const NON_TERMINAL: readonly AssetRfqSwapState[] = AssetRfqMachine.live
+export const EXPOSED: readonly AssetRfqSwapState[] = AssetRfqMachine.exposed
 
 /**
  * Columns a transition may set.
@@ -223,7 +196,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_asset_rfq_swap_rfq_id ON asset_rfq_swap(rf
 -- it, of which at most one fill can succeed. Partial, so a lapsed or stuck
 -- negotiation does not block a later legitimate one at the same address.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_asset_rfq_swap_live_offer
-  ON asset_rfq_swap(offer_pk_script) WHERE state IN ('quoted', 'funded', 'filling', 'filled');
+  ON asset_rfq_swap(offer_pk_script) WHERE state IN (${AssetRfqMachine.sqlList(AssetRfqMachine.where('holdsOfferScript'))});
 
 CREATE TABLE IF NOT EXISTS asset_rfq_swap_event (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -285,7 +258,7 @@ const SHAPE: StoreShape<AssetRfqSwapRow, AssetRfqSwapState> = {
   noun: 'asset rfq swap',
   lifecycleLabel: 'asset rfq lifecycle',
   searchColumns: [],
-  legalEdges: LEGAL_EDGES,
+  legalEdges: AssetRfqMachine.edges,
   transitionColumns: TRANSITION_COLUMNS,
   patchColumns: new Set(),
   live: NON_TERMINAL,
@@ -418,7 +391,7 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
   /** The live negotiation watching an offer script, if this solver has one. */
   async findLiveByOfferScript(offerPkScript: string): Promise<AssetRfqSwapRow | undefined> {
     const raw = await this.driver.get<Raw>(
-      `SELECT * FROM asset_rfq_swap WHERE offer_pk_script = ? AND state IN ('quoted', 'funded', 'filling', 'filled')`,
+      `SELECT * FROM asset_rfq_swap WHERE offer_pk_script = ? AND state IN (${AssetRfqMachine.sqlList(AssetRfqMachine.where('holdsOfferScript'))})`,
       [offerPkScript],
     )
     return raw ? toRow(raw) : undefined
@@ -443,7 +416,7 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
    */
   override async committedSats(pair?: string): Promise<number> {
     const raws = await this.driver.all<Raw>(
-      `SELECT to_amount FROM asset_rfq_swap WHERE state = 'filling' AND to_asset_id IS NULL` +
+      `SELECT to_amount FROM asset_rfq_swap WHERE state IN (${AssetRfqMachine.sqlList(AssetRfqMachine.where('outgoing'))}) AND to_asset_id IS NULL` +
         (pair === undefined ? '' : ' AND pair = ?'),
       pair === undefined ? [] : [pair],
     )
@@ -486,7 +459,7 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
    * The ONE edge back out of `filling`, and sound only for its one caller: a fill
    * refused with `OfferNotSubmittedError`, raised above the call that submits.
    * Compare-and-swap on the state AND the phase, for the reason `OfferFillStore` gives. Deliberately
-   * absent from `LEGAL_EDGES`, so the generic `filling -> funded` keeps throwing —
+   * absent from `AssetRfqMachine.edges`, so the generic `filling -> funded` keeps throwing —
    * an edge cannot say "only when nothing was sent", so this is reached by name.
    */
   async revertUnsubmitted(id: string): Promise<boolean> {
