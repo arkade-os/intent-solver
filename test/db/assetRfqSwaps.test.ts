@@ -84,6 +84,29 @@ describe('insertQuote', () => {
     await store.close()
   })
 
+  it('round-trips the native fee split and each leg decimals', async () => {
+    const store = await open()
+    const row = await store.insertQuote(
+      quote({
+        pair: `arkade:${ASSET_A}->arkade:${ASSET_B}`,
+        fromAssetId: ASSET_A,
+        toAssetId: ASSET_B,
+        fromDecimals: 6,
+        toDecimals: 6,
+        fromFlatFee: 30_000_000n,
+        toSpread: 5_000_000n,
+      }),
+    )
+    expect(row).toMatchObject({
+      fromDecimals: 6,
+      toDecimals: 6,
+      fromFlatFee: 30_000_000n,
+      toSpread: 5_000_000n,
+    })
+    expect(await store.findById('swap-1')).toMatchObject({ fromFlatFee: 30_000_000n, toSpread: 5_000_000n })
+    await store.close()
+  })
+
   /**
    * § 4.5's natural key. The atomic class has no payment hash and the spec says
    * so: "a profile without one — the atomic class today — is identified by

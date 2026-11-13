@@ -304,6 +304,10 @@ describe('AssetRfqSwapStore.migrate', () => {
       'quote_implied_mantissa',
       'quote_implied_scale',
       'quote_gives_base',
+      'from_decimals',
+      'from_flat_fee',
+      'to_decimals',
+      'to_spread',
       'fill_price_mantissa',
       'fill_price_scale',
     ]) {

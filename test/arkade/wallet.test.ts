@@ -1039,6 +1039,22 @@ describe('findClaimPreimage', () => {
     expect(found).toEqual(PREIMAGE)
   })
 
+  it('reads the preimage off the Arkade tx of a claim accepted but never finalized', async () => {
+    // arkd before v0.9.24 stores a two-step claim's checkpoint bare; only the Arkade tx carries `P`.
+    const ARK_TXID = 'f'.repeat(64)
+    const getVtxos = vi.fn(async () => ({
+      vtxos: [{ ...OUTPOINT, value: 50_000, status: {}, isSpent: true, spentBy: SPEND_TXID, arkTxId: ARK_TXID }],
+    }))
+    const ctx = indexerCtx({
+      getVtxos,
+      virtualTxs: {
+        [SPEND_TXID]: buildSpendTxB64({}),
+        [ARK_TXID]: buildSpendTxB64({ spends: { txid: SPEND_TXID, vout: 0 }, conditionWitness: [PREIMAGE] }),
+      },
+    })
+    await expect(findClaimPreimage(ctx, [OUTPOINT], PAYMENT_HASH)).resolves.toEqual(PREIMAGE)
+  })
+
   it('finds the right input by outpoint, not by assuming index 0', async () => {
     const spendTx = buildSpendTxB64({ matchingInputIndex: 2, conditionWitness: [PREIMAGE] })
     const ctx = indexerCtx({ spentBy: SPEND_TXID, virtualTxs: { [SPEND_TXID]: spendTx } })

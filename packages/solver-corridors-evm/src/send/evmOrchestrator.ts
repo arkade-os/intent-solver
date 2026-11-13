@@ -618,17 +618,35 @@ export class EvmSendSwapService {
     // than guessing - there is no last-known-good here on purpose, because a
     // stale rate is how a solver is arbitraged.
     let evmAmount: bigint
-    // RESERVED, not merely observed. The read-then-check this replaces let two
-    // concurrent quotes both see the same headroom and both take it: a swap is
-    // invisible to `totalCommitted()` until its row lands, so the window
-    // between the check and the insert admitted more than the cap allows.
-    // `reserve` does the comparison and the claim in one serialised
-    // step, so the second caller sees the first one's claim.
-    //
-    // Taken HERE rather than before the price fetch, deliberately: a
-    // reservation held across a network round trip serialises every quote
-    // behind the feed's latency, which is the trade `core/admission.ts`
-    // declines to make for the same reason on the receive leg.
+    try {
+      const price = await this.deps.fetchPrice(market.priceFeed, market.pricePath)
+      // ROUNDED DOWN: the solver is paying this out, so a sub-unit remainder
+      // stays with the solver rather than being given away on every swap.
+      evmAmount = convertAmount({
+        baseAmount: BigInt(payoutSats),
+        price,
+        baseDecimals: 8,
+        quoteDecimals: token.decimals,
+        rounding: 'down',
+      })
+    } catch {
+      return { accepted: false, reason: 'price_unavailable' }
+    }
+    if (evmAmount <= 0n) return { accepted: false, reason: 'payout_below_dust' }
+    // The inventory bound, in the token's own units, enforced at QUOTE time —
+    // the sats bound above is width-limited and reads generous precisely when
+    // the price has run away; this is the knob that still refuses then.
+    if (
+      served.tokenLimits !== undefined &&
+      (evmAmount < served.tokenLimits.minUnits || evmAmount > served.tokenLimits.maxUnits)
+    ) {
+      return { accepted: false, reason: 'amount_out_of_range' }
+    }
+
+    // RESERVED, not merely observed: a swap is invisible to `totalCommitted()` until its row lands, and
+    // `reserve` claims in one serialised step so a concurrent quote sees this one. Taken after the price
+    // fetch so no headroom is held across the feed's round trip, but before `prepareQuote`, so a quote
+    // the cap refuses never reserves provider liquidity it would have to abandon.
     const reservation = await this.admission.reserve(
       request.amountSats,
       this.deps.totalCommitted,
@@ -637,31 +655,6 @@ export class EvmSendSwapService {
     if (reservation === null) return { accepted: false, reason: 'provider_at_capacity' }
 
     try {
-      try {
-        const price = await this.deps.fetchPrice(market.priceFeed, market.pricePath)
-        // ROUNDED DOWN: the solver is paying this out, so a sub-unit remainder
-        // stays with the solver rather than being given away on every swap.
-        evmAmount = convertAmount({
-          baseAmount: BigInt(payoutSats),
-          price,
-          baseDecimals: 8,
-          quoteDecimals: token.decimals,
-          rounding: 'down',
-        })
-      } catch {
-        return { accepted: false, reason: 'price_unavailable' }
-      }
-      if (evmAmount <= 0n) return { accepted: false, reason: 'payout_below_dust' }
-      // The inventory bound, in the token's own units, enforced at QUOTE time —
-      // the sats bound above is width-limited and reads generous precisely when
-      // the price has run away; this is the knob that still refuses then.
-      if (
-        served.tokenLimits !== undefined &&
-        (evmAmount < served.tokenLimits.minUnits || evmAmount > served.tokenLimits.maxUnits)
-      ) {
-        return { accepted: false, reason: 'amount_out_of_range' }
-      }
-
       const serverKey = hex.decode(arkade.serverPubkey)
       const id = crypto.randomUUID()
       // Constructed from parts rather than through `covenantScriptFromRow`: that

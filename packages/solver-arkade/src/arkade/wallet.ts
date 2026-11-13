@@ -446,7 +446,7 @@ const candidateWitnessItems = (tx: InstanceType<typeof Transaction>, inputIndex:
  * The preimage from whichever transaction claimed one of `outpoints` (covclaimd's claim),
  * verified against `paymentHashHex` — a matching witness SHAPE is not proof. Null means
  * nothing provable yet. `spentBy` names the CHECKPOINT tx, whose input carries the claim
- * leaf's witness, so matching its inputs to `outpoints` needs no special case.
+ * leaf's witness; so does the Arkade tx spending it at vout 0, from submit, before any finalize.
  */
 export const findClaimPreimage = async (
   ctx: ArkadeContext,
@@ -463,8 +463,14 @@ export const findClaimPreimage = async (
 
   // Both spend facts, not just `spentBy` — see lockupSpendEvidence. Truthiness, never
   // presence: both are "" rather than absent for an output they do not apply to.
-  const spendingTxids = [...new Set(vtxos.flatMap((v) => [v.spentBy, v.settledBy]).filter((id): id is string => !!id))]
+  const spendingTxids = [
+    ...new Set(vtxos.flatMap((v) => [v.spentBy, v.settledBy, v.arkTxId]).filter((id): id is string => !!id)),
+  ]
   if (spendingTxids.length === 0) return null
+  const spent = new Set([
+    ...outpoints.map((o) => `${o.txid}:${o.vout}`),
+    ...vtxos.filter((v) => v.spentBy).map((v) => `${v.spentBy}:0`),
+  ])
 
   // Same reason the vtxo read above is paged: a padded script names more spending
   // transactions than one request carries back. A match stops the later chunks too.
@@ -475,9 +481,7 @@ export const findClaimPreimage = async (
       const tx = Transaction.fromPSBT(base64.decode(raw))
       for (let i = 0; i < tx.inputsLength; i++) {
         const input = tx.getInput(i)
-        if (!input.txid) continue
-        const matchesOurOutpoint = outpoints.some((o) => hex.encode(input.txid!) === o.txid && input.index === o.vout)
-        if (!matchesOurOutpoint) continue
+        if (!input.txid || !spent.has(`${hex.encode(input.txid)}:${input.index}`)) continue
         for (const candidate of candidateWitnessItems(tx, i)) {
           if (hashMatches(candidate, paymentHashHex)) return candidate
         }

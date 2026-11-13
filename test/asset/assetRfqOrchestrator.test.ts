@@ -147,6 +147,20 @@ describe('quote', () => {
     expect(outcome.swap.validUntil).toBe(1_030)
   })
 
+  it('records the input flat fee and output spread in their native units', async () => {
+    const { service } = await harness({
+      markets: [{ ...MARKET, sellBaseFeeFlat: 300n }],
+    })
+    const outcome = await service.quote(request())
+    if (!outcome.accepted) throw new Error('expected a quote')
+    expect(outcome.swap).toMatchObject({
+      fromFlatFee: 300n,
+      toSpread: 499_998_500n,
+      fromDecimals: 8,
+      toDecimals: 6,
+    })
+  })
+
   /**
    * The whole point of the corridor: the solver derives the offer covenant that
    * the CLIENT will fund, from the terms it just quoted plus the two parameters

@@ -39,11 +39,11 @@
 import {
   evaluateAssetFill,
   parseAssetPair,
-  resolveAssetQuote,
   struckQuotePrice,
   type AssetLeg,
   type AssetQuoteMarket,
 } from '@arkade-os/solver-core/core/assetRfq.js'
+import { decomposeAssetQuote } from '@arkade-os/solver-core/core/pricingPreview.js'
 import type { Price } from '@arkade-os/solver-core/core/priceFeed.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { askApprovalFor, type ApprovalCheck } from '@arkade-os/solver-core/core/approvalGate.js'
@@ -295,7 +295,7 @@ export class AssetRfqSwapService {
       return { accepted: false, reason: 'price_unavailable', detail: 'the market feed could not be read' }
     }
 
-    const resolved = resolveAssetQuote({
+    const resolved = decomposeAssetQuote({
       pair,
       amount: request.amount,
       amountSide: request.amountSide,
@@ -333,8 +333,12 @@ export class AssetRfqSwapService {
         pair: assetRfqPairFor(pair.from, pair.to),
         fromAssetId: pair.from,
         fromAmount: resolved.fromAmount,
+        fromDecimals: pair.from === priced.base ? priced.baseDecimals : priced.quoteDecimals,
+        fromFlatFee: resolved.flatFee,
         toAssetId: pair.to,
         toAmount: resolved.toAmount,
+        toDecimals: pair.to === priced.base ? priced.baseDecimals : priced.quoteDecimals,
+        toSpread: resolved.spreadFee,
         makerPkScript: request.makerPkScript,
         makerPublicKey: request.makerPublicKey,
         offerPkScript: offer.pkScript,

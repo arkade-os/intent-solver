@@ -221,6 +221,19 @@ export interface FxLeg {
   points: FxPoint[]
 }
 
+export interface NativeAssetPnl {
+  assetId: string | null
+  decimals: number | null
+  inputFlatFee: string
+  outputSpread: string
+  total: string
+}
+
+export interface NativePnlSummary {
+  assets: NativeAssetPnl[]
+  recordCount: number
+}
+
 export interface LedgerSummary {
   since: number
   until: number
@@ -264,6 +277,8 @@ export interface LedgerSummary {
    * overstates the margin by exactly the share that reports no cost.
    */
   netMarginBps: number | null
+  /** Fee revenue in each asset's own units. */
+  nativePnl: NativePnlSummary
   atRiskSats: number
   /** Rows in the window this layer could not price, and therefore left out of every total. */
   unpricedCount: number
@@ -317,6 +332,74 @@ const priced = (record: SwapEconomics): boolean => record.realized && record.gro
  * whose rails report no cost, "net" would otherwise silently equal "gross".
  */
 const costed = (record: SwapEconomics): boolean => priced(record) && record.realizedCostSats !== null
+
+const integerOf = (value: string): bigint | null => {
+  if (value.trim() === '') return null
+  try {
+    return BigInt(value)
+  } catch {
+    return null
+  }
+}
+
+const nativePnlOf = (records: readonly SwapEconomics[]): NativePnlSummary => {
+  const totals = new Map<
+    string,
+    {
+      assetId: string | null
+      decimals: number | null
+      scaleMismatch: boolean
+      inputFlatFee: bigint
+      outputSpread: bigint
+    }
+  >()
+  let recordCount = 0
+
+  for (const record of records) {
+    if (!record.realized || record.nativePnl.length === 0) continue
+    let counted = false
+    for (const component of record.nativePnl) {
+      const amount = integerOf(component.amount)
+      if (amount === null) continue
+      const key = component.assetId ?? 'btc'
+      let total = totals.get(key)
+      if (!total) {
+        total = {
+          assetId: component.assetId,
+          decimals: component.decimals,
+          scaleMismatch: false,
+          inputFlatFee: 0n,
+          outputSpread: 0n,
+        }
+        totals.set(key, total)
+      }
+      if (!total.scaleMismatch) {
+        if (total.decimals === null) total.decimals = component.decimals
+        else if (component.decimals !== null && total.decimals !== component.decimals) {
+          total.decimals = null
+          total.scaleMismatch = true
+        }
+      }
+      if (component.source === 'input_flat_fee') total.inputFlatFee += amount
+      else if (component.source === 'output_spread') total.outputSpread += amount
+      counted = true
+    }
+    if (counted) recordCount += 1
+  }
+
+  return {
+    assets: [...totals.values()]
+      .sort((a, b) => (a.assetId ?? '').localeCompare(b.assetId ?? ''))
+      .map((total) => ({
+        assetId: total.assetId,
+        decimals: total.decimals,
+        inputFlatFee: total.inputFlatFee.toString(),
+        outputSpread: total.outputSpread.toString(),
+        total: (total.inputFlatFee + total.outputSpread).toString(),
+      })),
+    recordCount,
+  }
+}
 
 /**
  * The sats size of a trade — THE DENOMINATOR every margin is a margin of.
@@ -383,6 +466,7 @@ export const summarise = (records: readonly SwapEconomics[], since: number, unti
     netSats: costedCount === 0 ? null : costedGrossSats - realizedCostSats,
     costedCount,
     netMarginBps: costedCount === 0 ? null : marginBpsOf(costedGrossSats - realizedCostSats, costedVolumeSats),
+    nativePnl: nativePnlOf(records),
     atRiskSats,
     // Realized but unpriceable — a cross-asset fill, mostly. Reported so the
     // headline total can be read as covering part of the book rather than all

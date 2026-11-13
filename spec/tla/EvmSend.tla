@@ -358,11 +358,13 @@ Terminal == { "claimed", "refunded", "refused", "stuck" }
 Drivable == NonTerminal \cup { "none" }
 
 \* Every -> claiming / -> stuck pair is the pre-switch rule, not a state
-\* branch.  The dead `funded` row has the planner's two edges.
+\* branch.  The dead `funded` row has the planner's edges, and its lock
+\* re-checks the quote deadline like quoted's.
 Edges == [ x \in Row |->
     CASE x = "none"           -> { "quoted" }
       [] x = "quoted"         -> { "locking_evm", "claiming", "refused", "stuck" }
-      [] x = "funded"         -> { "locking_evm", "claiming", "stuck" }
+      [] x = "funded"         -> { "locking_evm", "claiming", "refused",
+                                   "stuck" }
       [] x = "locking_evm"    -> { "awaiting_claim", "claiming",
                                    "refunding_evm", "stuck" }
       [] x = "awaiting_claim" -> { "claiming", "refunding_evm", "stuck" }
@@ -590,13 +592,14 @@ InsertQuote(w, s) ==
 \* the client's late funding is its own problem (the covenant sweep returns
 \* it, outside this model's money).
 RefuseQuoted(w, s) ==
-    /\ Saw(w, s, "quoted")
-    /\ \/ /\ loc[w].res = "empty"
-          /\ QuoteStale \/ RefundOpen
-       \/ /\ loc[w].res = "funded"
-          /\ QuoteStale
-    /\ \/ CasWon(s, "quoted", "refused")
-       \/ CasLost(s, "quoted")
+    /\ \/ /\ Saw(w, s, "quoted")
+          /\ \/ /\ loc[w].res = "empty"
+                /\ QuoteStale \/ RefundOpen
+             \/ /\ loc[w].res = "funded"
+                /\ QuoteStale
+       \/ Saw(w, s, "funded") /\ QuoteStale
+    /\ \/ CasWon(s, loc[w].seen, "refused")
+       \/ CasLost(s, loc[w].seen)
     /\ Park(w)
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED LsVars
@@ -605,7 +608,7 @@ RefuseQuoted(w, s) ==
 \* crash can land between them - and between broadcast and txid patch.
 SubmitEvmLock(w, s) ==
     /\ \/ Saw(w, s, "quoted") /\ loc[w].res = "funded" /\ ~QuoteStale
-       \/ Saw(w, s, "funded")
+       \/ Saw(w, s, "funded") /\ ~QuoteStale
     /\ IF LockCommitFirst
        THEN UNCHANGED lockSends
        ELSE \* the mutation: send first, record after - two readers both send

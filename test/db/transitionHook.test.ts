@@ -119,8 +119,8 @@ describe('EvmSendSwapStore.onTransition', () => {
       nonInteractiveParameters: true,
       rfqId: 'rfq-1',
     })
-    await evm.transition('evm-1', 'quoted', 'funded')
-    expect(fired).toEqual([{ id: 'evm-1', from: 'quoted', to: 'funded' }])
+    await evm.transition('evm-1', 'quoted', 'locking_evm')
+    expect(fired).toEqual([{ id: 'evm-1', from: 'quoted', to: 'locking_evm' }])
     await evm.close()
   })
 })

@@ -194,9 +194,26 @@ export const assetRfqEconomics = (row: AssetRfqSwapRow, descriptor: CorridorDesc
     inbound: {
       assetId: row.fromAssetId,
       amount: row.depositTxid === null ? null : row.fromAmount.toString(),
-      decimals: null,
+      decimals: row.fromDecimals,
     },
-    outbound: { assetId: row.toAssetId, amount: row.toAmount.toString(), decimals: null },
+    outbound: { assetId: row.toAssetId, amount: row.toAmount.toString(), decimals: row.toDecimals },
+    nativePnl:
+      row.state !== 'filled' || row.fromFlatFee === null || row.toSpread === null
+        ? []
+        : [
+            {
+              assetId: row.fromAssetId,
+              amount: row.fromFlatFee.toString(),
+              decimals: row.fromDecimals,
+              source: 'input_flat_fee',
+            },
+            {
+              assetId: row.toAssetId,
+              amount: row.toSpread.toString(),
+              decimals: row.toDecimals,
+              source: 'output_spread',
+            },
+          ],
     // Two observations taken at two TIMES. All-or-nothing on each half: an
     // implied price with no direction beside it cannot be signed, and either
     // half on its own marks against nothing.

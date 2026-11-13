@@ -19,7 +19,7 @@ describe('the reconciliation page', () => {
     expect(source).toContain('oldest of the latest')
     expect(source).toContain('opening checkpoint predates this window')
     expect(source).toContain('checkpoint history starts after this window began')
-    expect(source).toContain('if (decimals > 20) return String(raw)')
+    expect(source).toContain('if (decimals > maxDecimals) return String(raw)')
     expect(source).toContain('reported fees')
     expect(source).toContain('so this is a minimum')
     expect(source).toContain('unsettled rows remain listed regardless of window')
