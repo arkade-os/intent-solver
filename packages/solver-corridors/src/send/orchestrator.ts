@@ -75,7 +75,7 @@ import { sweep } from '@arkade-os/solver-core/util/sweep.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
 import type { CovenantScriptRow } from '@arkade-os/solver-arkade/arkade/covenantRow.js'
-import { outpointKey } from '../legs/arkadeLockup.js'
+import { adoptedOnly, outpointKey, unadopted } from '../legs/arkadeLockup.js'
 export type { CovenantScriptRow }
 
 import type { ArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
@@ -1898,8 +1898,9 @@ export class SendSwapService {
     // An unrolled output is already off Arkade, so its claim is not parked behind the vtxo read.
     const lockupsP = capture(arkade.findLockups(row.pkScript))
     const unrolled = await advanceUnrolledClaims(store, row, arkade, row, row.preimage)
-    const outputs = claimOutputs(unwrap(await lockupsP), row.amountSats)
-    // claimOutputs falls back to EVERY output when the asset-free ones fall short, so a
+    const lockups = unwrap(await lockupsP)
+    const outputs = claimOutputs(adoptedOnly(lockups, row.lockupOutpoints), row.amountSats)
+    // claimOutputs falls back to EVERY adopted output when the asset-free ones fall short, so a
     // dust asset vtxo left after the clean funding was swept reads non-empty yet still
     // cannot cover the amount. Guard on value, not emptiness — held 0 is the empty case.
     const held = outputs.reduce((sum, o) => sum + o.value, 0)
@@ -1956,6 +1957,10 @@ export class SendSwapService {
         return false
       }
       throw error
+    }
+    const extra = unadopted(lockups, row.lockupOutpoints)
+    if (txid !== null && extra.length > 0) {
+      await arkade.refund(row, extra).catch((error: unknown) => this.onTickError?.(row.id, error))
     }
     const recourse = () => unilateralExitRecourse(row, { solverPubkey: arkade.providerPubkey })
     if (unrolled === null || unrolled.settled) {
