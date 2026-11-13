@@ -250,7 +250,7 @@ export abstract class EvmSwapStore<Row, State extends string> {
   async transition(id: string, from: State, to: State, fields: Record<string, unknown> = {}): Promise<void> {
     const { table, noun } = this.shape
     // Throws, unlike a lost CAS: an illegal edge is a caller bug, not a race.
-    if (!this.shape.legalEdges[from].includes(to)) {
+    if (!this.shape.legalEdges[from]?.includes(to)) {
       throw new Error(`illegal transition ${from} -> ${to}: not an edge of the evm ${noun} swap lifecycle`)
     }
     const columns = Object.keys(fields)
