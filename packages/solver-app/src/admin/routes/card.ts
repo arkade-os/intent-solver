@@ -14,7 +14,8 @@ import { publishStateOf } from '../publishState.js'
 import type { AdminDeps } from '../server.js'
 import { assetCardMarketsFromPolicy } from '../../ops/assetRfqMarkets.js'
 import { descriptorFor } from '@arkade-os/solver-corridors/corridors/index.js'
-import { RFQ_ASSET_SWAP_V2, rfqCovenantEnabled } from '@arkade-os/solver-core/core/rfqCovenant.js'
+import { ASSET_RFQ_COVENANT_VERSIONS } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
+import { rfqCovenantEnabled } from '@arkade-os/solver-core/core/rfqCovenant.js'
 
 /** `RELAY_URL` then `SOLVER_CARD_RELAYS`. */
 export const advertisedRelays = (relayUrl: string | null, extra: readonly string[]): string[] =>
@@ -38,11 +39,12 @@ export type CardSource = Pick<
   'config' | 'policy' | 'bootPolicy' | 'assetMarkets' | 'liveOfferMarkets' | 'assetRfqMarkets' | 'providerPubkey'
 > & { arkade: { identity: Pick<Services['arkade']['identity'], 'signMessage'> } }
 
+/** Any one served covenant is enough: negotiation picks among the enabled ones. */
+const assetRfqServed = (source: CardSource): boolean =>
+  ASSET_RFQ_COVENANT_VERSIONS.some((version) => rfqCovenantEnabled(source.bootPolicy.rfqCovenantVersions, version))
+
 /** ENABLED already — `assetMarketPolicy` drops a pause. */
-const assetMarketsOf = (
-  source: CardSource,
-  rfqServed = rfqCovenantEnabled(source.bootPolicy.rfqCovenantVersions, RFQ_ASSET_SWAP_V2),
-) =>
+const assetMarketsOf = (source: CardSource, rfqServed = assetRfqServed(source)) =>
   publishableAssetMarkets(
     assetCardMarketsFromPolicy({
       pricing: source.assetMarkets,
@@ -64,15 +66,14 @@ export const cardOmissions = (source: CardSource): string[] => [
     (corridor) =>
       `${corridor} is enabled but omitted: covenant ${descriptorFor(corridor).covenantVersion} is not in rfq.covenantVersions`,
   ),
-  ...(source.assetRfqMarkets.length === 0 ||
-  rfqCovenantEnabled(source.bootPolicy.rfqCovenantVersions, RFQ_ASSET_SWAP_V2)
+  ...(source.assetRfqMarkets.length === 0 || assetRfqServed(source)
     ? []
-    : ['asset RFQ markets are omitted: covenant asset-swap-v2 is not in rfq.covenantVersions']),
+    : [`asset RFQ markets are omitted: none of ${ASSET_RFQ_COVENANT_VERSIONS.join(', ')} is in rfq.covenantVersions`]),
   // LIVE unlike the corridor map: `rebuild` builds the corridor set from `livePolicy.evmCorridors`.
   ...unpublishableCorridors(
     source.policy.evmCorridors.filter((corridor) => corridor.enabled).map((corridor) => corridor.corridor),
   ),
-  // As if asset-swap-v2 were on, so a market's own fault still shows beside the covenant note above.
+  // As if an asset-swap covenant were on, so a market's own fault still shows beside the covenant note above.
   ...assetMarketsOf(source, true).omitted,
 ]
 

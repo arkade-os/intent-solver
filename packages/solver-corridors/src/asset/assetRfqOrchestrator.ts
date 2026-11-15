@@ -337,6 +337,7 @@ export class AssetRfqSwapService {
         // while the quote was outstanding; against its own feed it would measure
         // the configured spread and nothing else.
         ...quoteSnapshot({ resolved, market: priced, pair, feed, carrierSats: market.carrierSats }),
+        ...(request.covenantVersion === undefined ? {} : { covenantVersion: request.covenantVersion }),
       })
       return { accepted: true, swap, carrierSats: market.carrierSats }
     } catch (error) {

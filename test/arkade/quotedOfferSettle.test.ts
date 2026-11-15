@@ -13,6 +13,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
 import { offerExitDelay, offerScriptFrom } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
+import { RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_V3 } from '@arkade-os/solver-core/core/rfqCovenant.js'
 import { quotedOfferSettleFor, type QuotedOfferIntent } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
 import type { OfferOutpoint } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
 import type { fulfillOffer } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
@@ -40,15 +41,19 @@ const intent = (over: Partial<QuotedOfferIntent> = {}): QuotedOfferIntent => {
     makerPublicKey: MAKER_KEY,
     depositTxid: TXID,
     depositVout: 1,
+    covenantVersion: null,
     ...over,
   }
-  const derived = offerScriptFrom(derivation)({
-    wantAmount: base.toAmount,
-    wantAssetId: base.toAssetId,
-    offerAssetId: base.fromAssetId,
-    makerPkScript: base.makerPkScript,
-    makerPublicKey: base.makerPublicKey,
-  })
+  const derived = offerScriptFrom(derivation)(
+    {
+      wantAmount: base.toAmount,
+      wantAssetId: base.toAssetId,
+      offerAssetId: base.fromAssetId,
+      makerPkScript: base.makerPkScript,
+      makerPublicKey: base.makerPublicKey,
+    },
+    base.covenantVersion ?? undefined,
+  )
   return { offerPkScript: derived.pkScript, ...base }
 }
 
@@ -128,6 +133,31 @@ describe('quotedOfferSettleFor', () => {
     // script would spend a covenant these terms do not open.
     const { settle, fulfill } = settleWith([funded()])
     await expect(settle({ ...intent(), offerPkScript: '5120' + 'ee'.repeat(32) })).rejects.toThrow(
+      /derive .*, not the offer script/,
+    )
+    expect(fulfill).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['v3', RFQ_ASSET_SWAP_V3],
+    ['v2', RFQ_ASSET_SWAP_V2],
+    ['NULL (baseline)', null],
+  ])('settles a %s row on the tree its version derives', async (_label, covenantVersion) => {
+    const { settle, fulfill } = settleWith([funded()])
+    const row = intent({ covenantVersion })
+    await settle(row)
+    expect(hex.encode(fulfill.mock.calls[0]![2].swapPkScript)).toBe(row.offerPkScript)
+  })
+
+  it('derives a v3 row at a different script than a v2 one', () => {
+    expect(intent({ covenantVersion: RFQ_ASSET_SWAP_V3 }).offerPkScript).not.toBe(intent().offerPkScript)
+  })
+
+  it('refuses a row whose stored script does not match its stored version', async () => {
+    const { settle, fulfill } = settleWith([funded()])
+    const v3Script = intent({ covenantVersion: RFQ_ASSET_SWAP_V3 }).offerPkScript
+    await expect(settle({ ...intent(), offerPkScript: v3Script })).rejects.toThrow(/derive .*, not the offer script/)
+    await expect(settle({ ...intent(), covenantVersion: RFQ_ASSET_SWAP_V3 })).rejects.toThrow(
       /derive .*, not the offer script/,
     )
     expect(fulfill).not.toHaveBeenCalled()

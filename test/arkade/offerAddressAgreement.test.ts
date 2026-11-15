@@ -76,7 +76,7 @@ const clientOffer = async (unilateralExitDelay: number) => {
     wantAmount: terms.wantAmount,
     wantAsset: asset.AssetId.fromString(USDA),
     emulatorPubkey: '02' + hex.encode(EMULATOR),
-    generation: 'previous', // a 0.0.12 client derives v2; the SDK default is now v3
+    generation: 'previous', // a 0.0.12 client derives v2
   })
 }
 

@@ -150,6 +150,8 @@ export interface AssetRfqSwapRow {
    */
   fillPriceMantissa: bigint | null
   fillPriceScale: number | null
+  /** The covenant negotiated for this quote; null is the baseline, asset-swap-v2. */
+  covenantVersion: string | null
 }
 
 export interface AssetRfqQuoteRecord {
@@ -175,6 +177,8 @@ export interface AssetRfqQuoteRecord {
    * @see AssetRfqSwapRow.quoteImpliedMantissa
    */
   quotePrice?: { impliedMantissa: bigint; scale: number; givesBase: boolean }
+  /** Omitted when the request named no `covenant_versions`. */
+  covenantVersion?: string
 }
 
 const COLUMNS = `
@@ -203,7 +207,8 @@ const COLUMNS = `
   quote_gives_base       INTEGER,
   fill_price_mantissa    TEXT,
   fill_price_scale       INTEGER,
-  fill_phase             TEXT
+  fill_phase             TEXT,
+  covenant_version       TEXT
 `
 
 const SCHEMA = `
@@ -274,6 +279,7 @@ const toRow = (raw: Raw): AssetRfqSwapRow => ({
     raw.quote_gives_base === null || raw.quote_gives_base === undefined ? null : Number(raw.quote_gives_base) === 1,
   fillPriceMantissa: bigIntOrNull(raw.fill_price_mantissa),
   fillPriceScale: numberOrNull(raw.fill_price_scale),
+  covenantVersion: text(raw.covenant_version),
 })
 
 const bigIntOrNull = (value: string | number | null | undefined): bigint | null =>
@@ -330,6 +336,7 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
       ['fill_price_mantissa', 'TEXT'],
       ['fill_price_scale', 'INTEGER'],
       ['fill_phase', 'TEXT'],
+      ['covenant_version', 'TEXT'],
     ])
   }
 
@@ -372,8 +379,8 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
          id, state, created_at, updated_at, rfq_id, pair, from_asset_id, from_amount,
          to_asset_id, to_amount, maker_pk_script, maker_public_key, offer_pk_script,
          offer_address, solver_pubkey, valid_until, deposit_txid, deposit_vout, fill_txid, failure_reason,
-         quote_implied_mantissa, quote_implied_scale, quote_gives_base
-       ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?)`,
+         quote_implied_mantissa, quote_implied_scale, quote_gives_base, covenant_version
+       ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?)`,
       [
         record.id,
         at,
@@ -395,6 +402,7 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
         record.quotePrice?.impliedMantissa.toString() ?? null,
         record.quotePrice?.scale ?? null,
         record.quotePrice === undefined ? null : record.quotePrice.givesBase ? 1 : 0,
+        record.covenantVersion ?? null,
       ],
     )
     await this.recordEvent(record.id, null, 'quoted', null)

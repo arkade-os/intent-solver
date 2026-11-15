@@ -16,9 +16,9 @@ import { RFQ_ASSET_SWAP_V3 } from '@arkade-os/solver-core/core/rfqCovenant.js'
 import { offerVtxoScript, type Offer } from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
 
-// Everything but v3 — baseline and absent included — is the PREVIOUS tree: swap
-// #1147 flipped the SDK default to v3, so a no-generation derivation would strand
-// a v2 client's deposit at a v3 address it never derived.
+// Everything but v3 — baseline and absent included — is the PREVIOUS tree. Always
+// passed explicitly: a release that moved the SDK default would otherwise strand a
+// v2 client's deposit at an address it never derived.
 export const assetOfferGeneration = (covenantVersion?: string): 'current' | 'previous' =>
   covenantVersion === RFQ_ASSET_SWAP_V3 ? 'current' : 'previous'
 

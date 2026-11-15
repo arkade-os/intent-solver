@@ -48,7 +48,7 @@ const derive = offerScriptFrom(derivation)
 
 describe('offerScriptFrom', () => {
   it('compiles the same covenant the SDK does from the equivalent offer', () => {
-    // 'previous' = the v2 baseline; the SDK default is now v3. @see assetOfferGeneration
+    // 'previous' = the v2 baseline. @see assetOfferGeneration
     const direct = offerVtxoScript(
       {
         wantAmount: 1_000n,

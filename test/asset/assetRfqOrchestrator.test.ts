@@ -184,6 +184,15 @@ describe('quote', () => {
   })
 
   it.each([
+    ['the negotiated version', { covenantVersion: 'asset-swap-v3' }, 'asset-swap-v3'],
+    ['NULL for a request that named none', {}, null],
+  ])('persists %s and reads it back', async (_label, over, stored) => {
+    const { service, store } = await harness()
+    await service.quote(request(over))
+    expect((await store.findByRfqId(RFQ_ID))?.covenantVersion).toBe(stored)
+  })
+
+  it.each([
     ['a pair on another corridor', { pair: 'arkade:BTC->lightning:BTC' }],
     [
       'a pair with an asset on both legs, which no packet can carry',

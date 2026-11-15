@@ -14,6 +14,10 @@
 import { describe, it, expect } from 'vitest'
 import { AssetRfqSwapStore, type AssetRfqQuoteRecord } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
+import { schnorr } from '@noble/curves/secp256k1.js'
+import { hex } from '@scure/base'
+import { offerExitDelay, offerScriptFrom } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
+import { quotedOfferSettleFor } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
 
 const ASSET_A = `${'aa'.repeat(32)}0100`
 const ASSET_B = `${'bb'.repeat(32)}0100`
@@ -340,6 +344,55 @@ describe('the fill phase', () => {
     await expect(AssetRfqSwapStore.open(driver, () => 1_000)).resolves.toBeInstanceOf(AssetRfqSwapStore)
     expect((await legacy.get('old')).fillPhase).toBeNull()
     await legacy.close()
+  })
+
+  it('reads a row from before covenant_version as NULL, and settles it on the v2 tree', async () => {
+    const xonly = (fill: number) => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
+    const derivation = {
+      serverPubkey: xonly(2),
+      emulatorPubkey: xonly(4),
+      hrp: 'tark',
+      exitDelay: offerExitDelay(605_184),
+    }
+    const maker = { script: `5120${'cc'.repeat(32)}`, key: hex.encode(xonly(3)) }
+    const v2 = offerScriptFrom(derivation)({
+      wantAmount: 2n,
+      wantAssetId: ASSET_A,
+      offerAssetId: null,
+      makerPkScript: maker.script,
+      makerPublicKey: maker.key,
+    })
+    const driver = betterSqliteDriver(':memory:')
+    await driver.exec(`CREATE TABLE asset_rfq_swap (
+      id TEXT PRIMARY KEY, state TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+      rfq_id TEXT NOT NULL, pair TEXT NOT NULL, from_asset_id TEXT, from_amount TEXT NOT NULL,
+      to_asset_id TEXT, to_amount TEXT NOT NULL, maker_pk_script TEXT NOT NULL, maker_public_key TEXT NOT NULL,
+      offer_pk_script TEXT NOT NULL, offer_address TEXT NOT NULL, solver_pubkey TEXT NOT NULL,
+      valid_until INTEGER NOT NULL, deposit_txid TEXT, deposit_vout INTEGER, fill_txid TEXT, failure_reason TEXT,
+      quote_implied_mantissa TEXT, quote_implied_scale INTEGER, quote_gives_base INTEGER,
+      fill_price_mantissa TEXT, fill_price_scale INTEGER, fill_phase TEXT
+    )`)
+    await driver.run(
+      `INSERT INTO asset_rfq_swap (id, state, created_at, updated_at, rfq_id, pair, from_amount, to_asset_id,
+         to_amount, maker_pk_script, maker_public_key, offer_pk_script, offer_address, solver_pubkey, valid_until,
+         deposit_txid, deposit_vout)
+       VALUES ('old', 'funded', 1, 1, 'r', 'p', '1', ?, '2', ?, ?, ?, ?, 'f', 2000, ?, 0)`,
+      [ASSET_A, maker.script, maker.key, v2.pkScript, v2.address, 'a'.repeat(64)],
+    )
+
+    const store = await AssetRfqSwapStore.open(driver, () => 1_000)
+    const row = await store.get('old')
+    expect(row.covenantVersion).toBeNull()
+    const fulfill = async () => 'fill'.padEnd(64, '0')
+    const settle = quotedOfferSettleFor({
+      ctx: {} as never,
+      emulatorUrl: 'http://emulator.test',
+      derivation,
+      outpointsAt: async () => [{ txid: 'a'.repeat(64), vout: 0, sats: 1n, assets: [] }],
+      fulfill,
+    })
+    await expect(settle(row)).resolves.toBe('fill'.padEnd(64, '0'))
+    await store.close()
   })
 })
 

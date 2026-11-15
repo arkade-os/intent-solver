@@ -100,12 +100,20 @@ export interface FlatCorridorDeps {
   rfqCovenantVersions?: ReadonlySet<string>
 }
 
-/** `rfq.covenantVersions` as served; unset adds each injected corridor's own version to this build's defaults. */
+/** `rfq.covenantVersions` as served; unset adds each injected corridor's own versions to this build's defaults. */
 export const servedCovenantVersions = (
   configured: readonly string[] | null,
   extra: readonly Corridor[],
 ): ReadonlySet<string> =>
-  new Set(configured ?? [...RFQ_COVENANT_VERSIONS, ...extra.map((corridor) => corridor.descriptor.covenantVersion)])
+  new Set(
+    configured ?? [
+      ...RFQ_COVENANT_VERSIONS,
+      ...extra.flatMap((corridor) => [
+        corridor.descriptor.covenantVersion,
+        ...(corridor.descriptor.covenantVersions ?? []),
+      ]),
+    ],
+  )
 
 /**
  * One gate rather than each quote's own LND read: the onchain legs make none before the client has funded, so

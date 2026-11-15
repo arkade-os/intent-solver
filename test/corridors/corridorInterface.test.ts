@@ -188,7 +188,15 @@ describe('covenant negotiation', () => {
     const set = createCorridorSet([corridor], { supportedCovenantVersions: new Set(['v2', 'v3']) })
     const outcome = await set.get('a->b')!.quote(RFQ)
     expect(seen).toEqual([undefined])
-    expect(outcome.payload).not.toHaveProperty('covenant_version')
+    expect(outcome.payload).toEqual({ v: 1, type: 'rfq_quote', rfq_id: RFQ.rfq_id })
+  })
+
+  it('serves v2 to a client that lists only v2, though v3 is served too', async () => {
+    const { corridor, seen } = multi()
+    const set = createCorridorSet([corridor], { supportedCovenantVersions: new Set(['v2', 'v3']) })
+    const outcome = await set.get('a->b')!.quote({ ...RFQ, covenant_versions: ['v2'] })
+    expect(seen).toEqual(['v2'])
+    expect(outcome).toMatchObject({ payload: { covenant_version: 'v2' } })
   })
 
   it('keeps a class-based corridor whole, prototype methods and private fields included', async () => {
