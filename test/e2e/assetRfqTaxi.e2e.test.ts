@@ -428,7 +428,7 @@ afterAll(async () => {
       await new Promise<void>((resolve) => daemon.once('exit', () => resolve()))
     }
     await Promise.all([buyer?.close(), solver?.close()].filter(Boolean))
-    arkade?.close()
+    await arkade?.close()
     if (feed) await new Promise<void>((resolve) => feed.close(() => resolve()))
     if (workdir) {
       const target = resolve(workdir)

@@ -65,7 +65,7 @@ beforeAll(async () => {
   dir = tempStoreDir()
 }, SETUP_TIMEOUT_MS)
 
-afterAll(() => arkade?.close())
+afterAll(async () => await arkade?.close())
 
 const coins = async (): Promise<readonly CarrierCoin[]> =>
   spendableCarrierCoins(await arkade.ctx.wallet.getContractManager())

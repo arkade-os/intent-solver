@@ -144,7 +144,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (feed) await new Promise<void>((resolve) => feed.close(() => resolve()))
-  arkade?.close()
+  await arkade?.close()
 })
 
 const market = (over: Partial<AssetRfqMarket> = {}): AssetRfqMarket => ({
@@ -246,6 +246,8 @@ interface Harness {
 
 /** Both asset directions behind ONE relay ingress, as a deployment serves them. */
 const harness = async (over: Partial<AssetRfqMarket> = {}): Promise<Harness> => {
+  // NIP-01 rounds freshness to seconds; each fresh store shares the same solver identity.
+  await sleep(1000 - (Date.now() % 1000))
   const markets = [market(over)]
   const store = await AssetRfqSwapStore.open(join(dir, `assetrfq-relay-${randomBytes(6).toString('hex')}.sqlite`))
   const service = new AssetRfqSwapService({
@@ -374,8 +376,8 @@ describe('Alice, Bob and the solver over the regtest Nostr relay', () => {
         expect(status).toMatchObject({ type: 'rfq_status', state: 'settled' })
         expect(status?.profile['fill_txid']).toBe(filled.fillTxid)
       } finally {
-        alice.close()
-        bob.close()
+        await alice.close()
+        await bob.close()
         await store.close()
         await ingress.stop()
       }
@@ -620,8 +622,8 @@ describe('Alice, Bob and the solver over the regtest Nostr relay', () => {
             ),
           () => ingress.stop(),
           () => store.close(),
-          async () => alice?.close(),
-          async () => sink?.close(),
+          async () => await alice?.close(),
+          async () => await sink?.close(),
         ]) {
           try {
             await cleanup()

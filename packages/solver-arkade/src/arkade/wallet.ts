@@ -171,8 +171,8 @@ export interface ArkadeContext {
    */
   reservations: ReservationLedger
   directFills: DirectFillAttempts
-  /** Checkpoint and release the SQLite handle. */
-  close(): void
+  /** Drain wallet resources before checkpointing and releasing SQLite. */
+  close(): Promise<void>
 }
 
 /**
@@ -346,6 +346,7 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
     `${config.operatorUrl}:${hex.encode(wallet.arkServerPublicKey)}:${hex.encode(await identity.xOnlyPublicKey())}`,
     hex.encode(ArkAddress.decode(await wallet.getAddress()).pkScript),
   )
+  let closing: Promise<void> | undefined
   return {
     wallet,
     identity,
@@ -358,7 +359,11 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
     hrp: config.arkadeHrp,
     reservations,
     directFills,
-    close: () => executor.close(),
+    close: () =>
+      (closing ??= (async () => {
+        await wallet.dispose()
+        executor.close()
+      })()),
   }
 }
 

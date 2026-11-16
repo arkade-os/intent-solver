@@ -74,5 +74,5 @@ if (unsettled > 0) {
 }
 
 console.log('balance after:', JSON.stringify(await arkade.wallet.getBalance(), (_k, v) => asNumber(v)))
-arkade.close()
+await arkade.close()
 process.exit(0)

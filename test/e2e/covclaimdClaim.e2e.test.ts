@@ -115,6 +115,7 @@ describe('e2e covclaimd claims the receive lockup non-interactively', () => {
   afterAll(async () => {
     for (const payer of payers) payer.stop()
     await store?.close()
+    await arkade?.close()
   })
 
   it(

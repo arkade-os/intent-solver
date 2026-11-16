@@ -131,7 +131,7 @@ beforeAll(async () => {
 afterAll(async () => {
   // Guarded, not optional-chained: unset, the executor never calls `resolve`.
   if (feed) await new Promise<void>((resolve) => feed.close(() => resolve()))
-  arkade?.close()
+  await arkade?.close()
 })
 
 const market = (over: Partial<AssetRfqMarket> = {}): AssetRfqMarket => ({

@@ -101,7 +101,7 @@ export interface E2eArkade {
   limits: Limits
   /** Cap passed to every service — generous, so a shared regtest wallet's other rows never refuse a test quote. */
   maxExposedSats: number
-  close(): void
+  close(): Promise<void>
 }
 
 /**

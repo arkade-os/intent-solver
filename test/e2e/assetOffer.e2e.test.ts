@@ -71,7 +71,7 @@ beforeAll(async () => {
   await assertArkadeSpendable(arkade, NEEDED_SATS)
 }, SETUP_TIMEOUT_MS)
 
-afterAll(() => arkade?.close())
+afterAll(async () => await arkade?.close())
 
 describe('e2e arkade offers — publish, discover, settle', () => {
   it(

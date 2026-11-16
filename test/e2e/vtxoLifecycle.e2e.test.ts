@@ -96,8 +96,8 @@ describe('e2e vtxo lifecycle — the solver’s own float', () => {
     arkade = await openArkade()
   }, SETUP_TIMEOUT_MS)
 
-  afterAll(() => {
-    arkade?.close()
+  afterAll(async () => {
+    await arkade?.close()
   })
 
   it(

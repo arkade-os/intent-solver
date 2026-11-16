@@ -66,5 +66,5 @@ stack('mine', '1')
 
 console.log('arkade balance:', JSON.stringify(await arkade.wallet.getBalance(), (_k, v) => (typeof v === 'bigint' ? Number(v) : v)))
 console.log('arkade address:', await arkade.wallet.getAddress())
-arkade.close()
+await arkade.close()
 process.exit(0)

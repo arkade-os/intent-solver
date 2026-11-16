@@ -111,7 +111,7 @@ describe('e2e lightning:BTC->arkade:BTC (receive) — funding gates, races and r
 
   afterAll(async () => {
     await store?.close()
-    arkade?.close()
+    await arkade?.close()
   })
 
   it('refuses a second live quote for the same payment hash', async () => {

@@ -106,7 +106,7 @@ describe('e2e arkade:BTC->onchain:BTC (send)', () => {
   afterAll(async () => {
     await store?.close()
     await onchain?.close?.()
-    arkade?.close()
+    await arkade?.close()
   })
 
   it(

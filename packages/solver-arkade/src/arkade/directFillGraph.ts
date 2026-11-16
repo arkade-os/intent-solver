@@ -8,6 +8,7 @@ import {
   matchServerCheckpoints,
   MultisigTapscript,
   scriptFromTapLeafScript,
+  TapTreeCoder,
   Transaction,
   verifyTapscriptSignatures,
   VtxoScript,
@@ -83,6 +84,29 @@ const canonical = (value: unknown): unknown => {
 }
 const same = (a: unknown, b: unknown): boolean => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b))
 
+/** Arkd preserves the committed leaves while writing its own depth metadata. */
+export const sameVtxoTaprootTrees = (actual: readonly Uint8Array[], expected: readonly Uint8Array[]): boolean => {
+  if (actual.length !== expected.length) return false
+  const unmatched = [...expected]
+  for (const raw of actual) {
+    const match = unmatched.findIndex((held) => {
+      if (same(raw, held)) return true
+      const tree = VtxoScript.decode(held)
+      const arkd = TapTreeCoder.encode(
+        tree.scripts.map((script, index) => ({
+          depth: Math.min(index + 1, tree.scripts.length - 1),
+          version: 0xc0,
+          script: Uint8Array.from(script),
+        })),
+      )
+      return same(raw, tree.encode()) || same(raw, arkd)
+    })
+    if (match < 0) return false
+    unmatched.splice(match, 1)
+  }
+  return true
+}
+
 const assertCommitment = (got: Transaction, want: Transaction, allowRemovedMetadata = false): void => {
   if (got.id !== want.id) throw new Error('direct fill transaction id changed')
   for (let i = 0; i < want.inputsLength; i++) {
@@ -95,8 +119,8 @@ const assertCommitment = (got: Transaction, want: Transaction, allowRemovedMetad
       if (allowRemovedMetadata && actual[field] === undefined) continue
       if (!same(actual[field], expected[field])) throw new Error(`direct fill ${field} changed`)
     }
-    const trees = (tx: Transaction) => getArkPsbtFields(tx, i, VtxoTaprootTree).map(hex.encode).sort()
-    if (!(allowRemovedMetadata && trees(got).length === 0) && !same(trees(got), trees(want))) {
+    const trees = (tx: Transaction) => getArkPsbtFields(tx, i, VtxoTaprootTree)
+    if (!(allowRemovedMetadata && trees(got).length === 0) && !sameVtxoTaprootTrees(trees(got), trees(want))) {
       throw new Error('direct fill taptree changed')
     }
   }

@@ -237,6 +237,19 @@ jobs:
           GROUP_NAME: ${{ matrix.name }}
         run: |
           set -eu
+          # Esplora needs RPC/Electrum; SQL mining analytics require an unrelated GitHub download.
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs'
+          const path = 'docker/compose.base.yml'
+          const source = readFileSync(path, 'utf8')
+          const api = source.indexOf('\n  mempool_api:')
+          const web = source.indexOf('\n  mempool_web:', api)
+          if (api < 0 || web < 0) throw new Error('regtest mempool service layout changed')
+          const section = source.slice(api, web)
+          const configured = section.replace('DATABASE_ENABLED: "true"', 'DATABASE_ENABLED: "false"')
+          if (section === configured) throw new Error('regtest mempool database setting changed')
+          writeFileSync(path, source.slice(0, api) + configured + source.slice(web))
+          NODE
           if [ "$SECONDS_TYPED" = "true" ] && [ "$GROUP_NAME" != "taxi" ]; then
             export ARKD_VTXO_TREE_EXPIRY=6144 ARKD_UNILATERAL_EXIT_DELAY=512 \
                    ARKD_PUBLIC_UNILATERAL_EXIT_DELAY=512 ARKD_BOARDING_EXIT_DELAY=2048 \

@@ -3,6 +3,7 @@
 import { base64, hex } from '@scure/base'
 import { Extension, getArkPsbtFields, Transaction, VtxoTaprootTree } from '@arkade-os/sdk'
 import { verifyOfferFillPlan } from '@arkade-os/swap'
+import { sameVtxoTaprootTrees } from '@arkade-os/solver-arkade/arkade/directFillGraph.js'
 import {
   assertAssetPayouts,
   assertSolverSatsFloor,
@@ -238,9 +239,9 @@ const assertSameSpendCommitment = (candidate: Transaction, trusted: Transaction,
     if (!sameBytes(got.witnessUtxo?.script, want.witnessUtxo?.script)) differs(`input ${i} prevout script`)
     if (got.witnessUtxo?.amount !== want.witnessUtxo?.amount) differs(`input ${i} prevout value`)
     if (!sameOrAbsent(tapLeavesOf(candidate, i), tapLeavesOf(trusted, i))) differs(`input ${i} tap leaves`)
-    const trees = (of: Transaction): readonly string[] =>
-      getArkPsbtFields(of, i, VtxoTaprootTree).map(hex.encode).sort()
-    if (!sameOrAbsent(trees(candidate), trees(trusted))) differs(`input ${i} taptree`)
+    const trees = (of: Transaction): readonly Uint8Array[] => getArkPsbtFields(of, i, VtxoTaprootTree)
+    const observed = trees(candidate)
+    if (observed.length > 0 && !sameVtxoTaprootTrees(observed, trees(trusted))) differs(`input ${i} taptree`)
   }
 }
 

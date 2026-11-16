@@ -143,7 +143,7 @@ describe('e2e arkade:BTC->lightning:BTC (send) — refusals, refunds and recover
 
   afterAll(async () => {
     await store?.close()
-    arkade?.close()
+    await arkade?.close()
   })
 
   it('refuses a second live quote for the same payment hash', async () => {

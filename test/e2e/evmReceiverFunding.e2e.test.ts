@@ -302,7 +302,7 @@ beforeAll(async () => {
 }, 240_000)
 
 afterAll(async () => {
-  arkade?.close()
+  await arkade?.close()
   await sql?.close()
 })
 

@@ -37,7 +37,7 @@ beforeAll(async () => {
   await assertArkadeSpendable(arkade, NEEDED_SATS)
 }, SETUP_TIMEOUT_MS)
 
-afterAll(() => arkade?.close())
+afterAll(async () => await arkade?.close())
 
 const heldAsset = async (): Promise<{ assetId: string; amount: bigint }> => {
   const balance = await arkade.ctx.wallet.getBalance()

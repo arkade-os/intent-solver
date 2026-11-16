@@ -77,5 +77,5 @@ if (status?.state === 'settled') {
   console.log(`returns the lockup to ${swap.refundAddress} after ${swap.quote.refund_locktime} — nothing for you to do`)
 }
 
-arkade.close()
+await arkade.close()
 process.exit(0)

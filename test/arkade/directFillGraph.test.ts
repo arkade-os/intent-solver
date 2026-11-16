@@ -6,8 +6,10 @@ import {
   Extension,
   MultisigTapscript,
   SingleKey,
+  TapTreeCoder,
   Transaction,
   VtxoScript,
+  VtxoTaprootTree,
 } from '@arkade-os/sdk'
 import { base64, hex } from '@scure/base'
 import {
@@ -52,8 +54,8 @@ const deps = (): DirectFillGraphDeps => ({
   signer: solver,
   ark: { submitTx: vi.fn(), finalizeTx: vi.fn(), getPendingTxs: vi.fn().mockResolvedValue([]) },
 })
-const fixture = async () => {
-  const inputs = [coin(1, foreignTree), coin(2)]
+const fixture = async (depositTree = foreignTree) => {
+  const inputs = [coin(1, depositTree), coin(2)]
   const built = buildOffchainTx(
     inputs.map((input) => ({ ...input, tapLeafScript: input.forfeitTapLeafScript })),
     [{ script: ownTree.pkScript, amount: 10_000n }],
@@ -266,6 +268,45 @@ describe('direct fill committed graph recovery', () => {
       vtxos: inputs.map((input) => ({ ...input, spentBy: 'ff'.repeat(32) })),
     })
     expect(await directFillFinalized(mixed, graph, inputs)).toBe(false)
+  })
+
+  it.each([3, 5, 6])('accepts arkd depth metadata for a finalized %s-leaf checkpoint', async (count) => {
+    const tree = new VtxoScript(
+      Array.from(
+        { length: count },
+        (_, index) =>
+          CSVMultisigTapscript.encode({
+            pubkeys: [foreignKey, serverKey],
+            timelock: { type: 'blocks', value: BigInt(index + 1) },
+          }).script,
+      ),
+    )
+    const { graph, inputs } = await fixture(tree)
+    const checkpoint = parse(graph.checkpoints[0]!)
+    const changed = (scripts: readonly Uint8Array[]) => {
+      const copy = Transaction.fromPSBT(checkpoint.toPSBT())
+      const raw = TapTreeCoder.encode(
+        scripts.map((script, index) => ({
+          depth: Math.min(index + 1, scripts.length - 1),
+          version: 0xc0,
+          script: Uint8Array.from(script),
+        })),
+      )
+      const unknown = copy.getInput(0).unknown!.filter((entry) => VtxoTaprootTree.decode(entry) === null)
+      copy.updateInput(0, { unknown: undefined })
+      copy.updateInput(0, { unknown: [...unknown, VtxoTaprootTree.encode(raw)] })
+      expect(copy.id).toBe(checkpoint.id)
+      return encode(copy)
+    }
+    const chain = chainFor(graph, inputs)
+    vi.mocked(chain.getVirtualTxs).mockResolvedValue({
+      txs: [graph.arkTx, changed(tree.scripts), graph.checkpoints[1]!],
+    })
+    await expect(directFillFinalized(chain, graph, inputs)).resolves.toBe(true)
+    vi.mocked(chain.getVirtualTxs).mockResolvedValue({
+      txs: [graph.arkTx, changed([ownTree.scripts[0]!, ...tree.scripts.slice(1)]), graph.checkpoints[1]!],
+    })
+    await expect(directFillFinalized(chain, graph, inputs)).rejects.toThrow('taptree changed')
   })
 
   it('returns every selected coin, all sats and every asset to the recorded own script', async () => {

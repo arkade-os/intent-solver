@@ -126,6 +126,7 @@ describe('e2e self-payment refresh — edges and failure spine', () => {
     for (const payer of payers) payer.stop()
     await receiveStore?.close()
     sendStore?.close()
+    await arkade?.close()
   })
 
   it(
