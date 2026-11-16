@@ -187,12 +187,14 @@ if (entry) {
     failures.push(error.message)
   }
   failIfInvalid()
-  for (const [from, name, symbol] of [
+  for (const [from, name, symbol, requiredMethod] of [
     [entry, '@arkade-os/sdk', CANDIDATE_SDK_SYMBOL],
+    [entry, '@arkade-os/sdk', 'ServiceWorkerReadonlyWallet', 'onWalletUpdate'],
     [at(TAXI_CONSUMER, 'package.json'), '@arkade-os/swap', SWAP_FILL_SYMBOL],
+    [at(TAXI_CONSUMER, 'package.json'), '@arkade-os/swap', 'InMemoryAssetSwapRepository', 'createSwapRecordIfAbsent'],
   ]) {
     try {
-      await assertCandidateExport(packageRootFrom(from, name), name, symbol)
+      await assertCandidateExport(packageRootFrom(from, name), name, symbol, '.', requiredMethod)
     } catch (error) {
       failures.push(error.message)
     }

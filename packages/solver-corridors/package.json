@@ -26,8 +26,8 @@
     "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
-    "@arkade-os/sdk": "0.5.7-taxi.0",
-    "@arkade-os/swap": "0.1.7-taxi.1",
+    "@arkade-os/sdk": "0.5.7-taxi.2",
+    "@arkade-os/swap": "0.2.0-taxi.0",
     "@arkade-os/solver-arkade": "workspace:*",
     "@arkade-os/solver-core": "workspace:*",
     "@arkade-os/solver-db": "workspace:*",

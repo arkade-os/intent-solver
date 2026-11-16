@@ -13,8 +13,9 @@ export const MANIFEST_PATH = `${VENDOR_DIR}/manifest.json`
 
 const TS_SDK = 'https://github.com/arkade-os/ts-sdk.git'
 const ARKADE_TAXI = 'https://github.com/ArkLabsHQ/arkade-taxi.git'
-const SDK_COMMIT = '735e40b9c99c1c2ef01d75ccbcba1439e06450bf'
-const SWAP_COMMIT = '309701dc0dc10a20bdb8e81c8c9ca5aa499498ef'
+const SDK_COMMIT = '8c428b36d33f5c19584b652bdd98243f15900db1'
+const SWAP_COMMIT = '37aa317a08750dd39b5a9f639f4d0452d46655fa'
+const TAXI_CLIENT_COMMIT = 'e6f4b274c8eadb8bf1bdfec512132aeebc27d2ad'
 const TAXI_COMMIT = 'a9d2fbb47149ea3518fe28733d896197094bddf4'
 
 // Every package whose resolution must come from a frozen archive, and the exact
@@ -26,7 +27,7 @@ export const PINNED_SOURCES = {
   '@arkade-os/swap': { repository: TS_SDK, commit: SWAP_COMMIT, directory: 'packages/swap' },
   '@arkade-taxi/covenant': { repository: ARKADE_TAXI, commit: TAXI_COMMIT, directory: 'packages/covenant' },
   '@arkade-taxi/protocol': { repository: ARKADE_TAXI, commit: TAXI_COMMIT, directory: 'packages/protocol' },
-  '@arkade-taxi/client': { repository: ARKADE_TAXI, commit: TAXI_COMMIT, directory: 'packages/client' },
+  '@arkade-taxi/client': { repository: ARKADE_TAXI, commit: TAXI_CLIENT_COMMIT, directory: 'packages/client' },
 }
 
 export const PINNED_PACKAGES = Object.keys(PINNED_SOURCES)

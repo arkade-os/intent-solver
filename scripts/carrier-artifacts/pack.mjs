@@ -44,6 +44,10 @@ const SDK_PACKAGES = packagesFrom(SDK_SOURCE.repository)
 const TAXI_PACKAGES = packagesFrom(TAXI_SOURCE.repository)
 if (SDK_PACKAGES.length + TAXI_PACKAGES.length !== PINNED_PACKAGES.length)
   throw new Error('a pinned package names a source repository this command cannot pack from')
+if (new Set(TAXI_PACKAGES.map((name) => PINNED_SOURCES[name].commit)).size !== 1)
+  throw new Error(
+    'Taxi archives use independent source commits; copy the authenticated canonical bundle instead of repacking',
+  )
 
 const args = process.argv.slice(2)
 const flag = (name) => {

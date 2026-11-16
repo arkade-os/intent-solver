@@ -188,7 +188,7 @@ it('authenticates a separate SDK resolved through a Taxi dependency', () => {
   }
 })
 
-it('authenticates a separate SDK resolved through the published swap package', () => {
+it('authenticates a separate SDK resolved through the swap package', () => {
   const path = join(root, 'node_modules/@arkade-os/swap/node_modules/@arkade-os/sdk')
   rmSync(path)
   cpSync(sdk, path, { recursive: true, dereference: false })
