@@ -108,6 +108,90 @@ describe('public price previews', () => {
     expect(await preview(open(`${btc}~bolt11:bitcoin/slip44:0`, '1000'))).toBeUndefined()
   })
 
+  it('delegates onchain exact-in and exact-out amounts without replacing the returned price', async () => {
+    const base = source()
+    const previewAmounts = vi.fn(() => ({ fromAmount: 10000, toAmount: 9850 }))
+    const services = {
+      ...base,
+      bootPolicy: {
+        ...base.bootPolicy,
+        corridorFees: { ...base.bootPolicy.corridorFees, 'arkade:BTC->onchain:BTC': fee },
+        corridorLimits: { ...base.bootPolicy.corridorLimits, 'arkade:BTC->onchain:BTC': bounds },
+      },
+      onchainService: { previewAmounts },
+    }
+    const preview = openRfqPreview(services as unknown as Services, { now: () => 1800000000 })
+    const priced = { from_amount: '10000', to_amount: '9850', valid_until: 1800000035 }
+    expect(await preview(open(`${btc}~bitcoin:bitcoin/slip44:0`, '10000'))).toEqual(priced)
+    expect(await preview(open(`${btc}~bitcoin:bitcoin/slip44:0`, '9850', 'to'))).toEqual(priced)
+    expect(previewAmounts).toHaveBeenNthCalledWith(1, 10000, 'from')
+    expect(previewAmounts).toHaveBeenNthCalledWith(2, 9850, 'to')
+    expect(await preview(open(`${btc}~bitcoin:bitcoin/slip44:0`, '9007199254740992'))).toBeUndefined()
+    expect(previewAmounts).toHaveBeenCalledTimes(2)
+    expect(services.corridors.get).toHaveBeenCalledWith('arkade:BTC->onchain:BTC')
+  })
+
+  it.each(['missing', 'refused'] as const)(
+    'does not fall back to generic fees when the onchain preview is %s',
+    async (state) => {
+      const base = source()
+      const previewAmounts = vi.fn(() => undefined)
+      const services = {
+        ...base,
+        bootPolicy: {
+          ...base.bootPolicy,
+          corridorFees: { ...base.bootPolicy.corridorFees, 'arkade:BTC->onchain:BTC': fee },
+          corridorLimits: { ...base.bootPolicy.corridorLimits, 'arkade:BTC->onchain:BTC': bounds },
+        },
+        onchainService: state === 'missing' ? undefined : { previewAmounts },
+      }
+      const preview = openRfqPreview(services as unknown as Services, { now: () => 1800000000 })
+      expect(await preview(open(`${btc}~bitcoin:bitcoin/slip44:0`, '10000'))).toBeUndefined()
+      expect(await preview(open(`${btc}~bitcoin:bitcoin/slip44:0`, '9850', 'to'))).toBeUndefined()
+      if (state === 'missing') {
+        expect(previewAmounts).not.toHaveBeenCalled()
+      } else {
+        expect(previewAmounts).toHaveBeenNthCalledWith(1, 10000, 'from')
+        expect(previewAmounts).toHaveBeenNthCalledWith(2, 9850, 'to')
+      }
+    },
+  )
+
+  it('enforces the effective onchain from-leg limits on both exact amount sides', async () => {
+    const base = source()
+    const previewAmounts = vi.fn((amount: number, side: 'from' | 'to') =>
+      side === 'from' ? { fromAmount: amount, toAmount: amount - 150 } : { fromAmount: amount + 150, toAmount: amount },
+    )
+    const services = {
+      ...base,
+      bootPolicy: {
+        ...base.bootPolicy,
+        corridorFees: { ...base.bootPolicy.corridorFees, 'arkade:BTC->onchain:BTC': fee },
+        corridorLimits: {
+          ...base.bootPolicy.corridorLimits,
+          'arkade:BTC->onchain:BTC': { minSats: 1000, maxSats: 10000 },
+        },
+      },
+      onchainService: { previewAmounts },
+    }
+    const preview = openRfqPreview(services as unknown as Services, { now: () => 1800000000 })
+    const pair = `${btc}~bitcoin:bitcoin/slip44:0`
+    for (const [from_amount, to_amount] of [
+      ['1000', '850'],
+      ['10000', '9850'],
+    ] as const) {
+      expect(await preview(open(pair, from_amount))).toMatchObject({ from_amount, to_amount })
+      expect(await preview(open(pair, to_amount, 'to'))).toMatchObject({ from_amount, to_amount })
+    }
+    for (const [from, to] of [
+      ['999', '849'],
+      ['10001', '9851'],
+    ] as const) {
+      expect(await preview(open(pair, from))).toBeUndefined()
+      expect(await preview(open(pair, to, 'to'))).toBeUndefined()
+    }
+  })
+
   it('matches directed asset fees and the priced carrier on both amount sides', async () => {
     const base = source()
     const services = {
@@ -254,7 +338,7 @@ describe('EVM card discovery', () => {
       config: { ...base.config, solverName: 'evm-solver', relayUrl: 'wss://relay.example', cardRelays: [] },
       bootPolicy: {
         ...base.bootPolicy,
-        corridorEnabled: { 'arkade:BTC->lightning:BTC': true },
+        corridorEnabled: { 'arkade:BTC->lightning:BTC': true, 'lightning:BTC->arkade:BTC': true },
         offerMinFillAmount: 1n,
         offerMaxFillAmount: 100000n,
       },
@@ -268,9 +352,15 @@ describe('EVM card discovery', () => {
     expect(published.version).toBe(0)
     expect(published.markets).toHaveLength(1)
     expect(JSON.stringify(published)).not.toContain('eip155:')
+    expect(openRfqPairs(published)).toEqual([`${btc}~bolt11:bitcoin/slip44:0`, `bolt11:bitcoin/slip44:0~${btc}`])
     expect(inline.version).toBe(1)
     expect(inline.markets).toHaveLength(2)
     expect(cardErrors(inline, 'bitcoin')).toEqual([])
+    expect(openRfqPairs(inline)).toEqual([
+      `${btc}~bolt11:bitcoin/slip44:0`,
+      `bolt11:bitcoin/slip44:0~${btc}`,
+      `${btc}~eip155:1/erc20:${token.address}`,
+    ])
   })
 
   it('reports precision the card feed cannot express', () => {

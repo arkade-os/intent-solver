@@ -686,6 +686,11 @@ the ERC20 input unit. Inline discovery does not bypass these representability
 limits. Cards received in bids remain temporary unless the user explicitly
 adds them to saved solvers.
 
+Feed URLs embedded in cards are visible in full to offer recipients. Operators
+MUST configure public, credential-free endpoints. The reference solver rejects
+URL userinfo and recognized credential query names, but that screening cannot
+detect secrets in arbitrary parameter names or paths.
+
 These bids are **indicative price previews**, not executable quotes or
 standing commitments to later directed requests. The solver uses live pricing
 resolvers without reserving capacity, creating an invoice, persisting a swap
@@ -697,6 +702,8 @@ a refusal; relay redelivery must not create duplicate offers.
 The reference solver uses one `OpenRfqBidder` and one configured
 `relay.openRfqMaxBidsPerMinute` budget across its advertised directions. It
 charges the work budget before pricing, including unquotable requests.
+Its bounded replay cache retains active request ids; when full, new requests
+are ignored until an entry expires rather than evicting an active id.
 `0` disables bidding. Subscriptions refresh every thirty seconds, including
 retries after an initial refresh failure. Stopping the bidder closes only its
 own subscriptions, leaving the shared directed connection active.

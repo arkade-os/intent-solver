@@ -389,6 +389,8 @@ const evmMarketEntry = (market: EvmCardMarket, network: SwapNetwork): Record<str
   if (!market.priceFeed.trim() || !(market.pricePath || defaultPricePath(market.priceFeed)))
     throw new Error('EVM price feed and resolved pointer are required')
   const feedUrl = new URL(market.priceFeed)
+  // Card feeds must be public; arbitrary parameter names and URL paths can hide credentials
+  // that this recognized-name check cannot identify.
   if (
     feedUrl.username ||
     feedUrl.password ||

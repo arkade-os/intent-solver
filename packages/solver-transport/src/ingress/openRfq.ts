@@ -103,8 +103,7 @@ export class OpenRfqBidder {
       for (const [id, expiry] of this.seen) if (expiry <= now) this.seen.delete(id)
       const id = `${event.author}:${open.open_id}`
       // Charge before fetching a price so unquotable opens cannot bypass the work budget.
-      if (this.seen.has(id) || !this.bucket.take(now)) return
-      if (this.seen.size >= 1024) this.seen.delete(this.seen.keys().next().value!)
+      if (this.seen.has(id) || this.seen.size >= 1024 || !this.bucket.take(now)) return
       this.seen.set(id, open.bids_until * 1000)
       const price = await this.deps.preview(open)
       if (!price || this.stopped || Math.floor(this.now() / 1000) >= open.bids_until) return

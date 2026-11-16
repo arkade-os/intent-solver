@@ -179,6 +179,23 @@ describe('open RFQ boundary', () => {
     expect(relay.events.filter((event) => event.recipient === client)).toHaveLength(1)
   })
 
+  it('keeps active replay keys when the bounded cache fills, then reclaims expired slots', async () => {
+    let clock = now
+    const { relay } = await setup({ rate: 2000, clock: () => clock })
+    const id = (index: number) => index.toString(16).padStart(64, '0')
+    for (let index = 0; index < 1025; index++) {
+      await relay.open(request({ open_id: id(index) }), { id: id(index) })
+    }
+    await relay.open(request({ open_id: id(0) }), { id: id(0) })
+    expect(relay.events.filter((event) => event.recipient === client)).toHaveLength(1024)
+    clock += 6000
+    await relay.open(request({ open_id: id(1025), bids_until: clock / 1000 + 5 }), {
+      id: id(1025),
+      createdAtMs: clock,
+    })
+    expect(relay.events.filter((event) => event.recipient === client)).toHaveLength(1025)
+  })
+
   it('refreshes subscriptions when advertised directions change', async () => {
     let pairs = [pair]
     const { relay } = await setup({ pairs: async () => pairs })
