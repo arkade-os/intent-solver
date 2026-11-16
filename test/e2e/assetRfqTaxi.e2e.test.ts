@@ -7,12 +7,12 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { generateMnemonic } from '@scure/bip39'
 import { wordlist } from '@scure/bip39/wordlists/english.js'
-import { ArkAddress, asset, RestIndexerProvider } from '@arkade-os/sdk'
+import { ArkAddress, asset, RestIndexerProvider, Transaction } from '@arkade-os/sdk'
 import { TaxiClient } from '@arkade-taxi/client'
 import { requestArkadeSwap } from '@arkade-os/swap/protocol'
 import { receiverPaidTransport } from './support/receiverPaidTransport.js'
 import { nostrRfqTransport } from '@arkade-os/swap/nostr'
-import { hex } from '@scure/base'
+import { base64, hex } from '@scure/base'
 import { createArkadeContext, type ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { envToDocument } from '@arkade-os/solver-app/config/fromEnv.js'
 import { legacyEnvNames } from '@arkade-os/solver-app/config/load.js'
@@ -166,6 +166,64 @@ const assetUnits = async (wallet: ArkadeContext['wallet']): Promise<bigint> => {
   return (balance.availableAssets ?? [])
     .filter((entry) => entry.assetId === assetId)
     .reduce((total, entry) => total + BigInt(entry.amount), 0n)
+}
+
+const readRfqState = async (rfqId: string): Promise<unknown> => {
+  const db = betterSqliteDriver(join(workdir, 'solver-swaps.sqlite'))
+  try {
+    return await db.get(
+      `SELECT id, state, failure_reason, valid_until, deposit_txid, deposit_vout, fill_txid, fill_phase,
+              json_extract(carrier_attempt, '$.phase') AS carrier_attempt_phase
+         FROM asset_rfq_swap WHERE rfq_id = ?`,
+      [rfqId],
+    )
+  } finally {
+    await db.close()
+  }
+}
+
+const readCarrierEvidence = async (rfqId: string): Promise<unknown> => {
+  const db = betterSqliteDriver(join(workdir, 'solver-swaps.sqlite'))
+  try {
+    const row = await db.get<{ carrier_attempt: string; deposit_txid: string; deposit_vout: number }>(
+      'SELECT carrier_attempt, deposit_txid, deposit_vout FROM asset_rfq_swap WHERE rfq_id = ?',
+      [rfqId],
+    )
+    if (!row?.carrier_attempt) return null
+    const graph = JSON.parse(row.carrier_attempt).binding?.graph as
+      { ark_tx: string; checkpoints: string[] } | undefined
+    if (!graph) return null
+    const summarize = (psbt: string) => {
+      const tx = Transaction.fromPSBT(base64.decode(psbt))
+      return {
+        id: tx.id,
+        inputs: Array.from({ length: tx.inputsLength }, (_, index) => {
+          const input = tx.getInput(index)
+          return {
+            script: input.witnessUtxo?.script && hex.encode(input.witnessUtxo.script),
+            value: input.witnessUtxo?.amount.toString(),
+          }
+        }),
+      }
+    }
+    const expected = [graph.ark_tx, ...graph.checkpoints].map(summarize)
+    const indexer = arkade.ctx.wallet.indexerProvider
+    const { vtxos } = await indexer.getVtxos({ outpoints: [{ txid: row.deposit_txid, vout: row.deposit_vout }] })
+    const { txs } = await indexer.getVirtualTxs(expected.map(({ id }) => id))
+    return {
+      expected,
+      observed: txs.map(summarize),
+      deposit: vtxos.map(({ txid, vout, spentBy, arkTxId, settledBy }) => ({
+        txid,
+        vout,
+        spentBy,
+        arkTxId,
+        settledBy,
+      })),
+    }
+  } finally {
+    await db.close()
+  }
 }
 
 const spendableSatInventory = async (wallet: ArkadeContext['wallet']) => {
@@ -442,17 +500,7 @@ describe('running solver to Taxi on regtest', () => {
       ).catch(async (error: unknown) => {
         let rfqState: unknown
         try {
-          const db = betterSqliteDriver(join(workdir, 'solver-swaps.sqlite'))
-          try {
-            rfqState = await db.get(
-              `SELECT id, state, failure_reason, valid_until, deposit_txid, deposit_vout, fill_txid,
-                      json_extract(carrier_attempt, '$.phase') AS carrier_attempt_phase
-                 FROM asset_rfq_swap WHERE rfq_id = ?`,
-              [rfqId],
-            )
-          } finally {
-            await db.close()
-          }
+          rfqState = await readRfqState(rfqId)
         } catch (diagnosticError) {
           rfqState = {
             diagnosticError: diagnosticError instanceof Error ? diagnosticError.message : String(diagnosticError),
@@ -613,16 +661,25 @@ describe('running solver to Taxi on regtest', () => {
         taxiAssets: true,
       })
       const statusTransport = nostrRfqTransport({ relays: [relayUrl], solverPubkey: solverPublicKey })
+      let lastRfqStatus: unknown
       try {
         const status = await poll(
           async () => {
             const latest = await statusTransport.status(rfqId)
+            lastRfqStatus = latest
             return latest?.state === 'settled' ? latest : null
           },
           { attempts: 30, intervalMs: 1_000, whenExhausted: 'solver did not publish the settled RFQ status' },
         )
         expect(status).toMatchObject({ type: 'rfq_status', state: 'settled' })
         expect(status?.profile['fill_txid']).toMatch(/^[0-9a-f]{64}$/)
+      } catch (error) {
+        const state = await readRfqState(rfqId).catch((cause: unknown) => ({ error: String(cause) }))
+        const evidence = await readCarrierEvidence(rfqId).catch((cause: unknown) => ({ error: String(cause) }))
+        throw new Error(
+          `${String(error)}; rfqState=${JSON.stringify(state)}; rfqStatus=${JSON.stringify(lastRfqStatus)}; evidence=${JSON.stringify(evidence)}; solver=${daemonLog}`,
+          { cause: error },
+        )
       } finally {
         await statusTransport.close()
       }

@@ -190,6 +190,8 @@ startup and lifecycle reconciliation recover ownership after a lost response.
 
 Freeze updated SDK, swap and Taxi packages from their clean pinned sources with
 `node scripts/carrier-artifacts/pack.mjs --sdk <sdk-checkout> --taxi <taxi-checkout> --sdk-bundle <sdk-bundle>`.
+The swap candidate loads the compiled artifacts from its canonical `.ark` offer
+definitions; the manifest records the independent SDK and swap source commits.
 Update source pins, the manifest and `pnpm-workspace.yaml` overrides together,
 then run `pnpm install` and `pnpm verify:artifacts --installed`.
 

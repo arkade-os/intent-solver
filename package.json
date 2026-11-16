@@ -49,8 +49,8 @@
     "light-bolt11-decoder": "^3.2.0",
     "lightning": "^12.2.3",
     "nostr-tools": "2.24.1",
-    "@arkade-os/swap": "0.1.6",
-    "@arkade-taxi/client": "file:packages/solver-app/vendor/carrier/arkade-taxi-client-0.1.0-578bf66f.tgz",
+    "@arkade-os/swap": "0.1.7-taxi.0",
+    "@arkade-taxi/client": "file:packages/solver-app/vendor/carrier/arkade-taxi-client-0.1.0-a9d2fbb4.tgz",
     "undici": "7.29.1"
   },
   "devDependencies": {

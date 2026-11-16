@@ -83,7 +83,7 @@ const party = async (): Promise<ArkadeContext> =>
   createArkadeContext({
     mnemonic: generateMnemonic(wordlist, 128),
     operatorUrl: ARKD_URL,
-    esploraUrl: process.env.ARK_ESPLORA_URL?.trim() || process.env.ESPLORA_URL,
+    esploraUrl: process.env.ARKADE_ESPLORA_URL?.trim() || process.env.ESPLORA_URL,
     databasePath: join(tempStoreDir(), 'wallet.sqlite'),
     isMainnet: arkade.profile.isMainnet,
     arkadeHrp: arkade.profile.arkadeHrp,
@@ -264,8 +264,8 @@ const harness = async (over: Partial<AssetRfqMarket> = {}): Promise<Harness> => 
   const buy = assetRfqDescriptor(markets[0]!, 'buy_base')
   const corridors = createCorridorSet([assetRfqCorridor(sell, service, store), assetRfqCorridor(buy, service, store)])
   const readers = createCorridorReaderSet([assetRfqReader(sell, store), assetRfqReader(buy, store)])
-  const mnemonic = process.env.ARK_MNEMONIC
-  if (!mnemonic) throw new Error('ARK_MNEMONIC is required for the solver Nostr identity')
+  const mnemonic = process.env.WALLET_MNEMONIC
+  if (!mnemonic) throw new Error('WALLET_MNEMONIC is required for the solver Nostr identity')
   const connection = webSocketRelayConnection(relayUrl, {
     codec: nostrCodecForWallet(mnemonic, arkade.profile.isMainnet, makerPublicKey),
   })
