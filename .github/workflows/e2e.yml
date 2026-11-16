@@ -215,6 +215,8 @@ jobs:
         env:
           COVCLAIMD_IMAGE: ${{ matrix.covclaimdImage }}
           SECONDS_TYPED: ${{ matrix.arkdTimelocks == 'seconds' }}
+          NBXPLORER_PORT: '22838'
+          POSTGRES_PORT: '29372'
         run: |
           set -eu
           if [ "$SECONDS_TYPED" = "true" ]; then
