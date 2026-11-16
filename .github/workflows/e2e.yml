@@ -235,6 +235,7 @@ jobs:
           COVCLAIMD_IMAGE: ${{ matrix.covclaimdImage }}
           SECONDS_TYPED: ${{ matrix.arkdTimelocks == 'seconds' }}
           GROUP_NAME: ${{ matrix.name }}
+          NBXPLORER_PORT: '28338'
         run: |
           set -eu
           # Esplora needs RPC/Electrum; SQL mining analytics require an unrelated GitHub download.
