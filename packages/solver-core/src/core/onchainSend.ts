@@ -96,20 +96,30 @@ export const onchainRefundLocktimeFor = (htlcLocktime: number, unilateralClaimDe
 export const arkadeClaimDeadline = (htlcLocktime: number): number =>
   latestClaimArrival(htlcLocktime) + ARKADE_CLAIM_WINDOW_SECONDS
 
-/** By when the solver's L1 refund must confirm: a client claim replacing it later reveals `P` too late to answer before `refundLocktime`. */
-export const onchainRefundConfirmDeadline = (refundLocktime: number): number =>
-  refundLocktime - ARKADE_CLAIM_WINDOW_SECONDS
+/**
+ * By when the solver's L1 refund must confirm: a client claim replacing it later reveals `P` too
+ * late to answer before `refundLocktime`, or before the lockup's batch is swept.
+ */
+export const onchainRefundConfirmDeadline = (refundLocktime: number, lockupExpiresAt?: number): number =>
+  Math.min(refundLocktime, lockupExpiresAt ?? refundLocktime) - ARKADE_CLAIM_WINDOW_SECONDS
+
+/** Mirrors the fee-bump ramp (`FEE_BUMP_RAMP_SECONDS` in solver-rails), which this package cannot import. */
+export const LOCKUP_REFUND_CONFIRM_BUDGET = 2 * HOUR
+
+/** The earliest batch expiry a lockup may have: room to arm the L1 refund, confirm it, then answer a claim. */
+export const lockupExpiryFloor = (htlcLocktime: number): number =>
+  htlcLocktime + HTLC_REFUND_MTP_MARGIN + LOCKUP_REFUND_CONFIRM_BUDGET + ARKADE_CLAIM_WINDOW_SECONDS
 
 /**
  * A lockup inherits its inputs' batch expiry. Swept, nothing is left for the solver to claim
- * offchain — the SDK recovers through the SENDER's leaf only — while the client's refund still
- * pays out. An absent expiry is not judged.
+ * offchain while the client's refund still pays out, and the L1 claim leaf has no timelock, so
+ * the lockup must outlive the solver's refund confirming. An absent expiry is not judged.
  */
 export const expiryBeforeClaimDeadline = (
   outputs: readonly { expiresAt?: number }[],
   htlcLocktime: number,
 ): number | null => {
-  const deadline = arkadeClaimDeadline(htlcLocktime)
+  const deadline = lockupExpiryFloor(htlcLocktime)
   const early = outputs.flatMap((o) => (o.expiresAt !== undefined && o.expiresAt < deadline ? [o.expiresAt] : []))
   return early.length > 0 ? Math.min(...early) : null
 }

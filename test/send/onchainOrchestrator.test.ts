@@ -17,6 +17,7 @@ import {
   ARKADE_CLAIM_WINDOW_SECONDS,
   CLIENT_LOCKUP_RELEASE_DELAY_SECONDS,
   arkadeClaimDeadline,
+  lockupExpiryFloor,
   DEFAULT_ONCHAIN_LOCKUP_TIMEOUT,
   ONCHAIN_DUST_SATS,
   ONCHAIN_CLAIM_MARGIN_SECONDS,
@@ -630,7 +631,7 @@ describe('OnchainSendSwapService', () => {
       clientRefundPubkey,
     })
     if (!outcome.accepted) throw new Error('expected acceptance')
-    const expiresAt = expiry(arkadeClaimDeadline(outcome.swap.htlcLocktime))
+    const expiresAt = expiry(lockupExpiryFloor(outcome.swap.htlcLocktime))
     deps.outputs.set(outcome.swap.pkScript, [
       { txid: 'lockup-tx', vout: 0, value: 50_000, ...(expiresAt === undefined ? {} : { expiresAt }) },
     ])
@@ -654,6 +655,7 @@ describe('OnchainSendSwapService', () => {
   })
 
   it.each([
+    ['expires exactly at the floor', (deadline: number) => deadline],
     ['outlives the deadline', (deadline: number) => deadline + 86_400],
     ['carries no expiry at all', () => undefined],
   ])('still adopts a lockup that %s', async (_case, expiry) => {
@@ -2374,6 +2376,41 @@ describe('OnchainSendSwapService', () => {
       await service.tick(first.id)
     }
 
+    const last = Transaction.fromRaw(hex.decode(broadcasts.at(-1)!), {
+      allowUnknownOutputs: true,
+      allowUnknownInputs: true,
+    })
+    expect(last.getOutput(0).amount).toBe(BigInt(ONCHAIN_DUST_SATS))
+    expect(now).toBeLessThan(deadline)
+  })
+
+  it('pays everything above dust before the lockup batch expires, however far its refund deadline', async () => {
+    deps.arkade.delays = deriveUnilateralDelays(MAINNET_EXIT_DELAY)
+    const svc = gated()
+    const outcome = await svc.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    const expiresAt = outcome.swap.htlcLocktime + 5 * 3600 + 60
+    deps.outputs.set(outcome.swap.pkScript, [{ txid: 'lockup-tx', vout: 0, value: 50_000, expiresAt }])
+    let row = await svc.tick(outcome.swap.id)
+    expect(row.state).toBe('awaiting_claim')
+    now = row.htlcLocktime + HTLC_REFUND_MTP_MARGIN + 1
+    row = await svc.tick(row.id)
+    expect(row.state).toBe('refunding_onchain')
+    const broadcasts = captureBroadcasts()
+
+    const deadline = expiresAt - ARKADE_CLAIM_WINDOW_SECONDS
+    while (now < deadline - FEE_BUMP_ALL_IN_SECONDS) {
+      now += FEE_BUMP_INTERVAL_SECONDS
+      await svc.tick(row.id)
+    }
+
+    expect(broadcasts.length).toBeGreaterThan(0)
     const last = Transaction.fromRaw(hex.decode(broadcasts.at(-1)!), {
       allowUnknownOutputs: true,
       allowUnknownInputs: true,
