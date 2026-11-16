@@ -855,15 +855,18 @@ const quotesView = () => {
       ? h('p.muted', 'No bids since this process started.')
       : h(
           'table',
-          h('thead', h('tr', h('th', 'pair'), h('th.right', 'amount'), h('th.right', 'bps'), h('th', 'age'))),
+          h(
+            'thead',
+            h('tr', h('th', 'pair'), h('th.right', 'from (atomic)'), h('th.right', 'to (atomic)'), h('th', 'age')),
+          ),
           h(
             'tbody',
             d.bids.entries.map((bid) =>
               h(
                 'tr',
                 h('td.muted', bid.pair),
-                h('td.num', sats(bid.amountSats)),
-                h('td.num', String(bid.feeBps)),
+                h('td.num', bid.fromAmount),
+                h('td.num', bid.toAmount),
                 h('td.muted', ago(bid.at)),
               ),
             ),

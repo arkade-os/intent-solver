@@ -35,14 +35,6 @@ describe('marketKeyForPair — Arkade asset ids', () => {
   })
 
   it('refuses an upper-case asset id rather than normalising it', () => {
-    // Hex is case-insensitive, so accepting either spelling and lowercasing it
-    // looks like the friendly choice. It is the dangerous one. `pair` is
-    // compared byte for byte elsewhere — `decideOpenRfqBid` tests `open.pair
-    // !== servedPair` — so an upper-case pair normalised only here would
-    // derive the correct market key, reach our subscription, and then be
-    // skipped as "unserved pair". Refusing at the edge keeps the layers from
-    // disagreeing, and § 2's identity rule (`^(btc|[0-9a-f]{68})$`) already
-    // says lowercase.
     expect(() => marketKeyForPair(`arkade:${ASSET.toUpperCase()}->lightning:BTC`)).toThrow(
       /no canonical asset id for ticker/,
     )

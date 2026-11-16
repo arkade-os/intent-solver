@@ -1,26 +1,29 @@
+import { RfqOpen, rfqBidPayload, type RfqBid } from '@arkade-os/solver-core/core/rfqProtocol.js'
 import {
-  RfqOpenV2,
   validOpenRfqPrice,
-  type OpenRfqV2,
-  type OpenRfqV2Price,
-} from '@arkade-os/solver-core/core/openRfqV2.js'
-import { tokenBucket, OPEN_RFQ_MAX_AGE_MS, type TokenBucket } from '@arkade-os/solver-core/core/openRfq.js'
+  tokenBucket,
+  OPEN_RFQ_MAX_AGE_MS,
+  type TokenBucket,
+  type OpenRfq,
+  type OpenRfqPrice,
+} from '@arkade-os/solver-core/core/openRfq.js'
 import type { SolverCard } from '@arkade-os/solver-core/core/registryCard.js'
 import { eventId, type RelayConnection, type RelayEvent, type RelaySubscription } from '../relay/connection.js'
 
-export interface OpenRfqV2BidderDeps {
+export interface OpenRfqBidderDeps {
   connection: RelayConnection
   providerPubkey: string
   pairs(): Promise<readonly string[]>
   card(): Promise<SolverCard>
-  preview(open: OpenRfqV2): Promise<OpenRfqV2Price | undefined>
+  preview(open: OpenRfq): Promise<OpenRfqPrice | undefined>
   maxBidsPerMinute: number
   bidBucket?: TokenBucket
+  onBid?: (open: OpenRfq, bid: RfqBid) => void
   onError?: (context: string, error: unknown) => void
   now?: () => number
 }
 
-export class OpenRfqV2Bidder {
+export class OpenRfqBidder {
   private readonly now: () => number
   private readonly bucket
   private readonly seen = new Map<string, number>()
@@ -29,7 +32,7 @@ export class OpenRfqV2Bidder {
   private refreshTimer?: ReturnType<typeof setInterval>
   private refreshing?: Promise<void>
 
-  constructor(private readonly deps: OpenRfqV2BidderDeps) {
+  constructor(private readonly deps: OpenRfqBidderDeps) {
     this.now = deps.now ?? Date.now
     this.bucket = deps.bidBucket ?? tokenBucket(deps.maxBidsPerMinute, this.now())
   }
@@ -37,18 +40,15 @@ export class OpenRfqV2Bidder {
   async start(): Promise<void> {
     if (!this.stopped) return
     this.stopped = false
+    this.refreshTimer = setInterval(
+      () => void this.refresh().catch((error) => this.deps.onError?.('open-rfq refresh', error)),
+      30_000,
+    )
+    this.refreshTimer.unref?.()
     try {
       await this.refresh()
-      if (!this.stopped) {
-        this.refreshTimer = setInterval(
-          () => void this.refresh().catch((error) => this.deps.onError?.('open-rfq v2 refresh', error)),
-          30_000,
-        )
-        this.refreshTimer.unref?.()
-      }
     } catch (error) {
-      await this.stop()
-      throw error
+      this.deps.onError?.('open-rfq refresh', error)
     }
   }
 
@@ -88,7 +88,7 @@ export class OpenRfqV2Bidder {
 
   private async handle(event: RelayEvent): Promise<void> {
     try {
-      const parsed = RfqOpenV2.safeParse(event.payload)
+      const parsed = RfqOpen.safeParse(event.payload)
       const now = this.now()
       if (this.stopped || !parsed.success || event.recipient !== undefined) return
       const open = parsed.data
@@ -119,24 +119,18 @@ export class OpenRfqV2Bidder {
         return
       if (!(await this.deps.pairs()).includes(open.pair)) return
       if (this.stopped || Math.floor(this.now() / 1000) >= open.bids_until) return
+      const bid = rfqBidPayload(open, { ...price, card })
       await this.deps.connection.publish({
         id: eventId(this.deps.providerPubkey, this.now()),
         author: this.deps.providerPubkey,
         recipient: event.author,
         replyTo: event.id,
         createdAtMs: this.now(),
-        payload: {
-          v: 2,
-          type: 'rfq_bid',
-          open_id: open.open_id,
-          pair: open.pair,
-          amount_side: open.amount_side,
-          ...price,
-          card,
-        },
+        payload: bid,
       })
+      this.deps.onBid?.(open, bid)
     } catch (error) {
-      this.deps.onError?.('open-rfq v2 handle', error)
+      this.deps.onError?.('open-rfq handle', error)
     }
   }
 }

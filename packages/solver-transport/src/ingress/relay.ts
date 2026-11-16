@@ -17,20 +17,9 @@
  * quote, so a client that missed our first reply recovers it by asking again.
  */
 
-import type { Limits } from '@arkade-os/solver-core/core/limits.js'
-import { FREE, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
-import {
-  defaultBidding,
-  tokenBucket,
-  type BiddingStrategy,
-  type OpenRfq,
-  type OpenRfqBidDecision,
-  type TokenBucket,
-} from '@arkade-os/solver-core/core/openRfq.js'
-import { marketKeyForPair } from '@arkade-os/solver-core/core/marketKey.js'
 import type { RelayConnection, RelayEvent, RelaySubscription } from '../relay/connection.js'
 import { eventId } from '../relay/connection.js'
-import { RfqOpen, rfqBidPayload, rfqRefusalPayload } from '@arkade-os/solver-core/core/rfqProtocol.js'
+import { rfqRefusalPayload } from '@arkade-os/solver-core/core/rfqProtocol.js'
 import { respondToRfqRequest, respondToRfqStatus } from './rfq.js'
 import { reportRfqRefusal, type RfqRefusalObserver } from './refusals.js'
 import type { CorridorReaderSet, CorridorSet } from '@arkade-os/solver-core/core/corridor.js'
@@ -72,123 +61,6 @@ export interface RelayIngressDeps {
   onRefusal?: RfqRefusalObserver
   onQuoteTiming?: (sample: { rfqRef?: string; quoteMs: number; publishMs: number; outcome: string }) => void
   now?: () => number
-}
-
-export interface OpenRfqBidderDeps {
-  connection: RelayConnection
-  /** The solver's x-only pubkey, hex — the author of every bid. */
-  providerPubkey: string
-  /**
-   * The directional pair this bidder serves — the one it subscribes for, the
-   * one it validates opens against, and the one its bids claim. Injected so
-   * all three can never disagree, and so a second market is a second bidder
-   * rather than an edit to this class.
-   */
-  pair: string
-  limits: Limits
-  /**
-   * What the served corridor charges. Omitted means free.
-   *
-   * A bid quotes a `to_amount` derived from this, so a bid that understates the
-   * fee is a promise the quote will not keep. See {@link OpenRfqBidder} for
-   * what happens when the fee cannot be expressed in a bid at all.
-   */
-  fee?: Fee
-  /**
-   * How this bidder decides. Absent means § 4.6's rules as `decideOpenRfqBid`
-   * implements them — what every deployment used before bidding was injectable.
-   *
-   * The silence rule and the rate limit are enforced around this, not by it.
-   */
-  bidding?: BiddingStrategy
-  /** MUST be positive — whether to bid at all is the composer's decision. */
-  maxBidsPerMinute: number
-  bidBucket?: TokenBucket
-  /** Each bid, once its publish has resolved. */
-  onBid?: (open: OpenRfq, bid: Extract<OpenRfqBidDecision, { kind: 'bid' }>) => void
-  onError?: (context: string, error: unknown) => void
-  now?: () => number
-}
-
-/**
- * Open-RFQ bidding (docs/rfq-protocol.md § 4.6): subscribe to the served
- * market's broadcasts, answer with sealed bids. Deliberately separate from
- * {@link RelayIngress} — bidding touches no swap state, so it composes (and
- * tests) without the swap stack, and it never owns the shared connection.
- */
-export class OpenRfqBidder {
-  private readonly now: () => number
-  private subscription?: RelaySubscription
-  private readonly bidBucket: TokenBucket
-
-  constructor(private readonly deps: OpenRfqBidderDeps) {
-    this.now = deps.now ?? (() => Date.now())
-    this.bidBucket = deps.bidBucket ?? tokenBucket(deps.maxBidsPerMinute, this.now())
-  }
-
-  async start(): Promise<void> {
-    // sinceMs ≈ now is the § 4.6 freshness rule: without it, subscription
-    // replay after every reconnect would hand us the relay's stored backlog
-    // of stale opens.
-    // KNOWN: EVM pairs cannot reach here. `marketKeyForPair` resolves a leg's
-    // asset through the § 2 ticker registry, and an EVM pair names its token by
-    // ADDRESS (`ethereum:0x…`) — so it throws rather than deriving a key. Today
-    // that is unreachable because `deps.pair` is the Lightning send pair, fixed
-    // at the composition root; widening it to the EVM corridors needs the two
-    // grammars reconciled first, which is the open question in arkade-os/meta#19
-    // (Q10). Wiring them in without that lands a throw here, or — if the throw
-    // is softened — a subscription to a market nobody publishes to, which is the
-    // silent miss `marketKey.ts` exists to prevent.
-    this.subscription = await this.deps.connection.subscribe(
-      { topic: marketKeyForPair(this.deps.pair), sinceMs: this.now() },
-      (event) => this.handleOpenRfq(event),
-    )
-  }
-
-  /** Closes only its own subscription; the connection belongs to the composer. */
-  async stop(): Promise<void> {
-    await this.subscription?.close()
-  }
-
-  /**
-   * One open-RFQ broadcast. Every failure path is SILENCE — never a refusal
-   * (§ 4.6) — and never a throw. The token is taken only when we actually
-   * bid: a flood of unserved opens costs us a pure-function evaluation each,
-   * not our bidding budget.
-   */
-  private async handleOpenRfq(event: RelayEvent): Promise<void> {
-    try {
-      const parsed = RfqOpen.safeParse(event.payload)
-      if (!parsed.success) return
-      const fee = this.deps.fee ?? FREE
-      // Both price components go to the bid. A flat fee used to mean not
-      // bidding at all, because the bid could carry `fee_bps` and nothing
-      // else, so bidding would have advertised a better rate than the quote
-      // would honour. § 4.6 carries `fee_flat` now, so the corridor can bid
-      // honestly instead of declining silently.
-      const decision = (this.deps.bidding ?? defaultBidding).decide({
-        open: parsed.data,
-        eventCreatedAtMs: event.createdAtMs,
-        servedPair: this.deps.pair,
-        limits: this.deps.limits,
-        feeBps: fee.bps,
-        feeFlat: fee.flatSats,
-        nowMs: this.now(),
-      })
-      if (decision.kind === 'skip') return
-      if (!this.bidBucket.take(this.now())) return
-      await publishTo(
-        this.deps.connection,
-        this.deps.providerPubkey,
-        event.author,
-        rfqBidPayload(parsed.data.open_id, this.deps.pair, decision),
-        this.now(),
-      )
-      this.deps.onBid?.(parsed.data, decision)
-    } catch (error) {
-      this.deps.onError?.('open-rfq handle', error)
-    }
-  }
 }
 
 export class RelayIngress {

@@ -21,6 +21,8 @@ import {
 import type { QuoteRefusal as SendQuoteRefusal } from '@arkade-os/solver-corridors/send/orchestrator.js'
 import type { QuoteRefusal as ReceiveQuoteRefusal } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import type { QuoteRefusal as OnchainSendQuoteRefusal } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
+import type { RfqOpenPayload } from '@arkade-os/solver-core/core/rfqProtocol.js'
+import { buildSolverCard } from '@arkade-os/solver-core/core/registryCard.js'
 
 const OPEN_ID = 'b'.repeat(64)
 
@@ -105,53 +107,85 @@ type _SendMapped = Mapped<SendQuoteRefusal>
 type _ReceiveMapped = Mapped<ReceiveQuoteRefusal>
 type _OnchainSendMapped = Mapped<OnchainSendQuoteRefusal>
 
-const bid = (overrides: Partial<Parameters<typeof rfqBidPayload>[2]> = {}) => ({
-  fee_bps: 25,
-  fee_flat: 0,
-  min: 1000,
-  max: 25_000,
-  valid_until: 1_800_000_900,
+const open = (overrides: Partial<RfqOpenPayload> = {}): RfqOpenPayload => ({
+  v: 1,
+  type: 'rfq_open',
+  open_id: OPEN_ID,
+  pair: 'arkade:bitcoin/slip44:0~bolt11:bitcoin/slip44:0',
+  amount_side: 'to',
+  amount: '100000000000000000001',
+  bids_until: 1_800_000_005,
   ...overrides,
 })
 
-/**
- * The bid had no direct test before `fee_flat` existed — it was covered
- * incidentally by the modules that import it. It earns one now because the new
- * field is OPTIONAL in the protocol with omitted meaning zero, so "absent" and
- * "present as 0" are different bytes carrying the same meaning, and only one of
- * them leaves a pre-flat-fee deployment's bids unchanged.
- */
+const card = {
+  ...buildSolverCard({
+    name: 'bidder',
+    network: 'bitcoin',
+    discoveryPubkey: 'c'.repeat(64),
+    relays: ['wss://relay.example'],
+    corridors: { [RFQ_PAIR_SEND]: { limits: { minSats: 1000, maxSats: 25_000 }, fee: { bps: 25, flatSats: 0 } } },
+  }),
+  sig: 'd'.repeat(128),
+}
+
+const bid = (overrides: Partial<Parameters<typeof rfqBidPayload>[1]> = {}) => ({
+  from_amount: '100250000000000000001',
+  to_amount: '100000000000000000001',
+  valid_until: 1_800_000_900,
+  card,
+  ...overrides,
+})
+
 describe('rfqBidPayload', () => {
-  it('omits fee_flat entirely when the corridor charges none', () => {
-    // Omitted means zero, so a deployment that sets no flat fee must publish
-    // exactly the bytes it published before the field existed.
-    const payload = rfqBidPayload(OPEN_ID, RFQ_PAIR_SEND, bid())
-    expect('fee_flat' in payload).toBe(false)
-  })
-
-  it('carries a nonzero fee_flat', () => {
-    const payload = rfqBidPayload(OPEN_ID, RFQ_PAIR_SEND, bid({ fee_flat: 50 }))
-    expect(payload.fee_flat).toBe(50)
-  })
-
-  it('puts the two price components next to each other', () => {
-    // Cosmetic on the wire, but it matches the protocol's own example and is
-    // the shape a reader compares against when debugging a bid.
-    const keys = Object.keys(rfqBidPayload(OPEN_ID, RFQ_PAIR_SEND, bid({ fee_flat: 50 })))
-    expect(keys.indexOf('fee_flat')).toBe(keys.indexOf('fee_bps') + 1)
-  })
-
-  it('carries the rest of the bid through unchanged', () => {
-    expect(rfqBidPayload(OPEN_ID, RFQ_PAIR_SEND, bid())).toEqual({
+  it('carries the exact request correlation, atomic amounts, expiry and signed card', () => {
+    expect(rfqBidPayload(open(), bid())).toEqual({
       v: 1,
       type: 'rfq_bid',
       open_id: OPEN_ID,
-      pair: RFQ_PAIR_SEND,
-      fee_bps: 25,
-      min: 1000,
-      max: 25_000,
+      pair: 'arkade:bitcoin/slip44:0~bolt11:bitcoin/slip44:0',
+      amount_side: 'to',
+      from_amount: '100250000000000000001',
+      to_amount: '100000000000000000001',
       valid_until: 1_800_000_900,
+      card,
     })
+  })
+
+  it('echoes the selected exact amount side and directional canonical pair', () => {
+    const request = open({
+      open_id: 'e'.repeat(64),
+      pair: 'bolt11:bitcoin/slip44:0~arkade:bitcoin/slip44:0',
+      amount_side: 'from',
+      amount: '100250000000000000001',
+    })
+    expect(rfqBidPayload(request, bid())).toMatchObject({
+      open_id: request.open_id,
+      pair: request.pair,
+      amount_side: 'from',
+      from_amount: request.amount,
+    })
+  })
+
+  it('preserves the signed card and exact price strings through JSON serialization', () => {
+    const payload = rfqBidPayload(open(), bid())
+    expect(payload.card).toBe(card)
+    expect(JSON.parse(JSON.stringify(payload))).toEqual(payload)
+    expect(payload.card.sig).toBe('d'.repeat(128))
+  })
+
+  it('omits the old fee schedule, bounds and request-only fields', () => {
+    const payload = rfqBidPayload(open(), bid())
+    for (const field of ['fee_bps', 'fee_flat', 'min', 'max', 'amount', 'size_bucket', 'bids_until']) {
+      expect(Object.hasOwn(payload, field)).toBe(false)
+    }
+  })
+
+  it('keeps request correlation and allowed fields when a preview carries extra properties', () => {
+    const preview = { ...bid(), v: 2, pair: 'unexpected', open_id: 'other', fee_bps: 0 }
+    const payload = rfqBidPayload(open(), preview)
+    expect(payload).toMatchObject({ v: 1, pair: open().pair, open_id: OPEN_ID })
+    expect(Object.hasOwn(payload, 'fee_bps')).toBe(false)
   })
 })
 

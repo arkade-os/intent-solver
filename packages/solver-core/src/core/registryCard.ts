@@ -392,7 +392,7 @@ const evmMarketEntry = (market: EvmCardMarket, network: SwapNetwork): Record<str
   if (
     feedUrl.username ||
     feedUrl.password ||
-    [...feedUrl.searchParams.keys()].some((key) => /(?:key|token|secret|authorization)/i.test(key))
+    [...feedUrl.searchParams.keys()].some((key) => /(?:key|token|secret|auth|password)/i.test(key))
   )
     throw new Error('a private price-feed credential cannot be published in a solver card')
   for (const direction of [receive, send]) {

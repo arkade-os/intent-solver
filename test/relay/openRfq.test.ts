@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { OpenRfqV2Bidder } from '@arkade-os/solver-transport/ingress/openRfqV2.js'
-import { RfqOpenV2 } from '@arkade-os/solver-core/core/openRfqV2.js'
+import { OpenRfqBidder } from '@arkade-os/solver-transport/ingress/openRfq.js'
+import { RfqOpen } from '@arkade-os/solver-core/core/rfqProtocol.js'
 import { buildSolverCard, signSolverCard, verifyCardSig } from '@arkade-os/solver-core/core/registryCard.js'
 import { nostrCodec } from '@arkade-os/solver-transport/relay/nostr.js'
 import { schnorr } from '@noble/curves/secp256k1.js'
@@ -18,7 +18,7 @@ const client = bytesToHex(schnorr.getPublicKey(new Uint8Array(32).fill(2)))
 const pair = 'arkade:bitcoin/slip44:0~bolt11:bitcoin/slip44:0'
 const now = 1_800_000_000_000
 const request = (over: Record<string, unknown> = {}) => ({
-  v: 2,
+  v: 1,
   type: 'rfq_open',
   open_id: 'ab'.repeat(32),
   pair,
@@ -53,17 +53,19 @@ class Relay implements RelayConnection {
   }
 }
 
-describe('open RFQ v2 boundary', () => {
+describe('open RFQ boundary', () => {
   it('keeps cross-asset amounts exact and rejects unbounded or noncanonical inputs', () => {
-    expect(RfqOpenV2.parse(request({ amount: '100000000000000000001' })).amount).toBe('100000000000000000001')
+    expect(RfqOpen.parse(request({ amount: '100000000000000000001' })).amount).toBe('100000000000000000001')
     for (const amount of [10000, '0', '01', '1e8', '1.2', '1'.repeat(129)]) {
-      expect(RfqOpenV2.safeParse(request({ amount })).success).toBe(false)
+      expect(RfqOpen.safeParse(request({ amount })).success).toBe(false)
     }
-    expect(RfqOpenV2.safeParse(request({ invoice: 'private' })).success).toBe(false)
-    expect(RfqOpenV2.safeParse(request({ pair: 'arkade:BTC->lightning:BTC' })).success).toBe(false)
+    expect(RfqOpen.safeParse(request({ invoice: 'private' })).success).toBe(false)
+    expect(RfqOpen.safeParse(request({ pair: 'arkade:BTC->lightning:BTC' })).success).toBe(false)
+    expect(RfqOpen.safeParse(request({ v: 2 })).success).toBe(false)
+    expect(RfqOpen.safeParse(request({ size_bucket: { min: '1', max: '2' } })).success).toBe(false)
   })
 
-  let bidder: OpenRfqV2Bidder | undefined
+  let bidder: OpenRfqBidder | undefined
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
   })
@@ -75,13 +77,15 @@ describe('open RFQ v2 boundary', () => {
 
   const setup = async (
     opts: {
+      relay?: Relay
       clock?: () => number
       pairs?: () => Promise<readonly string[]>
       preview?: () => Promise<{ from_amount: string; to_amount: string; valid_until: number } | undefined>
       rate?: number
+      onError?: (context: string, error: unknown) => void
     } = {},
   ) => {
-    const relay = new Relay()
+    const relay = opts.relay ?? new Relay()
     const card = await signSolverCard(
       buildSolverCard({
         name: 'bidder',
@@ -97,7 +101,7 @@ describe('open RFQ v2 boundary', () => {
     const preview = vi.fn(
       opts.preview ?? (async () => ({ from_amount: '10000', to_amount: '9950', valid_until: now / 1000 + 30 })),
     )
-    bidder = new OpenRfqV2Bidder({
+    bidder = new OpenRfqBidder({
       connection: relay,
       providerPubkey: provider,
       pairs: opts.pairs ?? (async () => [pair]),
@@ -105,6 +109,7 @@ describe('open RFQ v2 boundary', () => {
       preview,
       maxBidsPerMinute: opts.rate ?? 30,
       now: opts.clock ?? (() => now),
+      onError: opts.onError,
     })
     await bidder.start()
     return { relay, card, preview }
@@ -119,7 +124,7 @@ describe('open RFQ v2 boundary', () => {
       recipient: client,
       replyTo: 'cd'.repeat(32),
       payload: {
-        v: 2,
+        v: 1,
         type: 'rfq_bid',
         open_id: 'ab'.repeat(32),
         pair,
@@ -183,6 +188,52 @@ describe('open RFQ v2 boundary', () => {
     expect(relay.subscriptions).toHaveLength(0)
     pairs = [pair]
     await bidder!.refresh()
+    expect(relay.subscriptions).toHaveLength(1)
+  })
+
+  it.each(['pairs', 'subscribe'])('recovers when the initial %s call fails temporarily', async (failure) => {
+    const relay = new Relay()
+    const pairs = vi.fn(async () => [pair])
+    const onError = vi.fn()
+    if (failure === 'pairs') pairs.mockRejectedValueOnce(new Error('temporary failure'))
+    else vi.spyOn(relay, 'subscribe').mockRejectedValueOnce(new Error('temporary failure'))
+    await setup({ relay, pairs, onError })
+    expect(relay.subscriptions).toHaveLength(0)
+    expect(onError).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(relay.subscriptions).toHaveLength(1)
+    await relay.open()
+    expect(relay.events.filter((event) => event.recipient === client)).toHaveLength(1)
+  })
+
+  it('cleans partial startup subscriptions and stops retrying after stop', async () => {
+    const relay = new Relay()
+    const subscribe = relay.subscribe.bind(relay)
+    const attempt = vi
+      .spyOn(relay, 'subscribe')
+      .mockImplementationOnce(subscribe)
+      .mockRejectedValueOnce(new Error('unavailable'))
+    const pairs = vi.fn(async () => [pair, pair.split('~').reverse().join('~')])
+    await setup({ relay, pairs })
+    expect(relay.subscriptions).toHaveLength(1)
+    await bidder!.stop()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(relay.subscriptions).toHaveLength(0)
+    expect(pairs).toHaveBeenCalledOnce()
+    expect(attempt).toHaveBeenCalledTimes(2)
+    expect(relay.close).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('keeps retrying once per refresh interval through a longer startup outage', async () => {
+    let attempts = 0
+    const pairs = vi.fn(async () => {
+      if (++attempts < 5) throw new Error('unavailable')
+      return [pair]
+    })
+    const { relay } = await setup({ pairs })
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(pairs).toHaveBeenCalledTimes(5)
     expect(relay.subscriptions).toHaveLength(1)
   })
 

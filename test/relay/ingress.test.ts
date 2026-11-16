@@ -2,11 +2,9 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
-import { OpenRfqBidder, RelayIngress } from '@arkade-os/solver-transport/ingress/relay.js'
-import type { BiddingStrategy } from '@arkade-os/solver-core/core/openRfq.js'
-import { BID_VALIDITY } from '@arkade-os/solver-core/core/openRfq.js'
-import { RFQ_PAIR_SEND } from '@arkade-os/solver-corridors/wire/payloads.js'
-import { marketKeyForPair } from '@arkade-os/solver-core/core/marketKey.js'
+import { RelayIngress } from '@arkade-os/solver-transport/ingress/relay.js'
+import { OpenRfqBidder } from '@arkade-os/solver-transport/ingress/openRfq.js'
+import { buildSolverCard } from '@arkade-os/solver-core/core/registryCard.js'
 import {
   decodeFrame,
   encodeFrame,
@@ -536,188 +534,68 @@ describe('relay frame codec', () => {
   })
 })
 
-describe('OpenRfqBidder (§ 4.6)', () => {
-  const MARKET_KEY = 'arkade:btc/lightning:btc'
-  const OPEN_ID = 'ab'.repeat(32)
-  const open = (over: Record<string, unknown> = {}) => ({
+describe('open RFQ alongside directed negotiation', () => {
+  const pair = 'arkade:bitcoin/slip44:0~bolt11:bitcoin/slip44:0'
+  const open = () => ({
     v: 1,
     type: 'rfq_open',
-    open_id: OPEN_ID,
-    pair: RFQ_PAIR_SEND,
-    amount_side: 'to',
-    amount: 5000,
-    ...over,
+    open_id: 'ab'.repeat(32),
+    pair,
+    amount_side: 'from',
+    amount: '5000',
+    bids_until: clock + 5,
   })
-  const broadcast = async (payload: unknown) =>
-    relay.publish({
-      id: `b${relay.published.length}`,
-      author: CLIENT,
-      topic: MARKET_KEY,
-      createdAtMs: clock * 1000,
-      payload,
-    })
+  const broadcast = () =>
+    relay.publish({ id: 'open-event', author: CLIENT, topic: pair, createdAtMs: clock * 1000, payload: open() })
 
-  // No SendSwapService, no SwapStore: bidding touches no swap state.
-  let bidder: OpenRfqBidder | undefined
-  const startBidding = async (
-    maxBidsPerMinute: number,
-    fee?: { bps: number; flatSats: number },
-    bidding?: BiddingStrategy,
-  ): Promise<void> => {
-    bidder = new OpenRfqBidder({
-      bidding,
+  it('leaves broadcasts unanswered when no bidder is configured', async () => {
+    await broadcast()
+    expect(relay.repliesTo(CLIENT)).toHaveLength(0)
+  })
+
+  it('previews without creating a swap and leaves directed quotes unchanged', async () => {
+    const bidder = new OpenRfqBidder({
       connection: relay,
       providerPubkey: PROVIDER,
-      pair: RFQ_PAIR_SEND,
-      limits: { minSats: 500, maxSats: 10_000 },
-      fee,
-      maxBidsPerMinute,
-      now: () => clock * 1000,
-    })
-    await bidder.start()
-  }
-  afterEach(async () => {
-    await bidder?.stop()
-    bidder = undefined
-  })
-
-  it('publishes a bid to the broadcast author, with the configured terms', async () => {
-    await startBidding(30)
-    await broadcast(open())
-    const replies = relay.repliesTo(CLIENT)
-    expect(replies).toHaveLength(1)
-    expect(replies[0]!.payload).toEqual({
-      v: 1,
-      type: 'rfq_bid',
-      open_id: OPEN_ID,
-      pair: RFQ_PAIR_SEND,
-      fee_bps: 0,
-      min: 500,
-      max: 10_000,
-      valid_until: clock + BID_VALIDITY,
-    })
-    // A broadcast creates no solver state (§ 4.6).
-    expect((await store.findRecoverable()).length).toBe(0)
-  })
-
-  it('bids when the corridor charges a flat fee, carrying both price components', async () => {
-    // The guard this replaces was silent: setting LN_SEND_FEE_FLAT_SATS simply
-    // stopped the corridor bidding, with nothing in the logs to say so.
-    await startBidding(30, { bps: 25, flatSats: 50 })
-    await broadcast(open())
-    const replies = relay.repliesTo(CLIENT)
-    expect(replies).toHaveLength(1)
-    expect(replies[0]!.payload).toMatchObject({ fee_bps: 25, fee_flat: 50 })
-  })
-
-  it('serves, validates and bids on the INJECTED pair, not a hardcoded one', async () => {
-    // A second bidder for a different market must subscribe to that market's
-    // topic and stamp that pair on its bids. Pins the pair as a real
-    // parameter: hardcoding any of the three sites again fails here.
-    const other = 'arkade:BTC->arkade:USDT'
-    bidder = new OpenRfqBidder({
-      connection: relay,
-      providerPubkey: PROVIDER,
-      pair: other,
-      limits: { minSats: 500, maxSats: 10_000 },
+      pairs: async () => [pair],
+      card: async () => ({
+        ...buildSolverCard({
+          name: 'bidder',
+          network: 'bitcoin',
+          discoveryPubkey: PROVIDER,
+          relays: ['wss://relay.example'],
+          corridors: {
+            'arkade:BTC->lightning:BTC': { limits: { minSats: 1, maxSats: 10000 }, fee: { bps: 0, flatSats: 0 } },
+          },
+        }),
+        sig: 'aa'.repeat(64),
+      }),
+      preview: async () => ({ from_amount: '5000', to_amount: '4950', valid_until: clock + 30 }),
       maxBidsPerMinute: 30,
       now: () => clock * 1000,
     })
     await bidder.start()
-
-    // An open on the send pair is now UNSERVED by this bidder...
-    await broadcast(open())
-    expect(relay.repliesTo(CLIENT)).toHaveLength(0)
-
-    // ...and one on its own market, arriving on that market's topic, is bid on.
-    await relay.publish({
-      id: 'b-other',
-      author: CLIENT,
-      topic: marketKeyForPair(other),
-      createdAtMs: clock * 1000,
-      payload: open({ pair: other }),
-    })
-    const bid = relay.repliesTo(CLIENT).at(-1)!.payload as Record<string, unknown>
-    expect(bid.type).toBe('rfq_bid')
-    expect(bid.pair).toBe(other)
-  })
-
-  it('is silent — never a refusal — on malformed, unserved and out-of-range opens', async () => {
-    await startBidding(30)
-    await broadcast(open({ surprise: true })) // unknown field
-    await broadcast(open({ pair: 'lightning:BTC->arkade:BTC' })) // receive leg is not served
-    await broadcast(open({ amount: 100 })) // below the floor
-    await broadcast(open({ bids_until: clock - 1 })) // window already lapsed
-    expect(relay.repliesTo(CLIENT)).toHaveLength(0)
-  })
-
-  it('stops bidding at the rate cap', async () => {
-    await startBidding(2)
-    for (const fill of ['aa', 'bb', 'cc']) await broadcast(open({ open_id: fill.repeat(32) }))
-    expect(relay.repliesTo(CLIENT)).toHaveLength(2)
-  })
-
-  it('without a bidder, broadcasts get silence — the directed ingress never answers them', async () => {
-    await broadcast(open())
-    expect(relay.repliesTo(CLIENT)).toHaveLength(0)
-  })
-
-  it('leaves the directed path untouched while bidding', async () => {
-    await startBidding(30)
-    await broadcast(open())
-    await relay.sendRequest(CLIENT, {
-      v: 1,
-      type: 'rfq_request',
-      rfq_id: 'c3'.repeat(32),
-      pair: 'arkade:BTC->lightning:BTC',
-      amount_side: 'to',
-      profile: { invoice: INVOICE, refund_address: REFUND_ADDRESS, client_refund_pubkey: CLIENT_REFUND_PUBKEY },
-    })
-    const types = relay.repliesTo(CLIENT).map((r) => (r.payload as Record<string, unknown>).type)
-    expect(types).toEqual(['rfq_bid', 'rfq_quote'])
-  })
-
-  /**
-   * Bidding is where a solver competes, so it is the knob most likely to be
-   * replaced — and the two rules around it are the ones a replacement is most
-   * likely to break, because neither is expressible in the return type.
-   */
-  describe('a custom BiddingStrategy', () => {
-    it('bids on terms the default would never produce', async () => {
-      const undercut: BiddingStrategy = {
-        decide: () => ({ kind: 'bid', fee_bps: 1, fee_flat: 0, min: 1, max: 1_000_000, valid_until: 9_999_999 }),
-      }
-      await startBidding(30, undefined, undercut)
-      await broadcast(open())
-      const replies = relay.repliesTo(CLIENT)
-      expect(replies).toHaveLength(1)
-      expect(replies[0]!.payload).toMatchObject({ fee_bps: 1, min: 1, max: 1_000_000 })
-    })
-
-    /**
-     * § 4.6 inverts § 4's refusal rule: an open this solver cannot serve is
-     * answered with SILENCE. `skip` is the only way to decline, and the host —
-     * not the strategy — is what turns it into saying nothing.
-     */
-    it('says NOTHING when it skips, rather than publishing a refusal', async () => {
-      const never: BiddingStrategy = { decide: () => ({ kind: 'skip', why: 'not today' }) }
-      await startBidding(30, undefined, never)
-      await broadcast(open())
-      expect(relay.repliesTo(CLIENT)).toHaveLength(0)
-    })
-
-    /**
-     * The rate limit is the OPERATOR's budget, not the strategy's. A strategy
-     * that wants to bid on everything does not get to outspend it.
-     */
-    it('cannot bid past maxBidsPerMinute however eager it is', async () => {
-      const always: BiddingStrategy = {
-        decide: () => ({ kind: 'bid', fee_bps: 1, fee_flat: 0, min: 1, max: 1_000_000, valid_until: 9_999_999 }),
-      }
-      await startBidding(1, undefined, always)
-      await broadcast(open())
-      await broadcast(open({ open_id: 'cd'.repeat(32) }))
-      expect(relay.repliesTo(CLIENT)).toHaveLength(1)
-    })
+    try {
+      await broadcast()
+      expect(relay.repliesTo(CLIENT)[0]).toMatchObject({
+        replyTo: 'open-event',
+        payload: { v: 1, type: 'rfq_bid', from_amount: '5000', to_amount: '4950' },
+      })
+      expect(await store.findRecoverable()).toHaveLength(0)
+      await relay.sendRequest(CLIENT, {
+        v: 1,
+        type: 'rfq_request',
+        rfq_id: 'c3'.repeat(32),
+        pair: 'arkade:BTC->lightning:BTC',
+        amount_side: 'to',
+        profile: { invoice: INVOICE, refund_address: REFUND_ADDRESS, client_refund_pubkey: CLIENT_REFUND_PUBKEY },
+      })
+      expect(relay.repliesTo(CLIENT).map((event) => (event.payload as { type: string }).type)).toEqual([
+        'rfq_bid',
+        'rfq_quote',
+      ])
+    } finally {
+      await bidder.stop()
+    }
   })
 })

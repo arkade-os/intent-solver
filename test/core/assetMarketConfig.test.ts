@@ -59,9 +59,6 @@ describe('legs', () => {
   })
 
   it('refuses an UPPERCASE asset id, which § 2 says is a different string', () => {
-    // Hex is case-insensitive and the wire is not: `decideOpenRfqBid` compares
-    // pair strings byte for byte, so an upper-case id would derive a market key
-    // nothing subscribes to.
     expect(() => validateAssetMarket(market({ quote: USDT.toUpperCase() }))).toThrow(/lowercase/)
   })
 

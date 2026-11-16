@@ -12,7 +12,7 @@ import {
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { bytesToHex } from '@noble/hashes/utils.js'
 import { giveSatsFor, payoutSatsFor } from '@arkade-os/solver-core/core/corridorPolicy.js'
-import type { OpenRfqV2 } from '@arkade-os/solver-core/core/openRfqV2.js'
+import type { OpenRfq } from '@arkade-os/solver-core/core/openRfq.js'
 
 const asset = 'ab'.repeat(34)
 const btc = 'arkade:bitcoin/slip44:0'
@@ -30,8 +30,8 @@ const evmPolicies = [
     fee,
   },
 ]
-const open = (pair: string, amount: string, amount_side: 'from' | 'to' = 'from'): OpenRfqV2 => ({
-  v: 2,
+const open = (pair: string, amount: string, amount_side: 'from' | 'to' = 'from'): OpenRfq => ({
+  v: 1,
   type: 'rfq_open',
   open_id: 'cd'.repeat(32),
   pair,
@@ -278,4 +278,17 @@ describe('EVM card discovery', () => {
     expect(result.publishable).toEqual([])
     expect(result.omitted[0]).toContain('decimals above 8')
   })
+
+  it.each(['auth', 'password', 'AUTH', 'PASSWORD', 'Auth', 'Password'])(
+    'omits EVM card markets whose feed URL contains a %s credential',
+    (parameter) => {
+      const priceFeed = `https://prices.example/btc?${parameter}=secret`
+      const market = { ...evm, priceFeed }
+      const result = publishableEvmMarkets([market], 'bitcoin')
+      expect(result.publishable).toEqual([])
+      expect(result.omitted.length).toBeGreaterThan(0)
+      expect(result.omitted.every((reason) => reason.includes('private price-feed credential'))).toBe(true)
+      expect(market.priceFeed).toBe(priceFeed)
+    },
+  )
 })

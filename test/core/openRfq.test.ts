@@ -1,30 +1,28 @@
 import { describe, it, expect } from 'vitest'
-import {
-  BID_VALIDITY,
-  decideOpenRfqBid,
-  OPEN_RFQ_MAX_AGE_MS,
-  tokenBucket,
-  type OpenRfqBidInput,
-} from '@arkade-os/solver-core/core/openRfq.js'
+import { tokenBucket, validOpenRfqPrice, type OpenRfq, type OpenRfqPrice } from '@arkade-os/solver-core/core/openRfq.js'
 import { marketKeyForPair } from '@arkade-os/solver-core/core/marketKey.js'
-import { RfqOpen, RFQ_PAIR_SEND } from '@arkade-os/solver-corridors/wire/payloads.js'
+import { RfqOpen } from '@arkade-os/solver-core/core/rfqProtocol.js'
 
 const OPEN_ID = 'a'.repeat(64)
-const PAIR = RFQ_PAIR_SEND
-const LIMITS = { minSats: 1000, maxSats: 100_000 }
+const PAIR = 'arkade:bitcoin/slip44:0~bolt11:bitcoin/slip44:0'
 const NOW_MS = 1_800_000_000_000
+const NOW_SECONDS = NOW_MS / 1000
 
-const input = (
-  overrides: Partial<OpenRfqBidInput> = {},
-  open: Partial<OpenRfqBidInput['open']> = {},
-): OpenRfqBidInput => ({
-  open: { open_id: OPEN_ID, pair: PAIR, amount_side: 'to', amount: 5000, ...open },
-  eventCreatedAtMs: NOW_MS,
-  servedPair: PAIR,
-  limits: LIMITS,
-  feeBps: 0,
-  feeFlat: 0,
-  nowMs: NOW_MS,
+const open = (overrides: Partial<OpenRfq> = {}): OpenRfq => ({
+  v: 1,
+  type: 'rfq_open',
+  open_id: OPEN_ID,
+  pair: PAIR,
+  amount_side: 'to',
+  amount: '5000',
+  bids_until: NOW_SECONDS + 5,
+  ...overrides,
+})
+
+const price = (overrides: Partial<OpenRfqPrice> = {}): OpenRfqPrice => ({
+  from_amount: '5025',
+  to_amount: '5000',
+  valid_until: NOW_SECONDS + 30,
   ...overrides,
 })
 
@@ -48,102 +46,56 @@ describe('marketKeyForPair', () => {
   })
 
   it('refuses unknown tickers, corridors and malformed pairs loudly', () => {
-    // A misderived key is a subscription that silently misses every open RFQ,
-    // so this must fail at startup, not degrade.
     expect(() => marketKeyForPair('arkade:DOGE->lightning:BTC')).toThrow(/no canonical asset id/)
     expect(() => marketKeyForPair('liquid:BTC->arkade:BTC')).toThrow(/unknown corridor/)
     expect(() => marketKeyForPair('arkade:btc/lightning:btc')).toThrow(/not a directional pair/)
   })
 })
 
-describe('decideOpenRfqBid', () => {
-  it('bids on a served, in-range, fresh open with the configured terms', () => {
-    const decision = decideOpenRfqBid(input())
-    expect(decision).toEqual({
-      kind: 'bid',
-      fee_bps: 0,
-      fee_flat: 0,
-      min: LIMITS.minSats,
-      max: LIMITS.maxSats,
-      valid_until: Math.floor(NOW_MS / 1000) + BID_VALIDITY,
-    })
+describe('validOpenRfqPrice', () => {
+  it('accepts a price that preserves the requested exact side', () => {
+    expect(validOpenRfqPrice(open(), price(), NOW_SECONDS)).toBe(true)
+    expect(validOpenRfqPrice(open({ amount_side: 'from', amount: '5025' }), price(), NOW_SECONDS)).toBe(true)
   })
 
-  it('takes the flat fee off an exact-in size before converting to the to leg', () => {
-    // 1040 on the from leg is 990 on the to leg once a 50 flat fee comes off,
-    // which is under the 1000 minimum. Converting on the spread alone reads it
-    // as 1040 and bids on a size the corridor cannot serve.
-    const decision = decideOpenRfqBid(input({ feeBps: 0, feeFlat: 50 }, { amount: 1040, amount_side: 'from' }))
-    expect(decision).toEqual({ kind: 'skip', why: 'amount outside limits' })
+  it('compares atomic amounts exactly beyond the JSON safe-integer range', () => {
+    const amount = '100000000000000000001'
+    const request = open({ amount_side: 'from', amount })
+    expect(validOpenRfqPrice(request, price({ from_amount: amount }), NOW_SECONDS)).toBe(true)
+    expect(validOpenRfqPrice(request, price({ from_amount: '100000000000000000002' }), NOW_SECONDS)).toBe(false)
+    expect(validOpenRfqPrice(open({ amount }), price({ to_amount: amount }), NOW_SECONDS)).toBe(true)
+    expect(validOpenRfqPrice(open({ amount }), price({ to_amount: '100000000000000000002' }), NOW_SECONDS)).toBe(false)
   })
 
-  it('still bids when the exact-in size clears the minimum after the flat fee', () => {
-    const decision = decideOpenRfqBid(input({ feeBps: 0, feeFlat: 50 }, { amount: 1050, amount_side: 'from' }))
-    expect(decision).toMatchObject({ kind: 'bid' })
+  it('rejects either price leg unless it is a bounded canonical positive atomic string', () => {
+    for (const amount of ['', '0', '01', '-1', '+1', '1.2', '1e3', ' 1', '1 ', '1'.repeat(129)]) {
+      expect(validOpenRfqPrice(open(), price({ from_amount: amount }), NOW_SECONDS)).toBe(false)
+      expect(validOpenRfqPrice(open(), price({ to_amount: amount }), NOW_SECONDS)).toBe(false)
+    }
+    expect(validOpenRfqPrice(open(), price({ from_amount: 5025 as unknown as string }), NOW_SECONDS)).toBe(false)
+    expect(validOpenRfqPrice(open(), price({ to_amount: 5000 as unknown as string }), NOW_SECONDS)).toBe(false)
   })
 
-  it('skips an exact-in size the flat fee consumes entirely', () => {
-    // Not "outside limits": the corridor serves this size, it just cannot
-    // serve it at this fee — the distinction pricing_unavailable draws.
-    const decision = decideOpenRfqBid(input({ feeBps: 0, feeFlat: 50 }, { amount: 40, amount_side: 'from' }))
-    expect(decision).toEqual({ kind: 'skip', why: 'flat fee consumes the size' })
-  })
-
-  it('carries the flat fee into the bid it returns', () => {
-    const decision = decideOpenRfqBid(input({ feeBps: 25, feeFlat: 50 }))
-    expect(decision).toMatchObject({ kind: 'bid', fee_bps: 25, fee_flat: 50 })
-  })
-
-  it('skips an unserved pair', () => {
-    const decision = decideOpenRfqBid(input({}, { pair: 'lightning:BTC->arkade:BTC' }))
-    expect(decision.kind).toBe('skip')
-  })
-
-  it('skips when the bidding window has lapsed', () => {
-    const lapsed = Math.floor(NOW_MS / 1000) - 1
-    expect(decideOpenRfqBid(input({}, { bids_until: lapsed })).kind).toBe('skip')
-  })
-
-  it('honours bids_until over the transport stamp: an old event with a live window still gets a bid', () => {
-    const decision = decideOpenRfqBid(
-      input({ eventCreatedAtMs: NOW_MS - 10 * OPEN_RFQ_MAX_AGE_MS }, { bids_until: Math.floor(NOW_MS / 1000) + 5 }),
+  it('accepts the maximum atomic string length without number conversion', () => {
+    const amount = '9'.repeat(128)
+    expect(validOpenRfqPrice(open({ amount }), price({ from_amount: amount, to_amount: amount }), NOW_SECONDS)).toBe(
+      true,
     )
-    expect(decision.kind).toBe('bid')
   })
 
-  it('without bids_until, skips a broadcast whose transport stamp is stale', () => {
-    const stale = input({ eventCreatedAtMs: NOW_MS - OPEN_RFQ_MAX_AGE_MS - 1 })
-    expect(decideOpenRfqBid(stale).kind).toBe('skip')
-    const fresh = input({ eventCreatedAtMs: NOW_MS - OPEN_RFQ_MAX_AGE_MS })
-    expect(decideOpenRfqBid(fresh).kind).toBe('bid')
+  it('requires validity strictly after both the current time and collection deadline', () => {
+    for (const valid_until of [NOW_SECONDS - 1, NOW_SECONDS, NOW_SECONDS + 5]) {
+      expect(validOpenRfqPrice(open(), price({ valid_until }), NOW_SECONDS)).toBe(false)
+    }
+    expect(validOpenRfqPrice(open(), price({ valid_until: NOW_SECONDS + 6 }), NOW_SECONDS)).toBe(true)
+    expect(validOpenRfqPrice(open(), price(), NOW_SECONDS + 30)).toBe(false)
+    expect(validOpenRfqPrice(open(), price({ valid_until: NOW_SECONDS + 31 }), NOW_SECONDS + 30)).toBe(true)
   })
 
-  it('gates exact amounts against the limits, boundaries included', () => {
-    expect(decideOpenRfqBid(input({}, { amount: LIMITS.minSats })).kind).toBe('bid')
-    expect(decideOpenRfqBid(input({}, { amount: LIMITS.maxSats })).kind).toBe('bid')
-    expect(decideOpenRfqBid(input({}, { amount: LIMITS.minSats - 1 })).kind).toBe('skip')
-    expect(decideOpenRfqBid(input({}, { amount: LIMITS.maxSats + 1 })).kind).toBe('skip')
-  })
-
-  it('converts exact-in sizes through the spread before gating', () => {
-    // 1% fee: 1009 in pays out floor(1009·10⁴/10100) = 999 — under the floor.
-    const under = input({ feeBps: 100 }, { amount_side: 'from', amount: 1009 })
-    expect(decideOpenRfqBid(under).kind).toBe('skip')
-    const at = input({ feeBps: 100 }, { amount_side: 'from', amount: 1010 })
-    expect(decideOpenRfqBid(at).kind).toBe('bid')
-  })
-
-  it('bids when a size bucket overlaps the limits, skips when disjoint', () => {
-    const bucket = (min: number, max: number) =>
-      decideOpenRfqBid(input({}, { amount: undefined, size_bucket: { min, max } }))
-    expect(bucket(100, LIMITS.minSats).kind).toBe('bid')
-    expect(bucket(LIMITS.maxSats, LIMITS.maxSats * 10).kind).toBe('bid')
-    expect(bucket(100, LIMITS.minSats - 1).kind).toBe('skip')
-    expect(bucket(LIMITS.maxSats + 1, LIMITS.maxSats * 10).kind).toBe('skip')
-  })
-
-  it('skips an open with no size at all rather than trusting the caller parsed one', () => {
-    expect(decideOpenRfqBid(input({}, { amount: undefined })).kind).toBe('skip')
+  it('rejects fractional, non-finite and unsafe expiry seconds', () => {
+    for (const valid_until of [NOW_SECONDS + 30.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(validOpenRfqPrice(open(), price({ valid_until }), NOW_SECONDS)).toBe(false)
+    }
   })
 })
 
@@ -180,26 +132,72 @@ describe('tokenBucket', () => {
 })
 
 describe('RfqOpen wire schema', () => {
-  const base = { v: 1, type: 'rfq_open', open_id: OPEN_ID, pair: PAIR, amount_side: 'to' }
-
-  it('accepts an exact amount or a size bucket', () => {
-    expect(RfqOpen.safeParse({ ...base, amount: 5000 }).success).toBe(true)
-    expect(RfqOpen.safeParse({ ...base, size_bucket: { min: 1000, max: 10_000 } }).success).toBe(true)
-    expect(RfqOpen.safeParse({ ...base, amount: 5000, bids_until: 1_800_000_030 }).success).toBe(true)
+  it('retains version 1 and preserves exact atomic strings for either amount side', () => {
+    for (const amount_side of ['from', 'to'] as const) {
+      const request = open({ amount_side, amount: '100000000000000000001' })
+      expect(RfqOpen.parse(request)).toEqual(request)
+    }
+    expect(RfqOpen.parse(open({ amount: '1' })).amount).toBe('1')
+    expect(RfqOpen.parse(open({ amount: '9'.repeat(128) })).amount).toBe('9'.repeat(128))
   })
 
-  it('rejects both sizes, neither size, and an inverted bucket', () => {
-    expect(RfqOpen.safeParse({ ...base, amount: 5000, size_bucket: { min: 1, max: 2 } }).success).toBe(false)
-    expect(RfqOpen.safeParse(base).success).toBe(false)
-    expect(RfqOpen.safeParse({ ...base, size_bucket: { min: 10, max: 1 } }).success).toBe(false)
+  it('rejects numeric, zero, noncanonical and oversized atomic amounts', () => {
+    for (const amount of [5000, '', '0', '00', '01', '-1', '+1', '1.2', '1e3', ' 1', '1 ', '1'.repeat(129)]) {
+      expect(RfqOpen.safeParse({ ...open(), amount }).success).toBe(false)
+    }
   })
 
-  it('rejects unknown fields, in the envelope and inside the bucket', () => {
-    expect(RfqOpen.safeParse({ ...base, amount: 5000, surprise: true }).success).toBe(false)
-    expect(RfqOpen.safeParse({ ...base, size_bucket: { min: 1000, max: 2000, surprise: true } }).success).toBe(false)
+  it('requires an exact amount and a collection deadline', () => {
+    const { amount: _amount, ...withoutAmount } = open()
+    const { bids_until: _deadline, ...withoutDeadline } = open()
+    expect(RfqOpen.safeParse(withoutAmount).success).toBe(false)
+    expect(RfqOpen.safeParse(withoutDeadline).success).toBe(false)
   })
 
-  it('rejects a malformed open_id', () => {
-    expect(RfqOpen.safeParse({ ...base, open_id: 'short', amount: 5000 }).success).toBe(false)
+  it('accepts canonical CAIP asset pairs across supported asset namespaces', () => {
+    const asset = `arkade:bitcoin/asset:${'a'.repeat(68)}`
+    const token = `eip155:1/erc20:0x${'b'.repeat(40)}`
+    for (const pair of [PAIR, `bitcoin:bitcoin/slip44:0~${asset}`, `${asset}~${token}`, `${token}~${asset}`]) {
+      expect(RfqOpen.parse(open({ pair })).pair).toBe(pair)
+    }
+  })
+
+  it('rejects malformed, noncanonical and unbounded pairs', () => {
+    for (const pair of [
+      'arkade:BTC->lightning:BTC',
+      PAIR.toUpperCase(),
+      PAIR.replace('~', '->'),
+      `${PAIR}~bolt11:bitcoin/slip44:0`,
+      `arkade:bitcoin/asset:${'a'.repeat(67)}~bolt11:bitcoin/slip44:0`,
+      `arkade:${'a'.repeat(512)}/slip44:0~bolt11:bitcoin/slip44:0`,
+    ]) {
+      expect(RfqOpen.safeParse(open({ pair })).success).toBe(false)
+    }
+  })
+
+  it('accepts only positive safe-integer deadline seconds', () => {
+    expect(RfqOpen.safeParse(open({ bids_until: 1 })).success).toBe(true)
+    expect(RfqOpen.safeParse(open({ bids_until: Number.MAX_SAFE_INTEGER })).success).toBe(true)
+    for (const bids_until of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, `${NOW_SECONDS}`]) {
+      expect(RfqOpen.safeParse({ ...open(), bids_until }).success).toBe(false)
+    }
+  })
+
+  it('rejects the old size bucket, unknown fields and version 2', () => {
+    expect(RfqOpen.safeParse({ ...open(), size_bucket: { min: 1000, max: 10_000 } }).success).toBe(false)
+    const { amount: _amount, ...withoutAmount } = open()
+    expect(RfqOpen.safeParse({ ...withoutAmount, size_bucket: { min: '1000', max: '10000' } }).success).toBe(false)
+    for (const field of ['invoice', 'refund_address', 'profile', 'surprise']) {
+      expect(RfqOpen.safeParse({ ...open(), [field]: 'private' }).success).toBe(false)
+    }
+    expect(RfqOpen.safeParse({ ...open(), v: 2 }).success).toBe(false)
+  })
+
+  it('rejects malformed ids, envelope types and amount sides', () => {
+    for (const open_id of ['short', 'A'.repeat(64), 'g'.repeat(64), 'a'.repeat(65)]) {
+      expect(RfqOpen.safeParse(open({ open_id })).success).toBe(false)
+    }
+    expect(RfqOpen.safeParse({ ...open(), type: 'rfq_request' }).success).toBe(false)
+    expect(RfqOpen.safeParse({ ...open(), amount_side: 'both' }).success).toBe(false)
   })
 })

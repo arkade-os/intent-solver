@@ -19,9 +19,10 @@ out of scope for this spec — the Lightning legs use RFQ permanently.
 - **MUST / SHOULD / MAY** as in RFC 2119.
 - **Client** — the party asking for a quote and (in HTLC-class swaps) funding
   the settlement contract. **Solver** — the party quoting and filling.
-- All wire amounts are **integers in atomic units** of the named asset,
-  encoded as canonical decimal strings (§ 2.1). No floats, no msats, anywhere,
-  and no JSON numbers.
+- All wire amounts are **integers in atomic units** of the named asset.
+  Open discovery requires canonical decimal strings (§ 4.6). Directed `v: 1`
+  retains its existing lossless JSON-number compatibility (§ 2.1).
+  No floats or msats.
   - Earlier drafts of this spec required amounts to fit in `2^53 − 1` "for
     JSON interoperability", on the assumption that an asset would register
     decimals such that realistic amounts fit. That assumption does not hold:
@@ -39,16 +40,18 @@ out of scope for this spec — the Lightning legs use RFQ permanently.
   clients MUST ignore unknown fields in quotes, bids, refusals and statuses,
   so solvers can extend responses without a version bump.
 - **Versions.** The envelope's `v` names the protocol version. The reference
-  implementation speaks `v: 1` for directed negotiation and legacy bidding,
-  plus the open-price-preview `v: 2` profile in § 4.6.1. The reserved directed
-  `v: 2` draft makes two breaking changes: amounts
-  are strings only (§ 2.1), and pairs and topics use CAIP-19 identifiers
-  (§ 2.2).
+  implementation uses `v: 1` for directed negotiation and open price discovery
+  (§ 4.6). The reserved directed `v: 2` draft makes two breaking changes:
+  amounts are strings only (§ 2.1), and pairs and topics use CAIP-19 identifiers
+  (§ 2.2). Open discovery already requires canonical atomic strings and
+  directional CAIP-19 pairs under its `v: 1` envelope. Card schema versions
+  are independent of RFQ envelope versions.
 
 ## 2. Corridors, assets, pairs
 
-This section describes `v: 1` identifiers. `v: 2` replaces them with CAIP-19
-identifiers (§ 2.2).
+This section describes directed `v: 1` identifiers. The reserved directed
+`v: 2` draft replaces them with CAIP-19 identifiers (§ 2.2). Open discovery
+uses the directional CAIP-19 pair defined in § 4.6.
 
 A **leg** is `<corridor>:<asset>`. A **pair** is directional:
 `<from-leg>-><to-leg>`. Direction matters — `arkade:BTC->lightning:BTC` and
@@ -78,9 +81,8 @@ Arkade AssetId in lowercase hex (68 chars, network-scoped) for every other
 asset; the same identity rule the solver-registry uses
 (`^(btc|[0-9a-f]{68})$`, `schema/card.schema.json`). The non-BTC ids in the
 table above are protocol-local placeholders standing in for those AssetIds,
-not registry-valid ids. It appears wherever this spec says "asset id" (the
-open-RFQ tag above all); `asset` tickers appear in the directional `pair`
-strings.
+not registry-valid ids. It appears wherever this section says "asset id";
+`asset` tickers appear in directed `v: 1` pair strings.
 
 Those 68 characters are not opaque, and an implementation that treats them as
 opaque will not be able to build a covenant over the asset. An Arkade AssetId
@@ -179,10 +181,9 @@ consequences, each of which is an error rather than a silent acceptance:
   `ethereum`. Accepting it there would yield a well-formed market key that no
   counterparty can ever subscribe to.
 - **Lowercase only**, per the identity rule above. Hex is case-insensitive, so
-  normalising instead is tempting — but a `pair` is also compared byte for
-  byte (`decideOpenRfqBid` against the served pair), so a spelling normalised
-  in one layer and not the other derives the right market key and is then
-  refused as `unsupported_pair`.
+  normalising instead is tempting — but a directed `pair` is also compared
+  byte for byte, so inconsistent normalisation can derive the right market
+  key and still produce `unsupported_pair`.
 - **A registered ticker wins.** The table is explicit configuration; the
   literal form is the open-ended fallback, so a name someone put in the table
   can never be shadowed by one that merely matches the shape.
@@ -197,27 +198,26 @@ the protocol.
 
 The solver-registry's **market key** is a different string with a different
 job: non-directional, it identifies a market, not a trade direction. Its
-derivation is normative here, because both sides of § 4.6 must compute the
-identical string: each leg is `<corridor>:<asset-id>` — corridors resolved
-(an omitted corridor is `arkade`), asset ids from the `id` column, never
+derivation is independent of open discovery: each leg is
+`<corridor>:<asset-id>` — corridors resolved (an omitted corridor is `arkade`), asset ids from the `id` column, never
 tickers — and the two legs join with `/`. Leg order: when exactly one leg is
 arkade it comes first (the registry's rule); when both or neither are, the
 legs sort lexicographically as strings (this spec's extension — the registry
 imposes no order there; § 12). Examples: `arkade:btc/lightning:btc`,
 `arkade:btc/arkade:<68-hex-assetid>`, `lightning:btc/onchain:btc`; for a
 non-BTC asset the id is the 68-hex AssetId, so a cross-asset market key is
-network-scoped. Where this spec needs the market key — the open-RFQ
-subscription tag, § 4.6 — it says so explicitly; everywhere else `pair` means
-the directional form above. `v: 2` replaces this market key with the § 2.2
-topic key.
+network-scoped. These registry market keys remain unchanged. Open discovery
+uses the exact directional CAIP-19 pair as its subscription tag (§ 4.6);
+it does not derive a registry market key.
 
 ### 2.2 Identifiers in directed `v: 2` _(reserved draft)_
 
 `v: 2` legs are the CAIP-19 asset ids that solver-registry cards already use.
 One id holds the corridor, the network and the asset.
 
-This section describes a future directed-negotiation version. Implemented open
-price previews use the directional pair and topic defined in § 4.6.1 instead.
+This section describes a future directed-negotiation version. Open discovery
+reuses these canonical leg spellings with its own directional `~` pair and
+topic (§ 4.6); it does not use the draft aliases or sorted topic below.
 
 **Legs.** A leg is `<corridor>:<network>/<asset-namespace>:<asset-reference>`:
 
@@ -252,8 +252,8 @@ arkade:bitcoin/slip44:0->bolt11:bitcoin/slip44:0
 - A client SHOULD send canonical pairs. Every pair a solver sends is
   canonical, whatever spelling the request used.
 
-**Aliases.** A `v: 2` solver accepts these `v: 1` spellings in `rfq_request`
-and `rfq_open`. It resolves each one on its own network:
+**Aliases.** A directed `v: 2` solver accepts these directed `v: 1` spellings
+in `rfq_request`. It resolves each one on its own network:
 
 | alias               | canonical leg                          |
 | ------------------- | -------------------------------------- |
@@ -266,9 +266,9 @@ and `rfq_open`. It resolves each one on its own network:
 - A client compares the quoted pair with the canonical form of the pair it
   sent.
 
-**Topic key.** The open-RFQ tag (§ 4.6) and the broker topic (§ 3.2) carry a
-topic key: the two canonical legs of the pair, joined with `~`. A topic key
-has no direction, so the leg order is fixed:
+**Reserved topic key.** This directed `v: 2` draft defines a topic key from
+the two canonical legs joined with `~`. This draft key has no direction, so
+the leg order is fixed; it is not the open-discovery tag (§ 4.6):
 
 - When exactly one leg is on `arkade`, the `arkade` leg comes first.
 - Otherwise the legs sort in byte order.
@@ -322,9 +322,9 @@ trade intent. See `docs/relay-transport.md` § 4(b) for the measurements.
   prove a quote is the party holding the signed event.
 - **Kind `24860` (provisional) — open RFQ broadcast.** Phase 1 of the
   broadcast-bidding flow (§ 4.6): a **plaintext** `rfq_open` payload with no
-  recipient and no `p` tag, tagged with the canonical market key so solvers
-  can subscribe by pair. Nothing secret ever rides this kind — § 4.6 defines
-  exactly what may appear. Ephemerality matters most here, because this is the
+  recipient and no `p` tag, tagged with the exact directional CAIP-19 pair
+  so solvers can subscribe by direction. Nothing secret ever rides this kind —
+  § 4.6 defines exactly what may appear. Ephemerality matters most here, because this is the
   one kind whose contents are public by design.
 - **Kind `38859` (provisional) — solver card.** An addressable event whose
   `d` tag is the network the card describes (`bitcoin`, `signet`,
@@ -335,13 +335,13 @@ trade intent. See `docs/relay-transport.md` § 4(b) for the measurements.
   re-sends it at least every 30 minutes; clients drop a card older than two
   hours.
 
-  **Trust rule.** A card delivered over a transport counts only when its
+  **Public discovery trust rule.** A kind-38859 card counts only when its
   `discovery_pubkey` is listed in a solver-registry the client follows — as
   a full card, or as a pointer (the card without `markets`). An unlisted
   key's card is ignored. Listing reviews the identity once; the markets are
-  then the solver's own signed statement. Nothing in a card binds: terms
-  bind only through an `rfq_quote` (an `rfq_bid`, § 4.6, is a per-request
-  price commitment, but settlement terms still bind only through a quote).
+  then the solver's own signed statement. Inline signed cards in open bids
+  are separately verified temporary discoveries (§ 4.6). Neither cards nor
+  indicative bids bind settlement terms; those bind through an `rfq_quote`.
 
 The card is the **solver-registry corridor card**: a BIP340-signed listing
 carrying the solver's `discovery_pubkey` — the pubkey RFQ traffic is
@@ -353,16 +353,14 @@ and the kind-38859 publisher; `cli card --pointer` prints the pointer.
 
 A card's `fee_flat` is OPTIONAL — omitted means `"0"` — and is denominated
 in **quote-asset** atomic units to match the card's own `min_quote_amount` /
-`max_quote_amount`, not in the from-leg units a bid uses (§ 4.6). Optional
-rather than required so that adding the field breaks no existing card and
+`max_quote_amount`. Open bids carry atomic price pairs rather than a separate
+fee field (§ 4.6). The field is optional rather than required so that adding the field breaks no existing card and
 forces no coordinated release: `card.schema.json` carries
 `additionalProperties: false`, so until the registry schema lists
 `fee_flat` a card that sets it is rejected outright, and until then a solver
-charging a flat fee simply cannot publish a card that says so. On a
-same-asset corridor market the two denominations coincide; on a
-cross-asset one they are different assets, so a card's `fee_flat` and a
-bid's are not comparable numbers. That costs nothing today precisely
-because the card is indicative: the bid and the quote carry the terms.
+charging a flat fee simply cannot publish a card that says so. The card
+remains indicative; open bids resolve both atomic amounts, and the directed
+quote carries the executable terms.
 Where a same-asset card advertises one market standing for both directions of
 a corridor, its `fee_bps` and `fee_flat` are each the **maximum** across the
 directions it stands for — overstating a fee is the safe direction, and a
@@ -409,8 +407,8 @@ implemented and tested in `packages/solver-transport/src/relay/connection.ts`):
 
 The open-RFQ flow (§ 4.6) adds one thing to this framing: a topic —
 `topic?: string` on both the event shape and the subscription filter, exact
-string match, carrying the § 2 canonical market key; the broker analogue of
-the kind-24860 `t` tag (implemented: `packages/solver-transport/src/relay/connection.ts`,
+string match, carrying the § 4.6 directional CAIP-19 pair; the broker analogue
+of the kind-24860 `t` tag (implemented: `packages/solver-transport/src/relay/connection.ts`,
 `scripts/mock-relay.mjs`).
 
 ## 4. Message family
@@ -601,229 +599,28 @@ Relays redeliver, clients retry, and networks duplicate. The rules:
 - In `v: 2` these comparisons use canonical pairs (§ 2.2). A retry that
   spells the same pair with an alias is the same request.
 
-### 4.6 Open RFQ — broadcast bidding _(solver side implemented — `packages/solver-core/src/core/openRfq.ts`, `packages/solver-transport/src/ingress/relay.ts`; the client side lives in the ts-sdk)_
+### 4.6 Open RFQ — public price discovery
 
-Directed negotiation (§ 4.1–4.5) presumes the client has already picked a
-solver from discovery data. When several solvers serve a pair — and
-especially once an independent party runs a **shared RFQ bus relay** (a
-vanilla relay every solver lists in its registry card; admission control is
-relay policy, not protocol) — the client can instead publish **one open RFQ
-with no solver chosen in advance**, collect competing sealed bids, and close
-with the winner over the unchanged directed flow. Both modes coexist,
-permanently: an open RFQ publishes trade intent (pair + size) to everyone on
-the relay, where a directed request leaks it to one solver only, so clients
-choose per trade.
+The client publishes one public request, collects sealed indicative prices,
+then chooses a solver for the existing directed negotiation (§ 4.1–4.5).
+Open requests and bids use `v: 1`. The reference implementation lives in
+`packages/solver-core/src/core/openRfq.ts`,
+`packages/solver-core/src/core/rfqProtocol.ts` and
+`packages/solver-transport/src/ingress/openRfq.ts` (`OpenRfqBidder`); the client
+lives in the ts-sdk. Directed requests, quotes, refusals, statuses, settlement
+and recovery retain their existing version and fields.
 
-This cannot be "just remove the `p` tag": two properties of the directed
-flow are load-bearing. Directed content is encrypted _to somebody_, and an
-open RFQ has nobody to encrypt to — whatever it carries is public. And the
-send profile's request carries a BOLT11 whose publication would leak the
-payment destination and invite griefing (anyone can pay it, burning the hash
-outside the swap). The open flow therefore never carries an invoice or an
-address. Three phases:
-
-**Phase 1 — `rfq_open` (public broadcast, kind `24860`).** Plaintext, no
-recipient. The event carries a `t` tag (provisional) whose value is the
-**canonical corridor-qualified market key** under the § 2 derivation —
-corridors resolved, canonical asset ids, deterministic leg order:
-`arkade:btc/lightning:btc` — never the card's display label and never an
-unordered variant; a subscription keyed to any other form silently misses
-every event. Solvers subscribe by this tag, one subscription per served
-market, alongside their directed subscription. In `v: 2` the tag is the § 2.2
-topic key, for example `arkade:bitcoin/slip44:0~bolt11:bitcoin/slip44:0`.
+**Phase 1 — `rfq_open` (public broadcast, kind `24860`).** The signed event
+contains plaintext JSON, with no recipient or `p` tag. Its `t` tag MUST equal
+the payload's directional `pair`: canonical CAIP-19 legs joined with `~`, in
+client-gives then client-receives order. Leg spellings are defined in § 2.2;
+no aliases, sorting or registry market-key conversion applies to this flow.
 
 ```json
 {
   "v": 1,
   "type": "rfq_open",
-  "open_id": "9f2c…64 hex chars…a1",
-  "pair": "arkade:BTC->lightning:BTC",
-  "amount_side": "to",
-  "amount": "50000",
-  "bids_until": 1800000030
-}
-```
-
-- `open_id` — client-chosen, 32 bytes hex; correlates bids. It is not an
-  `rfq_id` and creates no negotiation — § 4.5 is untouched by this flow.
-- `pair` — the directional § 2 string; the tag is the non-directional
-  market key. Direction lives in the payload.
-- Size: exactly one of `amount` (§ 4.1 semantics) or `size_bucket` —
-  `{"min": …, "max": …}`, canonical decimal strings of atomic units (§ 2.1)
-  of the `amount_side` leg —
-  MUST be present. Buckets soften intent leakage; they SHOULD come from a
-  coarse shared ladder (decades: 10³–10⁴, 10⁴–10⁵, …) so the bucket choice
-  itself does not fingerprint the client.
-- `bids_until` — OPTIONAL absolute unix seconds: when the client stops
-  collecting (recommended window ~2–5 s). A solver MAY skip a lapsed open
-  RFQ or MAY still bid on one observed slightly late — a late bid just gets
-  dropped. As always (§ 1) the payload field is the deadline, never the
-  transport stamp. But subscription replay (§ 3.2) re-delivers relay
-  backlog, so solvers SHOULD subscribe with a transport `since` of roughly
-  now and, when `bids_until` is absent, MAY treat a broadcast older than a
-  local bound — by transport stamp — as stale. That use of the stamp is
-  sanctioned: broadcast freshness is a relevance filter, not a protocol
-  deadline.
-- A malformed or unserved `rfq_open` is **ignored silently — never
-  refused**. This inverts the § 4 refusal rule deliberately: on a shared
-  bus, answering every stray broadcast is a spam amplifier. An `rfq_open`
-  creates no solver state.
-
-**Phase 2 — `rfq_bid` (directed, sealed).** A solver serving the pair
-replies on kind `24859`, NIP-44-encrypted **to the open RFQ's author
-pubkey** — right there on the event. The solver MUST publish the bid to at
-least the relay the `rfq_open` arrived on; the client listens for events
-p-tagged to the open's author key on every relay it broadcast to.
-Encrypting bids to the client makes this a **sealed-bid auction**:
-competitors cannot read each other's prices, which resists undercutting
-races and collusion alike.
-
-```json
-{
-  "v": 1,
-  "type": "rfq_bid",
-  "open_id": "9f2c…a1",
-  "pair": "arkade:BTC->lightning:BTC",
-  "fee_bps": 25,
-  "fee_flat": "50",
-  "min": "1000",
-  "max": "100000",
-  "valid_until": 1800000900
-}
-```
-
-- `fee_bps` — the solver's price as a spread in basis points. A JSON number,
-  not a string: it is a rate bounded by `10⁴`, not an amount, so it carries
-  no asset and cannot exceed what a double represents exactly. The
-  conformance inequalities below multiply by it, and both sides must round
-  the product identically — which is why they name ceiling and floor
-  explicitly rather than leaving it to the implementation. On a
-  same-asset pair this is the whole of the size-proportional price (the
-  § 4.2 rule stands: in the eventual quote the fee lives in the spread
-  between the resolved amounts); `fee_flat` below carries the rest. On a
-  cross-asset pair it is a spread over the market reference price, and
-  only the quote fixes amounts.
-- `fee_flat` — OPTIONAL; a canonical decimal string (§ 2.1), **atomic units
-  of the from leg** (what the client pays). Omitted means `0`, so a corridor charging no flat component
-  sends nothing and every bid written before this field existed still reads
-  correctly. The part of
-  the price that does not scale with size: an onchain corridor broadcasts a
-  transaction and pays for it whether the swap is worth a thousand atomic
-  units or a million. Note the leg: `min`/`max` below are the **to** leg, and
-  this is deliberately the other one — the conformance inequalities add the
-  fee to `from_amount`, so denominating it there keeps the check evaluable by
-  the client without a reference price. On a cross-asset pair the two legs are
-  different assets and the distinction is load-bearing.
-- `min` / `max` — REQUIRED (conformance is undefined without them);
-  canonical decimal strings (§ 2.1), atomic units of the **to** leg (what
-  the solver pays out) — the
-  registry card's per-side-bounds convention. Conformance is always
-  evaluated on the to leg: for an exact-out request that is `amount`
-  itself; for an exact-in request it is the `to_amount` the solver's quote
-  resolves — so against exact-in sizes the bounds are indicative pre-quote
-  and exact at quote time.
-- `valid_until` — the § 5 absolute-time convention, at SHOULD strength (a
-  bid gates when a request can claim a price; it is not § 5's
-  MUST-refuse-late-funding): a conforming directed `rfq_request` — same
-  pair, to-leg size within `[min, max]`, first observed before
-  `valid_until` — SHOULD be answered with a quote no worse than the bid.
-  "No worse", concretely, on a same-asset pair:
-  `from_amount ≤ ceil(to_amount · (1 + fee_bps/10⁴)) + fee_flat` for
-  exact-out, `to_amount ≥ floor((from_amount − fee_flat) · 10⁴ / (10⁴ +
-fee_bps))` for exact-in — ceiling and floor chosen so a boundary quote
-  conforms, and `fee_flat` outside them because it is exact. Worked, at
-  `fee_bps` 25 and `fee_flat` 50: an exact-out request for 25 000 permits
-  `from_amount` up to `ceil(25 062.5) + 50 = 25 113`, and an exact-in
-  request of 25 113 requires `to_amount` of at least 25 000 — the same
-  boundary from either side. A request whose `from_amount` does not exceed
-  `fee_flat` is unquotable, not mispriced: the solver refuses it with
-  `pricing_unavailable` rather than quoting a non-positive payout. On a
-  cross-asset
-  pair no reference price is client-verifiable in v1; comparing concurrent
-  bids and quotes is the defense there, and the § 12 bonding question is
-  the eventual answer.
-- The close carries no bid reference and MAY come from a key the solver
-  has never seen (see phase 3), so a bid's reach is wider than one client:
-  until `valid_until`, a solver SHOULD price **every** conforming directed
-  request on that pair no worse than the **lowest total fee** implied by any
-  of its own unexpired bids covering that to-leg size — it cannot know which
-  open RFQ, if any, a request descends from, and must not need to. A bid's
-  implied fee at to-leg size `S` is `ceil(S · fee_bps/10⁴) + fee_flat`.
-  Solvers size `valid_until` accordingly.
-- Two components mean **cheapness depends on size**, which one did not.
-  A bid at `fee_bps` 25 / `fee_flat` 50 is dearer than one at `fee_bps` 45 /
-  `fee_flat` 0 at small sizes and cheaper at large ones — both imply 113
-  atomic units at a to-leg size of 25 000. The switch is not a clean
-  crossing: because each implied fee rounds up independently, the two trade
-  places repeatedly through a band either side of that size (equal at 24 667
-  and 24 889, the 45-bps bid cheaper again at 24 801). So neither a solver
-  ranking its own commitments nor a client ranking solvers may order bids by
-  `fee_bps` alone, nor by picking a representative size — the comparison is
-  defined only at the size actually being priced, and an implementation that
-  sorts on the spread is correct exactly until two bids differ in
-  `fee_flat`.
-- A bid is a **response**: tolerant parsing (§ 1), no refusal for a bad one
-  — the client just drops it. The client MUST verify the event signature
-  and MUST drop bids for an unknown `open_id`. A solver MAY revise its bid
-  by publishing a new one under the same `open_id`; the client keeps one
-  bid per solver per `open_id`, ordered by the transport event's
-  `created_at` with event id as tiebreak — a sanctioned § 1 exception (no funds-relevant deadline
-  is read from it), which is also what makes relay redelivery harmless.
-  Revision cannot retract a commitment: any unexpired signed bid the
-  client holds remains presentable evidence, so revisions effectively bind
-  only downward — a solver that may need to reprice sizes `valid_until`
-  short instead.
-- The bid's author pubkey is the solver identity the close is addressed to
-  (v1 key model, § 4.2; splitting keys is the § 12 question). Solver-signed,
-  a bid is a **non-repudiable per-request price commitment** — strictly
-  stronger than the non-binding kind-38859 card — but enforcement is
-  reputational: the client's recourse against a reneging solver is
-  publishable evidence (signed bid + worse signed quote), not a bond
-  (§ 12).
-
-**Phase 3 — close (the existing directed flow, unchanged).** The client
-picks the best bid and runs the class's normal path against the winner —
-§ 4.1 → § 4.2, then acceptance BY FUNDING — the settlement contract for the
-HTLC class, the offer covenant for the atomic one (§ 7.2). A fresh
-`rfq_id`; the profile's
-sensitive inputs — the send profile's invoice, the receive profile's
-`payment_hash` and sealed `claim_packet` — reaching **only** the winner,
-encrypted; local contract derivation; idempotency by the profile's natural
-key (§ 4.5) — every § 4–§ 7 rule applies verbatim, and no directed message
-gains new fields. A quote inconsistent with the winning bid is grounds to
-walk away — decline to fund, or to fill — holding both signed artifacts as
-evidence (§ 6 unchanged). Losing bids simply expire; v1 sends no loser
-notification.
-
-Client privacy: the client SHOULD use a fresh transport key per open RFQ —
-bids seal to it, and negotiations stay unlinkable across trades. The
-directed close MAY come from any key; nothing in phase 3 depends on the
-phase-1 identity.
-
-Spam: an open RFQ costs every subscribed solver a bid computation — but
-only that. Bids are config-priced (no invoice to decode at bid time), and
-solvers SHOULD rate-limit bidding per pair. Admission control on a shared
-bus (proof-of-work, rate limits) is the relay operator's concern.
-
-The § 6 trust model needs no amendment: the client still derives every
-contract locally and funds only its own derivation, so neither a bus relay
-nor a lying bidder can redirect funds — a malicious bus can censor, or
-misdirect into silence, the same failure class as a wrong registry
-rendezvous.
-
-### 4.6.1 Open price previews v2
-
-V2 public discovery uses the same ephemeral kinds as v1. The payload's `pair`
-and the event's `t` tag are both the **directional** canonical CAIP-19 legs
-joined with `~`, in client-gives then client-receives order. No sorting is
-applied. This profile is implemented separately from the reserved directed-v2
-draft in § 2.2; existing directed requests and v1 bidding remain unchanged.
-
-```json
-{
-  "v": 2,
-  "type": "rfq_open",
-  "open_id": "<64 lowercase hex>",
+  "open_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "pair": "arkade:bitcoin/slip44:0~eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
   "amount_side": "from",
   "amount": "25000",
@@ -831,22 +628,36 @@ draft in § 2.2; existing directed requests and v1 bidding remain unchanged.
 }
 ```
 
-Only the pair, requested amount and collection deadline are public. An invoice,
-destination, refund address, hash or wallet profile MUST NOT be included. Amounts
-are positive canonical decimal strings, at most 128 digits. The collection
-deadline is an integer unix second and at most sixty seconds ahead. Opens that
-are stale, malformed, unserved or outside the collection window are ignored.
+- `open_id` is a client-chosen 32-byte lowercase hex string (64 characters).
+  It correlates bids and creates no directed negotiation or `rfq_id`.
+- `amount_side` is `from` or `to`; `amount` is that leg's positive atomic-unit
+  amount, encoded as a canonical decimal string (`^[1-9][0-9]*$`, at most
+  128 digits). JSON numbers and size buckets are not accepted.
+- `bids_until` is a required integer unix second, after now and at most sixty
+  seconds ahead. The reference solver also rejects events older than sixty
+  seconds or timestamped more than five seconds ahead. Transport timestamps
+  filter replay freshness; the payload field controls the collection deadline.
+- A malformed, stale, expired or unserved request is ignored silently, never
+  refused. The request MUST NOT contain an invoice, recipient, destination,
+  refund address, payment hash, hashlock or wallet profile. Only the pair,
+  amount side, amount, correlation id and collection deadline are public.
 
-The solver responds on kind 24859, NIP-44 sealed to the open event's author.
-The `p` tag names that author and the `e` tag names the signed open **event id**.
-The decrypted payload is:
+Solvers subscribe by the exact directional pair. The client and solver MUST
+share at least one configured relay: public broadcast does not discover a
+relay route by itself. A client listens for sealed bids on the relay or relays
+to which it published the open event.
+
+**Phase 2 — `rfq_bid` (directed, sealed, kind `24859`).** The solver verifies
+the open event and encrypts its bid with NIP-44 to that event's author. The
+bid's `p` tag MUST name the author and its `e` tag MUST name the signed open
+**event id**, distinct from `open_id`. The decrypted payload is:
 
 ```json
 {
-  "v": 2,
+  "v": 1,
   "type": "rfq_bid",
-  "open_id": "<same open_id>",
-  "pair": "<same directional pair>",
+  "open_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "pair": "arkade:bitcoin/slip44:0~eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
   "amount_side": "from",
   "from_amount": "25000",
   "to_amount": "24920000",
@@ -855,22 +666,56 @@ The decrypted payload is:
 }
 ```
 
-The card's discovery key MUST equal the bid event's verified signing key. Its
-network, direction, signature and transport data are validated before the offer
-is shown. The requested side's amount is unchanged; the other amount uses its
-own asset's atomic units. A bid expires after the collection window, so it can
-be selected. Current solver previews use the ordinary pricing resolvers without
-reserving capacity, creating an invoice or persisting a swap. Their expiry
-leaves thirty seconds after collection for the user to choose. EVM previews
-support exact-in only, as the directed EVM paths do.
+The client MUST verify the event signature, recipient and reply binding; match
+`open_id`, `pair` and `amount_side` to its request; and reject expired bids.
+Both amounts follow the positive canonical atomic-string rule above, each in
+its own leg's units. The requested side's amount MUST equal the request
+exactly. `valid_until` MUST be later than both now and `bids_until`; current
+solver previews leave thirty seconds after collection for selection.
 
-These are **indicative previews**, not executable quotes. The selected solver
-then supplies an ordinary verified directed quote. A client MUST refuse worse
-terms, an expired selection or a changed solver, and return to offer selection;
-it MUST NOT silently fail over or fund while collecting previews. In particular,
-an invoice-specific Lightning execution fee can only be resolved during this
-private close. Signed cards discovered here remain temporary unless the user
-explicitly adds them to their saved solvers.
+The inline card MUST be independently signed, and its `discovery_pubkey` MUST
+equal the bid event's verified signing key. The client validates its network,
+advertised direction and transport before displaying the offer. The card's
+schema version is independent of the RFQ envelope's version: an inline EVM
+card can use `version: 1`, while the default public card retains its
+existing `version: 0` shape. ERC20 card feeds require a non-negative
+`price_decimals`, so tokens with more than eight decimals remain on their
+existing directed path and appear in `cardOmitted`. A receive direction with
+a BTC-output flat fee is also omitted when the card's fee field would denote
+the ERC20 input unit. Inline discovery does not bypass these representability
+limits. Cards received in bids remain temporary unless the user explicitly
+adds them to saved solvers.
+
+These bids are **indicative price previews**, not executable quotes or
+standing commitments to later directed requests. The solver uses live pricing
+resolvers without reserving capacity, creating an invoice, persisting a swap
+or accepting a trade. Invoice-specific Lightning execution fees are resolved
+only during the private directed close. EVM previews support exact-in only,
+as the directed EVM paths do. A malformed or unrelated bid is dropped without
+a refusal; relay redelivery must not create duplicate offers.
+
+The reference solver uses one `OpenRfqBidder` and one configured
+`relay.openRfqMaxBidsPerMinute` budget across its advertised directions. It
+charges the work budget before pricing, including unquotable requests.
+`0` disables bidding. Subscriptions refresh every thirty seconds, including
+retries after an initial refresh failure. Stopping the bidder closes only its
+own subscriptions, leaving the shared directed connection active.
+
+**Phase 3 — directed close.** Once the user selects an offer, the client asks
+that solver for the ordinary directed quote using a fresh `rfq_id`. Sensitive
+inputs reach only the selected solver, encrypted. The client MUST reject an
+expired selection, a changed solver or worse terms and return to offer
+selection; it MUST NOT silently fail over after explicit selection or funding.
+The existing quote validation, local contract derivation, idempotency,
+acceptance by funding, settlement and recovery rules remain in force.
+Collecting previews never funds or accepts a swap; losing bids expire without
+notification.
+
+A fresh client transport key per open request is recommended to avoid linking
+public trade intent across trades. The directed close may use another key;
+its identity and settlement bindings follow the unchanged directed protocol.
+Relay admission control remains relay policy. The client still derives every
+contract locally and funds only its verified derivation (§ 6).
 
 ## 5. Quote validity — `valid_until`
 
@@ -896,9 +741,9 @@ not only while a watcher happens to be running.)
 For quotes that mint an invoice (receive-direction Lightning), the invoice's
 own expiry SHOULD equal `valid_until`.
 
-An `rfq_bid` (§ 4.6) carries its own `valid_until` with the same
-absolute-time semantics: it bounds when a conforming directed request can
-still claim the bid's price.
+An indicative `rfq_bid` (§ 4.6) carries its own absolute `valid_until`:
+it bounds offer selection, not funding or a right to claim that price.
+The subsequent directed quote has its own binding validity window.
 
 ## 6. Trust model
 
@@ -1975,12 +1820,14 @@ have a tested reference in this repo.
    and re-send it at least every 30 minutes; list its key in the
    solver-registry as a full card or a pointer (§ 3.1) — an unlisted key's
    card is ignored.
-10. **(Optional) Open-RFQ bidding** (§ 4.6) — a second subscription per
-    served market keyed by the canonical market-key tag; a bid handler that
-    prices from config (no invoice decode) and seals `rfq_bid` to the
-    broadcast's author; a per-pair rate limit. The directed path is
-    untouched (ref: `packages/solver-core/src/core/openRfq.ts`, `packages/solver-transport/src/ingress/relay.ts`,
-    `test/core/openRfq.test.ts`).
+10. **(Optional) Open-RFQ bidding** (§ 4.6) — subscribe by the exact
+    advertised directional CAIP-19 pair, price side-effect-free previews with
+    the live resolvers and seal each signed-card `rfq_bid` to the broadcast's
+    author with the open event reply binding. One bidder shares the configured
+    work budget across directions and refreshes subscriptions every thirty
+    seconds. The directed path is unchanged (ref:
+    `packages/solver-core/src/core/openRfq.ts`,
+    `packages/solver-transport/src/ingress/openRfq.ts`).
 
 ## 12. Open questions
 
@@ -1991,8 +1838,8 @@ have a tested reference in this repo.
   the digits are open.
 - **Quote bonding.** A quote is signed but costless; whether solvers should
   bond against reneging on observed-in-time funding (and how slashing would
-  work) is open. The same question covers bids (§ 4.6): a reneged bid today
-  costs only reputation.
+  work) is open. Indicative open bids (§ 4.6) are not executable commitments;
+  the subsequent directed quote is the binding artifact.
 - **Atomic-class fill format — the encoding question was the wrong question.**
   There is no partially-signed transaction and no `rfq_fill` — the message does
   not exist, and `@arkade-os/swap@0.0.9` never constructs one. The CLIENT funds
@@ -2029,11 +1876,9 @@ have a tested reference in this repo.
   notification. Still open from that design: whether a shared bus may
   itself pick the winner (thin-client UX) — that variant needs
   public-and-signed bids so the pick is auditable, i.e. the registry spec's
-  dormant v1 quote layer plus a matcher — and the exact granularity of the
-  § 4.6 size-bucket ladder. The § 2 leg-ordering rule for markets the
-  registry leaves unordered (both or neither side arkade) is this spec's
-  extension and should be upstreamed so the two documents cannot drift. The
-  § 2.2 topic key reuses that rule.
+  dormant quote layer plus a matcher. The § 2 leg-ordering rule for registry
+  markets with both or neither side arkade remains separate from open
+  discovery, whose directional pair is never sorted.
 - **Key separation.** v1 assumes one solver key for transport identity and
   settlement; splitting them (hot Nostr key, cold settlement key) needs a
   binding proof in the card or quote.

@@ -1,7 +1,7 @@
 import { resolveAssetQuote } from '@arkade-os/solver-core/core/assetRfq.js'
 import { giveSatsFor, payoutSatsFor, isCorridor } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { convertAmount, convertQuoteToBase, type Price } from '@arkade-os/solver-core/core/priceFeed.js'
-import type { OpenRfqV2, OpenRfqV2Price } from '@arkade-os/solver-core/core/openRfqV2.js'
+import type { OpenRfq, OpenRfqPrice } from '@arkade-os/solver-core/core/openRfq.js'
 import type { SolverCard } from '@arkade-os/solver-core/core/registryCard.js'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
 import type { Services } from './services.js'
@@ -37,7 +37,7 @@ export const openRfqPreview = (
 ) => {
   const fetchPrice = options.fetchPrice ?? createPriceFeed()
   const now = options.now ?? (() => Math.floor(Date.now() / 1000))
-  return async (open: OpenRfqV2): Promise<OpenRfqV2Price | undefined> => {
+  return async (open: OpenRfq): Promise<OpenRfqPrice | undefined> => {
     const [fromId, toId] = open.pair.split('~')
     const from = fromId ? legacyLeg(fromId, source) : undefined
     const to = toId ? legacyLeg(toId, source) : undefined
