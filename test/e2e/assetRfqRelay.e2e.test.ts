@@ -21,7 +21,7 @@ import { generateMnemonic } from '@scure/bip39'
 import { wordlist } from '@scure/bip39/wordlists/english.js'
 import { ArkAddress, asset, isVtxoSpent, Transaction } from '@arkade-os/sdk'
 import { InMemoryAssetSwapRepository } from '@arkade-os/swap'
-import { cancelOffer, requestArkadeSwap, type Offer } from '@arkade-os/swap/protocol'
+import { cancelOffer, requestArkadeSwap } from '@arkade-os/swap/protocol'
 import { nostrRfqTransport } from '@arkade-os/swap/nostr'
 import { base64, hex } from '@scure/base'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
@@ -29,13 +29,9 @@ import { GiveUp, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
 import { createCorridorReaderSet, createCorridorSet } from '@arkade-os/solver-core/core/corridor.js'
 import type { AssetLeg } from '@arkade-os/solver-core/core/assetRfq.js'
 import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
-import { ASSET_CARRIER_SATS, fulfillOffer } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
-import {
-  offerExitDelay,
-  offerFromTerms,
-  offerScriptFrom,
-  type OfferDerivation,
-} from '@arkade-os/solver-arkade/arkade/offerTerms.js'
+import { ASSET_CARRIER_SATS } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
+import { quotedOfferSettleFor } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
+import { offerExitDelay, offerScriptFrom, type OfferDerivation } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
 import {
   AssetRfqSwapService,
   type AssetRfqMarket,
@@ -48,6 +44,7 @@ import { RelayIngress } from '@arkade-os/solver-transport/ingress/relay.js'
 import { webSocketRelayConnection } from '@arkade-os/solver-transport/relay/connection.js'
 import { nostrCodecForWallet } from '@arkade-os/solver-transport/relay/nostr.js'
 import { createArkadeContext, type ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { directFillRecoveryFor } from '@arkade-os/solver-app/ops/directFillRecovery.js'
 import { requireStack } from './support/preflight.js'
 import {
   assertArkadeSpendable,
@@ -173,14 +170,6 @@ const derivation = (): OfferDerivation => ({
 
 const deriveOffer = (terms: OfferTerms): { pkScript: string; address: string } => offerScriptFrom(derivation())(terms)
 
-const termsOf = (row: AssetRfqSwapRow): OfferTerms => ({
-  wantAmount: row.toAmount,
-  wantAssetId: row.toAssetId,
-  offerAssetId: row.fromAssetId,
-  makerPkScript: row.makerPkScript,
-  makerPublicKey: row.makerPublicKey,
-})
-
 const depositAt = async (offerPkScript: string): Promise<ObservedDeposit | null> => {
   const { vtxos } = await arkade.ctx.wallet.indexerProvider.getVtxos({ scripts: [offerPkScript] })
   const live = (vtxos ?? []).filter((vtxo) => !isVtxoSpent(vtxo) && vtxo.isSwept !== true)
@@ -220,23 +209,6 @@ const depositSpent = async (offerPkScript: string): Promise<'spent'> =>
 const balance = async (): Promise<ReadonlyMap<AssetLeg, bigint>> =>
   offerInventoryFrom(await arkade.ctx.wallet.getBalance())
 
-const settle = async (row: AssetRfqSwapRow): Promise<string> => {
-  const deposit = await depositAt(row.offerPkScript)
-  if (!deposit) throw new Error(`nothing live at ${row.offerPkScript} to fill`)
-  const offer: Offer = {
-    ...offerFromTerms(termsOf(row), emulatorXOnly(), offerExitDelay(arkade.ctx.advertisedExitDelay)),
-    swapPkScript: hex.decode(row.offerPkScript),
-  }
-  return fulfillOffer(arkade.ctx, arkade.emulator.url, offer, {
-    txid: deposit.txid,
-    vout: deposit.vout,
-    value: Number(deposit.sats),
-    ...(row.fromAssetId !== null
-      ? { assetAmount: deposit.assets.find((a) => a.assetId === row.fromAssetId)?.amount }
-      : {}),
-  })
-}
-
 interface Harness {
   ingress: RelayIngress
   store: AssetRfqSwapStore
@@ -260,8 +232,16 @@ const harness = async (over: Partial<AssetRfqMarket> = {}): Promise<Harness> => 
     depositAt,
     balance,
     fetchPrice: createPriceFeed(),
-    settle,
+    settle: quotedOfferSettleFor({ ctx: arkade.ctx, emulatorUrl: arkade.emulator.url, derivation: derivation() }),
   })
+  const recovery = await directFillRecoveryFor(arkade.ctx, (kind) =>
+    kind === 'rfq'
+      ? {
+          recoverDirectFill: (proof, txid) => service.recoverDirectFill(proof, txid),
+          cancelDirectFill: (proof, txid) => store.cancelDirectFill(proof, txid),
+        }
+      : null,
+  )
   const sell = assetRfqDescriptor(markets[0]!, 'sell_base')
   const buy = assetRfqDescriptor(markets[0]!, 'buy_base')
   const corridors = createCorridorSet([assetRfqCorridor(sell, service, store), assetRfqCorridor(buy, service, store)])
@@ -279,6 +259,7 @@ const harness = async (over: Partial<AssetRfqMarket> = {}): Promise<Harness> => 
     pairSell: sell.pair,
     tickAll: async () => {
       await service.tickAll()
+      await recovery.sweep()
     },
   }
 }
@@ -298,6 +279,13 @@ const driveTo = async (
       await tickAll()
       const row = await store.get(id)
       if (row.state === state) return row
+      if (
+        row.state === 'stuck' &&
+        (await arkade.ctx.directFills.list()).some(
+          (attempt) => attempt.parent.kind === 'rfq' && attempt.parent.id === id,
+        )
+      )
+        return null
       if (row.state !== 'quoted' && row.state !== 'funded' && row.state !== 'filling') {
         throw new GiveUp(`${id} ended ${row.state}, not ${state}: ${row.failureReason ?? 'no reason recorded'}`)
       }
