@@ -103,6 +103,7 @@ export interface OpenRfqBidderDeps {
   bidding?: BiddingStrategy
   /** MUST be positive — whether to bid at all is the composer's decision. */
   maxBidsPerMinute: number
+  bidBucket?: TokenBucket
   /** Each bid, once its publish has resolved. */
   onBid?: (open: OpenRfq, bid: Extract<OpenRfqBidDecision, { kind: 'bid' }>) => void
   onError?: (context: string, error: unknown) => void
@@ -122,7 +123,7 @@ export class OpenRfqBidder {
 
   constructor(private readonly deps: OpenRfqBidderDeps) {
     this.now = deps.now ?? (() => Date.now())
-    this.bidBucket = tokenBucket(deps.maxBidsPerMinute, this.now())
+    this.bidBucket = deps.bidBucket ?? tokenBucket(deps.maxBidsPerMinute, this.now())
   }
 
   async start(): Promise<void> {

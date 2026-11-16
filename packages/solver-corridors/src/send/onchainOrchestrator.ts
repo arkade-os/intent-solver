@@ -502,6 +502,23 @@ export class OnchainSendSwapService {
     )
   }
 
+  previewAmounts(amount: number, side: 'from' | 'to'): { fromAmount: number; toAmount: number } | undefined {
+    if (!Number.isSafeInteger(amount) || amount <= 0) return undefined
+    const fromAmount =
+      side === 'from' ? amount : this.pricing.giveFor({ pair: RFQ_PAIR_ONCHAIN_SEND, payoutSats: amount })
+    const toAmount =
+      side === 'to' ? amount : this.pricing.payoutFor({ pair: RFQ_PAIR_ONCHAIN_SEND, giveSats: fromAmount })
+    if (
+      !Number.isSafeInteger(fromAmount) ||
+      !Number.isSafeInteger(toAmount) ||
+      fromAmount < this.deps.limits.minSats ||
+      fromAmount > this.deps.limits.maxSats ||
+      toAmount < this.refundablePayoutFloor()
+    )
+      return undefined
+    return { fromAmount, toAmount }
+  }
+
   tick(id: string): Promise<OnchainSendSwapRow> {
     return guardedTick(id, this.inFlight, this.deps.store, (row) => this.step(row))
   }

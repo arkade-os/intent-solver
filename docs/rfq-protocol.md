@@ -39,7 +39,9 @@ out of scope for this spec — the Lightning legs use RFQ permanently.
   clients MUST ignore unknown fields in quotes, bids, refusals and statuses,
   so solvers can extend responses without a version bump.
 - **Versions.** The envelope's `v` names the protocol version. The reference
-  implementation speaks `v: 1`. `v: 2` makes two breaking changes: amounts
+  implementation speaks `v: 1` for directed negotiation and legacy bidding,
+  plus the open-price-preview `v: 2` profile in § 4.6.1. The reserved directed
+  `v: 2` draft makes two breaking changes: amounts
   are strings only (§ 2.1), and pairs and topics use CAIP-19 identifiers
   (§ 2.2).
 
@@ -209,10 +211,13 @@ subscription tag, § 4.6 — it says so explicitly; everywhere else `pair` means
 the directional form above. `v: 2` replaces this market key with the § 2.2
 topic key.
 
-### 2.2 Identifiers in `v: 2` _(specified; NOT yet implemented)_
+### 2.2 Identifiers in directed `v: 2` _(reserved draft)_
 
 `v: 2` legs are the CAIP-19 asset ids that solver-registry cards already use.
 One id holds the corridor, the network and the asset.
+
+This section describes a future directed-negotiation version. Implemented open
+price previews use the directional pair and topic defined in § 4.6.1 instead.
 
 **Legs.** A leg is `<corridor>:<network>/<asset-namespace>:<asset-reference>`:
 
@@ -805,6 +810,67 @@ contract locally and funds only its own derivation, so neither a bus relay
 nor a lying bidder can redirect funds — a malicious bus can censor, or
 misdirect into silence, the same failure class as a wrong registry
 rendezvous.
+
+### 4.6.1 Open price previews v2
+
+V2 public discovery uses the same ephemeral kinds as v1. The payload's `pair`
+and the event's `t` tag are both the **directional** canonical CAIP-19 legs
+joined with `~`, in client-gives then client-receives order. No sorting is
+applied. This profile is implemented separately from the reserved directed-v2
+draft in § 2.2; existing directed requests and v1 bidding remain unchanged.
+
+```json
+{
+  "v": 2,
+  "type": "rfq_open",
+  "open_id": "<64 lowercase hex>",
+  "pair": "arkade:bitcoin/slip44:0~eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+  "amount_side": "from",
+  "amount": "25000",
+  "bids_until": 1800000005
+}
+```
+
+Only the pair, requested amount and collection deadline are public. An invoice,
+destination, refund address, hash or wallet profile MUST NOT be included. Amounts
+are positive canonical decimal strings, at most 128 digits. The collection
+deadline is an integer unix second and at most sixty seconds ahead. Opens that
+are stale, malformed, unserved or outside the collection window are ignored.
+
+The solver responds on kind 24859, NIP-44 sealed to the open event's author.
+The `p` tag names that author and the `e` tag names the signed open **event id**.
+The decrypted payload is:
+
+```json
+{
+  "v": 2,
+  "type": "rfq_bid",
+  "open_id": "<same open_id>",
+  "pair": "<same directional pair>",
+  "amount_side": "from",
+  "from_amount": "25000",
+  "to_amount": "24920000",
+  "valid_until": 1800000035,
+  "card": { "<complete signed solver card>": "..." }
+}
+```
+
+The card's discovery key MUST equal the bid event's verified signing key. Its
+network, direction, signature and transport data are validated before the offer
+is shown. The requested side's amount is unchanged; the other amount uses its
+own asset's atomic units. A bid expires after the collection window, so it can
+be selected. Current solver previews use the ordinary pricing resolvers without
+reserving capacity, creating an invoice or persisting a swap. Their expiry
+leaves thirty seconds after collection for the user to choose. EVM previews
+support exact-in only, as the directed EVM paths do.
+
+These are **indicative previews**, not executable quotes. The selected solver
+then supplies an ordinary verified directed quote. A client MUST refuse worse
+terms, an expired selection or a changed solver, and return to offer selection;
+it MUST NOT silently fail over or fund while collecting previews. In particular,
+an invoice-specific Lightning execution fee can only be resolved during this
+private close. Signed cards discovered here remain temporary unless the user
+explicitly adds them to their saved solvers.
 
 ## 5. Quote validity — `valid_until`
 

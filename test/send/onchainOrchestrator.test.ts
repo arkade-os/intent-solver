@@ -3078,6 +3078,16 @@ describe('OnchainSendSwapService', () => {
       expect(serviceCharging({ bps: 100, flatSats: 50 }, 10_000).minimumPayoutSats()).toBe(9_850)
     })
 
+    it('previews current prices without opening or reserving a swap', async () => {
+      const priced = serviceCharging({ bps: 100, flatSats: 50 }, 1_000)
+      const before = await deps.store.committedSats()
+      expect(priced.previewAmounts(10_000, 'from')).toEqual({ fromAmount: 10_000, toAmount: 9_850 })
+      expect(priced.previewAmounts(9_850, 'to')).toEqual({ fromAmount: 10_000, toAmount: 9_850 })
+      expect(priced.previewAmounts(999, 'from')).toBeUndefined()
+      expect(serviceCharging({ bps: 0, flatSats: 900 }, 1_000).previewAmounts(1000, 'from')).toBeUndefined()
+      expect(await deps.store.committedSats()).toBe(before)
+    })
+
     it('tracks the configured minimum, not a constant', () => {
       const free = { bps: 0, flatSats: 0 }
       expect(serviceCharging(free, 20_000).minimumPayoutSats()).toBe(20_000)

@@ -1164,6 +1164,10 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     const services = await createServices(config, { rebalance: 'active' })
     const { webSocketRelayConnection, isRelayFault } = await import('@arkade-os/solver-transport/relay/connection.js')
     const { RelayIngress, OpenRfqBidder } = await import('@arkade-os/solver-transport/ingress/relay.js')
+    const { OpenRfqV2Bidder } = await import('@arkade-os/solver-transport/ingress/openRfqV2.js')
+    const { tokenBucket } = await import('@arkade-os/solver-core/core/openRfq.js')
+    const { deploymentCard } = await import('./admin/routes/card.js')
+    const { openRfqPairs, openRfqPreview } = await import('./ops/openRfq.js')
     const latencyDiagnostics = config.latencyDiagnostics
     if (latencyDiagnostics && services.receiveService) {
       services.receiveService.onQuoteTiming = (sample) => log('receive_quote_timing', json(sample))
@@ -1230,6 +1234,9 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     // corridor — the bidder only ever bids on that one pair, and a bid on a
     // corridor that then refuses the directed RFQ is worse than no bid.
     let bidder
+    let bidderV2
+    const bidBucket =
+      config.openRfqMaxBidsPerMinute > 0 ? tokenBucket(config.openRfqMaxBidsPerMinute, Date.now()) : undefined
     let bids: BidRecorder | undefined
     if (config.openRfqMaxBidsPerMinute > 0 && services.service) {
       bids = createBidTail()
@@ -1243,16 +1250,33 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
         limits: services.policy.corridorLimits['arkade:BTC->lightning:BTC'],
         fee: services.policy.corridorFees['arkade:BTC->lightning:BTC'],
         maxBidsPerMinute: config.openRfqMaxBidsPerMinute,
+        bidBucket,
         onBid: recordBidsIn(bids),
         onError,
       })
       await bidder.start()
       log('open-RFQ bidding on, capped at', config.openRfqMaxBidsPerMinute, 'bids/min')
     }
+    if (config.openRfqMaxBidsPerMinute > 0) {
+      bidderV2 = new OpenRfqV2Bidder({
+        connection,
+        providerPubkey: services.providerPubkey,
+        pairs: async () => openRfqPairs(await deploymentCard(services, undefined, { includeEvm: true })),
+        card: () => deploymentCard(services, undefined, { includeEvm: true }),
+        preview: openRfqPreview(services),
+        maxBidsPerMinute: config.openRfqMaxBidsPerMinute,
+        bidBucket,
+        onError,
+      })
+      try {
+        await bidderV2.start()
+      } catch (error) {
+        onError('open-RFQ v2 unavailable', error)
+      }
+    }
 
     // Undefined under `off`: nothing is constructed, so nothing can publish.
     const { startAdPublishing } = await import('@arkade-os/solver-transport/relay/adPublisher.js')
-    const { deploymentCard } = await import('./admin/routes/card.js')
     const ads = startAdPublishing({
       mode: config.nostrAdPublish,
       connection,
@@ -1326,10 +1350,12 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     } finally {
       clearInterval(heartbeat)
       ads?.stop()
-      try {
-        await bidder?.stop()
-      } catch (error) {
-        log('bidder.stop() failed:', error instanceof Error ? error.message : String(error))
+      for (const activeBidder of [bidder, bidderV2]) {
+        try {
+          await activeBidder?.stop()
+        } catch (error) {
+          log('bidder.stop() failed:', error instanceof Error ? error.message : String(error))
+        }
       }
       try {
         await ingress.stop()

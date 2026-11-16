@@ -4,7 +4,8 @@ import {
   buildSolverCard,
   publishableAssetMarkets,
   signSolverCard,
-  unpublishableCorridors,
+  publishableEvmMarkets,
+  type EvmCardMarket,
   type SolverCard,
 } from '@arkade-os/solver-core/core/registryCard.js'
 import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
@@ -50,13 +51,51 @@ const assetMarketsOf = (source: CardSource) =>
     source.config.network,
   )
 
-export const cardOmissions = (source: CardSource): string[] => [
-  // LIVE unlike the corridor map: `rebuild` builds the corridor set from `livePolicy.evmCorridors`.
-  ...unpublishableCorridors(
-    source.policy.evmCorridors.filter((corridor) => corridor.enabled).map((corridor) => corridor.corridor),
-  ),
-  ...assetMarketsOf(source).omitted,
-]
+export const evmCardMarketsOf = (source: CardSource) => {
+  const markets: EvmCardMarket[] = []
+  const unavailable: string[] = []
+  const chainId = source.config.evmChain?.chainId
+  if (chainId !== undefined) {
+    for (const market of source.config.evmMarkets ?? []) {
+      const policies = source.bootPolicy.evmCorridors.filter(
+        (policy) =>
+          policy.enabled &&
+          policy.token.address === market.token.address &&
+          source.policy.evmCorridors.some((live) => live.corridor === policy.corridor && live.enabled),
+      )
+      if (!policies.length) continue
+      const send = policies.find((policy) => policy.direction === 'send')
+      const receive = policies.find((policy) => policy.direction === 'receive')
+      markets.push({ ...market, chainId, ...(send ? { send } : {}), ...(receive ? { receive } : {}) })
+    }
+  }
+  for (const policy of source.policy.evmCorridors) {
+    if (policy.enabled && !markets.some((market) => market.token.address === policy.token?.address)) {
+      const boot = source.bootPolicy.evmCorridors.find((entry) => entry.corridor === policy.corridor && entry.enabled)
+      unavailable.push(
+        `${policy.corridor} cannot be advertised: ${boot ? 'its EVM chain or price-feed metadata is missing' : 'enabling this EVM direction is pending restart'}`,
+      )
+    }
+  }
+  const result = publishableEvmMarkets(markets, source.config.network)
+  return { publishable: result.publishable, omitted: [...unavailable, ...result.omitted] }
+}
+
+export const cardOmissions = (source: CardSource): string[] => {
+  const evm = evmCardMarketsOf(source)
+  const inlineOnly = source.policy.evmCorridors
+    .filter(
+      (policy) =>
+        policy.enabled &&
+        evm.publishable.some(
+          (market) => market.token.address === policy.token?.address && Boolean(market[policy.direction]),
+        ),
+    )
+    .map(
+      (policy) => `${policy.corridor} requires the open-RFQ v2 inline card; the legacy published card stays version 0`,
+    )
+  return [...evm.omitted, ...inlineOnly, ...assetMarketsOf(source).omitted]
+}
 
 /**
  * One builder for `/api/card`, `cli card` and the kind-38859 publisher.
@@ -68,6 +107,7 @@ export const cardOmissions = (source: CardSource): string[] => [
 export const deploymentCard = async (
   source: CardSource,
   name = source.config.solverName ?? undefined,
+  options: { includeEvm?: boolean } = {},
 ): Promise<SolverCard> => {
   const { config, bootPolicy } = source
   const trimmed = name?.trim()
@@ -97,6 +137,7 @@ export const deploymentCard = async (
       relays: advertisedRelays(config.relayUrl, config.cardRelays),
       corridors: served,
       assetMarkets: assetMarketsOf(source).publishable,
+      ...(options.includeEvm ? { evmMarkets: evmCardMarketsOf(source).publishable } : {}),
     }),
     (digest) => source.arkade.identity.signMessage(digest, 'schnorr'),
   )

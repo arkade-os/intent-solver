@@ -680,12 +680,12 @@ describe('a bound with nothing to inherit', () => {
   })
 })
 
-describe('corridors no card can name', () => {
-  it('reports a served ERC20 corridor rather than dropping it silently', () => {
+describe('corridor names without EVM metadata', () => {
+  it('reports the missing metadata rather than inventing an ERC20 market', () => {
     const notes = unpublishableCorridors(['arkade:BTC->ethereum:0xdac17f958d2ee523a2206206994597c13d831ec7'])
     expect(notes).toHaveLength(1)
     expect(notes[0]).toContain('0xdac17f958d2ee523a2206206994597c13d831ec7')
-    expect(notes[0]).toContain('solver-registry#23')
+    expect(notes[0]).toContain('token precision, feed and directional limits')
   })
 
   it('says nothing when nothing is unpublishable', () => {
