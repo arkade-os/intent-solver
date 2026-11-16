@@ -108,6 +108,33 @@ describe('public price previews', () => {
     expect(await preview(open(`${btc}~bolt11:bitcoin/slip44:0`, '1000'))).toBeUndefined()
   })
 
+  it('refuses unsafe exact-out inversions while preserving safe maximum free previews', async () => {
+    for (const bps of [1, 0]) {
+      const base = source()
+      const services = {
+        ...base,
+        bootPolicy: {
+          ...base.bootPolicy,
+          corridorFees: {
+            'arkade:BTC->lightning:BTC': { bps, flatSats: 0 },
+            'lightning:BTC->arkade:BTC': { bps, flatSats: 0 },
+          },
+          corridorLimits: {
+            'arkade:BTC->lightning:BTC': { minSats: 1, maxSats: Number.MAX_SAFE_INTEGER },
+            'lightning:BTC->arkade:BTC': { minSats: 1, maxSats: Number.MAX_SAFE_INTEGER },
+          },
+        },
+      }
+      const preview = openRfqPreview(services as unknown as Services, { now: () => 1800000000 })
+      const amount = String(Number.MAX_SAFE_INTEGER)
+      for (const pair of [`${btc}~bolt11:bitcoin/slip44:0`, `bolt11:bitcoin/slip44:0~${btc}`]) {
+        const result = await preview(open(pair, amount, 'to'))
+        if (bps > 0) expect(result).toBeUndefined()
+        else expect(result).toMatchObject({ from_amount: amount, to_amount: amount })
+      }
+    }
+  })
+
   it('delegates onchain exact-in and exact-out amounts without replacing the returned price', async () => {
     const base = source()
     const previewAmounts = vi.fn(() => ({ fromAmount: 10000, toAmount: 9850 }))
