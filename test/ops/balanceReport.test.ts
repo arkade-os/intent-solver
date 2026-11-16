@@ -2,10 +2,13 @@ import { describe, it, expect, vi } from 'vitest'
 import {
   createBalanceReportReader,
   formatBalanceReport,
+  formatSourceRecovered,
   type BalanceReportInput,
 } from '@arkade-os/solver-app/ops/balanceReport.js'
+import { createJoin } from '@arkade-os/solver-app/ops/guardedRead.js'
 import type { FundBalance, FundSource } from '@arkade-os/solver-app/ops/fundSources.js'
 import type { SwapSummary } from '@arkade-os/solver-app/ops/swapSummary.js'
+import type { BalanceCheckpoint } from '@arkade-os/solver-app/ops/balanceCheckpoints.js'
 
 const source = (label: string, readBalance: () => Promise<FundBalance>): FundSource => ({
   id: label,
@@ -32,7 +35,72 @@ const read = (overrides: Partial<BalanceReportInput> = {}, reader = createBalanc
     ...overrides,
   })
 
+const checkpoint = (id: number, totalSats: string, assets: Record<string, string> = {}): BalanceCheckpoint => ({
+  id,
+  scope: 'provider',
+  startedAt: id * 60,
+  finishedAt: id * 60,
+  arkade: { totalSats, assets },
+  totalSats,
+  lightningSats: null,
+  onchain: null,
+  previousId: null,
+  decreases: [],
+  errors: {},
+})
+
 describe('balance report', () => {
+  it('includes signed BTC changes and exact new, spent and changed asset quantities', async () => {
+    const previous = checkpoint(1, '6400', { changed: '10000000000000000000000000', spent: '10' })
+    const current = checkpoint(3, '7400', { changed: '10000000000000000000000001', added: '25' })
+    const text = formatBalanceReport(await read({ readCheckpoint: async () => ({ current, previous }) }))
+    expect(text).toContain('*Balance change* 1970-01-01 00:01 to 00:03 UTC')
+    expect(text).toContain('BTC: +1,000 sats (6,400 → 7,400)')
+    expect(text).toContain(
+      'arkade:changed: +1 base units (10,000,000,000,000,000,000,000,000 → 10,000,000,000,000,000,000,000,001)',
+    )
+    expect(text).toContain('arkade:spent: -10 base units (10 → 0)')
+    expect(text).toContain('arkade:added: +25 base units (0 → 25)')
+    expect(text).toContain('*arkade float*: available')
+  })
+
+  it('includes negative and zero BTC deltas without inventing a delta on the first report', async () => {
+    const previous = checkpoint(1, '6400')
+    const decreased = checkpoint(2, '6300')
+    expect(
+      formatBalanceReport(await read({ readCheckpoint: async () => ({ current: decreased, previous }) })),
+    ).toContain('BTC: -100 sats (6,400 → 6,300)')
+    expect(
+      formatBalanceReport(await read({ readCheckpoint: async () => ({ current: checkpoint(2, '6400'), previous }) })),
+    ).toContain('BTC: 0 sats (6,400 → 6,400)')
+    expect(
+      formatBalanceReport(await read({ readCheckpoint: async () => ({ current: previous, previous: null }) })),
+    ).toContain('first complete report; baseline established')
+  })
+
+  it('reports missing, incomplete and failed checkpoint reads without a false zero change', async () => {
+    const previous = checkpoint(1, '6400')
+    const current = { ...checkpoint(2, '0'), totalSats: null }
+    const incomplete = formatBalanceReport(await read({ readCheckpoint: async () => ({ current, previous }) }))
+    expect(incomplete).toContain('latest checkpoint incomplete; previous report baseline retained')
+    expect(incomplete).not.toContain('BTC:')
+    const stale = formatBalanceReport(await read({ readCheckpoint: async () => ({ current: previous, previous }) }))
+    expect(stale).toContain('no newer checkpoint; previous report baseline retained')
+    expect(stale).not.toContain('BTC:')
+    expect(formatBalanceReport(await read({ readCheckpoint: async () => ({ current: null, previous }) }))).toContain(
+      'awaiting the first checkpoint',
+    )
+    expect(
+      formatBalanceReport(
+        await read({
+          readCheckpoint: async () => {
+            throw new Error('db busy')
+          },
+        }),
+      ),
+    ).toContain('balance change: unreadable (db busy)')
+  })
+
   it('lists every source, its figures, the assets and the committed total', async () => {
     const text = formatBalanceReport(
       await read({
@@ -48,11 +116,11 @@ describe('balance report', () => {
     )
     expect(text).toBe(
       [
-        'Balance report — mutinynet',
-        'arkade float (sats): available 1,234,567 · total 1,300,000',
-        'BTC rail (sats): channel out 2,000,000 · onchain confirmed 300,000',
-        'arkade assets (base units): USDA 1250000000 · bbbbbbbb…bbbb 42',
-        'committed to live swaps: 150,000 sats',
+        '📊 *Balance report* · mutinynet',
+        '*arkade float*: available 1,234,567 · total 1,300,000',
+        '*BTC rail*: channel out 2,000,000 · onchain confirmed 300,000',
+        '*arkade assets* (base units): USDA 1250000000 · bbbbbbbb…bbbb 42',
+        '*committed to live swaps*: 150,000 sats',
       ].join('\n'),
     )
   })
@@ -72,7 +140,7 @@ describe('balance report', () => {
       }),
     )
     expect(text).toContain('BTC rail: unreadable (node unreachable)')
-    expect(text).toContain('arkade float (sats): available 5')
+    expect(text).toContain('*arkade float*: available 5')
     expect(text).toContain('arkade assets: unreadable (indexer down)')
   })
 
@@ -93,8 +161,33 @@ describe('balance report', () => {
       }),
     )
     expect(text).toContain(
-      'BTC rail (sats): channel out 700 · channel in: lnd timed out · pools: ONE pool. · x: unread',
+      ['*BTC rail*: channel out 700', '   ↳ channel in: lnd timed out', '   ↳ pools: ONE pool.', '   ↳ x: unread'].join(
+        '\n',
+      ),
     )
+  })
+
+  it('calls a source with no readable figure unreadable, never empty', async () => {
+    const text = formatBalanceReport(
+      await read({ sources: [source('BTC rail', async () => sats(['channel out', null, 'lnd timed out']))] }),
+    )
+    expect(text).toContain('*BTC rail*: unreadable\n   ↳ channel out: lnd timed out')
+    expect(text).not.toContain('nothing held')
+  })
+
+  it('leaves out a quiet figure while it is zero, and puts a unit label after its number', async () => {
+    const balance = (pending: string): FundBalance => ({
+      unit: 'sats',
+      figures: [
+        { label: 'channel out', amount: '0' },
+        { label: 'onchain unconfirmed', amount: pending, quietWhenZero: true },
+        { label: 'fee rate (sat/vB)', amount: '1' },
+      ],
+    })
+    const at = async (pending: string) =>
+      formatBalanceReport(await read({ sources: [source('BTC rail', async () => balance(pending))] }))
+    expect(await at('0')).toContain('*BTC rail*: channel out 0 · fee rate 1 sat/vB\n')
+    expect(await at('2500')).toContain('*BTC rail*: channel out 0 · onchain unconfirmed 2,500 · fee rate 1 sat/vB\n')
   })
 
   // A hung read would otherwise hold the report forever, and every later one behind it.
@@ -110,7 +203,7 @@ describe('balance report', () => {
       }),
     )
     expect(text).toContain('BTC rail: unreadable (no answer within 10ms)')
-    expect(text).toContain('arkade float (sats): available 5')
+    expect(text).toContain('*arkade float*: available 5')
     expect(text).toContain('committed to live swaps: unreadable (no answer within 10ms)')
   })
 
@@ -128,6 +221,46 @@ describe('balance report', () => {
     expect(healthy).toHaveBeenCalledTimes(2)
   })
 
+  it('re-reads a source through the report join, and names it RECOVERED once it answers', async () => {
+    const reader = createBalanceReportReader()
+    let answer: (b: FundBalance) => void = () => {}
+    const slow = vi.fn(() => new Promise<FundBalance>((resolve) => (answer = resolve)))
+    const rail = source('lightning rail', slow)
+
+    const report = await read({ sources: [rail], deadlineMs: 10 }, reader)
+    expect(formatBalanceReport(report)).toContain('lightning rail: unreadable (no answer within 10ms)')
+    const [still] = await reader.readSources([rail], 10)
+    expect(still!.balance.error).toBe('no answer within 10ms')
+
+    const retry = reader.readSources([rail], 1000)
+    answer(sats(['channel out', '5000']))
+    const [back] = await retry
+    expect(slow).toHaveBeenCalledTimes(1)
+    expect(formatSourceRecovered('bitcoin', back!.label, back!.balance.value!)).toBe(
+      '✅ *RECOVERED* · bitcoin · lightning rail readable again\n*lightning rail*: channel out 5,000',
+    )
+  })
+
+  it('starts a fresh read once the joined one is stale', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      const joined = createJoin(1000)
+      const hung = vi.fn(() => new Promise<never>(() => {}))
+      void joined('k', hung)()
+      void joined('k', hung)()
+      vi.advanceTimersByTime(999)
+      void joined('k', hung)()
+      await new Promise((resolve) => setImmediate(resolve))
+      expect(hung).toHaveBeenCalledTimes(1)
+      vi.advanceTimersByTime(1)
+      void joined('k', hung)()
+      await new Promise((resolve) => setImmediate(resolve))
+      expect(hung).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('leaves a non-sats amount exactly as the source wrote it', async () => {
     const big = '115792089237316195423570985008687907853269984665640564039457584007913129639935'
     const text = formatBalanceReport(
@@ -135,7 +268,7 @@ describe('balance report', () => {
         sources: [source('usdc', async () => ({ unit: 'USDC', figures: [{ label: 'held', amount: big }] }))],
       }),
     )
-    expect(text).toContain(`usdc (USDC): held ${big}`)
+    expect(text).toContain(`*usdc* (USDC): held ${big}`)
   })
 
   it('omits the assets line when the float holds none', async () => {
@@ -154,7 +287,7 @@ describe('balance report', () => {
   it('appends the swap summary after the balances, and only when asked for one', async () => {
     expect(formatBalanceReport(await read())).not.toContain('Swaps')
     const text = formatBalanceReport(await read({ readSwaps: async () => summary() }))
-    expect(text.split('\n').at(-1)).toBe('Swaps 2025-10-14 06:00 to 12:00 UTC: none finished')
+    expect(text.split('\n').at(-1)).toBe('*Swaps* 2025-10-14 06:00 to 12:00 UTC: none finished')
   })
 
   it('reports a summary that could not be read without losing the balances', async () => {
@@ -165,7 +298,7 @@ describe('balance report', () => {
         },
       }),
     )
-    expect(text).toContain('arkade float (sats): available 1,234,567')
+    expect(text).toContain('*arkade float*: available 1,234,567')
     expect(text).toContain('swaps: unreadable (db locked)')
   })
 

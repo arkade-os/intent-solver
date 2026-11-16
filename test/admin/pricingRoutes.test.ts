@@ -32,12 +32,7 @@ const marketBody = (over: Record<string, unknown> = {}) => ({
 
 // applyOverrides/resolveDraftPolicy both iterate every corridor, so a config
 // holding one reads undefined.minSats on the others.
-const CORRIDOR_KEYS = [
-  'arkade:BTC->lightning:BTC',
-  'lightning:BTC->arkade:BTC',
-  'arkade:BTC->onchain:BTC',
-  'onchain:BTC->arkade:BTC',
-] as const
+const CORRIDOR_KEYS = ['arkade:BTC->lightning:BTC', 'lightning:BTC->arkade:BTC', 'arkade:BTC->onchain:BTC'] as const
 const everyCorridor = <T>(value: () => T) => Object.fromEntries(CORRIDOR_KEYS.map((key) => [key, value()]))
 
 const build = async (over: Record<string, unknown> = {}) => {

@@ -14,6 +14,7 @@ import { SwapStore, type QuoteRecord } from '@arkade-os/solver-corridors/db/swap
 import { ReceiveSwapStore } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
 import { lightningSendReader, lightningReceiveReader } from '@arkade-os/solver-corridors/corridors/adapters.js'
 import { createCorridorReaderSet } from '@arkade-os/solver-core/core/corridor.js'
+import { economicsOf } from '@arkade-os/solver-core/analytics/economics.js'
 
 const NOW = 1_800_000_000
 
@@ -41,6 +42,16 @@ interface PnlBody {
     failedCount: number
     atRiskSats: number
     openCount: number
+    nativePnl: {
+      recordCount: number
+      assets: {
+        assetId: string | null
+        decimals: number | null
+        inputFlatFee: string
+        outputSpread: string
+        total: string
+      }[]
+    }
   }
   series: { at: number; grossSats: number; cumulativeGrossSats: number; count: number }[]
   corridors: { corridor: string; grossSats: number; marginBps: number | null; atRiskSats: number }[]
@@ -182,6 +193,65 @@ describe('GET /api/pnl: the Lightning send leg reads its own columns the right w
 
     const { body } = await get(app)
     expect(body.summary.grossSats).toBe(-1_000)
+  })
+})
+
+describe('GET /api/pnl: native asset P&L', () => {
+  it('groups native fee revenue by asset without converting it to BTC', async () => {
+    const usdt = `${'11'.repeat(32)}0100`
+    const eurt = `${'22'.repeat(32)}0100`
+    const reader = {
+      descriptor: { pair: `arkade:${usdt}->arkade:${eurt}` },
+      economics: async () => ({
+        corridor: `arkade:${usdt}->arkade:${eurt}`,
+        truncated: false,
+        records: [
+          economicsOf({
+            id: 'asset-pnl',
+            corridor: `arkade:${usdt}->arkade:${eurt}`,
+            state: 'filled',
+            phase: 'done',
+            quotedAt: NOW - 100,
+            settledAt: NOW - 50,
+            inbound: { assetId: usdt, amount: '1000000000', decimals: 6 },
+            outbound: { assetId: eurt, amount: '995000000', decimals: 6 },
+            nativePnl: [
+              { assetId: usdt, amount: '30000000', decimals: 6, source: 'input_flat_fee' },
+              { assetId: eurt, amount: '5000000', decimals: 6, source: 'output_spread' },
+            ],
+          }),
+        ],
+      }),
+    }
+    const app = buildAdminApp({
+      services: { readers: createCorridorReaderSet([reader as never]) } as never,
+      startedAt: 1,
+      mode: 'serve',
+      now: () => NOW,
+    })
+
+    const { body } = await get(app, '/api/pnl?window=24h')
+    expect(body.summary.grossSats).toBe(0)
+    expect(body.summary.unpricedCount).toBe(1)
+    expect(body.summary.nativePnl).toEqual({
+      recordCount: 1,
+      assets: [
+        {
+          assetId: usdt,
+          decimals: 6,
+          inputFlatFee: '30000000',
+          outputSpread: '0',
+          total: '30000000',
+        },
+        {
+          assetId: eurt,
+          decimals: 6,
+          inputFlatFee: '0',
+          outputSpread: '5000000',
+          total: '5000000',
+        },
+      ],
+    })
   })
 })
 

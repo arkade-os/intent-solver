@@ -1,5 +1,5 @@
 /**
- * The asset packet `fulfillOffer` actually submits, read back off the ark tx.
+ * The asset packet `fulfillOffer` actually submits, read back off the Arkade transaction.
  *
  * These assertions used to hold against this repo's own `buildAssetPacket`.
  * That builder is gone — the spend is the SDK's `fillOffer` now — so they hold
@@ -15,7 +15,11 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
 import { base64, hex } from '@scure/base'
 import { schnorr } from '@noble/curves/secp256k1.js'
-import { fulfillOffer, offerInventoryFor } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
+import {
+  fulfillOffer,
+  offerInventoryFor,
+  OfferNotSubmittedError,
+} from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { sqliteExecutor } from '@arkade-os/solver-arkade/arkade/wallet.js'
@@ -34,21 +38,23 @@ const state = vi.hoisted(() => ({
 vi.mock('@arkade-os/sdk', async (importOriginal) => {
   const mod = await importOriginal<typeof import('@arkade-os/sdk')>()
   const SERVER = hex.decode('4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa')
+  const TestArkProvider = class {
+    async getInfo() {
+      return {
+        signerPubkey: `02${hex.encode(SERVER)}`,
+        checkpointTapscript: hex.encode(
+          mod.CSVMultisigTapscript.encode({
+            timelock: { type: 'blocks', value: 10n },
+            pubkeys: [SERVER],
+          }).script,
+        ),
+      }
+    }
+  }
   return {
     ...mod,
-    RestArkProvider: class {
-      async getInfo() {
-        return {
-          signerPubkey: `02${hex.encode(SERVER)}`,
-          checkpointTapscript: hex.encode(
-            mod.CSVMultisigTapscript.encode({
-              timelock: { type: 'blocks', value: 10n },
-              pubkeys: [SERVER],
-            }).script,
-          ),
-        }
-      }
-    },
+    RestArkProvider: TestArkProvider,
+    RestOperatorProvider: TestArkProvider,
     RestIndexerProvider: class {
       async getVtxos(options?: { outpoints?: { txid: string; vout: number }[] }) {
         if (options?.outpoints && state.submissions.length) {
@@ -140,7 +146,7 @@ const ctx = async (spendable: unknown[]): Promise<ArkadeContext> => {
     reservations,
     directFills,
     dustSats: 330n,
-    arkServerUrl: 'http://ark',
+    operatorUrl: 'http://ark',
   } as unknown as ArkadeContext
 }
 
@@ -192,7 +198,7 @@ const groupIds = (packet: unknown): string[] =>
  * mismatch as two separate failures. Throws rather than dereferencing an absent
  * tx, so "the fill never reached the emulator" says so. */
 const packetGroups = (): string[] => {
-  if (state.arkTx === undefined) throw new Error('no ark tx reached the emulator: the fill did not submit')
+  if (state.arkTx === undefined) throw new Error('no Arkade transaction reached the emulator: the fill did not submit')
   return groupIds(Extension.fromTx(Transaction.fromPSBT(base64.decode(state.arkTx))).getAssetPacket())
 }
 
@@ -206,6 +212,39 @@ beforeEach(() => {
 afterEach(() => database.close())
 
 describe('the asset packet fulfillOffer submits', () => {
+  it('claims the parent submission latch before sending the recorded graph', async () => {
+    const at = deposit([{ assetId: ASSET_B, amount: 900n }])
+    const context = await ctx([fundingCoin(80_000)])
+    const markSubmitting = vi.fn(async () => {
+      expect(state.submissions).toEqual([])
+      return true
+    })
+    await fulfillOffer(
+      context,
+      'http://emulator.test',
+      offerFor({ offerAsset: asset.AssetId.fromString(ASSET_B) }),
+      at,
+      {
+        markSubmitting,
+      },
+    )
+    expect(markSubmitting).toHaveBeenCalledOnce()
+    expect(state.submissions).toHaveLength(1)
+  })
+
+  it('abandons its unsent graph when another invocation owns the parent submission', async () => {
+    const at = deposit([{ assetId: ASSET_B, amount: 900n }])
+    const context = await ctx([fundingCoin(80_000)])
+    await expect(
+      fulfillOffer(context, 'http://emulator.test', offerFor({ offerAsset: asset.AssetId.fromString(ASSET_B) }), at, {
+        markSubmitting: async () => false,
+      }),
+    ).rejects.toBeInstanceOf(OfferNotSubmittedError)
+    expect(state.submissions).toEqual([])
+    expect(context.reservations.reserved().size).toBe(0)
+    expect(await context.directFills.list()).toEqual([])
+  })
+
   const deposit = (assets?: { assetId: string; amount: bigint }[]) => {
     const coin = { ...mintCoin(60_000), ...(assets ? { assets } : {}) }
     state.vtxos = [coin]

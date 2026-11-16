@@ -39,7 +39,7 @@
 (*                                                                         *)
 (* THE PLANNER/PLAN SPLIT, AND WHAT IT CHANGES HERE                        *)
 (*                                                                         *)
-(* Unlike the four BTC corridors there are no `when*` methods and no db    *)
+(* Unlike the three BTC corridors there are no `when*` methods and no db   *)
 (* LEGAL_EDGES table: every edge below is (a planner branch, the shell     *)
 (* effect that branch triggers).  The edge table in this module is the     *)
 (* planner's action set, stated explicitly so a Go rewrite has something   *)
@@ -88,7 +88,7 @@
 (*  - The contract's internal storage.  `evm` below IS the lock flag and   *)
 (*    its disposition: claim deletes the flag on claim (backend's isLocked)*)
 (*    and refund deletes it on refund, so absence is final.                *)
-(*  - The sats covenant's construction.  `arkFund` is "the client's sats   *)
+(*  - The sats covenant's construction.  `arkadeFund` is "the client's sats   *)
 (*    sit at the covenant"; the spending leaves are SwapCore's `conf`.     *)
 (*                                                                         *)
 (* MODELLING DECISIONS THAT ARE ASSUMPTIONS, NOT FACTS                     *)
@@ -331,16 +331,16 @@ ASSUME BreakDeadlineOrder \/ MarginHolds
 
 VARIABLES
     evmHeight,     \* the EVM chain tip, in blocks.  Advances inside the band.
-    arkFund,       \* [Swaps -> {"none","funded"}] the client's sats at covenant
+    arkadeFund,       \* [Swaps -> {"none","funded"}] the client's sats at covenant
     evm,           \* [Swaps -> {"none","locked","clientClaimed","solverRefunded"}]
     evmConfirmed,  \* [Swaps -> BOOLEAN] the lockDepth probe's thresholds met
     lockTxid,      \* [Swaps -> BOOLEAN] evm_lock_txid patched on the row
     lockSends,     \* [Swaps -> 0..2] lock broadcasts issued; the (A1) counter
     refundSent     \* [Swaps -> BOOLEAN] a refund broadcast is in the mempool
 
-LsVars == << evmHeight, arkFund, evm, evmConfirmed, lockTxid, lockSends,
+LsVars == << evmHeight, arkadeFund, evm, evmConfirmed, lockTxid, lockSends,
              refundSent >>
-vars   == << clock, st, loc, conf, serverUp, evmHeight, arkFund, evm,
+vars   == << clock, st, loc, conf, serverUp, evmHeight, arkadeFund, evm,
              evmConfirmed, lockTxid, lockSends, refundSent >>
 
 (***************************************************************************)
@@ -358,11 +358,13 @@ Terminal == { "claimed", "refunded", "refused", "stuck" }
 Drivable == NonTerminal \cup { "none" }
 
 \* Every -> claiming / -> stuck pair is the pre-switch rule, not a state
-\* branch.  The dead `funded` row has the planner's two edges.
+\* branch.  The dead `funded` row has the planner's edges, and its lock
+\* re-checks the quote deadline like quoted's.
 Edges == [ x \in Row |->
     CASE x = "none"           -> { "quoted" }
       [] x = "quoted"         -> { "locking_evm", "claiming", "refused", "stuck" }
-      [] x = "funded"         -> { "locking_evm", "claiming", "stuck" }
+      [] x = "funded"         -> { "locking_evm", "claiming", "refused",
+                                   "stuck" }
       [] x = "locking_evm"    -> { "awaiting_claim", "claiming",
                                    "refunding_evm", "stuck" }
       [] x = "awaiting_claim" -> { "claiming", "refunding_evm", "stuck" }
@@ -390,7 +392,7 @@ NoDoubleLock == \A s \in Swaps : lockSends[s] <= 1
 
 TypeOK == /\ TypeOKCore(Row)
           /\ evmHeight \in 0..MaxHeight
-          /\ arkFund \in [Swaps -> { "none", "funded" }]
+          /\ arkadeFund \in [Swaps -> { "none", "funded" }]
           /\ evm \in [Swaps -> { "none", "locked", "clientClaimed",
                                  "solverRefunded" }]
           /\ evmConfirmed \in [Swaps -> BOOLEAN]
@@ -430,13 +432,13 @@ RefundOpen  == clock >= RefundLocktime
 (* wait: the sweep loop runs on a seconds cadence against deadlines that   *)
 (* are minutes-to-hours wide, so a swap with an immediately-completable    *)
 (* solver step outstanding must be driven before the wall clock moves on.  *)
-(* Same discipline as OnchainReceive's Urgent/SolverBehind.  Without it    *)
+(* Same discipline as OnchainSend's Urgent/SolverBehind.  Without it       *)
 (* the client can schedule its ERC20 claim at the exact wall locktime and  *)
 (* the model cannot tell "solver was slow" from "solver had no budget".    *)
 (***************************************************************************)
 Urgent(s) ==
     \/ st[s] = "none"                                          \* admission settles at once
-    \/ (st[s] = "quoted" /\ arkFund[s] = "funded")             \* lock now
+    \/ (st[s] = "quoted" /\ arkadeFund[s] = "funded")             \* lock now
     \/ (st[s] = "quoted" /\ (QuoteStale \/ RefundOpen))        \* refuse now
     \/ (st[s] = "locking_evm" /\ evm[s] = "locked"
         /\ evmConfirmed[s])                                    \* adopt the lock
@@ -469,7 +471,7 @@ HeightTick ==
     /\ clock >= (evmHeight + 1) * FastCad
     /\ evmHeight' = evmHeight + 1
     /\ UNCHANGED << clock, st, loc, conf, serverUp >>
-    /\ UNCHANGED << arkFund, evm, evmConfirmed, lockTxid, lockSends, refundSent >>
+    /\ UNCHANGED << arkadeFund, evm, evmConfirmed, lockTxid, lockSends, refundSent >>
 
 Tick ==
     /\ TickCore
@@ -487,9 +489,9 @@ Censor(w) == CensorCore /\ UNCHANGED LsVars
 \* refused-and-swept case, abstracted away (sats back to client, no solver
 \* money involved).
 ClientFundsArkade(s) ==
-    /\ arkFund[s] = "none"
+    /\ arkadeFund[s] = "none"
     /\ st[s] \in Drivable
-    /\ arkFund' = [arkFund EXCEPT ![s] = "funded"]
+    /\ arkadeFund' = [arkadeFund EXCEPT ![s] = "funded"]
     /\ UNCHANGED << clock, st, loc, conf, serverUp, evmHeight >>
     /\ UNCHANGED << evm, evmConfirmed, lockTxid, lockSends, refundSent >>
 
@@ -501,17 +503,17 @@ ClientClaimsEvm(s) ==
     /\ evm[s] = "locked"
     /\ evm' = [evm EXCEPT ![s] = "clientClaimed"]
     /\ UNCHANGED << clock, st, loc, conf, serverUp, evmHeight >>
-    /\ UNCHANGED << arkFund, evmConfirmed, lockTxid, lockSends, refundSent >>
+    /\ UNCHANGED << arkadeFund, evmConfirmed, lockTxid, lockSends, refundSent >>
 
 \* The client refunds its sats, once the wall locktime opens and the server
 \* co-signs.  The contested output: SwapCore's conf, at most one winner.
 ClientRefundsArkade(s) ==
-    /\ arkFund[s] = "funded"
+    /\ arkadeFund[s] = "funded"
     /\ RefundOpen
     /\ serverUp
     /\ SpendAccepted(s, "clientRefund")
     /\ UNCHANGED << clock, st, loc, serverUp, evmHeight >>
-    /\ UNCHANGED << arkFund, evm, evmConfirmed, lockTxid, lockSends, refundSent >>
+    /\ UNCHANGED << arkadeFund, evm, evmConfirmed, lockTxid, lockSends, refundSent >>
 
 (***************************************************************************)
 (* WORKER ACTIONS.  The observation snapshot is one ReadSwap; the planner  *)
@@ -526,7 +528,7 @@ ReadSwap(w, s) ==
                     IF Exposure(NonTerminal) + Amount <= MaxExposed
                       THEN "capOk" ELSE "capFull"
              [] st[s] = "quoted" ->
-                    IF arkFund[s] = "funded" THEN "funded" ELSE "empty"
+                    IF arkadeFund[s] = "funded" THEN "funded" ELSE "empty"
              [] OTHER ->
                     IF ClaimReadable(s) THEN "revealed" ELSE "clear")
     /\ UNCHANGED LsVars
@@ -590,13 +592,14 @@ InsertQuote(w, s) ==
 \* the client's late funding is its own problem (the covenant sweep returns
 \* it, outside this model's money).
 RefuseQuoted(w, s) ==
-    /\ Saw(w, s, "quoted")
-    /\ \/ /\ loc[w].res = "empty"
-          /\ QuoteStale \/ RefundOpen
-       \/ /\ loc[w].res = "funded"
-          /\ QuoteStale
-    /\ \/ CasWon(s, "quoted", "refused")
-       \/ CasLost(s, "quoted")
+    /\ \/ /\ Saw(w, s, "quoted")
+          /\ \/ /\ loc[w].res = "empty"
+                /\ QuoteStale \/ RefundOpen
+             \/ /\ loc[w].res = "funded"
+                /\ QuoteStale
+       \/ Saw(w, s, "funded") /\ QuoteStale
+    /\ \/ CasWon(s, loc[w].seen, "refused")
+       \/ CasLost(s, loc[w].seen)
     /\ Park(w)
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED LsVars
@@ -605,7 +608,7 @@ RefuseQuoted(w, s) ==
 \* crash can land between them - and between broadcast and txid patch.
 SubmitEvmLock(w, s) ==
     /\ \/ Saw(w, s, "quoted") /\ loc[w].res = "funded" /\ ~QuoteStale
-       \/ Saw(w, s, "funded")
+       \/ Saw(w, s, "funded") /\ ~QuoteStale
     /\ IF LockCommitFirst
        THEN UNCHANGED lockSends
        ELSE \* the mutation: send first, record after - two readers both send
@@ -615,7 +618,7 @@ SubmitEvmLock(w, s) ==
        \/ /\ CasLost(s, loc[w].seen)
           /\ Park(w)
     /\ UNCHANGED << clock, conf, serverUp >>
-    /\ UNCHANGED << evmHeight, arkFund, evm, evmConfirmed, lockTxid,
+    /\ UNCHANGED << evmHeight, arkadeFund, evm, evmConfirmed, lockTxid,
                     refundSent >>
 
 \* The lock broadcast lands: transferFrom has run.  THE irreversible act of
@@ -635,7 +638,7 @@ LockLands(w, s) ==
     /\ lockTxid' = [lockTxid EXCEPT ![s] = TxidPatchAtomic \/ lockTxid[s]]
     /\ Park(w)
     /\ UNCHANGED << clock, st, conf, serverUp, evmHeight >>
-    /\ UNCHANGED << arkFund, evmConfirmed, refundSent >>
+    /\ UNCHANGED << arkadeFund, evmConfirmed, refundSent >>
 
 \* The txid patch.  A crash before this step leaves lockTxid FALSE forever -
 \* the lock exists and the column never names it.  It no longer gates the
@@ -649,7 +652,7 @@ PatchTxid(w, s) ==
     /\ lockTxid' = [lockTxid EXCEPT ![s] = TRUE]
     /\ Park(w)
     /\ UNCHANGED << clock, st, conf, serverUp, evmHeight >>
-    /\ UNCHANGED << arkFund, evm, evmConfirmed, lockSends, refundSent >>
+    /\ UNCHANGED << arkadeFund, evm, evmConfirmed, lockSends, refundSent >>
 
 \* The depth probe says final.  Measured, never fed back from config
 \* (orchestrator's observe(), the findClaimPreimage scan); one step here.
@@ -658,7 +661,7 @@ ConfirmEvmLock(s) ==
     /\ ~evmConfirmed[s]
     /\ evmConfirmed' = [evmConfirmed EXCEPT ![s] = TRUE]
     /\ UNCHANGED << clock, st, loc, conf, serverUp, evmHeight >>
-    /\ UNCHANGED << arkFund, evm, lockTxid, lockSends, refundSent >>
+    /\ UNCHANGED << arkadeFund, evm, lockTxid, lockSends, refundSent >>
 
 \* locking_evm, lock present and deep -> awaiting_claim.
 RecordLock(w, s) ==
@@ -692,7 +695,7 @@ SubmitEvmRefund(w, s) ==
        \/ /\ CasLost(s, loc[w].seen)
           /\ Park(w)
     /\ UNCHANGED << clock, conf, serverUp >>
-    /\ UNCHANGED << evmHeight, arkFund, evm, evmConfirmed, lockTxid,
+    /\ UNCHANGED << evmHeight, arkadeFund, evm, evmConfirmed, lockTxid,
                     lockSends, refundSent >>
 
 \* (A8) THE BROADCAST, a SEPARATE step from the CAS.  The shell transitions
@@ -713,7 +716,7 @@ BroadcastRefund(w, s) ==
     /\ refundSent' = [refundSent EXCEPT ![s] = TRUE]
     /\ UNCHANGED loc
     /\ UNCHANGED << clock, st, conf, serverUp >>
-    /\ UNCHANGED << evmHeight, arkFund, evm, evmConfirmed, lockTxid,
+    /\ UNCHANGED << evmHeight, arkadeFund, evm, evmConfirmed, lockTxid,
                     lockSends >>
 
 \* (A8) THE RESEND.  `refunding_evm` with no refund on record is not a row
@@ -742,7 +745,7 @@ RefundMines(s) ==
     /\ evm[s] = "locked"
     /\ evm' = [evm EXCEPT ![s] = "solverRefunded"]
     /\ UNCHANGED << clock, st, loc, conf, serverUp, evmHeight >>
-    /\ UNCHANGED << arkFund, evmConfirmed, lockTxid, lockSends, refundSent >>
+    /\ UNCHANGED << arkadeFund, evmConfirmed, lockTxid, lockSends, refundSent >>
 
 \* The recording CAS, and (A4) its receipt check.  RefundSeesClaim = TRUE
 \* is the SHIPPED planner (plan RULE 7): `refunded` is written
@@ -766,7 +769,7 @@ RecordEvmRefund(w, s) ==
        \/ CasLost(s, "refunding_evm")
     /\ Park(w)
     /\ UNCHANGED << clock, conf, serverUp, evmHeight >>
-    /\ UNCHANGED << arkFund, evm, evmConfirmed, lockTxid, lockSends,
+    /\ UNCHANGED << arkadeFund, evm, evmConfirmed, lockTxid, lockSends,
                     refundSent >>
 
 \* THE PRE-SWITCH RULE, early arm: P seen before the wall locktime.  CAS
@@ -793,7 +796,7 @@ ClaimArkade(w, s) ==
 \* claimArkade: the collaborative spend of the covenant.  Needs the server
 \* and an unspent output; if the client's refund landed first the call
 \* throws and the row parks in `claiming` - THE PARKED STATES.
-SubmitArkClaim(w, s) ==
+SubmitArkadeClaim(w, s) ==
     /\ At(w, s, "sentClaim")
     /\ IF /\ serverUp
           /\ conf[s] = {}
@@ -801,7 +804,7 @@ SubmitArkClaim(w, s) ==
        ELSE UNCHANGED conf
     /\ Park(w)
     /\ UNCHANGED << clock, st, serverUp, evmHeight >>
-    /\ UNCHANGED << arkFund, evm, evmConfirmed, lockTxid, lockSends, refundSent >>
+    /\ UNCHANGED << arkadeFund, evm, evmConfirmed, lockTxid, lockSends, refundSent >>
 
 \* The recording CAS.  A crash before it leaves `claiming` parked with the
 \* outcome already final on the covenant.
@@ -841,7 +844,7 @@ DriveRow(w, s) ==
 
 PushChain(w, s) ==
        LockLands(w, s) \/ PatchTxid(w, s)
-    \/ SubmitArkClaim(w, s)
+    \/ SubmitArkadeClaim(w, s)
     \/ BroadcastRefund(w, s)
     \/ RecordEvmRefund(w, s)
 
@@ -859,7 +862,7 @@ Next ==
 Init ==
     /\ InitCore("none")
     /\ evmHeight = 0
-    /\ arkFund = [ s \in Swaps |-> "none" ]
+    /\ arkadeFund = [ s \in Swaps |-> "none" ]
     /\ evm = [ s \in Swaps |-> "none" ]
     /\ evmConfirmed = [ s \in Swaps |-> FALSE ]
     /\ lockTxid = [ s \in Swaps |-> FALSE ]

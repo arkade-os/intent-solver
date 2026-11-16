@@ -1,16 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import {
-  projectSend,
-  projectReceive,
-  projectOnchainSend,
-  projectOnchainReceive,
-} from '@arkade-os/solver-corridors/corridors/projections.js'
+import { projectSend, projectReceive, projectOnchainSend } from '@arkade-os/solver-corridors/corridors/projections.js'
 import { phaseOf } from '../support/phaseOf.js'
 import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import type { SendSwapRow } from '@arkade-os/solver-corridors/db/swaps.js'
 import type { ReceiveSwapRow } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
 import type { OnchainSendSwapRow } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
-import type { OnchainReceiveSwapRow } from '@arkade-os/solver-corridors/db/onchainReceiveSwaps.js'
 
 describe('phaseOf — the claimed collision', () => {
   it('reads claimed as done on both SEND corridors, where it is terminal', () => {
@@ -18,9 +12,8 @@ describe('phaseOf — the claimed collision', () => {
     expect(phaseOf('arkade:BTC->onchain:BTC', 'claimed')).toBe('done')
   })
 
-  it('reads the SAME word as still-exposed on both RECEIVE corridors', () => {
+  it('reads the SAME word as still-exposed on the RECEIVE corridor', () => {
     expect(phaseOf('lightning:BTC->arkade:BTC', 'claimed')).toBe('exposed')
-    expect(phaseOf('onchain:BTC->arkade:BTC', 'claimed')).toBe('exposed')
   })
 })
 
@@ -39,7 +32,6 @@ describe('phaseOf — the rest of the vocabulary', () => {
   it('classifies a recovered refund as failed, not done — the swap did not deliver', () => {
     expect(phaseOf('lightning:BTC->arkade:BTC', 'refunded')).toBe('failed')
     expect(phaseOf('arkade:BTC->onchain:BTC', 'refunded')).toBe('failed')
-    expect(phaseOf('onchain:BTC->arkade:BTC', 'refunded')).toBe('failed')
   })
 
   it('classifies the mid-flight exposed states as exposed', () => {
@@ -47,12 +39,10 @@ describe('phaseOf — the rest of the vocabulary', () => {
     expect(phaseOf('arkade:BTC->lightning:BTC', 'paid')).toBe('exposed')
     expect(phaseOf('lightning:BTC->arkade:BTC', 'funded')).toBe('exposed')
     expect(phaseOf('arkade:BTC->onchain:BTC', 'funding_onchain')).toBe('exposed')
-    expect(phaseOf('onchain:BTC->arkade:BTC', 'funding_arkade')).toBe('exposed')
   })
 
-  it('classifies settled as done on the two corridors that have it', () => {
+  it('classifies settled as done on the corridor that has it', () => {
     expect(phaseOf('lightning:BTC->arkade:BTC', 'settled')).toBe('done')
-    expect(phaseOf('onchain:BTC->arkade:BTC', 'settled')).toBe('done')
   })
 
   it('falls to failed on an unknown state rather than silently calling it done', () => {
@@ -95,7 +85,7 @@ describe('projection', () => {
     expect(projectReceive(row)).toMatchObject({ state: 'claimed', phase: 'exposed', payoutSats: 990 })
   })
 
-  it('projects both onchain corridors', () => {
+  it('projects the onchain corridor', () => {
     const send = {
       id: 'c',
       state: 'funding_onchain',
@@ -106,18 +96,7 @@ describe('projection', () => {
       payoutSats: 4_900,
       failureReason: null,
     } as OnchainSendSwapRow
-    const receive = {
-      id: 'd',
-      state: 'settled',
-      createdAt: 1,
-      updatedAt: 2,
-      paymentHash: 'dd',
-      amountSats: 5_000,
-      payoutSats: 4_900,
-      failureReason: null,
-    } as OnchainReceiveSwapRow
     expect(projectOnchainSend(send)).toMatchObject({ corridor: 'arkade:BTC->onchain:BTC', phase: 'exposed' })
-    expect(projectOnchainReceive(receive)).toMatchObject({ corridor: 'onchain:BTC->arkade:BTC', phase: 'done' })
   })
 
   it('presents a refunded refusal as refunded on both send corridors', () => {

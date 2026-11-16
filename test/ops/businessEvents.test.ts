@@ -28,6 +28,7 @@ const reading = (over: Partial<BalanceReading> = {}): BalanceReading => ({
 
 const sampler = (over: Partial<BalanceReading> = {}) => ({
   current: () => reading(over),
+  refresh: async () => true,
 })
 
 const terms = (size = 'amount 10,000 sats') => size
@@ -74,9 +75,28 @@ describe('createSwapOutcomeReporter', () => {
     const { report, posted } = reporter()
     report({ id: 'swap-1', from: 'claiming', to: 'claimed' })
     await vi.waitFor(() => expect(posted).toHaveLength(1))
-    expect(posted[0]).toContain('Swap fulfilled')
-    expect(posted[0]).toContain('arkade:BTC->lightning:BTC')
-    expect(posted[0]).toContain('swap-1')
+    expect(posted[0]).toContain('✅ *Swap fulfilled*')
+    expect(posted[0]).toContain('arkade:BTC → lightning:BTC')
+    expect(posted[0]).toContain('`swap-1`')
+  })
+
+  it('refreshes the cached balances after the swap has committed', async () => {
+    let current = reading({
+      arkade: { value: 1_000_000, at: 1_000 },
+      lightning: { value: { availableSats: 2_000_000, incomingSats: 0 }, at: 1_000 },
+    })
+    const refresh = vi.fn(async () => {
+      current = reading({
+        arkade: { value: 1_002_012, at: 2_000 },
+        lightning: { value: { availableSats: 1_997_989, incomingSats: 0 }, at: 2_000 },
+      })
+      return true
+    })
+    const { report, posted } = reporter({ balances: { current: () => current, refresh } })
+    report({ id: 'swap-1', from: 'claiming', to: 'claimed' })
+    await vi.waitFor(() => expect(posted).toHaveLength(1))
+    expect(refresh).toHaveBeenCalledOnce()
+    expect(posted[0]!.split('\n')[1]).toBe('`swap-1` · Lightning 1,997,989 · Arkade 1,002,012')
   })
 
   it('does not page a refusal — never funded, nothing moved', async () => {
@@ -114,10 +134,8 @@ describe('createSwapOutcomeReporter', () => {
     await vi.waitFor(() => expect(posted).toHaveLength(1))
     expect(posted[0]).toBe(
       [
-        'Swap STUCK — lightning:BTC->arkade:BTC — 29975e63-b613-44fe-a392-43d5025b1f11',
-        'amount 80,362 sats -> payout 80,000 sats',
-        'Lightning: 1,200,000 sats available, 800,000 sats incoming (40s old)',
-        'Arkade: 5,074,074 sats available (40s old)',
+        '🚨 *Swap STUCK* · lightning:BTC → arkade:BTC · 80,362 sats → payout 80,000 sats',
+        '`29975e63-b613-44fe-a392-43d5025b1f11` · Lightning 1,200,000 (+800,000 incoming) · Arkade 5,074,074',
       ].join('\n'),
     )
   })
@@ -126,10 +144,21 @@ describe('createSwapOutcomeReporter', () => {
     const { report, posted } = reporter({ terms: async () => terms(btcSwapSize(71_945, null)) })
     report({ id: 'swap-1', from: 'claiming', to: 'claimed' })
     await vi.waitFor(() => expect(posted).toHaveLength(1))
-    expect(posted[0]).toContain('amount 71,945 sats')
+    expect(posted[0]).toContain('· 71,945 sats\n')
     expect(posted[0]).not.toContain('payout')
-    expect(posted[0]).toContain('Lightning: 2,000,000 sats available, 3,000,000 sats incoming')
-    expect(posted[0]).toContain('Arkade: 1,000,000 sats available')
+    expect(posted[0]).toContain('Lightning 2,000,000 (+3,000,000 incoming) · Arkade 1,000,000')
+  })
+
+  it('leaves out an incoming figure of zero and the age of a fresh sample', async () => {
+    const { report, posted } = reporter({
+      balances: sampler({
+        arkade: { value: 1_000_000, at: 1_900 },
+        lightning: { value: { availableSats: 2, incomingSats: 0 }, at: 1_900 },
+      }),
+    })
+    report({ id: 'swap-1', from: 'claiming', to: 'claimed' })
+    await vi.waitFor(() => expect(posted).toHaveLength(1))
+    expect(posted[0]!.split('\n')[1]).toBe('`swap-1` · Lightning 2 · Arkade 1,000,000')
   })
 
   it('says how stale each float reading is', async () => {
@@ -141,11 +170,39 @@ describe('createSwapOutcomeReporter', () => {
     })
     report({ id: 'swap-1', from: 'claiming', to: 'claimed' })
     await vi.waitFor(() => expect(posted).toHaveLength(1))
-    expect(posted[0]).toContain('600s old')
+    expect(posted[0]).toContain('balances 600s old')
+  })
+
+  it('still posts when a balance refresh hangs, and marks the reading as not refreshed', async () => {
+    vi.useFakeTimers()
+    try {
+      const errors: unknown[] = []
+      const { report, posted } = reporter({
+        balances: { current: () => reading(), refresh: () => new Promise<boolean>(() => {}) },
+        onError: (error: unknown) => errors.push(error),
+      })
+      report({ id: 'swap-1', from: 'claiming', to: 'claimed' })
+      await vi.advanceTimersByTimeAsync(10_000)
+      await settle()
+      expect(posted).toHaveLength(1)
+      expect(posted[0]).toContain('balances not refreshed')
+      expect(errors).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('marks the reading as not refreshed when a configured balance read fails', async () => {
+    const { report, posted } = reporter({
+      balances: { current: () => reading(), refresh: async () => false },
+    })
+    report({ id: 'swap-1', from: 'claiming', to: 'claimed' })
+    await vi.waitFor(() => expect(posted).toHaveLength(1))
+    expect(posted[0]).toContain('balances not refreshed')
   })
 
   it('still announces when no balance has been sampled yet', async () => {
-    const { report, posted } = reporter({ balances: { current: () => null } })
+    const { report, posted } = reporter({ balances: { current: () => null, refresh: async () => true } })
     report({ id: 'swap-1', from: 'claiming', to: 'claimed' })
     await vi.waitFor(() => expect(posted).toHaveLength(1))
     expect(posted[0]).toContain('unread')
@@ -157,8 +214,7 @@ describe('createSwapOutcomeReporter', () => {
     })
     report({ id: 'swap-1', from: 'claiming', to: 'claimed' })
     await vi.waitFor(() => expect(posted).toHaveLength(1))
-    expect(posted[0]).toContain('Lightning: unread')
-    expect(posted[0]).toContain('Arkade: 1,000,000 sats available')
+    expect(posted[0]).toContain('Lightning unread · Arkade 1,000,000')
   })
 
   it('still announces when the swap row cannot be read', async () => {
@@ -187,15 +243,24 @@ describe('createSwapOutcomeReporter', () => {
   })
 
   it('returns synchronously without reading the swap row', () => {
-    let touched = false
+    let termsTouched = false
+    let balancesTouched = false
     const { report } = reporter({
+      balances: {
+        current: () => reading(),
+        refresh: async () => {
+          balancesTouched = true
+          return true
+        },
+      },
       terms: async () => {
-        touched = true
+        termsTouched = true
         return terms()
       },
     })
     report({ id: 'swap-1', from: 'claiming', to: 'claimed' })
-    expect(touched).toBe(false)
+    expect(termsTouched).toBe(false)
+    expect(balancesTouched).toBe(false)
   })
 })
 
@@ -263,6 +328,101 @@ describe('createBalanceSampler', () => {
     release(8)
     await third
   })
+
+  it('refreshes after a sample already in flight instead of joining the pre-transition read', async () => {
+    let releaseFirst!: (sats: number) => void
+    let releaseSecond!: (sats: number) => void
+    const readArkadeAvailableSats = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise<number>((resolve) => (releaseFirst = resolve)))
+      .mockImplementationOnce(() => new Promise<number>((resolve) => (releaseSecond = resolve)))
+    const s = createBalanceSampler({ readArkadeAvailableSats, now: () => 10 })
+
+    const timerSample = s.sample()
+    const refreshed = s.refresh()
+    expect(readArkadeAvailableSats).toHaveBeenCalledTimes(1)
+
+    releaseFirst(100)
+    await timerSample
+    await vi.waitFor(() => expect(readArkadeAvailableSats).toHaveBeenCalledTimes(2))
+    releaseSecond(200)
+    await refreshed
+    expect(s.current()?.arkade?.value).toBe(200)
+  })
+
+  it('reports a failed configured read while keeping the previous value', async () => {
+    let fail = false
+    const errors: unknown[] = []
+    const s = createBalanceSampler({
+      readArkadeAvailableSats: async () => {
+        if (fail) throw new Error('node down')
+        return 900
+      },
+      now: () => 10,
+      onError: (error) => errors.push(error),
+    })
+
+    await s.sample()
+    fail = true
+    await expect(s.refresh()).resolves.toBe(false)
+    expect(s.current()?.arkade?.value).toBe(900)
+    expect(errors).toHaveLength(1)
+  })
+
+  it('coalesces refreshes waiting on one unresolved sample, then refreshes again', async () => {
+    let releaseFirst!: (sats: number) => void
+    let releaseSecond!: (sats: number) => void
+    let releaseThird!: (sats: number) => void
+    const readArkadeAvailableSats = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise<number>((resolve) => (releaseFirst = resolve)))
+      .mockImplementationOnce(() => new Promise<number>((resolve) => (releaseSecond = resolve)))
+      .mockImplementationOnce(() => new Promise<number>((resolve) => (releaseThird = resolve)))
+    const s = createBalanceSampler({ readArkadeAvailableSats, now: () => 10 })
+
+    const timerSample = s.sample()
+    const first = s.refresh()
+    const second = s.refresh()
+    expect(second).toBe(first)
+
+    releaseFirst(100)
+    await timerSample
+    await vi.waitFor(() => expect(readArkadeAvailableSats).toHaveBeenCalledTimes(2))
+
+    const third = s.refresh()
+    expect(readArkadeAvailableSats).toHaveBeenCalledTimes(2)
+    releaseSecond(200)
+    await first
+    await second
+    await vi.waitFor(() => expect(readArkadeAvailableSats).toHaveBeenCalledTimes(3))
+    releaseThird(300)
+    await third
+    expect(s.current()?.arkade?.value).toBe(300)
+  })
+
+  it('coalesces requests made after a read is already running, then starts one fresh read', async () => {
+    let releaseFirst!: (sats: number) => void
+    let releaseSecond!: (sats: number) => void
+    const readArkadeAvailableSats = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise<number>((resolve) => (releaseFirst = resolve)))
+      .mockImplementationOnce(() => new Promise<number>((resolve) => (releaseSecond = resolve)))
+    const s = createBalanceSampler({ readArkadeAvailableSats, now: () => 10 })
+
+    const first = s.refresh()
+    await vi.waitFor(() => expect(readArkadeAvailableSats).toHaveBeenCalledTimes(1))
+    const second = s.refresh()
+    const third = s.refresh()
+    expect(third).toBe(second)
+    releaseFirst(100)
+    await first
+    await vi.waitFor(() => expect(readArkadeAvailableSats).toHaveBeenCalledTimes(2))
+    releaseSecond(200)
+    await second
+    await third
+    expect(readArkadeAvailableSats).toHaveBeenCalledTimes(2)
+    expect(s.current()?.arkade?.value).toBe(200)
+  })
 })
 
 // A sampler nobody drives reports `unread` forever, and that is invisible at run
@@ -291,6 +451,16 @@ describe('the balance sampler is DRIVEN on the shipped daemon', () => {
     expect(cliSource).toMatch(/let lastBalanceReport = 0\n/)
     expect(cliSource).toMatch(/services\.reportBalances && Date\.now\(\) - lastBalanceReport > reportEveryMs/)
     expect(cliSource).toMatch(/void services\.reportBalances\(\)\.catch\(/)
+  })
+
+  it('an unreadable source is followed until it answers, and a new report or close drops the follow-up', () => {
+    expect(servicesSource).toMatch(
+      /followUnreadable\(sources\.filter\(\(_, i\) => report\.sources\[i\]!\.balance\.error !== null\)\)/,
+    )
+    expect(servicesSource).toMatch(/notifier\.post\(formatSourceRecovered\(config\.network, label, balance\.value\)\)/)
+    expect(servicesSource).toMatch(/if \(balanceReportsClosed \|\| sources\.length === 0\) return/)
+    expect(servicesSource).toMatch(/followUnreadable\(\[\]\)\n\s+balanceReportInFlight = \(async/)
+    expect(servicesSource).toMatch(/balanceReportsClosed = true\n\s+followUnreadable\(\[\]\)/)
   })
 
   it('the balance report carries the swap summary over every corridor reader', () => {

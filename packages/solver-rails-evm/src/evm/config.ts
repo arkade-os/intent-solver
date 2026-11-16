@@ -26,6 +26,11 @@ export interface EvmChainConfig {
   chainId: number
   cadence: EvmBlockCadence
   /**
+   * The cadence of `block.number`, which HTLC timelocks follow, when it is not `cadence`: Arbitrum-stack chains
+   * report the parent chain's height there. Null means the two are one clock, which boot verifies.
+   */
+  timelockCadence: EvmBlockCadence | null
+  /**
    * Confirmations before a lock is treated as real — the depth half of the
    * acceptance policy.
    */
@@ -54,7 +59,7 @@ export interface EvmChainConfig {
   /**
    * The key that signs this corridor's transactions, 32 bytes.
    *
-   * SEPARATE from `ARK_MNEMONIC` on purpose. An Arkade key and an EVM key protect
+   * SEPARATE from `WALLET_MNEMONIC` on purpose. An Arkade key and an EVM key protect
    * different money on different chains, and deriving one from the other would
    * mean an operator rotating either had silently rotated both — including the
    * one holding funds mid-swap.
@@ -111,7 +116,9 @@ export interface EvmChainConfig {
 
 const HEX_ADDRESS = /^0x[0-9a-fA-F]{40}$/
 
-const required = (env: NodeJS.ProcessEnv, name: string): string => {
+type Env = Readonly<Record<string, string | undefined>>
+
+const required = (env: Env, name: string): string => {
   const value = env[name]?.trim()
   if (!value) throw new Error(`${name} is not set`)
   return value
@@ -125,23 +132,17 @@ const required = (env: NodeJS.ProcessEnv, name: string): string => {
  * `numberFrom` allows non-integers, because a sub-second block cadence is a real
  * value on chains this must support.
  */
-const boundedFrom = (
-  env: NodeJS.ProcessEnv,
-  name: string,
-  min: number,
-  valid: (value: number) => boolean,
-  kind: string,
-): number => {
+const boundedFrom = (env: Env, name: string, min: number, valid: (value: number) => boolean, kind: string): number => {
   const raw = required(env, name)
   const value = Number(raw)
   if (!valid(value) || value < min) throw new Error(`${name} must be ${kind} >= ${min}, got ${JSON.stringify(raw)}`)
   return value
 }
 
-const numberFrom = (env: NodeJS.ProcessEnv, name: string, min: number): number =>
+const numberFrom = (env: Env, name: string, min: number): number =>
   boundedFrom(env, name, min, Number.isFinite, 'a finite number')
 
-const intFrom = (env: NodeJS.ProcessEnv, name: string, min: number): number =>
+const intFrom = (env: Env, name: string, min: number): number =>
   boundedFrom(env, name, min, Number.isInteger, 'an integer')
 
 /**
@@ -150,7 +151,7 @@ const intFrom = (env: NodeJS.ProcessEnv, name: string, min: number): number =>
  * a set-but-empty variable would otherwise become the floor while the logs claim
  * otherwise.
  */
-const intFromOptional = (env: NodeJS.ProcessEnv, name: string, def: number, min: number, max: number): number => {
+const intFromOptional = (env: Env, name: string, def: number, min: number, max: number): number => {
   const raw = env[name]?.trim()
   if (raw === undefined || raw === '') return def
   const value = Number(raw)
@@ -160,7 +161,7 @@ const intFromOptional = (env: NodeJS.ProcessEnv, name: string, def: number, min:
   return value
 }
 
-const booleanFromOptional = (env: NodeJS.ProcessEnv, name: string): boolean => {
+const booleanFromOptional = (env: Env, name: string): boolean => {
   const raw = env[name]?.trim()
   if (raw === undefined || raw === '' || raw === 'false') return false
   if (raw === 'true') return true
@@ -180,7 +181,7 @@ export const addressFromHex = (value: string, name: string): Uint8Array => {
  * from an account holding nothing, so every call would fail for want of gas — and
  * it would look like a chain problem rather than a missing setting.
  */
-const privateKeyFrom = (env: NodeJS.ProcessEnv, name: string): Uint8Array => {
+const privateKeyFrom = (env: Env, name: string): Uint8Array => {
   const raw = required(env, name)
   const body = raw.startsWith('0x') ? raw.slice(2) : raw
   if (body.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(body)) {
@@ -199,7 +200,7 @@ const privateKeyFrom = (env: NodeJS.ProcessEnv, name: string): Uint8Array => {
  * means anything at zero: no gas executes nothing, and a zero ceiling refuses
  * every price.
  */
-const bigintFrom = (env: NodeJS.ProcessEnv, name: string): bigint => {
+const bigintFrom = (env: Env, name: string): bigint => {
   const raw = required(env, name)
   if (!/^[0-9]+$/.test(raw)) throw new Error(name + ' must be a decimal integer, got ' + raw)
   const value = BigInt(raw)
@@ -214,7 +215,7 @@ const bigintFrom = (env: NodeJS.ProcessEnv, name: string): bigint => {
  * Anything else missing IS an error: a half-configured chain must not start,
  * because the missing half is always a safety knob.
  */
-export const loadEvmChainConfig = (env: NodeJS.ProcessEnv = process.env): EvmChainConfig | null => {
+export const loadEvmChainConfig = (env: Env): EvmChainConfig | null => {
   if (!env.EVM_RPC_URL?.trim()) return null
 
   // `Number.MIN_VALUE` is the SENTINEL FOR "POSITIVE", not a plausible bound:
@@ -232,12 +233,26 @@ export const loadEvmChainConfig = (env: NodeJS.ProcessEnv = process.env): EvmCha
   // downstream — both conversions keep working and silently return the unsafe
   // answer on every swap — so startup is the only place this is catchable.
   assertCadence(cadence)
+  const timelockSet = ['EVM_TIMELOCK_FASTEST_SECONDS_PER_BLOCK', 'EVM_TIMELOCK_SLOWEST_SECONDS_PER_BLOCK'].filter(
+    (name) => env[name]?.trim(),
+  ).length
+  if (timelockSet === 1)
+    throw new Error('EVM_TIMELOCK_FASTEST_SECONDS_PER_BLOCK and EVM_TIMELOCK_SLOWEST_SECONDS_PER_BLOCK go together')
+  const timelockCadence: EvmBlockCadence | null =
+    timelockSet === 0
+      ? null
+      : {
+          fastestSecondsPerBlock: numberFrom(env, 'EVM_TIMELOCK_FASTEST_SECONDS_PER_BLOCK', Number.MIN_VALUE),
+          slowestSecondsPerBlock: numberFrom(env, 'EVM_TIMELOCK_SLOWEST_SECONDS_PER_BLOCK', Number.MIN_VALUE),
+        }
+  if (timelockCadence !== null) assertCadence(timelockCadence)
 
   return {
     contractAddress: addressFromHex(required(env, 'EVM_HTLC_ADDRESS'), 'EVM_HTLC_ADDRESS'),
     rpcUrl: required(env, 'EVM_RPC_URL'),
     chainId: intFrom(env, 'EVM_CHAIN_ID', 1),
     cadence,
+    timelockCadence,
     minConfirmations: intFrom(env, 'EVM_MIN_CONFIRMATIONS', 1),
     // Positive, not non-negative — same sentinel as the cadence knobs. Zero
     // is depth-only wearing a two-knob disguise.

@@ -13,11 +13,12 @@
 import { execFileSync } from 'node:child_process'
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, relative, resolve } from 'node:path'
+import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   CANDIDATE_SDK_SYMBOL,
-  CANDIDATE_SWAP_SYMBOL,
+  SWAP_FILL_SYMBOL,
+  SWAP_VERSION,
   CANDIDATE_TAXI_FILL_SYMBOL,
   PINNED_PACKAGES,
   PINNED_SOURCES,
@@ -131,9 +132,16 @@ try {
 
   const consumerManifest = harness.buildConsumerManifest(taxiTarballs, consumer)
   consumerManifest.pnpm.overrides['@arkade-os/sdk'] = spec(consumer, candidate['@arkade-os/sdk'])
-  consumerManifest.pnpm.overrides['@arkade-os/swap'] = spec(consumer, candidate['@arkade-os/swap'])
-  consumerManifest.dependencies['@arkade-os/swap'] = spec(consumer, candidate['@arkade-os/swap'])
-  writeFileSync(join(consumer, 'package.json'), `${JSON.stringify(consumerManifest, null, 2)}\n`)
+  if (candidate['@arkade-os/swap']) {
+    consumerManifest.pnpm.overrides['@arkade-os/swap'] = spec(consumer, candidate['@arkade-os/swap'])
+    consumerManifest.dependencies['@arkade-os/swap'] = frozenSdkArtifacts.get('@arkade-os/swap').version
+  } else {
+    delete consumerManifest.pnpm.overrides['@arkade-os/swap']
+    consumerManifest.dependencies['@arkade-os/swap'] = SWAP_VERSION
+  }
+  const { pnpm: workspace, ...consumerPackage } = consumerManifest
+  writeFileSync(join(consumer, 'pnpm-workspace.yaml'), `${JSON.stringify(workspace, null, 2)}\n`)
+  writeFileSync(join(consumer, 'package.json'), `${JSON.stringify(consumerPackage, null, 2)}\n`)
   runPnpm(
     consumer,
     ['--store-dir', join(scratch, 'pnpm-store'), 'install', '--ignore-scripts', '--frozen-lockfile=false'],
@@ -154,7 +162,7 @@ try {
   await assertCandidateExport(
     packageRootFrom(join(consumer, 'package.json'), '@arkade-os/swap'),
     '@arkade-os/swap',
-    CANDIDATE_SWAP_SYMBOL,
+    SWAP_FILL_SYMBOL,
   )
   await assertCandidateExport(
     packageRootFrom(entry, '@arkade-taxi/client'),
@@ -243,6 +251,8 @@ try {
   process.stdout.write(`manifest: ${where}/manifest.json\n`)
 } finally {
   try {
+    if (dirname(resolve(scratch)) !== resolve(tmpdir()) || !basename(scratch).startsWith('carrier-pack-'))
+      throw new Error('refusing to remove outside the carrier pack temporary directory')
     rmSync(scratch, { recursive: true, force: true })
   } catch (error) {
     process.stderr.write(`could not remove ${scratch}: ${error.message}\n`)

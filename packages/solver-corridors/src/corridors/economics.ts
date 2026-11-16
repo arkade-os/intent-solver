@@ -19,12 +19,11 @@ import { economicsOf, type SwapEconomics } from '@arkade-os/solver-core/analytic
 import { phaseOfStates } from '@arkade-os/solver-core/core/swapView.js'
 import { amountSatsOf } from '@arkade-os/solver-core/invoice/decode.js'
 import type { CorridorDescriptor } from '@arkade-os/solver-core/core/corridorDescriptor.js'
-import { LN_SEND, LN_RECEIVE, ONCHAIN_SEND, ONCHAIN_RECEIVE } from './index.js'
+import { LN_SEND, LN_RECEIVE, ONCHAIN_SEND } from './index.js'
 import { presentedState } from './projections.js'
 import type { SendSwapRow } from '../db/swaps.js'
 import type { ReceiveSwapRow } from '../db/receiveSwaps.js'
 import type { OnchainSendSwapRow } from '../db/onchainSwaps.js'
-import type { OnchainReceiveSwapRow } from '../db/onchainReceiveSwaps.js'
 import type { AssetRfqSwapRow } from '../db/assetRfqSwaps.js'
 
 /**
@@ -171,24 +170,6 @@ export const onchainSendEconomics = (row: OnchainSendSwapRow): SwapEconomics =>
   })
 
 /**
- * Onchain receive, read from the AMENDED pair when there is one.
- *
- * `fundedValueSats`/`fundedPayoutSats` record what the client's output actually
- * held and the payout re-derived against it, and they must be read TOGETHER:
- * mixing the amended intake with the quoted payout invents a spread neither
- * number describes. Absence means the swap was never amended, so the quoted
- * pair is the fact.
- */
-export const onchainReceiveEconomics = (row: OnchainReceiveSwapRow): SwapEconomics =>
-  economicsOf({
-    ...common(ONCHAIN_RECEIVE, row),
-    // `fundingTxid` is the CLIENT's HTLC — the solver's own broadcast is
-    // `arkadeFundTxid` — so it is exact evidence that the intake arrived.
-    inbound: sats(row.fundingTxid === null ? null : (row.fundedValueSats ?? row.amountSats)),
-    outbound: sats(row.fundedPayoutSats ?? row.payoutSats),
-  })
-
-/**
  * The asset RFQ leg — the only corridor whose economics are an FX RATE.
  *
  * Its two legs can be different assets, so there is no sats spread to report
@@ -213,9 +194,26 @@ export const assetRfqEconomics = (row: AssetRfqSwapRow, descriptor: CorridorDesc
     inbound: {
       assetId: row.fromAssetId,
       amount: row.depositTxid === null ? null : row.fromAmount.toString(),
-      decimals: null,
+      decimals: row.fromDecimals,
     },
-    outbound: { assetId: row.toAssetId, amount: row.toAmount.toString(), decimals: null },
+    outbound: { assetId: row.toAssetId, amount: row.toAmount.toString(), decimals: row.toDecimals },
+    nativePnl:
+      row.state !== 'filled' || row.fromFlatFee === null || row.toSpread === null
+        ? []
+        : [
+            {
+              assetId: row.fromAssetId,
+              amount: row.fromFlatFee.toString(),
+              decimals: row.fromDecimals,
+              source: 'input_flat_fee',
+            },
+            {
+              assetId: row.toAssetId,
+              amount: row.toSpread.toString(),
+              decimals: row.toDecimals,
+              source: 'output_spread',
+            },
+          ],
     // Two observations taken at two TIMES. All-or-nothing on each half: an
     // implied price with no direction beside it cannot be signed, and either
     // half on its own marks against nothing.

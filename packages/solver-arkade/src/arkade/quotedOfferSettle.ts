@@ -14,7 +14,7 @@
  */
 import { hex } from '@scure/base'
 import type { ArkadeContext } from './wallet.js'
-import { fulfillOffer } from './offerFulfill.js'
+import { fulfillOffer, type FulfillOptions } from './offerFulfill.js'
 import { heldOf } from './offerFill.js'
 import { liveOfferOutpoints, type OfferOutpoint } from './offerOutpoints.js'
 import {
@@ -62,7 +62,9 @@ const termsOf = (intent: QuotedOfferIntent): QuotedOfferTerms => ({
   makerPublicKey: intent.makerPublicKey,
 })
 
-export const quotedOfferSettleFor = (deps: QuotedOfferSettleDeps): ((intent: QuotedOfferIntent) => Promise<string>) => {
+export const quotedOfferSettleFor = (
+  deps: QuotedOfferSettleDeps,
+): ((intent: QuotedOfferIntent, options?: FulfillOptions) => Promise<string>) => {
   const outpointsAt = deps.outpointsAt ?? ((pkScript: string) => liveOfferOutpoints(deps.ctx, pkScript))
   const fulfill = deps.fulfill ?? fulfillOffer
   const derive = offerScriptFrom(deps.derivation)
@@ -70,7 +72,7 @@ export const quotedOfferSettleFor = (deps: QuotedOfferSettleDeps): ((intent: Quo
   // `fulfillOffer` would carry a key the derived script was not compiled from.
   const emulatorPubkey = xOnlyPubkey(deps.derivation.emulatorPubkey)
 
-  return async (intent) => {
+  return async (intent, options) => {
     if (intent.carrierTerms?.mode === 'recycle' || intent.carrierTerms?.mode === 'recycle_receiver') {
       throw new Error(`${intent.carrierTerms.mode} settlement requires the dedicated receive-carrier adapter`)
     }
@@ -125,6 +127,7 @@ export const quotedOfferSettleFor = (deps: QuotedOfferSettleDeps): ((intent: Quo
         assetAmount: intent.fromAssetId === null ? undefined : held,
       },
       { kind: 'rfq', id: intent.id },
+      options,
     )
   }
 }

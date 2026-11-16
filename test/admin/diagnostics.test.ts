@@ -10,14 +10,12 @@ const flatLimits = (maxSats: number) => ({
   'arkade:BTC->lightning:BTC': { minSats: 1_000, maxSats },
   'lightning:BTC->arkade:BTC': { minSats: 1_000, maxSats },
   'arkade:BTC->onchain:BTC': { minSats: 1_000, maxSats },
-  'onchain:BTC->arkade:BTC': { minSats: 1_000, maxSats },
 })
 
 const allCorridors = <T>(value: T) => ({
   'arkade:BTC->lightning:BTC': value,
   'lightning:BTC->arkade:BTC': value,
   'arkade:BTC->onchain:BTC': value,
-  'onchain:BTC->arkade:BTC': value,
 })
 
 /**
@@ -58,7 +56,7 @@ const makeDeps = (
       directFillRecovery: over.directFillDiagnostics ? { diagnostics: over.directFillDiagnostics } : undefined,
       config: {
         lnBackend: 'lnd',
-        arkade: { arkServerUrl: 'http://ark' },
+        arkade: { operatorUrl: 'http://arkade' },
         emulatorUrl: 'http://emu',
         // Kept deliberately DIFFERENT from the per-corridor caps in the tests
         // that care, so reverting to it is detectable rather than invisible.
@@ -147,7 +145,7 @@ describe('GET /api/diagnostics', () => {
     expect(body.directFills).toBeNull()
     expect(body.directFillsError).toBe('direct fill pinned journal row vanished')
     expect(body.backends).toHaveLength(4)
-    expect(body.corridors).toHaveLength(4)
+    expect(body.corridors).toHaveLength(3)
     expect(body.overridesError).toBeNull()
   })
 
@@ -240,7 +238,6 @@ describe('GET /api/diagnostics', () => {
           'arkade:BTC->lightning:BTC': { minSats: 1_000, maxSats: 25_000 },
           'lightning:BTC->arkade:BTC': { minSats: 1_000, maxSats: 50_000 },
           'arkade:BTC->onchain:BTC': { minSats: 1_000, maxSats: 3_000 },
-          'onchain:BTC->arkade:BTC': { minSats: 1_000, maxSats: 50_000 },
         },
       }),
     )
@@ -268,12 +265,6 @@ describe('GET /api/diagnostics', () => {
       payoutRail: 'onchain',
       advertisedMaxSats: 3_000,
       availableSats: 5_000,
-      canHonourMax: true,
-    })
-
-    expect(rows['onchain:BTC->arkade:BTC']).toMatchObject({
-      payoutRail: 'arkade',
-      advertisedMaxSats: 50_000,
       canHonourMax: true,
     })
   })
@@ -305,8 +296,8 @@ describe('GET /api/diagnostics', () => {
    * ONE DEAD BACKEND MUST NOT BLANK THE PAGE — at corridor granularity.
    *
    * A dead Lightning node must take down the answer for the one corridor it
-   * funds and nothing else. Sharing a single error across all four would be as
-   * misleading as ignoring it: three corridors are still perfectly fundable.
+   * funds and nothing else. Sharing a single error across all three would be as
+   * misleading as ignoring it: two corridors are still perfectly fundable.
    */
   it('confines an unreadable rail to the corridors that rail actually funds', async () => {
     const rows = await corridorsOf(
@@ -327,10 +318,12 @@ describe('GET /api/diagnostics', () => {
     expect(rows['arkade:BTC->lightning:BTC']?.balanceError).toContain('lnd unreachable')
 
     // Everything the dead rail does not fund still answers.
-    for (const corridor of ['lightning:BTC->arkade:BTC', 'onchain:BTC->arkade:BTC']) {
-      expect(rows[corridor]).toMatchObject({ payoutRail: 'arkade', availableSats: 100_000, canHonourMax: true })
-      expect(rows[corridor]?.balanceError).toBeNull()
-    }
+    expect(rows['lightning:BTC->arkade:BTC']).toMatchObject({
+      payoutRail: 'arkade',
+      availableSats: 100_000,
+      canHonourMax: true,
+      balanceError: null,
+    })
     expect(rows['arkade:BTC->onchain:BTC']).toMatchObject({ availableSats: 5_000, balanceError: null })
   })
 
@@ -442,7 +435,7 @@ describe('GET /api/diagnostics', () => {
     const response = await buildAdminApp(deps).fetch(new Request('http://admin/api/diagnostics'))
     expect(response.status).toBe(200)
     const body = (await response.json()) as { corridors: unknown[]; mode: string }
-    expect(body.corridors).toHaveLength(4)
+    expect(body.corridors).toHaveLength(3)
     expect(body.mode).toBe('relay')
   })
 })

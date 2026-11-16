@@ -50,7 +50,7 @@ describe('createArkadeContext', () => {
    * the part that matters. The SDK takes `config.onchainProvider || new
    * EsploraProvider(default)`, so passing a provider unconditionally would
    * construct one against `undefined` and blank the per-network fallback that
-   * every deployment not setting `ARK_ESPLORA_URL` relies on. A `toContain`
+   * every deployment not setting `ARKADE_ESPLORA_URL` relies on. A `toContain`
    * on the field alone would stay green through exactly that rewrite.
    */
   it('passes an onchain provider only when one was configured', () => {

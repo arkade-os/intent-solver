@@ -9,7 +9,6 @@ import {
 import type { QuoteRefusal as SendQuoteRefusal } from '@arkade-os/solver-corridors/send/orchestrator.js'
 import type { QuoteRefusal as ReceiveQuoteRefusal } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import type { QuoteRefusal as OnchainSendQuoteRefusal } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
-import type { QuoteRefusal as OnchainReceiveQuoteRefusal } from '@arkade-os/solver-corridors/receive/onchainOrchestrator.js'
 
 /**
  * The drift guard for `OrchestratorRefusal`.
@@ -17,13 +16,13 @@ import type { QuoteRefusal as OnchainReceiveQuoteRefusal } from '@arkade-os/solv
  * `REFUSAL_EXPLANATIONS` is `Record<RefusalReason, …>`, so the compiler already
  * forces an entry for every member of `RefusalReason`. What it cannot see is
  * whether `RefusalReason` still describes what the orchestrators RETURN:
- * `OrchestratorRefusal` is written out by hand in `refusalReasons.ts` (the four
+ * `OrchestratorRefusal` is written out by hand in `refusalReasons.ts` (the three
  * corridors all export `QuoteRefusal` under that one name, and importing them
- * there would couple a presentation module to four orchestrators). Add a member
+ * there would couple a presentation module to three orchestrators). Add a member
  * to any corridor's `QuoteRefusal` and nothing in `src/` complains —
  * `explainFailure` just starts answering `null` for a live refusal code.
  *
- * So the aliasing happens HERE instead, where the coupling is free. These four
+ * So the aliasing happens HERE instead, where the coupling is free. These three
  * lines fail `pnpm typecheck` the moment a corridor can return something the
  * table does not explain. They are deliberately type-only: types are erased
  * before vitest runs, so no runtime assertion could do this job.
@@ -32,7 +31,6 @@ type Explained<T extends RefusalReason> = T
 type _SendExplained = Explained<SendQuoteRefusal>
 type _ReceiveExplained = Explained<ReceiveQuoteRefusal>
 type _OnchainSendExplained = Explained<OnchainSendQuoteRefusal>
-type _OnchainReceiveExplained = Explained<OnchainReceiveQuoteRefusal>
 
 describe('REFUSAL_EXPLANATIONS', () => {
   it('says something distinct for every reason', () => {

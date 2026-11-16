@@ -9,7 +9,7 @@ export const receiverPaidTransport = (
   descriptor: RecycleCarrierQuote,
   taxi: { url: string; operatorKey: string },
   wantAsset: asset.AssetId,
-  arkServerUrl: string,
+  operatorUrl: string,
   now: () => number = () => Math.floor(Date.now() / 1000),
 ) => {
   if (
@@ -85,7 +85,7 @@ export const receiverPaidTransport = (
         },
       })
       assertQuote(quote)
-      dust = (await new RestArkProvider(arkServerUrl).getInfo()).dust
+      dust = (await new RestArkProvider(operatorUrl).getInfo()).dust
       assertQuote(quote)
       return quote
     },

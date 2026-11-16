@@ -21,7 +21,6 @@ import {
 import type { QuoteRefusal as SendQuoteRefusal } from '@arkade-os/solver-corridors/send/orchestrator.js'
 import type { QuoteRefusal as ReceiveQuoteRefusal } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import type { QuoteRefusal as OnchainSendQuoteRefusal } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
-import type { QuoteRefusal as OnchainReceiveQuoteRefusal } from '@arkade-os/solver-corridors/receive/onchainOrchestrator.js'
 
 const OPEN_ID = 'b'.repeat(64)
 
@@ -105,7 +104,6 @@ type Mapped<T extends (typeof QUOTE_REFUSALS)[number]> = T
 type _SendMapped = Mapped<SendQuoteRefusal>
 type _ReceiveMapped = Mapped<ReceiveQuoteRefusal>
 type _OnchainSendMapped = Mapped<OnchainSendQuoteRefusal>
-type _OnchainReceiveMapped = Mapped<OnchainReceiveQuoteRefusal>
 
 const bid = (overrides: Partial<Parameters<typeof rfqBidPayload>[2]> = {}) => ({
   fee_bps: 25,

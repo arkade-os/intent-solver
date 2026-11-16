@@ -39,7 +39,7 @@
  *   `MAX_REFUND_HORIZON` and refuses rather than minting escrow that cannot survive
  *   its own swap.
  *
- *   NOTE: the inheritance step is inferred from the Ark model and from
+ *   NOTE: the inheritance step is inferred from the Arkade model and from
  *   `toBatchExpiry` reading indexer state, not observed. Confirm by funding a lockup
  *   on regtest from a coin of known batch expiry and reading the child's
  *   `virtualStatus.batchExpiry`. If it is wrong the expiry rule is merely
@@ -163,23 +163,30 @@ export const liveLockupRows = async (
   corridors: CorridorReaderSet,
   log: (line: string) => void = () => {},
 ): Promise<CovenantScriptRow[]> => {
-  const rows: CovenantScriptRow[] = []
-  const answered: string[] = []
   const mute: string[] = []
+  const readers: { pair: string; rows: Promise<readonly unknown[]> }[] = []
   for (const corridor of corridors) {
     if (!corridor.liveLockups) {
       mute.push(corridor.descriptor.pair)
       continue
     }
-    answered.push(corridor.descriptor.pair)
-    for (const row of await corridor.liveLockups()) {
-      // Checked, not cast. `liveLockups` is typed `readonly unknown[]` so core
-      // need not name this row, and a plugged-in corridor is third-party code:
-      // a cast would carry a malformed row into `covenantScriptFromRow` and
-      // build a wrong script from it. See `assertCovenantScriptRow`.
-      rows.push(assertCovenantScriptRow(row, corridor.descriptor.pair))
-    }
+    readers.push({ pair: corridor.descriptor.pair, rows: corridor.liveLockups() })
   }
+  const loaded = await Promise.all(
+    readers.map(async ({ pair, rows: pending }) => {
+      const parsed: CovenantScriptRow[] = []
+      for (const row of await pending) {
+        // Checked, not cast. `liveLockups` is typed `readonly unknown[]` so core
+        // need not name this row, and a plugged-in corridor is third-party code:
+        // a cast would carry a malformed row into `covenantScriptFromRow` and
+        // build a wrong script from it. See `assertCovenantScriptRow`.
+        parsed.push(assertCovenantScriptRow(row, pair))
+      }
+      return parsed
+    }),
+  )
+  const rows = loaded.flat()
+  const answered = readers.map((reader) => reader.pair)
   // A non-empty set in which NOTHING answered is a wiring fault, not an idle
   // solver: every built-in corridor supplies `liveLockups`, so the only way to
   // get here is a set assembled wrong. Returning [] would report every contract
@@ -439,9 +446,8 @@ export const renewExpiringVtxos = async <V extends RenewableVtxo>(deps: RenewVtx
   const due = candidates.filter((vtxo) => isRenewalDue(vtxo, now))
   if (due.length === 0) throw new Error('No VTXOs available to renew')
 
-  const { intentFee, vtxoMaxAmount, dust } = await deps.serverInfo()
+  const [{ intentFee, vtxoMaxAmount, dust }, address] = await Promise.all([deps.serverInfo(), deps.destination()])
   const estimator = new Estimator(intentFee)
-  const address = await deps.destination()
   const script = hex.encode(ArkAddress.decode(address).pkScript)
   const outputFeeOn = (amount: bigint): bigint => BigInt(estimator.evalOffchainOutput({ amount, script }).satoshis)
 
@@ -559,6 +565,15 @@ export interface VtxoLifecycleDeps {
   nowSeconds(): number
 }
 
+export interface BlockedLockupOutput {
+  txid: string
+  vout: number
+  script: string
+  reason: string
+  /** The arm no clock clears: no refund key of ours. @see LockupDeadline.refundable */
+  notOurs: boolean
+}
+
 export interface VtxoLifecycleReport {
   /**
    * Settlement txid that turned boarded L1 sats into float. Always null here —
@@ -573,6 +588,12 @@ export interface VtxoLifecycleReport {
   recovered: string | null
   /** Why recovery did not run, when it was deliberately held back. */
   recoverySkipped: string | null
+  /**
+   * The same outputs as data, so a caller can ACT on the block rather than only
+   * log it. Optional and absent-rather-than-empty: a consumer compiled against
+   * the earlier shape — a fork, or a test building this literal — must work.
+   */
+  recoveryBlockedBy?: readonly BlockedLockupOutput[]
   /**
    * Inputs moved off deprecated signers this pass, by the cooperative
    * migration `runFloatLifecycle` owns since `settlementConfig: false` stopped
@@ -728,13 +749,24 @@ export const runVtxoLifecycle = async (deps: VtxoLifecycleDeps): Promise<VtxoLif
       }
     }
     const blocking = recoverable.flatMap((vtxo) => {
-      const reason =
-        (vtxo.confirmedRecoverable === false ? undefined : notOurs.get(vtxo.script)) ?? immature.get(vtxo.script)
-      return reason === undefined ? [] : [`${vtxo.txid}:${vtxo.vout} at ${vtxo.script} (${reason})`]
+      const notOursReason = vtxo.confirmedRecoverable === false ? undefined : notOurs.get(vtxo.script)
+      const reason = notOursReason ?? immature.get(vtxo.script)
+      if (reason === undefined) return []
+      return [{ txid: vtxo.txid, vout: vtxo.vout, script: vtxo.script, reason, notOurs: notOursReason !== undefined }]
     })
     if (blocking.length > 0) {
-      recoverySkipped = `${blocking.length} recoverable lockup output(s) not safe to sweep at ${now}: ${blocking.join(', ')}`
-      return { boarded: null, renewed, resplit, recovered, recoverySkipped, migrated: 0, failures }
+      const named = blocking.map((output) => `${output.txid}:${output.vout} at ${output.script} (${output.reason})`)
+      recoverySkipped = `${blocking.length} recoverable lockup output(s) not safe to sweep at ${now}: ${named.join(', ')}`
+      return {
+        boarded: null,
+        renewed,
+        resplit,
+        recovered,
+        recoverySkipped,
+        recoveryBlockedBy: blocking,
+        migrated: 0,
+        failures,
+      }
     }
 
     recovered = await deps.recoverVtxos()

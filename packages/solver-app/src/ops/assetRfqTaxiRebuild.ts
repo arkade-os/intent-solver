@@ -33,7 +33,7 @@ export const assertSolverSatsFloor = (
 
 export interface CarrierFillRebuildDeps {
   wallet: IWallet
-  arkServerUrl: string
+  operatorUrl: string
 }
 
 const solverFunding = (coin: CarrierCoin, label: string) => {
@@ -90,7 +90,7 @@ export const createCarrierFillRebuilder =
       changeScript,
       ...(fare === 0n ? {} : { fare: { script: changeScript, sats: fare }, combineSatsFareWithChange: true }),
     }
-    const built = await buildOfferFillPlan(deps.wallet, deps.arkServerUrl, request.offerHex, {
+    const built = await buildOfferFillPlan(deps.wallet, deps.operatorUrl, request.offerHex, {
       fund: request.inputs.map((coin) => solverFunding(coin, label)),
       payoutScript: request.proceedsScript,
       fundingOutpoint: { txid: request.row.depositTxid!, vout: request.row.depositVout! },

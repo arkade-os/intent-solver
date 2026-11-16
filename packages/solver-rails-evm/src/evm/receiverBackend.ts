@@ -1,6 +1,7 @@
 import { bytesToHex, hexToBytes, concatBytes } from '@noble/hashes/utils.js'
 import { keccak_256 } from '@noble/hashes/sha3.js'
 import type { JsonRpc } from '@arkade-os/solver-core/ports/evm.js'
+import { capture, unwrap } from '@arkade-os/solver-core/util/capture.js'
 import { EvmPayoutFundingQuarantinedError } from '@arkade-os/solver-core/ports/evmPayoutFunding.js'
 import {
   addressWord,
@@ -28,6 +29,7 @@ import {
 } from './receiver.js'
 import type { DurableEvmSender } from './durableSender.js'
 import { decodeSignedTransaction } from './transaction.js'
+import { readTimelockClock } from './timelockClock.js'
 import { verifyEvmClaimEvidence } from './claimEvidence.js'
 
 type Header = { number: string; hash: string; timestamp: string }
@@ -63,6 +65,8 @@ export interface ReceiverInspection {
   binding: IntentReceiverBinding
   observedBlock: bigint
   currentBlock: bigint
+  /** `block.number` at `currentBlock`: the clock activation cutoffs and the HTLC timelock are in. */
+  currentClock: bigint
   observedBlockHash: string
   currentBlockHash: string
   observedTimestamp: bigint
@@ -206,31 +210,41 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
     const { current, observed, tip, target, tag, ageSeconds } = seen ?? (await view(policy))
     const runtimeHash = expectedReceiverRuntimeHash(binding)
     const deployed = bytes(await rpc('eth_getCode', [hx(receiverAddress), tag])).length > 0
+    const observationP = capture(
+      (async () => {
+        const readsP = capture(
+          Promise.all([
+            read(binding.lock.tokenAddress, 'balanceOf(address)', [addressWord(receiverAddress, 'receiver')], tag),
+            read(binding.lock.tokenAddress, 'balanceOf(address)', [addressWord(binding.swapContract, 'swap')], tag),
+            deployed ? read(receiverAddress, 'activated()', [], tag) : Promise.resolve(0n),
+            read(binding.swapContract, 'swaps(bytes32)', [swapKey(binding.lock)], tag),
+            readTimelockClock(rpc, current.number),
+          ]),
+        )
+        const [swapAllow, tokenAllow] = await Promise.all([
+          capture(allowed(binding.swapContract, deps.allowedSwapCodeHashes, tag)),
+          capture(allowed(binding.lock.tokenAddress, deps.allowedTokenCodeHashes, tag)),
+        ])
+        if (!swapAllow.ok) throw swapAllow.error
+        if (!tokenAllow.ok) throw tokenAllow.error
+        const [tokenBalance, swapTokenBalance, activatedWord, htlcWord, currentClock] = unwrap(await readsP)
+        return { tokenBalance, swapTokenBalance, activatedWord, htlcWord, currentClock }
+      })(),
+    )
     if (deployed)
       await verifyReceiverBinding(rpc, receiverAddress, binding, runtimeHash, {
         blockTag: tag,
         allowActivated: true,
         allowClosed: true,
       })
-    await allowed(binding.swapContract, deps.allowedSwapCodeHashes, tag)
-    await allowed(binding.lock.tokenAddress, deps.allowedTokenCodeHashes, tag)
-    const tokenBalance = await read(
-      binding.lock.tokenAddress,
-      'balanceOf(address)',
-      [addressWord(receiverAddress, 'receiver')],
-      tag,
-    )
-    const swapTokenBalance = await read(
-      binding.lock.tokenAddress,
-      'balanceOf(address)',
-      [addressWord(binding.swapContract, 'swap')],
-      tag,
-    )
-    const activated = deployed && bool(await read(receiverAddress, 'activated()', [], tag))
-    const htlcPresent = bool(await read(binding.swapContract, 'swaps(bytes32)', [swapKey(binding.lock)], tag))
+    const { tokenBalance, swapTokenBalance, activatedWord, htlcWord, currentClock } = unwrap(await observationP)
+    const activated = deployed && bool(activatedWord)
+    const htlcPresent = bool(htlcWord)
     const invalidExactLock = htlcPresent && (!activated || swapTokenBalance < binding.lock.amount)
-    await stable(observed)
-    await stable(current)
+    const observedStable = capture(stable(observed))
+    const currentStable = capture(stable(current))
+    unwrap(await observedStable)
+    unwrap(await currentStable)
     if (invalidExactLock) throw new ReceiverInvariantError('exact lock lacks receiver activation or token backing')
     return {
       receiverAddress: Uint8Array.from(receiverAddress),
@@ -238,6 +252,7 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
       binding,
       observedBlock: target,
       currentBlock: tip,
+      currentClock,
       observedBlockHash: observed.hash,
       currentBlockHash: current.hash,
       observedTimestamp: quantity(observed.timestamp),
@@ -265,8 +280,10 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
   }
   const factoryRequest = { to: RECEIVER_DEPLOYER, data: receiverFactoryDeploymentCall() }
   const factoryReady = async (tag: unknown): Promise<boolean> => {
-    if (bytes(await rpc('eth_getCode', [hx(RECEIVER_FACTORY), tag])).length === 0) return false
-    const implementation = bytes(await rpc('eth_getCode', [hx(RECEIVER_IMPLEMENTATION), tag]))
+    const factoryP = capture(rpc('eth_getCode', [hx(RECEIVER_FACTORY), tag]))
+    const implementationP = capture(rpc('eth_getCode', [hx(RECEIVER_IMPLEMENTATION), tag]))
+    if (bytes(unwrap(await factoryP)).length === 0) return false
+    const implementation = bytes(unwrap(await implementationP))
     if (hx(keccak_256(implementation)) !== hx(expectedImplementationRuntimeHash()))
       throw new Error('receiver implementation mismatch')
     return true
@@ -327,7 +344,7 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
       const observation = await inspect(address, binding, policy)
       if (
         !observation.activated &&
-        (observation.currentBlock >= binding.activationCutoff ||
+        (observation.currentClock >= binding.activationCutoff ||
           observation.currentTimestamp >= binding.activationCutoffTimestamp ||
           BigInt(finality.nowSeconds()) >= binding.activationCutoffTimestamp ||
           observation.tokenBalance < binding.lock.amount)
@@ -345,7 +362,7 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
       const observation = await inspect(address, binding, policy)
       if (
         observation.activated ||
-        observation.currentBlock >= binding.activationCutoff ||
+        observation.currentClock >= binding.activationCutoff ||
         observation.currentTimestamp >= binding.activationCutoffTimestamp ||
         BigInt(finality.nowSeconds()) >= binding.activationCutoffTimestamp ||
         observation.tokenBalance < binding.lock.amount
@@ -363,7 +380,7 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
       const signed = decodeSignedTransaction(hexToBytes(current.rawTransaction.slice(2))).fields
       const [latest, networkTip] = await Promise.all([header('latest'), rpc('eth_maxPriorityFeePerGas', [])])
       if (
-        quantity(latest.number) >= binding.activationCutoff ||
+        (await readTimelockClock(rpc, latest.number)) >= binding.activationCutoff ||
         quantity(latest.timestamp) >= binding.activationCutoffTimestamp ||
         BigInt(finality.nowSeconds()) >= binding.activationCutoffTimestamp
       )
@@ -389,7 +406,7 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
     ) {
       const observation = await inspect(address, binding, policy)
       if (
-        observation.currentBlock < binding.activationCutoff &&
+        observation.currentClock < binding.activationCutoff &&
         observation.currentTimestamp < binding.activationCutoffTimestamp
       )
         throw new Error('original activation is not guaranteed expired on chain')
@@ -405,7 +422,8 @@ export const createReceiverBackend = (deps: ReceiverBackendDeps) => {
     async refund(id: string, binding: IntentReceiverBinding) {
       if (binding.chainId !== deps.chainId) throw new Error('receiver binding chain mismatch')
       const observed = await view()
-      if (observed.target < binding.lock.timelock) throw new Error('destination refund not mature')
+      if ((await readTimelockClock(rpc, observed.target)) < binding.lock.timelock)
+        throw new Error('destination refund not mature')
       await allowed(binding.swapContract, deps.allowedSwapCodeHashes, observed.tag)
       return deps.transactions.submit(id, { to: binding.swapContract, data: encodeRefundFor(binding.lock) })
     },

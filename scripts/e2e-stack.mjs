@@ -62,6 +62,11 @@ const post = async (method, params) => {
   return json.result
 }
 
+// Same clock pin as `pinAnvilClock` in test/e2e/support/evmChain.ts.
+const pinAnvilClock = async () => {
+  await post('anvil_setBlockTimestampInterval', [0])
+}
+
 /** eth_chainId answering, or false. */
 const anvilHealthy = async () => {
   try {
@@ -125,6 +130,7 @@ const ensureAnvil = async () => {
           ? `anvil already answering on :${ANVIL_PORT} - reusing the ${ANVIL_NAME} container`
           : `an anvil is already answering on :${ANVIL_PORT} (no ${ANVIL_NAME} container) - using it`,
     )
+    await pinAnvilClock()
     return
   }
   if (await portBusy(ANVIL_PORT)) {
@@ -154,6 +160,7 @@ const ensureAnvil = async () => {
   const deadline = Date.now() + 60_000
   while (Date.now() < deadline) {
     if (await anvilHealthy()) {
+      await pinAnvilClock()
       console.log('anvil up')
       return
     }

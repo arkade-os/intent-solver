@@ -25,12 +25,20 @@ import {
   type EvmCall,
   type EvmHtlcBackend,
   type EvmTransactionOutcome,
+  type TimelockHeight,
 } from '@arkade-os/solver-core/ports/evm.js'
 import { EVM_SEND_EXPOSED } from '@arkade-os/solver-core/core/evmSwapState.js'
 import type { Erc20SwapLock } from '@arkade-os/solver-rails-evm/evm/erc20Swap.js'
 import type { ArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
+import {
+  refundColumnsOnly,
+  refundSweptLockupFor,
+  sweptOpsFrom,
+  type SweptLockupRefund,
+} from '@arkade-os/solver-arkade/arkade/sweptLockupRefund.js'
 import { provenDepth } from '@arkade-os/solver-rails-evm/evm/lockDepth.js'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
+import { capture, unwrap } from '@arkade-os/solver-core/util/capture.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import type { Limits } from '@arkade-os/solver-core/core/limits.js'
 import { askApproval, type ApprovalCheck } from '@arkade-os/solver-core/core/approvalGate.js'
@@ -72,12 +80,14 @@ export interface EvmSendServiceDeps {
   acceptingQuotes?: () => boolean
   /** Is the client's Arkade lockup funded for the quoted amount? */
   arkadeLockupFunded(row: EvmSendSwapRow): Promise<boolean>
-  /** Claim the Arkade lockup with the revealed preimage; resolves to the ark txid. */
+  /** Claim the Arkade lockup with the revealed preimage; resolves to the Arkade txid. */
   claimArkade(row: EvmSendSwapRow, preimage: string): Promise<string>
   /** The lock as the contract keys it - built from the ROW, never from live config. */
   lockFor(row: EvmSendSwapRow): Erc20SwapLock
-  /** Current EVM block height. */
+  /** `eth_blockNumber`: claim-scan floors and confirmations. */
   blockHeight(): Promise<number>
+  /** `block.number`: the clock `evmTimeout` is set and compared in. */
+  timelockHeight(): Promise<TimelockHeight>
   /**
    * The solver's own EVM address, 20 bytes.
    *
@@ -126,8 +136,10 @@ export interface EvmSendServiceDeps {
     chainId: number
     minConfirmations: number
     minAgeSeconds: number
-    /** The two cadence bounds — quoted in to convert the seconds deadline to a height. */
+    /** `eth_blockNumber` cadence, for the claim-scan floor of a row whose lock height is unknown. */
     cadence: EvmBlockCadence
+    /** `block.number` cadence, to convert the seconds deadline to a timelock. */
+    timelockCadence: EvmBlockCadence
     /** How long the quoted rate binds, seconds. @see EvmChainConfig.quoteValiditySeconds */
     quoteValiditySeconds: number
     /** Optional override for the Arkade-after-EVM deadline margin. */
@@ -312,10 +324,11 @@ export class EvmSendSwapService {
    */
   private async observe(row: EvmSendSwapRow): Promise<EvmSendObservation> {
     const lock = this.deps.lockFor(row)
-    const [funded, present, height, lockReverted, refundOutcome, refundLanded] = await Promise.all([
+    const [funded, present, height, clock, lockReverted, refundOutcome, refundLanded] = await Promise.all([
       this.deps.arkadeLockupFunded(row),
       this.deps.evm.isLocked(lock),
       this.deps.blockHeight(),
+      this.deps.timelockHeight(),
       this.lockReverted(row),
       this.refundOutcome(row),
       this.refundLanded(row),
@@ -324,21 +337,25 @@ export class EvmSendSwapService {
     // deletes its flag on claim, so absence is exactly when a Claim exists.
     // Keyed on the state (its CAS precedes the broadcast), not `evmLockTxid`,
     // which is patched after it and so is null across a crash.
-    let preimage = row.preimage
-    if (preimage === null && (EVM_SEND_EXPOSED as readonly string[]).includes(row.state)) {
-      // Reported and survived, as `provenDepth` treats its failed reads.
-      try {
-        const found = await this.deps.evm.findClaimPreimage(lock, await this.claimScanFloor(row, height), {
-          minConfirmations: row.minConfirmations,
-          minAgeSeconds: row.minAgeSeconds,
-          nowSeconds: this.now(),
-        })
-        preimage = found === null ? null : Buffer.from(found).toString('hex')
-      } catch (error) {
-        if (error instanceof EvmClaimVerificationError) throw error
-        this.deps.onTickError?.(row.id, error)
-      }
-    }
+    // Captured because the depth probe below is awaited first, and for as long as it runs.
+    const preimageP = capture(
+      (async (): Promise<string | null> => {
+        if (row.preimage !== null || !(EVM_SEND_EXPOSED as readonly string[]).includes(row.state)) return row.preimage
+        // Reported and survived, as `provenDepth` treats its failed reads.
+        try {
+          const found = await this.deps.evm.findClaimPreimage(lock, await this.claimScanFloor(row, height), {
+            minConfirmations: row.minConfirmations,
+            minAgeSeconds: row.minAgeSeconds,
+            nowSeconds: this.now(),
+          })
+          return found === null ? null : Buffer.from(found).toString('hex')
+        } catch (error) {
+          if (error instanceof EvmClaimVerificationError) throw error
+          this.deps.onTickError?.(row.id, error)
+          return null
+        }
+      })(),
+    )
     // PROVEN depth, not assumed. Ask the contract whether this lock was already
     // there `minConfirmations` blocks back; if it was, it is at least that
     // deep, and the probe block's own timestamp bounds its age from below.
@@ -362,9 +379,9 @@ export class EvmSendSwapService {
       // zero for an absent or unproven lock, so it cannot advance.
       evmLockConfirmations: depth.confirmations,
       evmLockAgeSeconds: depth.ageSeconds,
-      preimage,
+      preimage: unwrap(await preimageP),
       nowSeconds: this.now(),
-      evmBlockHeight: height,
+      evmTimelockHeight: clock,
     }
   }
 
@@ -372,8 +389,14 @@ export class EvmSendSwapService {
     const adapter = this.deps.payoutFunding
     if (adapter === undefined) return
     const binding = payoutFundingBinding(adapter.identity, row, this.deps.lockFor(row))
+    const [blockHeight, timelockHeight] = await Promise.all([this.deps.blockHeight(), this.deps.timelockHeight()])
     const result = await adapter.ensure(
-      { binding, nowSeconds: this.now(), blockHeight: await this.deps.blockHeight() },
+      {
+        binding,
+        nowSeconds: this.now(),
+        blockHeight,
+        timelockHeight,
+      },
       mode,
     )
     const txid = checkedActivationTxid(result)
@@ -550,17 +573,6 @@ export class EvmSendSwapService {
     })
     if (!acceptance.accept) return { accepted: false, reason: acceptance.reason }
 
-    // Seconds -> HEIGHT, floored on the SLOWEST cadence ("setting our own
-    // timelock", blockTime.ts) so the refund opens no later than sized. The row
-    // stores the height: the contract keys the lock by exactly this timelock.
-    const evmTimeoutHeight =
-      (await this.deps.blockHeight()) + Number(blocksForDuration(acceptance.evmTimeout - nowSeconds, chain.cadence))
-    // The quote binds for the configured window, NOT until the refund locktime:
-    // every second past it is an unhedged option on a live pair (rfq-protocol.md
-    // §5). Snapshotted onto the row so a later config change can neither
-    // reprice a live quote nor resurrect an expired one.
-    const validUntil = nowSeconds + chain.quoteValiditySeconds
-
     // The client locks the full give; the solver pays out the give MINUS this
     // corridor's fee, converted into the token. `payoutSatsFor` does not clamp,
     // so a payout at or below zero is "the fee ate the swap" and is refused by
@@ -568,19 +580,29 @@ export class EvmSendSwapService {
     const payoutSats = payoutSatsFor(request.amountSats, fee)
     if (payoutSats <= 0) return { accepted: false, reason: 'fee_consumes_swap' }
 
-    if (await store.findLiveByPaymentHash(request.paymentHash)) {
-      return { accepted: false, reason: 'duplicate_swap' }
-    }
-    for (const peer of this.deps.peerStores ?? []) {
-      if (await peer.findLiveByPaymentHash(request.paymentHash)) {
-        return { accepted: false, reason: 'duplicate_swap' }
-      }
-    }
+    // `nowSeconds` is already fixed, so this height is not sampled later than before.
+    const tipP = this.deps.timelockHeight()
+    const traceP = capture(this.deps.assertClaimTraceSupport(hex.decode(token.address.slice(2))))
+    // Seconds -> HEIGHT, floored on the SLOWEST cadence ("setting our own
+    // timelock", blockTime.ts) so the refund opens no later than sized. The row
+    // stores the height: the contract keys the lock by exactly this timelock.
+    const evmTimeoutHeight =
+      (await tipP) + Number(blocksForDuration(acceptance.evmTimeout - nowSeconds, chain.timelockCadence))
+    // The quote binds for the configured window, NOT until the refund locktime:
+    // every second past it is an unhedged option on a live pair (rfq-protocol.md
+    // §5). Snapshotted onto the row so a later config change can neither
+    // reprice a live quote nor resurrect an expired one.
+    const validUntil = nowSeconds + chain.quoteValiditySeconds
 
-    try {
-      await this.deps.assertClaimTraceSupport(hex.decode(token.address.slice(2)))
-    } catch (error) {
-      this.deps.onTickError?.(request.paymentHash, error)
+    const spokenFor = await Promise.all([
+      store.findLiveByPaymentHash(request.paymentHash),
+      ...(this.deps.peerStores ?? []).map((peer) => peer.findLiveByPaymentHash(request.paymentHash)),
+    ])
+    if (spokenFor.some(Boolean)) return { accepted: false, reason: 'duplicate_swap' }
+
+    const trace = await traceP
+    if (!trace.ok) {
+      this.deps.onTickError?.(request.paymentHash, trace.error)
       return { accepted: false, reason: 'execution_unavailable' }
     }
 
@@ -590,17 +612,35 @@ export class EvmSendSwapService {
     // than guessing - there is no last-known-good here on purpose, because a
     // stale rate is how a solver is arbitraged.
     let evmAmount: bigint
-    // RESERVED, not merely observed. The read-then-check this replaces let two
-    // concurrent quotes both see the same headroom and both take it: a swap is
-    // invisible to `totalCommitted()` until its row lands, so the window
-    // between the check and the insert admitted more than the cap allows.
-    // `reserve` does the comparison and the claim in one serialised
-    // step, so the second caller sees the first one's claim.
-    //
-    // Taken HERE rather than before the price fetch, deliberately: a
-    // reservation held across a network round trip serialises every quote
-    // behind the feed's latency, which is the trade `core/admission.ts`
-    // declines to make for the same reason on the receive leg.
+    try {
+      const price = await this.deps.fetchPrice(market.priceFeed, market.pricePath)
+      // ROUNDED DOWN: the solver is paying this out, so a sub-unit remainder
+      // stays with the solver rather than being given away on every swap.
+      evmAmount = convertAmount({
+        baseAmount: BigInt(payoutSats),
+        price,
+        baseDecimals: 8,
+        quoteDecimals: token.decimals,
+        rounding: 'down',
+      })
+    } catch {
+      return { accepted: false, reason: 'price_unavailable' }
+    }
+    if (evmAmount <= 0n) return { accepted: false, reason: 'payout_below_dust' }
+    // The inventory bound, in the token's own units, enforced at QUOTE time —
+    // the sats bound above is width-limited and reads generous precisely when
+    // the price has run away; this is the knob that still refuses then.
+    if (
+      served.tokenLimits !== undefined &&
+      (evmAmount < served.tokenLimits.minUnits || evmAmount > served.tokenLimits.maxUnits)
+    ) {
+      return { accepted: false, reason: 'amount_out_of_range' }
+    }
+
+    // RESERVED, not merely observed: a swap is invisible to `totalCommitted()` until its row lands, and
+    // `reserve` claims in one serialised step so a concurrent quote sees this one. Taken after the price
+    // fetch so no headroom is held across the feed's round trip, but before `prepareQuote`, so a quote
+    // the cap refuses never reserves provider liquidity it would have to abandon.
     const reservation = await this.admission.reserve(
       request.amountSats,
       this.deps.totalCommitted,
@@ -609,31 +649,6 @@ export class EvmSendSwapService {
     if (reservation === null) return { accepted: false, reason: 'provider_at_capacity' }
 
     try {
-      try {
-        const price = await this.deps.fetchPrice(market.priceFeed, market.pricePath)
-        // ROUNDED DOWN: the solver is paying this out, so a sub-unit remainder
-        // stays with the solver rather than being given away on every swap.
-        evmAmount = convertAmount({
-          baseAmount: BigInt(payoutSats),
-          price,
-          baseDecimals: 8,
-          quoteDecimals: token.decimals,
-          rounding: 'down',
-        })
-      } catch {
-        return { accepted: false, reason: 'price_unavailable' }
-      }
-      if (evmAmount <= 0n) return { accepted: false, reason: 'payout_below_dust' }
-      // The inventory bound, in the token's own units, enforced at QUOTE time —
-      // the sats bound above is width-limited and reads generous precisely when
-      // the price has run away; this is the knob that still refuses then.
-      if (
-        served.tokenLimits !== undefined &&
-        (evmAmount < served.tokenLimits.minUnits || evmAmount > served.tokenLimits.maxUnits)
-      ) {
-        return { accepted: false, reason: 'amount_out_of_range' }
-      }
-
       const serverKey = hex.decode(arkade.serverPubkey)
       const id = crypto.randomUUID()
       // Constructed from parts rather than through `covenantScriptFromRow`: that
@@ -711,10 +726,15 @@ export class EvmSendSwapService {
         if (funding?.prepareQuote) {
           preparedBinding = payoutFundingBinding(funding.identity, candidate, sendLockFromRow(candidate))
           try {
+            const [blockHeight, timelockHeight] = await Promise.all([
+              this.deps.blockHeight(),
+              this.deps.timelockHeight(),
+            ])
             const prepared = await funding.prepareQuote({
               binding: preparedBinding,
               nowSeconds: this.now(),
-              blockHeight: await this.deps.blockHeight(),
+              blockHeight,
+              timelockHeight,
               tokenDecimals: token.decimals,
               orderMarginSeconds: chain.orderMarginSeconds ?? EVM_ORDER_MARGIN_SECONDS,
               quoteValiditySeconds: chain.quoteValiditySeconds,
@@ -827,15 +847,22 @@ export class EvmSendSwapService {
     for (const row of watched) {
       try {
         const lock = this.deps.lockFor(row)
-        const present = await this.deps.evm.isLocked(lock)
-        const claimed =
+        const presentP = this.deps.evm.isLocked(lock)
+        const claimedP =
           row.preimage === null
-            ? await this.deps.evm.findClaimPreimage(lock, await this.claimScanFloor(row, height), {
-                minConfirmations: row.minConfirmations,
-                minAgeSeconds: row.minAgeSeconds,
-                nowSeconds: this.now(),
-              })
-            : null
+            ? this.claimScanFloor(row, height).then((floor) =>
+                this.deps.evm.findClaimPreimage(lock, floor, {
+                  minConfirmations: row.minConfirmations,
+                  minAgeSeconds: row.minAgeSeconds,
+                  nowSeconds: this.now(),
+                }),
+              )
+            : Promise.resolve(null)
+        const [presentR, claimedR] = await Promise.allSettled([presentP, claimedP])
+        if (presentR.status === 'rejected') throw presentR.reason
+        if (claimedR.status === 'rejected') throw claimedR.reason
+        const present = presentR.value
+        const claimed = claimedR.value
         if (claimed !== null) {
           await store.patch(row.id, { preimage: Buffer.from(claimed).toString('hex') })
           this.deps.onTickError?.(
@@ -896,5 +923,20 @@ export class EvmSendSwapService {
       }
     }
     return pushed
+  }
+
+  /**
+   * `refused` rows only, and no verdict hook: an exposed row here means an EVM
+   * payout is out, which the chain answers rather than a Lightning rail.
+   */
+  async refundSweptLockup(pkScript: string): Promise<SweptLockupRefund> {
+    const { store, arkade } = this.deps
+    const ops = sweptOpsFrom(arkade, evmSendCovenantRowFor)
+    if (!ops) return null
+    return refundSweptLockupFor(pkScript, {
+      ...ops,
+      find: (script) => store.findByPkScript(script),
+      record: (row, fields) => store.patch(row.id, refundColumnsOnly(fields)),
+    })
   }
 }

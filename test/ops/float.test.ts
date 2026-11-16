@@ -118,6 +118,29 @@ describe('maybeMintPool', () => {
     })
     await expect(maybeMintPool(servicesWith([900_000]), { enabled: true, mint })).rejects.toThrow(/provider busy/)
   })
+
+  it('reports a refused mint and retries when commitments clear on a later pass', async () => {
+    const mint = vi
+      .fn()
+      .mockResolvedValueOnce({ refused: '9758 sat committed across non-terminal swaps.', committedSats: 9758 })
+      .mockResolvedValueOnce({ minted: [100_000, 100_000], txid: 'reshaped' })
+    const services = servicesWith([900_000])
+    expect(await maybeMintPool(services, { enabled: true, mint })).toEqual({
+      minted: false,
+      refused: '9758 sat committed across non-terminal swaps.',
+    })
+    expect((await maybeMintPool(services, { enabled: true, mint })).minted).toBe(true)
+    expect(mint).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not report a pinned-input skip as a completed mint', async () => {
+    expect(
+      await maybeMintPool(servicesWith([900_000]), {
+        enabled: true,
+        mint: async () => ({ skipped: 'inputs-pinned' }),
+      }),
+    ).toEqual({ minted: false, skipped: 'inputs-pinned' })
+  })
 })
 
 /**
@@ -138,7 +161,6 @@ const floatStores = {
   store: { findRecoverable: async () => [] },
   onchainStore: { findRecoverable: async () => [] },
   receiveStore: { findRecoverable: async () => [] },
-  onchainReceiveStore: { findRecoverable: async () => [] },
 }
 
 /** A real address, because a renewal decodes it to price its own output. */
@@ -159,15 +181,8 @@ const floatServices = (
   ({
     arkade: {
       wallet: {
-        settle: async (
-          params: SettleParams,
-          _eventCallback: unknown,
-          hooks?: { onPhase?: (phase: 'preparing' | 'registration_attempt') => void },
-        ) => {
-          hooks?.onPhase?.('preparing')
-          hooks?.onPhase?.('registration_attempt')
-          return (boarding.settle ?? (async () => 'settle-txid'))(params)
-        },
+        settle: async (params: SettleParams) => (boarding.settle ?? (async () => 'settle-txid'))(params),
+        intentRepository: { getLockedVtxoOutpoints: async () => [] },
         getBoardingUtxos: async () => boarding.boarded ?? [],
         // Read by resplitFloat after a renewal; empty means the float needs no reshaping.
         getSpendableVtxos: async () => [],
@@ -281,7 +296,6 @@ describe('lockupDeadlinesOf', () => {
         store: { findRecoverable: async () => rows },
         onchainStore: { findRecoverable: async () => [] },
         receiveStore: { findRecoverable: async () => [] },
-        onchainReceiveStore: { findRecoverable: async () => [] },
       } as unknown as FlatCorridorDeps),
     } as unknown as Services)
 
@@ -707,7 +721,7 @@ describe('runFloatLifecycle keeps renewal off reserved coins', () => {
 
     expect(settle).not.toHaveBeenCalled()
     expect(report.renewed).toBeNull()
-    expect(report.failures.join(' ')).toContain('pinned')
+    expect(report.failures.join(' ')).toContain('reserved')
   })
 })
 

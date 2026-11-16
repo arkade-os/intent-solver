@@ -35,8 +35,8 @@
  *    also earned by proving one landed - else the row holding the loser waits.
  */
 
-import type { EvmTransactionOutcome } from '../ports/evm.js'
-import type { EvmSendSwapState } from './evmSwapState.js'
+import type { EvmTransactionOutcome, TimelockHeight } from '../ports/evm.js'
+import { EvmSendMachine, type EvmSendSwapState } from './evmSwapState.js'
 
 /**
  * The planner's view of a swap row — declared HERE, structurally, for the same
@@ -76,8 +76,8 @@ export interface EvmSendObservation {
   preimage: string | null
   /** Wall clock, seconds. */
   nowSeconds: number
-  /** Current EVM block height, for the refund timeout. */
-  evmBlockHeight: number
+  /** `block.number` now, for the refund timeout. */
+  evmTimelockHeight: TimelockHeight
 }
 
 export type EvmSendAction =
@@ -97,10 +97,8 @@ export type EvmSendAction =
   /** Money is committed and cannot be recovered by this state machine. */
   | { do: 'stick'; reason: string }
 
-const TERMINAL: readonly EvmSendSwapState[] = ['claimed', 'refunded', 'refused', 'stuck']
-
 export const planEvmSend = (row: EvmSendPlanRow, seen: EvmSendObservation): EvmSendAction => {
-  if (TERMINAL.includes(row.state)) return { do: 'wait' }
+  if (EvmSendMachine.isTerminal(row.state)) return { do: 'wait' }
 
   // RULE 4 FIRST, and the order of these branches IS the rule. A preimage is
   // the money: once revealed, the Arkade lockup is claimable and no fact about
@@ -142,7 +140,11 @@ export const planEvmSend = (row: EvmSendPlanRow, seen: EvmSendObservation): EvmS
       return { do: 'lock_evm' }
 
     case 'funded':
-      // RULE 1 again, from the other side: the row says funded, so lock.
+      // RULE 1 again, from the other side: the row says funded, so lock. RULE 5 still binds: quoting
+      // enforces valid_until < refund_locktime, so this is also what keeps a late lock out of the refund race.
+      if (seen.nowSeconds >= row.validUntil) {
+        return { do: 'refuse', reason: 'lockup funded after the quote expired' }
+      }
       return { do: 'lock_evm' }
 
     case 'locking_evm':
@@ -155,7 +157,7 @@ export const planEvmSend = (row: EvmSendPlanRow, seen: EvmSendObservation): EvmS
       // RULE 3, ahead of the presence split: the depth probe reads a node that
       // cannot answer as UNPROVEN, never absent, so gating the timeout on
       // absence withholds it from exactly the lock that needs it.
-      if (seen.evmBlockHeight >= row.evmTimeout) return { do: 'refund_evm' }
+      if (seen.evmTimelockHeight >= row.evmTimeout) return { do: 'refund_evm' }
       if (!seen.evmLockPresent) return { do: 'wait' }
       // Depth AND age, both required. @see evm/config.ts - on a rollup a lock
       // can be many confirmations deep and still vanish, because safety comes
@@ -167,7 +169,7 @@ export const planEvmSend = (row: EvmSendPlanRow, seen: EvmSendObservation): EvmS
     case 'awaiting_claim':
       // RULE 3. Only at or past the timeout; earlier the contract rejects the
       // refund and treating that as failure would strand the lock.
-      return seen.evmBlockHeight >= row.evmTimeout ? { do: 'refund_evm' } : { do: 'wait' }
+      return seen.evmTimelockHeight >= row.evmTimeout ? { do: 'refund_evm' } : { do: 'wait' }
 
     case 'refunding_evm':
       // RULE 7, and the lock's presence splits the revert. Still there: nobody
@@ -182,7 +184,7 @@ export const planEvmSend = (row: EvmSendPlanRow, seen: EvmSendObservation): EvmS
         return { do: 'stick', reason: 'the ERC20 refund transaction reverted; the lock is still funded' }
       }
       // RULE 8. That `pending` is for want of a question, not a refund in flight.
-      if (row.evmRefundTxid === null && seen.evmLockPresent && seen.evmBlockHeight >= row.evmTimeout) {
+      if (row.evmRefundTxid === null && seen.evmLockPresent && seen.evmTimelockHeight >= row.evmTimeout) {
         return { do: 'refund_evm' }
       }
       // RULE 9. Cannot race rule 8: a refund that landed drained the lock, so

@@ -175,13 +175,13 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ArkLabsHQ/arkade-taxi
-          ref: e7cdfa4124e4a10706c3f1ebaba677965133e73c
+          ref: 578bf66f9fccc0f50d21082c9adb7c2b9979c30a
           path: arkade-taxi
 
       - name: Build Taxi regtest image
         if: matrix.name == 'taxi'
         working-directory: arkade-taxi
-        run: docker build --build-arg OCI_REVISION=e7cdfa4124e4a10706c3f1ebaba677965133e73c -t arkade-taxi:regtest .
+        run: docker build --build-arg OCI_REVISION=578bf66f9fccc0f50d21082c9adb7c2b9979c30a -t arkade-taxi:regtest .
 
       - uses: actions/setup-node@v4
         with:
@@ -243,12 +243,68 @@ jobs:
                    ARKD_CHECKPOINT_EXIT_DELAY=1536
           fi
           if [ "$GROUP_NAME" = "taxi" ]; then
-            node regtest.mjs start --env .env.taxi --profile "$E2E_PROFILES"
-          else
-            node regtest.mjs start --profile "$E2E_PROFILES"
+            export ARKD_IMAGE=ghcr.io/arkade-os/arkd:v0.9.25 \
+                   ARKD_WALLET_IMAGE=ghcr.io/arkade-os/arkd-wallet:v0.9.25 \
+                   ARKD_SIGNER_IMAGE=ghcr.io/arkade-os/arkd-signer:v0.9.25 \
+                   EMULATOR_IMAGE=ghcr.io/arkade-os/emulator:v0.0.10-rc.0 \
+                   ARKD_SCHEDULER_TYPE=gocron ARKD_SESSION_DURATION=10 ARKD_ROUND_INTERVAL=3 \
+                   ARKD_VTXO_TREE_EXPIRY=172800 ARKD_UNILATERAL_EXIT_DELAY=86400 \
+                   ARKD_PUBLIC_UNILATERAL_EXIT_DELAY=86400 ARKD_BOARDING_EXIT_DELAY=7776000 \
+                   ARKD_CHECKPOINT_EXIT_DELAY=86400 AUTOMINE_INTERVAL=0 \
+                   ARK_OFFCHAIN_INPUT_FEE=0.0 ARK_ONCHAIN_INPUT_FEE=0.0 \
+                   ARK_OFFCHAIN_OUTPUT_FEE=0.0 ARK_ONCHAIN_OUTPUT_FEE=0.0
           fi
+          node regtest.mjs start --profile "$E2E_PROFILES"
 
-      # The Taxi lane alone uses the documented zero-fee .env.taxi fixture.
+      - name: Start and fund the production Taxi
+        if: matrix.name == 'taxi'
+        timeout-minutes: 10
+        run: |
+          node --input-type=module <<'NODE'
+          import { execFileSync } from 'node:child_process'
+          import { randomBytes } from 'node:crypto'
+          import { writeFileSync } from 'node:fs'
+          import { join } from 'node:path'
+          const run = (command, args) => execFileSync(command, args, { stdio: 'inherit', timeout: 180_000 })
+          const values = {
+            TAXI_DB_PATH: '/data/taxi.db', TAXI_HTTP_PORT: '8080', TAXI_ADMIN_PORT: '8081',
+            TAXI_ARKD_URL: 'http://arkd:7070', TAXI_EMULATOR_URL: 'http://emulator:7073',
+            TAXI_ESPLORA_URL: 'http://mempool_web/api',
+            TAXI_PUBLIC_ARKD_URL: 'http://localhost:7070', TAXI_PUBLIC_EMULATOR_URL: 'http://localhost:7073',
+            TAXI_OPERATOR_PRIVKEY: randomBytes(32).toString('hex'), TAXI_OPERATOR_MIN_RESERVE_SATS: '10000',
+            TAXI_MIN_EXPIRY_HEADROOM_BLOCKS: '144', TAXI_MIN_EXPIRY_HEADROOM_SECONDS: '86400',
+            TAXI_VTXO_RENEWAL_THRESHOLD_SECONDS: '108000', TAXI_RECOVERY_BROADCAST_SECONDS: '43200',
+            TAXI_RECOVERY_CRITICAL_SECONDS: '7200', TAXI_COVENANT_DEADLINE_SECONDS: '14400',
+            TAXI_RECONCILE_INTERVAL_MS: '5000',
+          }
+          const envFile = join(process.env.RUNNER_TEMP, 'taxi.env')
+          writeFileSync(envFile, Object.entries(values).map(([key,value]) => `${key}=${value}`).join('\n'), { mode: 0o600 })
+          run('docker', ['run', '-d', '--name', 'taxi', '--network', 'arkade-regtest_default',
+            '--env-file', envFile, '-p', '127.0.0.1:8080:8080', '-p', '127.0.0.1:8081:8081',
+            '-v', 'solver-taxi-data:/data', 'arkade-taxi:regtest'])
+          const waitFor = async (path) => {
+            for (let attempt = 0; attempt < 120; attempt++) {
+              try { if ((await fetch(path, { signal: AbortSignal.timeout(3000) })).ok) return } catch {}
+              await new Promise((resolve) => setTimeout(resolve, 1000))
+            }
+            throw new Error(`Taxi readiness failed: ${path}`)
+          }
+          await waitFor('http://localhost:8080/health')
+          const response = await fetch('http://localhost:8081/admin/api/funding')
+          if (!response.ok) throw new Error(`Taxi funding API returned ${response.status}`)
+          const { arkAddress } = await response.json()
+          if (typeof arkAddress !== 'string') throw new Error('Taxi funding address missing')
+          run(process.execPath, ['arkade-regtest/regtest.mjs', 'ark', 'send', '--to', arkAddress,
+            '--amount', '3000000', '--password', 'secret'])
+          const policy = await fetch('http://localhost:8081/admin/api/policy', { method: 'PATCH',
+            headers: { 'content-type': 'application/json', 'x-taxi-operator': 'solver-ci' },
+            body: JSON.stringify({ paused: false, maxOutstandingSats: '10000000',
+              maxPerPaymentTopupSats: '100000', maxConcurrentAdvances: 20 }) })
+          if (!policy.ok) throw new Error(`Taxi policy initialization returned ${policy.status}`)
+          await waitFor('http://localhost:8080/ready')
+          NODE
+
+      # The Taxi lane alone uses zero intent fees.
       # Other lanes keep arkd's intent fees: `vtxoLifecycle` asserts the
       # ABSENCE of INTENT_INSUFFICIENT_FEE on a server that charges one.
       - name: What this arkd advertises
@@ -312,13 +368,13 @@ jobs:
             writeFileSync(process.env.E2E_ENV_FILE, [
               "SWAP_NETWORK=regtest",
               `LN_BACKEND=${process.env.LN_BACKEND}`,
-              `ARK_MNEMONIC="${generateMnemonic(wordlist, 128)}"`,
-              "ARK_SERVER_URL=http://localhost:7070",
+              `WALLET_MNEMONIC="${generateMnemonic(wordlist, 128)}"`,
+              "ARKADE_OPERATOR_URL=http://localhost:7070",
               "EMULATOR_URL=http://localhost:7073",
               "ESPLORA_URL=http://localhost:3000/api",
-              "ARK_ESPLORA_URL=http://localhost:3000/api",
+              "ARKADE_ESPLORA_URL=http://localhost:3000/api",
               ...lnd,
-              "ARK_DB_PATH=.data/ark-ci.sqlite",
+              "WALLET_DB_PATH=.data/ark-ci.sqlite",
               "SWAP_DB_PATH=.data/swaps-ci.sqlite",
               "",
             ].join("\n"))
@@ -398,7 +454,7 @@ jobs:
         run: |
           docker ps -a --format 'table {{.Names}}\t{{.Status}}' || true
           for c in bitcoin bitcoin-miner fulcrum mempool_api mempool_web nbxplorer taxi \
-                   arkd-wallet arkd emulator covclaimd boltz boltz-lnd boltz-fulmine \
+                   arkd-wallet arkd arkd-signer redis emulator covclaimd boltz boltz-lnd boltz-fulmine \
                    lnd pricefeed lsw-anvil; do
             echo "===== logs: $c ====="
             docker logs --tail 80 "$c" 2>&1 || true
@@ -415,5 +471,7 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
+          docker rm -f taxi > /dev/null 2>&1 || true
+          docker volume rm solver-taxi-data > /dev/null 2>&1 || true
           node arkade-regtest/regtest.mjs clean || true
           docker rm -f lsw-anvil > /dev/null 2>&1 || true

@@ -38,12 +38,13 @@ There is no `rfq_fill` — see `rfq-protocol.md` § 7.2.)
 ## Quickstart
 
 ```js
-import { createArkadeContext, loadConfig } from './packages/solver-app/dist/index.js' // this repo's build
+import { createArkadeContext } from './packages/solver-app/dist/index.js' // this repo's build
+import { configFromKnobs } from './packages/solver-app/dist/config.js'
 import {
   httpTransport, relayTransport, sendToLightning, pollStatus, lockupSpent,
 } from './examples/lib/swap-client.mjs'
 
-const config = loadConfig()
+const config = configFromKnobs(process.env) // the client wallet, from its env file
 const arkade = await createArkadeContext(config.arkade)
 
 // The transport is the ONLY line that differs between HTTP and the relay:

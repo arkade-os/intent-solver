@@ -22,13 +22,14 @@ import {
 } from '@arkade-os/solver-core/core/evmReceivePlan.js'
 import type { EvmReceiveSwapRow, EvmReceiveSwapStore } from '../db/evmReceiveSwaps.js'
 import type { EvmBroadcaster } from '../send/evmOrchestrator.js'
-import type { EvmHtlcBackend, EvmTransactionOutcome } from '@arkade-os/solver-core/ports/evm.js'
+import type { EvmHtlcBackend, EvmTransactionOutcome, TimelockHeight } from '@arkade-os/solver-core/ports/evm.js'
 import type { Erc20SwapLock } from '@arkade-os/solver-rails-evm/evm/erc20Swap.js'
 import { hex } from '@scure/base'
 import { ArkAddress } from '@arkade-os/sdk'
 import type { ReceiveArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 import { provenDepth } from '@arkade-os/solver-rails-evm/evm/lockDepth.js'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
+import { capture, unwrap } from '@arkade-os/solver-core/util/capture.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import type { Limits } from '@arkade-os/solver-core/core/limits.js'
 import { payoutSatsFor, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
@@ -51,9 +52,9 @@ export interface EvmReceiveServiceDeps {
   store: EvmReceiveSwapStore
   evm: EvmHtlcBackend
   broadcast: EvmBroadcaster
-  /** Fund the Arkade lockup for the client; resolves to the ark txid. */
+  /** Fund the Arkade lockup for the client; resolves to the Arkade txid. */
   fundArkade(row: EvmReceiveSwapRow): Promise<string>
-  /** Refund the solver's own Arkade lockup; resolves to the ark txid. */
+  /** Refund the solver's own Arkade lockup; resolves to the Arkade txid. */
   refundArkade(row: EvmReceiveSwapRow): Promise<string>
   /** Is the solver's Arkade lockup funded and visible? */
   arkadeLockupFunded(row: EvmReceiveSwapRow): Promise<boolean>
@@ -61,7 +62,10 @@ export interface EvmReceiveServiceDeps {
   arkadePreimage(row: EvmReceiveSwapRow): Promise<string | null>
   /** The CLIENT's lock as the contract keys it - rebuilt from the ROW. */
   lockFor(row: EvmReceiveSwapRow): Erc20SwapLock
+  /** `eth_blockNumber`: confirmations. */
   blockHeight(): Promise<number>
+  /** `block.number`: the client's `evmTimeout`. */
+  timelockHeight(): Promise<TimelockHeight>
 
   // ---- quote-time only ------------------------------------------------------
   // Read once, when a quote is admitted. Every later step rebuilds from the ROW.
@@ -76,7 +80,8 @@ export interface EvmReceiveServiceDeps {
     chainId: number
     minConfirmations: number
     minAgeSeconds: number
-    cadence: EvmBlockCadence
+    /** The cadence of `block.number`, which `evmTimeout` is in. */
+    timelockCadence: EvmBlockCadence
     /** How long the quoted rate binds, seconds. @see EvmChainConfig.quoteValiditySeconds */
     quoteValiditySeconds: number
     /** Optional override for the Arkade-refund-before-EVM-timeout margin. */
@@ -193,14 +198,22 @@ export class EvmReceiveSwapService {
    */
   private async observe(row: EvmReceiveSwapRow): Promise<EvmReceiveObservation> {
     const lock = this.deps.lockFor(row)
-    const [present, funded, height, claimOutcome] = await Promise.all([
+    const [present, funded, height, clock, claimOutcome] = await Promise.all([
       this.deps.evm.isLocked(lock),
       this.deps.arkadeLockupFunded(row),
       this.deps.blockHeight(),
+      this.deps.timelockHeight(),
       this.claimOutcome(row),
     ])
-    // Only worth asking once the lockup exists to be claimed FROM.
-    const preimage = row.preimage ?? (funded ? await this.deps.arkadePreimage(row) : null)
+    // Only worth asking once the lockup exists to be claimed FROM. Captured
+    // because the depth probe below is awaited first, and for as long as it runs.
+    const preimageP = capture(
+      row.preimage !== null
+        ? Promise.resolve(row.preimage)
+        : funded
+          ? this.deps.arkadePreimage(row)
+          : Promise.resolve(null),
+    )
     // PROVEN depth, not assumed — same probe as the send shell. On THIS leg it
     // is the only thing standing between a client lock that can still reorg
     // away and the solver's own sats, and the solver never sees that lock's
@@ -224,9 +237,9 @@ export class EvmReceiveSwapService {
       evmLockAgeSeconds: depth.ageSeconds,
       arkadeLockupFunded: funded,
       evmClaimOutcome: claimOutcome,
-      preimage,
+      preimage: unwrap(await preimageP),
       nowSeconds: this.now(),
-      evmBlockHeight: height,
+      evmTimelockHeight: clock,
     }
   }
 
@@ -250,7 +263,7 @@ export class EvmReceiveSwapService {
       case 'fund_arkade': {
         // RULE 2 again on a height read NOW - the planner's came from this tick's
         // observation. Before the CAS, so a closed window refuses rather than parks.
-        if (evmReceiveFundWindowClosed(await this.deps.blockHeight(), row.evmTimeout)) {
+        if (evmReceiveFundWindowClosed(await this.deps.timelockHeight(), row.evmTimeout)) {
           await store.transition(row.id, row.state, 'refused', {
             failure_reason: EVM_RECEIVE_FUND_WINDOW_REFUSAL,
           })
@@ -352,6 +365,10 @@ export class EvmReceiveSwapService {
       return { accepted: false, reason: 'amount_out_of_range' }
     }
 
+    // Sampled with the height read, not after it: a newer `now` against a stale
+    // height makes the client's timeout look further away than it is.
+    const nowSeconds = this.now()
+    const tipP = capture(this.deps.timelockHeight())
     let grossSats: number
     try {
       const price = await this.deps.fetchPrice(market.priceFeed, market.pricePath)
@@ -379,25 +396,21 @@ export class EvmReceiveSwapService {
     const payoutSats = payoutSatsFor(grossSats, fee)
     if (payoutSats <= 0) return { accepted: false, reason: 'fee_consumes_swap' }
 
-    if (await store.findLiveByPaymentHash(request.paymentHash)) {
-      return { accepted: false, reason: 'duplicate_swap' }
-    }
-    for (const peer of this.deps.peerStores ?? []) {
-      if (await peer.findLiveByPaymentHash(request.paymentHash)) {
-        return { accepted: false, reason: 'duplicate_swap' }
-      }
-    }
+    const spokenFor = await Promise.all([
+      store.findLiveByPaymentHash(request.paymentHash),
+      ...(this.deps.peerStores ?? []).map((peer) => peer.findLiveByPaymentHash(request.paymentHash)),
+    ])
+    if (spokenFor.some(Boolean)) return { accepted: false, reason: 'duplicate_swap' }
 
     // The client's deadline is a HEIGHT and the ordering gate is in seconds. The
     // conversion uses the FASTEST plausible block time, so the deadline is read
     // as the earliest it could arrive - the safe direction when it bounds
     // somebody else's recourse rather than our own.
-    const nowSeconds = this.now()
     const evmTimeoutSeconds = deadlineSecondsForBlock({
       timeoutBlock: BigInt(request.evmTimeout),
-      currentBlock: BigInt(await this.deps.blockHeight()),
+      currentBlock: BigInt(unwrap(await tipP)),
       nowSeconds,
-      cadence: chain.cadence,
+      cadence: chain.timelockCadence,
     })
     const refundLocktime = arkadeRefundLocktimeFor({
       evmTimeout: evmTimeoutSeconds,

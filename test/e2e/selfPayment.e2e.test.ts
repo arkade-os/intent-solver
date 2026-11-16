@@ -120,6 +120,7 @@ describe('e2e self-payment refresh (lightning:BTC->arkade:BTC coupled to arkade:
         store: sendStore,
         ln: countingLn,
         arkade: sendOps,
+        network: arkade.network,
         limits: arkade.limits,
         invoicePrefix: arkade.profile.invoicePrefix,
         maxExposedSats: arkade.maxExposedSats,

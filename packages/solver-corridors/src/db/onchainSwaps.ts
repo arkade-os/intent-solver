@@ -22,53 +22,22 @@
  */
 
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
-import { BaseSwapStore, addColumns, numberOrNull, text, type RawRow, type StoreShape } from './baseSwapStore.js'
+import {
+  BaseSwapStore,
+  addColumns,
+  numberOrNull,
+  text,
+  txidList,
+  type RawRow,
+  type StoreShape,
+} from './baseSwapStore.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { CLIENT_LOCKUP_RELEASE_DELAY_SECONDS } from '@arkade-os/solver-core/core/onchainSend.js'
+import { OnchainSendMachine, type OnchainSendSwapState } from '../machines/onchainSend.js'
 
-export type OnchainSendSwapState =
-  | 'quoted'
-  | 'funded'
-  | 'funding_onchain'
-  | 'awaiting_claim'
-  | 'claiming'
-  | 'claimed'
-  | 'refunding_onchain'
-  | 'refunded'
-  | 'refused'
-  | 'stuck'
+export type { OnchainSendSwapState }
 
-export const NON_TERMINAL: readonly OnchainSendSwapState[] = [
-  'quoted',
-  'funded',
-  'funding_onchain',
-  'awaiting_claim',
-  'claiming',
-  'refunding_onchain',
-]
-export const EXPOSED: readonly OnchainSendSwapState[] = [
-  'funding_onchain',
-  'awaiting_claim',
-  'claiming',
-  'refunding_onchain',
-]
-
-// States whose payout the float has yet to cover. The split is the funding
-// boundary: past it the payout is already broadcast, and counting it twice
-// would reserve the same sats twice.
-export const OWES_PAYOUT: readonly OnchainSendSwapState[] = ['quoted', 'funded', 'funding_onchain']
-
-const LEGAL_EDGES: Record<OnchainSendSwapState, readonly OnchainSendSwapState[]> = {
-  quoted: ['funded', 'refused'],
-  funded: ['funding_onchain', 'refused'],
-  funding_onchain: ['awaiting_claim', 'stuck'],
-  awaiting_claim: ['claiming', 'refunding_onchain', 'stuck'],
-  claiming: ['claimed', 'stuck'],
-  refunding_onchain: ['claiming', 'refunded', 'stuck'],
-  claimed: [],
-  refunded: [],
-  refused: [],
-  stuck: [],
-}
+export const FUND_LEASE_TTL_SECONDS = 10 * 60
 
 const TRANSITION_COLUMNS = new Set([
   'onchain_lockup_txid',
@@ -80,6 +49,8 @@ const TRANSITION_COLUMNS = new Set([
   'claim_ark_txid',
   'onchain_refund_txid',
   'failure_reason',
+  'fund_started_at',
+  'lockup_outpoints',
 ])
 /**
  * `onchain_refund_txid` is deliberately in BOTH sets. The automatic refund
@@ -89,7 +60,18 @@ const TRANSITION_COLUMNS = new Set([
  * along. Same shape as `refund_ark_txid` above: a fact about money that moved,
  * recorded without rewriting the state machine's verdict.
  */
-const PATCH_COLUMNS = new Set(['onchain_lockup_value', 'refund_ark_txid', 'refund_outcome', 'onchain_refund_txid'])
+/** The `onchain_refund_fee_rate`/`_broadcast_at`/`_prior_txids` trio is PATCH-only: a fee bump writes them with the row standing still in `refunding_onchain`. */
+const PATCH_COLUMNS = new Set([
+  'onchain_lockup_value',
+  'refund_ark_txid',
+  'refund_outcome',
+  'onchain_refund_txid',
+  'onchain_refund_fee_rate',
+  'onchain_refund_broadcast_at',
+  'onchain_refund_prior_txids',
+  'unrolled_claim',
+  'claim_ark_txid',
+])
 
 export interface OnchainSendSwapRow {
   id: string
@@ -159,8 +141,17 @@ export interface OnchainSendSwapRow {
   fundingVout: number | null
   preimage: string | null
   claimArkTxid: string | null
+  /** JSON, by outpoint: the last step of each L1 claim of a lockup output the client unrolled. */
+  unrolledClaim: string | null
+  /** JSON `[{txid, vout, value}]`: the lockup outputs adopted at funding, each to be collected. Null on older rows. */
+  lockupOutpoints: string | null
   /** Written BEFORE the broadcast: the refund ATTEMPTED, not one that landed. */
   onchainRefundTxid: string | null
+  /** The sat/vB {@link onchainRefundTxid} was built at, so the next version can be priced above it. */
+  onchainRefundFeeRate: number | null
+  onchainRefundBroadcastAt: number | null
+  /** The refund versions {@link onchainRefundTxid} replaced, newest first: until one confirms, ANY of them can be the one that does. */
+  onchainRefundPriorTxids: string[]
   refundArkTxid: string | null
   refundOutcome: 'pushed' | 'external' | null
   failureReason: string | null
@@ -172,6 +163,8 @@ export interface OnchainSendSwapRow {
    * @see OnchainSendSwapStore.claimFundLease
    */
   fundStartedAt: number | null
+  /** The signed funding, recorded before it is broadcast: every later pass resends this one. */
+  fundingTx: string | null
 }
 
 const SEND_ONCHAIN_SWAP_COLUMNS = `
@@ -209,11 +202,17 @@ const SEND_ONCHAIN_SWAP_COLUMNS = `
   preimage                      TEXT,
   claim_ark_txid                TEXT,
   onchain_refund_txid           TEXT,
+  onchain_refund_fee_rate       REAL,
+  onchain_refund_broadcast_at   INTEGER,
+  onchain_refund_prior_txids    TEXT,
   refund_ark_txid               TEXT,
   refund_outcome                TEXT,
   failure_reason                TEXT,
   rfq_id                        TEXT,
-  fund_started_at               INTEGER
+  fund_started_at               INTEGER,
+  funding_tx                    TEXT,
+  unrolled_claim                TEXT,
+  lockup_outpoints              TEXT
 `
 
 const SCHEMA = `
@@ -279,11 +278,17 @@ const toRow = (raw: Raw): OnchainSendSwapRow => ({
   preimage: raw.preimage === null ? null : String(raw.preimage),
   claimArkTxid: raw.claim_ark_txid === null ? null : String(raw.claim_ark_txid),
   onchainRefundTxid: raw.onchain_refund_txid === null ? null : String(raw.onchain_refund_txid),
+  onchainRefundFeeRate: numberOrNull(raw.onchain_refund_fee_rate),
+  onchainRefundBroadcastAt: numberOrNull(raw.onchain_refund_broadcast_at),
+  onchainRefundPriorTxids: txidList(raw.onchain_refund_prior_txids),
   refundArkTxid: raw.refund_ark_txid === null ? null : String(raw.refund_ark_txid),
   refundOutcome: raw.refund_outcome === null ? null : (String(raw.refund_outcome) as 'pushed' | 'external'),
   failureReason: raw.failure_reason === null ? null : String(raw.failure_reason),
   rfqId: text(raw.rfq_id),
   fundStartedAt: numberOrNull(raw.fund_started_at),
+  fundingTx: text(raw.funding_tx),
+  unrolledClaim: text(raw.unrolled_claim),
+  lockupOutpoints: text(raw.lockup_outpoints),
 })
 
 export interface OnchainQuoteRecord {
@@ -351,6 +356,7 @@ export const ONCHAIN_SEND_SEARCH_COLUMNS: readonly string[] = [
   'claim_ark_txid',
   'onchain_refund_txid',
   'refund_ark_txid',
+  'unrolled_claim',
   'rfq_id',
 ]
 
@@ -360,11 +366,11 @@ const SHAPE: StoreShape<OnchainSendSwapRow, OnchainSendSwapState> = {
   noun: 'onchain send swap',
   lifecycleLabel: 'onchain send lifecycle',
   searchColumns: ONCHAIN_SEND_SEARCH_COLUMNS,
-  legalEdges: LEGAL_EDGES,
+  legalEdges: OnchainSendMachine.edges,
   transitionColumns: TRANSITION_COLUMNS,
   patchColumns: PATCH_COLUMNS,
-  live: NON_TERMINAL,
-  exposed: EXPOSED,
+  live: OnchainSendMachine.live,
+  exposed: OnchainSendMachine.exposed,
   toRow: (raw: RawRow) => toRow(raw as Raw),
 }
 
@@ -405,6 +411,12 @@ export class OnchainSendSwapStore extends BaseSwapStore<OnchainSendSwapRow, Onch
       ['payout_sats', 'INTEGER'],
       ['fund_started_at', 'INTEGER'],
       ['non_interactive_parameters', 'TEXT'],
+      ['onchain_refund_fee_rate', 'REAL'],
+      ['onchain_refund_broadcast_at', 'INTEGER'],
+      ['onchain_refund_prior_txids', 'TEXT'],
+      ['unrolled_claim', 'TEXT'],
+      ['lockup_outpoints', 'TEXT'],
+      ['funding_tx', 'TEXT'],
     ])
   }
 
@@ -413,21 +425,43 @@ export class OnchainSendSwapStore extends BaseSwapStore<OnchainSendSwapRow, Onch
    * the solver's to spend — over every live state. COALESCE mirrors `toRow`.
    */
   async owedPayoutSats(): Promise<number> {
-    const placeholders = OWES_PAYOUT.map(() => '?').join(',')
+    const owes = OnchainSendMachine.where('owesPayout')
+    const placeholders = owes.map(() => '?').join(',')
     const row = await this.driver.get<{ total: number }>(
       `SELECT COALESCE(SUM(COALESCE(payout_sats, amount_sats)), 0) AS total
          FROM send_onchain_swap WHERE state IN (${placeholders})`,
-      [...OWES_PAYOUT],
+      [...owes],
     )
     return Number(row?.total ?? 0)
   }
 
+  /** Expires: a row taken over after a crash only resends the `funding_tx` it recorded. */
   override async claimFundLease(id: string, from: OnchainSendSwapState): Promise<boolean> {
-    return super.claimFundLease(id, from)
+    return super.claimFundLease(id, from, this.now() - FUND_LEASE_TTL_SECONDS)
+  }
+
+  /** Never over a recorded funding: a worker past an expired lease may be broadcasting it. */
+  async refuseUnrecorded(id: string, reason: string): Promise<boolean> {
+    return this.transitionWhere(id, 'funding_onchain', 'refused', { failure_reason: reason }, 'funding_tx IS NULL')
+  }
+
+  /** Single-winner, so a worker that loses it never broadcasts the funding it signed. */
+  async recordFundingTx(id: string, tx: string): Promise<boolean> {
+    const result = await this.driver.run(
+      `UPDATE send_onchain_swap SET funding_tx = ?, updated_at = ?
+       WHERE id = ? AND state = 'funding_onchain' AND funding_tx IS NULL`,
+      [tx, this.now(), id],
+    )
+    return result.changes === 1
   }
 
   override async releaseFundLease(id: string): Promise<void> {
     await super.releaseFundLease(id)
+  }
+
+  /** The only writer of `fund_started_at` on a transition: entry and lease in one write, so no recovery pass leases the row in between. */
+  async enterFunding(id: string): Promise<boolean> {
+    return this.transition(id, 'funded', 'funding_onchain', { fund_started_at: this.now() })
   }
 
   async insertQuote(quote: OnchainQuoteRecord): Promise<OnchainSendSwapRow> {
@@ -474,12 +508,26 @@ export class OnchainSendSwapStore extends BaseSwapStore<OnchainSendSwapRow, Onch
     return this.get(quote.id)
   }
 
+  /** `refused` only (never exposed); `client_refund_pubkey` means an untimelocked refund leaf. */
   async findRefundable(now: number): Promise<OnchainSendSwapRow[]> {
     const rows = await this.driver.all<Raw>(
       `SELECT * FROM send_onchain_swap
-       WHERE state = 'refused' AND refund_outcome IS NULL AND refund_locktime <= ?
+       WHERE state = 'refused'
+         AND refund_outcome IS NULL
+         AND (client_refund_pubkey IS NOT NULL OR refund_locktime <= ?)
        ORDER BY created_at`,
       [now],
+    )
+    return rows.map(toRow)
+  }
+
+  /** Still-held client lockups behind a landed L1 refund — the preimage can never arrive now. */
+  async findReleasable(now: number): Promise<OnchainSendSwapRow[]> {
+    const rows = await this.driver.all<Raw>(
+      `SELECT * FROM send_onchain_swap
+       WHERE state = 'refunded' AND refund_outcome IS NULL AND updated_at <= ?
+       ORDER BY created_at`,
+      [now - CLIENT_LOCKUP_RELEASE_DELAY_SECONDS],
     )
     return rows.map(toRow)
   }

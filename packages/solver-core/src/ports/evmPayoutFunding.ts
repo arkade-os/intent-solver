@@ -1,3 +1,5 @@
+import type { TimelockHeight } from './evm.js'
+
 export interface EvmPayoutFundingBinding {
   readonly adapterId: string
   readonly intentId: string
@@ -20,7 +22,10 @@ export interface EvmPayoutFundingBinding {
 export interface EvmPayoutFundingContext {
   readonly binding: EvmPayoutFundingBinding
   readonly nowSeconds: number
+  /** `eth_blockNumber`: scan floors and confirmations. */
   readonly blockHeight: number
+  /** `block.number`: the clock `evmTimeout` and receiver activation cutoffs are in. */
+  readonly timelockHeight: TimelockHeight
 }
 
 export interface EvmPayoutFundingQuoteContext extends EvmPayoutFundingContext {

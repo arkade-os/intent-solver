@@ -15,13 +15,8 @@ import type { AdminDeps } from '../server.js'
 import { assetCardMarketsFromPolicy } from '../../ops/assetRfqMarkets.js'
 
 /** `RELAY_URL` then `SOLVER_CARD_RELAYS`. */
-export const advertisedRelays = (relayUrl: string | null): string[] => {
-  const extra = (process.env.SOLVER_CARD_RELAYS ?? '')
-    .split(',')
-    .map((r) => r.trim())
-    .filter(Boolean)
-  return [...(relayUrl ? [relayUrl] : []), ...extra].map(withoutCredentials)
-}
+export const advertisedRelays = (relayUrl: string | null, extra: readonly string[]): string[] =>
+  [...(relayUrl ? [relayUrl] : []), ...extra].map(withoutCredentials)
 
 /** The card goes out with no human reading it, so a `?token=` or `user:pass@` in a relay URL must not ride along. */
 const withoutCredentials = (relay: string): string => {
@@ -70,14 +65,17 @@ export const cardOmissions = (source: CardSource): string[] => [
  * that would LIE about the deployment it names, and the route reports the
  * reason instead of publishing it.
  */
-export const deploymentCard = async (source: CardSource, name = process.env.SOLVER_NAME): Promise<SolverCard> => {
+export const deploymentCard = async (
+  source: CardSource,
+  name = source.config.solverName ?? undefined,
+): Promise<SolverCard> => {
   const { config, bootPolicy } = source
   const trimmed = name?.trim()
   // Guarded here rather than left to `buildSolverCard`: an absent variable
   // reaches its name rule as the string "undefined", which matches
   // /^[a-z0-9-]+$/ perfectly and would file a card called `undefined`.
   if (!trimmed) {
-    throw new Error('SOLVER_NAME is not set — it becomes the registry filename solvers/<network>/<name>.json')
+    throw new Error('name is not set in the config — it becomes the registry filename solvers/<network>/<name>.json')
   }
 
   // BOOT, not live: the card is SIGNED, none of these three is in `LIVE_KEYS`, and each is snapshotted into a
@@ -96,7 +94,7 @@ export const deploymentCard = async (source: CardSource, name = process.env.SOLV
       // The wallet identity — the same x-only key makers already address RFQs
       // to, which is what makes the card's rendezvous data self-attesting.
       discoveryPubkey: source.providerPubkey,
-      relays: advertisedRelays(config.relayUrl),
+      relays: advertisedRelays(config.relayUrl, config.cardRelays),
       corridors: served,
       assetMarkets: assetMarketsOf(source).publishable,
     }),
@@ -147,7 +145,7 @@ export const registerCardRoutes = (app: Hono, deps: AdminDeps): void => {
     // not mask a policy the operator actually set. "You configured off" is the
     // true answer to this request; "nothing is wired" is incidental.
     if (deps.services.config.nostrAdPublish === 'off') {
-      const detail = 'NOSTR_AD_PUBLISH is off: this solver is configured not to publish to Nostr'
+      const detail = 'relay.adPublish is off: this solver is configured not to publish to Nostr'
       await audit('error', detail)
       return c.json({ error: 'refused', detail }, 409)
     }

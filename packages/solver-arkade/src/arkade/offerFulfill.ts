@@ -1,6 +1,6 @@
 /**
  * Settle an offer: spend the maker's deposit through its fulfill leaf, paying
- * the maker what the covenant obliges, in one Ark transaction.
+ * the maker what the covenant obliges, in one Arkade transaction.
  *
  * Swap Protocol V1 § 4. The covenant is what makes this trustless for the
  * maker: the fulfill leaf's second key is the emulator's, tweaked by a commitment
@@ -35,8 +35,8 @@ import {
 import { ASSET_CARRIER_SATS, encodeOffer, fillOffer, type FillFunding, type Offer } from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
 import { type ArkadeContext } from './wallet.js'
-import { offerIsConsistent } from './offerConsistency.js'
 import { outpointKey } from './lockupFunding.js'
+import { offerIsConsistent } from './offerConsistency.js'
 import type { DirectFillAttempt, DirectFillParent } from './directFillAttempts.js'
 import { assertDirectFillResponse, directFillFinalized, validateDirectFillGraph } from './directFillGraph.js'
 
@@ -44,6 +44,29 @@ import { assertDirectFillResponse, directFillFinalized, validateDirectFillGraph 
  * Re-exported from the SDK rather than restated: it is a covenant constant, and a
  * second copy here diverges silently the day upstream changes it. */
 export { ASSET_CARRIER_SATS }
+
+/**
+ * A fill refusal that provably submitted nothing, so a caller holding the row in
+ * `filling` may walk it back. Raised ONLY at the two coin-selection refusals
+ * below, both above `fillOffer` — the call that builds AND submits. The other
+ * guards here stay plain on purpose: they mean the row disagrees with the chain,
+ * which needs a human. @see FundNotSubmittedError, the same boundary on receive.
+ */
+export class OfferNotSubmittedError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options)
+    this.name = 'OfferNotSubmittedError'
+  }
+}
+
+export interface FulfillOptions {
+  /**
+   * Claimed immediately before the submission: `false` means another attempt
+   * holds the row and nothing may be sent. A throw is left untyped — a failed
+   * write cannot say whether the latch landed. @see OfferFillStore.markSubmitting
+   */
+  markSubmitting?: () => Promise<boolean>
+}
 
 export interface OfferDepositOutpoint {
   txid: string
@@ -61,7 +84,7 @@ export interface OfferDepositOutpoint {
 }
 
 /**
- * Fulfil one offer and return the settled ark txid.
+ * Fulfil one offer and return the settled Arkade txid.
  *
  * Both directions: an asset-wanting maker is paid through the asset packet with
  * a 330-sat carrier at output[0], and an asset DEPOSIT is routed to us the same
@@ -72,8 +95,12 @@ export const fulfillOffer = async (
   emulatorUrl: string,
   offer: Offer,
   deposit: OfferDepositOutpoint,
-  parent: DirectFillParent = { kind: 'standalone', id: `${deposit.txid}:${deposit.vout}` },
+  parentOrOptions: DirectFillParent | FulfillOptions = { kind: 'standalone', id: `${deposit.txid}:${deposit.vout}` },
+  suppliedOptions?: FulfillOptions,
 ): Promise<string> => {
+  const parent =
+    'kind' in parentOrOptions ? parentOrOptions : { kind: 'standalone' as const, id: `${deposit.txid}:${deposit.vout}` }
+  const options = 'kind' in parentOrOptions ? suppliedOptions : parentOrOptions
   const serverPubkey = ctx.wallet.arkServerPublicKey
   if (!offerIsConsistent(offer, serverPubkey)) {
     // § 5.1: a taker MUST abort on mismatch. Checked again here rather than
@@ -118,13 +145,14 @@ export const fulfillOffer = async (
     }
   } catch (error) {
     const held = spendable.reduce((total, coin) => total + BigInt(coin.value), 0n)
-    throw new Error(
+    throw new OfferNotSubmittedError(
       `no spendable coins to pay the maker ${wantAmount} ${wantedAssetId ?? 'sats'} (holding ${held} sats): ${
         error instanceof Error ? error.message : String(error)
       }`,
+      { cause: error },
     )
   }
-  if (funding.length === 0) throw new Error(`no spendable coins to pay the maker ${wantAmount} sats`)
+  if (funding.length === 0) throw new OfferNotSubmittedError(`no spendable coins to pay the maker ${wantAmount} sats`)
 
   const release = ctx.reservations.reserve(funding)
   let attempt: DirectFillAttempt | undefined
@@ -159,7 +187,10 @@ export const fulfillOffer = async (
       proceedsScript: hex.encode(ArkAddress.decode(await ctx.wallet.getAddress()).pkScript),
     })
     release()
-    const txid = await fillOffer(ctx.wallet, ctx.arkServerUrl, hex.encode(encodeOffer(offer)), {
+    if (options?.markSubmitting && !(await options.markSubmitting())) {
+      throw new OfferNotSubmittedError(`another attempt already holds the fill for ${deposit.txid}:${deposit.vout}`)
+    }
+    const txid = await fillOffer(ctx.wallet, ctx.operatorUrl, hex.encode(encodeOffer(offer)), {
       // Inputs 1..n, in this order. Every asset a coin carries is declared, not
       // just the two the swap is about: arkd refuses with ASSET_NOT_FOUND when an
       // input owns an asset the packet does not mention, and selection picks for

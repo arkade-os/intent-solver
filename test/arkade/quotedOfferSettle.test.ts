@@ -134,7 +134,16 @@ describe('quotedOfferSettleFor', () => {
         assetAmount: undefined,
       },
       { kind: 'rfq', id: 'quoted-offer' },
+      undefined,
     )
+  })
+
+  it('forwards the submission latch with the durable parent identity', async () => {
+    const { settle, fulfill } = settleWith([funded()])
+    const options = { markSubmitting: async () => true }
+    await settle(intent(), options)
+    expect(fulfill.mock.calls[0]![4]).toEqual({ kind: 'rfq', id: 'quoted-offer' })
+    expect(fulfill.mock.calls[0]![5]).toBe(options)
   })
 
   it('hands `fulfill` an offer whose script is the DERIVED one', async () => {

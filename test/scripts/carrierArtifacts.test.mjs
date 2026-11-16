@@ -119,6 +119,16 @@ beforeAll(() => {
     link(packageRootFrom(join(repo, 'package.json'), '@scure/btc-signer'), join(root, 'node_modules/@scure/btc-signer'))
   if (existsSync(join(root, 'packages/solver-app/package.json')))
     link(join(root, 'node_modules'), join(root, 'packages/solver-app/node_modules'))
+  if (!candidates.has('@arkade-os/swap')) {
+    const swapOriginal = packageRootFrom(join(repo, 'package.json'), '@arkade-os/swap')
+    const swapFixture = join(root, 'node_modules/@arkade-os/swap')
+    if (existsSync(swapFixture)) rmSync(swapFixture)
+    cpSync(swapOriginal, swapFixture, {
+      recursive: true,
+      filter: (path) => path !== join(swapOriginal, 'node_modules'),
+    })
+    installDependencies(swapOriginal, swapFixture)
+  }
   sdk = join(root, 'node_modules/@arkade-os/sdk')
   const declared = JSON.parse(readFileSync(join(sdk, 'package.json'), 'utf8'))
   sdkEntry = join(sdk, declared.exports['.'].import.default)
@@ -134,6 +144,22 @@ it('accepts an unchanged installation extracted from the frozen archives', () =>
   expect(result.status, result.stderr).toBe(0)
 })
 
+it('rejects overrides placed in the ignored package manifest before importing installed code', () => {
+  const path = join(root, 'package.json')
+  const original = readFileSync(path)
+  const modified = JSON.parse(original)
+  modified.pnpm = { overrides: JSON.parse(readFileSync(join(root, 'pnpm-workspace.yaml'), 'utf8')).overrides }
+  writeFileSync(path, JSON.stringify(modified))
+  const restore = markEntry()
+  try {
+    rejectedBeforeImport(run(), 'package.json pnpm settings are ignored')
+  } finally {
+    writeFileSync(path, original)
+    restore()
+    rmSync(marker, { force: true })
+  }
+})
+
 it('rejects changed installed code with the same package version and exports before importing it', () => {
   const restore = markEntry()
   try {
@@ -146,6 +172,24 @@ it('rejects changed installed code with the same package version and exports bef
 
 it('authenticates a separate SDK resolved through a Taxi dependency', () => {
   const path = join(root, 'node_modules/@arkade-taxi/client/node_modules/@arkade-os/sdk')
+  rmSync(path)
+  cpSync(sdk, path, { recursive: true, dereference: false })
+  const originalEntry = sdkEntry
+  sdkEntry = join(path, originalEntry.slice(sdk.length + 1))
+  const restore = markEntry()
+  try {
+    rejectedBeforeImport(run(), 'installed bytes differ')
+  } finally {
+    restore()
+    sdkEntry = originalEntry
+    removeFixture(path)
+    link(sdk, path)
+    rmSync(marker, { force: true })
+  }
+})
+
+it('authenticates a separate SDK resolved through the published swap package', () => {
+  const path = join(root, 'node_modules/@arkade-os/swap/node_modules/@arkade-os/sdk')
   rmSync(path)
   cpSync(sdk, path, { recursive: true, dereference: false })
   const originalEntry = sdkEntry

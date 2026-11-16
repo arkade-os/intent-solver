@@ -82,7 +82,7 @@ export const probeBackends = async (services: Services, relay?: RelayProbeTarget
       const balance = await requireLn(services.ln).getBalance()
       return `${balance.availableSats} sat available, ${balance.incomingSats} sat incoming`
     }),
-    probe('arkade', services.config.arkade.arkServerUrl, async () => {
+    probe('arkade', services.config.arkade.operatorUrl, async () => {
       const address = await services.arkade.wallet.getAddress()
       return `wallet at ${address}`
     }),

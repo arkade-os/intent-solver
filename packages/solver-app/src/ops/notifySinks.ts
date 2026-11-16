@@ -35,19 +35,24 @@ const send = async (sink: string, fetchImpl: FetchLike, url: string, body: unkno
   if (!response.ok) throw opaqueFailure(sink, `HTTP ${response.status}`)
 }
 
+// Messages carry Slack mrkdwn: *bold* and `code`. Telegram gets plain text, since its
+// Markdown mode rejects a whole message over one stray `_` in a failure reason.
+const plain = (text: string): string => text.replace(/[*`]/g, '')
+const slackEscaped = (text: string): string => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+
 export const telegramSink = (botToken: string, chatId: string, fetchImpl: FetchLike): NotifySink => ({
   name: 'telegram',
   send: (text) =>
     send('telegram', fetchImpl, `https://api.telegram.org/bot${botToken}/sendMessage`, {
       chat_id: chatId,
-      text,
+      text: plain(text),
       disable_web_page_preview: true,
     }),
 })
 
 export const slackSink = (webhookUrl: string, fetchImpl: FetchLike): NotifySink => ({
   name: 'slack',
-  send: (text) => send('slack', fetchImpl, webhookUrl, { text }),
+  send: (text) => send('slack', fetchImpl, webhookUrl, { text: slackEscaped(text) }),
 })
 
 export interface NotifyCredentials {

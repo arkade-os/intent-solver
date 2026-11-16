@@ -37,6 +37,7 @@ import {
   balanceOf,
   evmChainReady,
   evmRpc,
+  pinAnvilClock,
   fundWithWeth,
   installContracts,
   sendFrom,
@@ -110,9 +111,14 @@ beforeAll(async () => {
   if ((await arkade.ctx.wallet.getBalance()).available < AMOUNT_SATS) return
 
   rpc = evmRpc()
-  // Earlier refund cases advance Anvil time; this file needs honest wall-clock cutoff checks.
+  // Earlier cases both advance Anvil time and, on current Anvil, walk it one
+  // second per block. `anvil_reset` restores process start, not wall time, so
+  // the next block is stamped at now before any cutoff check.
   await rpc('anvil_reset', [])
   await rpc('anvil_setAutomine', [true])
+  await pinAnvilClock(rpc)
+  await rpc('evm_setNextBlockTimestamp', [Math.floor(Date.now() / 1000)])
+  await rpc('anvil_mine', [1])
   const fixture = (name: string) =>
     readFileSync(fileURLToPath(new URL(`fixtures/${name}.runtime.hex`, import.meta.url)), 'utf8')
   await installContracts(rpc, fixture('erc20swap'), fixture('weth9'))
@@ -260,6 +266,7 @@ beforeAll(async () => {
     arkade: ops,
     solverEvmAddress: addressFromPrivateKey(REFUND_KEY),
     blockHeight: async () => Number(await backend.currentBlock()),
+    timelockHeight: () => backend.timelockClock(),
     maxExposedSats: 1_000_000_000,
     admission: new AdmissionControl(),
     totalCommitted: async () => 0,
@@ -286,6 +293,7 @@ beforeAll(async () => {
       minConfirmations: MIN_CONFIRMATIONS,
       minAgeSeconds: 0,
       cadence: { fastestSecondsPerBlock: 1, slowestSecondsPerBlock: 1 },
+      timelockCadence: { fastestSecondsPerBlock: 1, slowestSecondsPerBlock: 1 },
       quoteValiditySeconds: 60,
     },
     onTickError: (id, error) => console.error(`EVM receiver funding ${id} failed:`, error),

@@ -71,7 +71,7 @@ import {
   type E2eArkade,
 } from './support/stack.js'
 
-const ARKD_URL = process.env.ARK_SERVER_URL ?? 'http://localhost:7070'
+const ARKD_URL = process.env.ARKADE_OPERATOR_URL ?? 'http://localhost:7070'
 
 /** Enough for four deposits plus the carrier outputs and change, with room to spare. */
 const NEEDED_SATS = 120_000
@@ -242,7 +242,7 @@ const shippedCarrier = async (
     reserve: (outpoints) => reservations.reserve(outpoints),
     wallet,
     identity,
-    arkServerUrl: arkade.ctx.arkServerUrl,
+    operatorUrl: arkade.ctx.operatorUrl,
     dustSats: arkade.ctx.dustSats,
     offerHex: (row) => offerHex(termsOf(row), row.offerPkScript),
     proceedsAddress: await wallet.getAddress(),
@@ -596,6 +596,52 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
       const row = await store.get(id)
       expect(row.state).toBe('refused')
       expect(row.failureReason).toContain('deposit_short')
+      expect(row.fillTxid).toBeNull()
+      expect((await depositAt(row.offerPkScript))?.txid).toBe(fundingTxid)
+
+      await cancelOffer(arkade.ctx.wallet, mine.offerHex, {
+        repository: new InMemoryAssetSwapRepository(),
+        fundingTxid,
+        swapAddress: mine.address,
+      })
+      await store.close()
+    },
+    SWAP_TIMEOUT_MS,
+  )
+
+  it(
+    'never spends a deposit once the float has drained under the quoted payout',
+    async () => {
+      // § 9's ACTION-time gate, which the `exposure_cap` case above never
+      // reaches — that one refuses at quote time, before a row exists. Driven
+      // through the float seam because this wallet is BOTH sides: a competing
+      // fill pays our own maker script, so it cannot lower our own float.
+      let drained: bigint | null = null
+      const { corridor, store, pair } = await harness({
+        balance: async () =>
+          drained === null ? await balance() : new Map([...(await balance()), [assetId as AssetLeg, drained]]),
+      })
+      const amount = depositSats(5_000)
+      const outcome = await corridor.quote(requestFor(pair, amount))
+      expect(outcome.kind, JSON.stringify(outcome)).toBe('quote')
+      const quote = outcome.payload as { to_amount: string }
+
+      const mine = await clientOffer(BigInt(quote.to_amount))
+      const fundingTxid = await arkade.ctx.wallet.send({
+        address: mine.address,
+        amount: Number(amount),
+        extensions: [mine.extension],
+      })
+
+      const id = (await store.listNonTerminal())[0]!.id
+      await driveTo({ corridor, store }, id, 'funded')
+
+      // One short of the obliged payout: the boundary, not merely an empty float.
+      drained = BigInt(quote.to_amount) - 1n
+      await corridor.tickAll()
+      const row = await store.get(id)
+      expect(row.state).toBe('refused')
+      expect(row.failureReason).toContain('insufficient_inventory')
       expect(row.fillTxid).toBeNull()
       expect((await depositAt(row.offerPkScript))?.txid).toBe(fundingTxid)
 

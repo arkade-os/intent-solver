@@ -74,6 +74,7 @@ const build = async (over: Partial<EvmReceiveServiceDeps> = {}) => {
     arkadePreimage: vi.fn().mockResolvedValue(null),
     lockFor: vi.fn().mockReturnValue({}) as unknown as EvmReceiveServiceDeps['lockFor'],
     blockHeight: vi.fn().mockResolvedValue(20_000_000),
+    timelockHeight: vi.fn().mockResolvedValue(20_000_000),
     // Quote-time deps. Every test here drives `tick`, which reads none of them;
     // they are inert on purpose, so a tick test that started depending on one
     // would fail rather than pick up a plausible default.
@@ -97,7 +98,7 @@ const build = async (over: Partial<EvmReceiveServiceDeps> = {}) => {
       chainId: 8453,
       minConfirmations: 12,
       minAgeSeconds: 780,
-      cadence: { fastestSecondsPerBlock: 12, slowestSecondsPerBlock: 15 },
+      timelockCadence: { fastestSecondsPerBlock: 12, slowestSecondsPerBlock: 15 },
       quoteValiditySeconds: 60,
     },
     maxExposedSats: 100_000_000,
@@ -108,6 +109,37 @@ const build = async (over: Partial<EvmReceiveServiceDeps> = {}) => {
   }
   return { store, deps, service: new EvmReceiveSwapService(deps) }
 }
+
+describe('a failing preimage read beside the depth probe', () => {
+  it('reaches the tick rather than going unhandled', async () => {
+    const unhandled: unknown[] = []
+    const record = (error: unknown): void => void unhandled.push(error)
+    process.on('unhandledRejection', record)
+    try {
+      const evm = evmFake()
+      const probe = evm.isLockedAt as unknown as ReturnType<typeof vi.fn>
+      probe.mockImplementation(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        return true
+      })
+      const { service } = await build({
+        evm,
+        arkadeLockupFunded: vi.fn().mockResolvedValue(true),
+        // Not `vi.fn().mockRejectedValue`: that tracks settled results, observing
+        // the rejection this asserts is unobserved.
+        arkadePreimage: async () => {
+          throw new Error('arkade indexer unreachable')
+        },
+      })
+
+      await expect(service.tick('swap-1')).rejects.toThrow('arkade indexer unreachable')
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off('unhandledRejection', record)
+    }
+  })
+})
 
 describe('the row is exposed BEFORE the sats go out', () => {
   it('is already funding_arkade by the time fundArkade is called', async () => {
@@ -136,7 +168,7 @@ describe('RULE 2 is re-asked at the moment the sats are committed', () => {
     const chain = [FUNDABLE, CLOSED]
     const fundArkade = vi.fn()
     const { store, service } = await build({
-      blockHeight: vi.fn().mockImplementation(async () => chain.shift() ?? CLOSED),
+      timelockHeight: vi.fn().mockImplementation(async () => chain.shift() ?? CLOSED),
       fundArkade,
     })
     await service.tick('swap-1')
@@ -151,6 +183,7 @@ describe('RULE 2 is re-asked at the moment the sats are committed', () => {
     const fundArkade = vi.fn().mockResolvedValue('ark-fund-txid')
     const { store, service } = await build({
       blockHeight: vi.fn().mockResolvedValue(FUNDABLE),
+      timelockHeight: vi.fn().mockResolvedValue(FUNDABLE),
       fundArkade,
     })
     await service.tick('swap-1')
@@ -172,9 +205,7 @@ describe('the preimage is persisted BEFORE the ERC20 claim', () => {
         return '0xclaimtx'
       }),
     })
-    await store.transition('swap-1', 'quoted', 'awaiting_lock')
-    await store.transition('swap-1', 'awaiting_lock', 'locked')
-    await store.transition('swap-1', 'locked', 'funding_arkade')
+    await store.transition('swap-1', 'quoted', 'funding_arkade')
     await store.transition('swap-1', 'funding_arkade', 'awaiting_claim')
     await service.tick('swap-1')
     expect(preimageAtBroadcast).toBe('ab'.repeat(32))
@@ -191,9 +222,7 @@ describe('`claimed` is written for a claim that landed, not one that was sent', 
       arkadePreimage: vi.fn().mockResolvedValue('ab'.repeat(32)),
       ...over,
     })
-    await built.store.transition('swap-1', 'quoted', 'awaiting_lock')
-    await built.store.transition('swap-1', 'awaiting_lock', 'locked')
-    await built.store.transition('swap-1', 'locked', 'funding_arkade')
+    await built.store.transition('swap-1', 'quoted', 'funding_arkade')
     await built.store.transition('swap-1', 'funding_arkade', 'awaiting_claim')
     await built.service.tick('swap-1')
     return built
@@ -235,9 +264,7 @@ describe('the unclaimed path', () => {
       arkadeLockupFunded: vi.fn().mockResolvedValue(true),
       now: () => NOW + 86_400,
     })
-    await store.transition('swap-1', 'quoted', 'awaiting_lock')
-    await store.transition('swap-1', 'awaiting_lock', 'locked')
-    await store.transition('swap-1', 'locked', 'funding_arkade')
+    await store.transition('swap-1', 'quoted', 'funding_arkade')
     await store.transition('swap-1', 'funding_arkade', 'awaiting_claim')
     await service.tick('swap-1')
     const row = await store.get('swap-1')
@@ -252,9 +279,7 @@ describe('the unclaimed path', () => {
       refundArkade,
       now: () => NOW + 86_400,
     })
-    await store.transition('swap-1', 'quoted', 'awaiting_lock')
-    await store.transition('swap-1', 'awaiting_lock', 'locked')
-    await store.transition('swap-1', 'locked', 'funding_arkade')
+    await store.transition('swap-1', 'quoted', 'funding_arkade')
     await store.transition('swap-1', 'funding_arkade', 'awaiting_claim')
     await store.transition('swap-1', 'awaiting_claim', 'refunding_arkade')
 
@@ -275,9 +300,7 @@ describe('the unclaimed path', () => {
       refundArkade,
       now: () => NOW + 86_400,
     })
-    await store.transition('swap-1', 'quoted', 'awaiting_lock')
-    await store.transition('swap-1', 'awaiting_lock', 'locked')
-    await store.transition('swap-1', 'locked', 'funding_arkade')
+    await store.transition('swap-1', 'quoted', 'funding_arkade')
     await store.transition('swap-1', 'funding_arkade', 'awaiting_claim')
     await store.transition('swap-1', 'awaiting_claim', 'refunding_arkade')
 
@@ -372,9 +395,7 @@ describe('a retried claim does not rewrite the state trail', () => {
       broadcast: vi.fn().mockRejectedValue(new Error('rpc down')),
       onTickError: () => {},
     })
-    await store.transition('swap-1', 'quoted', 'awaiting_lock')
-    await store.transition('swap-1', 'awaiting_lock', 'locked')
-    await store.transition('swap-1', 'locked', 'funding_arkade')
+    await store.transition('swap-1', 'quoted', 'funding_arkade')
     await store.transition('swap-1', 'funding_arkade', 'awaiting_claim')
 
     // Three ticks, each failing at the broadcast so the row stays in claiming.

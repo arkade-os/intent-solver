@@ -51,6 +51,15 @@ export interface EconomicsLeg {
   readonly decimals: number | null
 }
 
+export type NativePnlSource = 'input_flat_fee' | 'output_spread'
+
+export interface NativePnlComponent {
+  readonly assetId: string | null
+  readonly amount: string
+  readonly decimals: number | null
+  readonly source: NativePnlSource
+}
+
 /** A swap's economics, in the vocabulary an operator's P&L question is asked in. */
 export interface SwapEconomics {
   readonly id: string
@@ -100,6 +109,8 @@ export interface SwapEconomics {
    * a zero here would report a stablecoin book as having made nothing.
    */
   readonly grossSats: number | null
+  /** Native fee revenue, never converted into another asset. */
+  readonly nativePnl: readonly NativePnlComponent[]
   /** {@link SwapEconomics.grossSats} as basis points of the inbound notional. */
   readonly grossBps: number | null
   /**
@@ -311,6 +322,7 @@ export const economicsOf = (parts: {
    * same number, so it is ignored there rather than allowed to disagree.
    */
   quotedSpreadSats?: number | null
+  nativePnl?: readonly NativePnlComponent[]
   /**
    * Sats this row put at stake, where the outbound leg is not itself sats.
    *
@@ -370,6 +382,7 @@ export const economicsOf = (parts: {
     inbound,
     outbound,
     grossSats,
+    nativePnl: parts.nativePnl ?? [],
     // Only against a SATS intake. A spread in sats over an intake denominated
     // in token units is not a basis point of anything.
     grossBps:

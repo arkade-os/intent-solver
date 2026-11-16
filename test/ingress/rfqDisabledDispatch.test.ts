@@ -12,7 +12,6 @@ import { setFrom, type RfqServices } from '../support/corridorSet.js'
 import { RFQ_PAIR_SEND } from '@arkade-os/solver-corridors/wire/payloads.js'
 import { RFQ_PAIR_RECEIVE } from '@arkade-os/solver-corridors/wire/lightningReceivePayloads.js'
 import { RFQ_PAIR_ONCHAIN_SEND } from '@arkade-os/solver-corridors/wire/onchainPayloads.js'
-import { RFQ_PAIR_ONCHAIN_RECEIVE } from '@arkade-os/solver-corridors/wire/onchainReceivePayloads.js'
 
 const RFQ_ID = 'd'.repeat(64)
 const HEX32 = 'a'.repeat(64)
@@ -50,7 +49,7 @@ const payloadFor = (pair: string) => {
 }
 
 describe('rfq dispatch — a corridor with no service refuses by name', () => {
-  it.each([RFQ_PAIR_SEND, RFQ_PAIR_ONCHAIN_SEND, RFQ_PAIR_RECEIVE, RFQ_PAIR_ONCHAIN_RECEIVE])(
+  it.each([RFQ_PAIR_SEND, RFQ_PAIR_ONCHAIN_SEND, RFQ_PAIR_RECEIVE])(
     'refuses %s as unsupported_pair when its service is absent',
     async (pair) => {
       const outcome = await respondToRfqRequest(setFrom({}, stores), payloadFor(pair))

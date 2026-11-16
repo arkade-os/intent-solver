@@ -14,12 +14,14 @@ import {
   authenticatedLndGrpc,
   broadcastChainTransaction,
   createChainAddress,
+  fundPsbt,
   getChainBalance as lndGetChainBalance,
   getChainFeeRate as lndGetChainFeeRate,
   getChainTransactions as lndGetChainTransactions,
   getPendingChainBalance as lndGetPendingChainBalance,
   getWalletInfo as lndGetWalletInfo,
   sendToChainAddress,
+  signPsbt,
   subscribeToChainSpend,
   type AuthenticatedLnd,
 } from 'lightning'
@@ -39,7 +41,6 @@ import {
 import type {
   FundedOnchainOutput,
   OnchainBalance,
-  OnchainReceiveBackend,
   OnchainSendBackend,
   OnchainTxOutcome,
 } from '@arkade-os/solver-core/ports/onchain.js'
@@ -98,7 +99,7 @@ export interface AdapterConfig {
  */
 const SPEND_LOOKUP_TIMEOUT_MS = 5_000
 
-export class LndOnchainAdapter implements OnchainSendBackend, OnchainReceiveBackend {
+export class LndOnchainAdapter implements OnchainSendBackend {
   private constructor(
     private readonly lnd: AuthenticatedLnd,
     private readonly esplora: EsploraClient | undefined,
@@ -142,6 +143,30 @@ export class LndOnchainAdapter implements OnchainSendBackend, OnchainReceiveBack
     if (vout === -1) throw new Error(`funding tx ${result.id} does not pay ${params.address} — cannot locate its vout`)
     assertFundingVout(tx?.transaction, vout, params.amountSats, result.id)
     return { txid: result.id, vout }
+  }
+
+  async signFunding(params: {
+    address: string
+    amountSats: number
+    feeRateSatPerVbyte: number
+  }): Promise<{ txid: string; vout: number; tx: string }> {
+    const funded = await fundPsbt({
+      lnd: this.lnd,
+      outputs: [{ address: params.address, tokens: params.amountSats }],
+      fee_tokens_per_vbyte: params.feeRateSatPerVbyte,
+    })
+    const { transaction } = await signPsbt({ lnd: this.lnd, psbt: funded.psbt })
+    const payment = funded.outputs.find((output) => !output.is_change)?.output_script
+    const tx = Transaction.fromRaw(hex.decode(transaction), { allowUnknownInputs: true, allowUnknownOutputs: true })
+    const vouts: number[] = []
+    for (let i = 0; i < tx.outputsLength; i++) {
+      const output = tx.getOutput(i)
+      if (output.script && hex.encode(output.script) === payment && output.amount === BigInt(params.amountSats)) {
+        vouts.push(i)
+      }
+    }
+    if (vouts.length !== 1) throw new Error(`signed funding ${tx.id} pays ${params.address} ${vouts.length} times`)
+    return { txid: tx.id, vout: vouts[0]!, tx: transaction }
   }
 
   private esploraFor(why: string): EsploraClient {
@@ -192,6 +217,8 @@ export class LndOnchainAdapter implements OnchainSendBackend, OnchainReceiveBack
       // spend is confirmed, and only by pushing it at a subscription. So ask,
       // briefly: a confirmed spend answers in milliseconds (measured: 32ms),
       // and a mempool-only one answers never, which is the case below.
+      // Tip BEFORE the status read. The other order can watch the funding confirm
+      // and then bound the rescan at a tip above the block that spend is already in.
       const { current_block_height } = await getWalletInfo({ lnd: this.lnd })
       const fundingStatus = (await esplora.getJson(`/tx/${params.txid}/status`)) as
         { confirmed: false } | { confirmed: true; block_height: number }

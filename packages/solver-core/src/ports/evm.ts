@@ -11,6 +11,14 @@
  * existing importers keep working; vendor packages import from here directly.
  */
 
+declare const timelockClock: unique symbol
+/**
+ * A height on the clock contracts read as `block.number`, which every HTLC timelock follows. Branded because on
+ * Arbitrum-stack chains that is the parent chain's height, not `eth_blockNumber`, and mixing the two mis-sizes locks.
+ */
+export type TimelockHeight = number & { readonly [timelockClock]: true }
+export const asTimelockHeight = (height: number | bigint): TimelockHeight => Number(height) as TimelockHeight
+
 /** One chain call: a destination and calldata. Every call is ERC-20, so none carries native value. */
 export interface EvmCall {
   /** The `ERC20Swap` deployment, 20 bytes. */
@@ -76,8 +84,10 @@ export class EvmClaimVerificationError extends Error {
  * private key.
  */
 export interface EvmHtlcBackend {
-  /** The chain tip. Every timelock question is relative to this. */
+  /** The chain tip: the height logs, receipts and confirmations are counted in. */
   currentBlock(): Promise<bigint>
+  /** `block.number` at the tip, which timelocks are compared with. Throws rather than falling back to the tip. */
+  timelockClock(): Promise<TimelockHeight>
   /**
    * Whether this exact lock is funded and unspent, per the contract's own
    * `swaps` mapping. False also means "claimed or refunded" — the flag is
@@ -163,4 +173,9 @@ export interface EvmHtlcBackendDeps {
   rpc: JsonRpc
   /** Blocks per `eth_getLogs` request; over a provider's cap it is REJECTED. */
   logScanRange?: number
+  /**
+   * False once the operator has given `block.number` its own cadence. While true (the default), a clock read that
+   * differs from the height throws, so timelocks are never sized with the height's cadence.
+   */
+  timelockClockIsHeight?: boolean
 }

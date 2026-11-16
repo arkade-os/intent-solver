@@ -39,17 +39,19 @@
 import {
   evaluateAssetFill,
   parseAssetPair,
-  resolveAssetQuote,
   struckQuotePrice,
   type AssetLeg,
   type AssetQuoteMarket,
 } from '@arkade-os/solver-core/core/assetRfq.js'
+import { decomposeAssetQuote } from '@arkade-os/solver-core/core/pricingPreview.js'
 import type { Price } from '@arkade-os/solver-core/core/priceFeed.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { askApprovalFor, type ApprovalCheck } from '@arkade-os/solver-core/core/approvalGate.js'
+import { capture, unwrap } from '@arkade-os/solver-core/util/capture.js'
 import { createSerialiser, type Serialiser } from '@arkade-os/solver-core/util/serialise.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
+import { OfferNotSubmittedError, type FulfillOptions } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { assetRfqPairFor } from '../wire/assetRfqPayloads.js'
 import { AssetRfqSwapStore, type AssetRfqSwapRow } from '../db/assetRfqSwaps.js'
 import type { AssetRfqCarrierTerms } from '../db/assetRfqSwaps.js'
@@ -220,12 +222,17 @@ export interface AssetRfqDeps {
   balance: () => Promise<ReadonlyMap<AssetLeg, bigint>>
   fetchPrice: (feedUrl: string, pricePath: string) => Promise<Price>
   /** Spend the deposit through `fulfill`, paying the client. Returns the txid. */
-  settle: (row: AssetRfqSwapRow) => Promise<string>
+  settle: (row: AssetRfqSwapRow, options?: FulfillOptions) => Promise<string>
   /** The internal Taxi adapter, reached only for an explicit `recycle`.
    * OPTIONAL, and its absence is a REFUSAL rather than a default. */
   receiveCarrierQuotes?: ReceiveCarrierQuotes
   approvalGate?: ApprovalCheck
   onError?: (id: string, error: unknown) => void
+  /**
+   * A fill put back to `funded` because the float was pinned or short. EVERY
+   * deferral, not only the first: `validUntil` bounds the count.
+   */
+  onDeferred?: (id: string, error: unknown) => void
   now?: () => number
   newId?: () => string
 }
@@ -591,6 +598,7 @@ export class AssetRfqSwapService {
     if (!resolvedCarrier.ok) return { accepted: false, reason: resolvedCarrier.reason, detail: resolvedCarrier.detail }
     const { terms, priceTerm, publishedSats, receiverFare } = resolvedCarrier
 
+    const inventoryP = carrierSettled(terms) ? undefined : capture(this.deps.balance())
     let feed: Price
     try {
       feed = await this.serialiseTrustedReads(() => this.deps.fetchPrice(market.feedUrl, market.pricePath))
@@ -600,7 +608,7 @@ export class AssetRfqSwapService {
       return { accepted: false, reason: 'price_unavailable', detail: 'the market feed could not be read' }
     }
 
-    const resolved = resolveAssetQuote({
+    const resolved = decomposeAssetQuote({
       pair,
       amount: request.amount,
       amountSide: request.amountSide,
@@ -646,7 +654,7 @@ export class AssetRfqSwapService {
         return { accepted: false, reason: 'price_unavailable', detail: 'carrier inventory could not be read' }
       }
     } else {
-      available = await this.serialiseTrustedReads(() => this.deps.balance())
+      available = unwrap(await inventoryP!)
     }
     if ((available.get(pair.to) ?? 0n) < resolved.toAmount) {
       return { accepted: false, reason: 'insufficient_inventory' }
@@ -694,8 +702,12 @@ export class AssetRfqSwapService {
           pair: assetRfqPairFor(pair.from, pair.to),
           fromAssetId: pair.from,
           fromAmount: resolved.fromAmount,
+          fromDecimals: pair.from === priced.base ? priced.baseDecimals : priced.quoteDecimals,
+          fromFlatFee: resolved.flatFee,
           toAssetId: pair.to,
           toAmount: resolved.toAmount,
+          toDecimals: pair.to === priced.base ? priced.baseDecimals : priced.quoteDecimals,
+          toSpread: resolved.spreadFee,
           makerPkScript: request.makerPkScript,
           makerPublicKey: request.makerPublicKey,
           offerPkScript: offer.pkScript,
@@ -931,8 +943,8 @@ export class AssetRfqSwapService {
     // submission leaves a row that says something may be in flight, rather than
     // one that still reads fillable and would be submitted twice.
     // Carrying the outpoint the decision was made ABOUT: the settle spends the RECORDED one.
-    const seen = deposit ? { deposit_txid: deposit.txid, deposit_vout: deposit.vout } : undefined
-    if (!(await this.deps.store.transition(row.id, 'funded', 'filling', seen))) return
+    const seen = deposit ? { deposit_txid: deposit.txid, deposit_vout: deposit.vout } : {}
+    if (!(await this.deps.store.transition(row.id, 'funded', 'filling', { ...seen, fill_phase: 'selecting' }))) return
     if (receiveCarrier !== null) {
       try {
         const filling = await this.deps.store.get(row.id)
@@ -946,7 +958,9 @@ export class AssetRfqSwapService {
     }
 
     try {
-      const txid = await this.deps.settle(await this.deps.store.get(row.id))
+      const txid = await this.deps.settle(await this.deps.store.get(row.id), {
+        markSubmitting: () => this.deps.store.markSubmitting(row.id),
+      })
       const filled = await this.deps.store.transition(row.id, 'filling', 'filled', { fill_txid: txid })
       // AFTER the transition, never before. A feed read between `settle` and
       // this CAS would widen the window in which a crash leaves a submitted fill
@@ -959,6 +973,13 @@ export class AssetRfqSwapService {
       // investigation.
       if (filled) await this.recordFillMark(row)
     } catch (error) {
+      // The one shape that is NOT ambiguous: raised above the call that submits,
+      // so the row goes back to `funded` for a later tick. No counter — `validUntil`
+      // already bounds the retrying — and no fill mark, because nothing filled.
+      if (error instanceof OfferNotSubmittedError) {
+        if (await this.deps.store.revertUnsubmitted(row.id)) this.deps.onDeferred?.(row.id, error)
+        return
+      }
       // `filling` fails to `stuck`, never to something retryable: the spend may
       // already have been submitted, and only a human can tell which.
       this.deps.onError?.(row.id, error)
@@ -1038,6 +1059,10 @@ export class AssetRfqSwapService {
       } catch (error) {
         this.deps.onError?.(row.id, error)
       }
+      return
+    }
+    if (row.fillPhase === 'selecting') {
+      await this.deps.store.revertUnsubmitted(row.id)
       return
     }
     await this.deps.store.fail(row.id, 'filling', 'fill outcome unknown after restart; check the offer address')

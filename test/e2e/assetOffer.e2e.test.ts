@@ -38,13 +38,13 @@ import { poll } from '@arkade-os/solver-core/util/poll.js'
 import { assetMarketPolicy, DEFAULT_SERVING } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { AssetOfferService, parseAssetMarkets } from '@arkade-os/solver-app/ops/assetOffers.js'
 import { createServices } from '@arkade-os/solver-app/ops/services.js'
-import { loadConfig } from '@arkade-os/solver-app/config.js'
+import { configFromKnobs } from '@arkade-os/solver-app/config.js'
 import { marketCapability } from '@arkade-os/solver-app/admin/marketCapability.js'
 import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
 import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
 import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
 
-const ARKD_URL = process.env.ARK_SERVER_URL ?? 'http://localhost:7070'
+const ARKD_URL = process.env.ARKADE_OPERATOR_URL ?? 'http://localhost:7070'
 /** Two deposits and the maker payment, with room for fees. */
 const NEEDED_SATS = 40_000
 
@@ -403,7 +403,7 @@ describe('e2e arkade offers — what OFFER_MARKETS actually builds', () => {
     }
   })
 
-  // Its own `SWAP_DB_PATH`/`ARK_DB_PATH`, sharing no handle with the wallet this
+  // Its own `SWAP_DB_PATH`/`WALLET_DB_PATH`, sharing no handle with the wallet this
   // suite already holds open. A fresh path has no suffixed sibling, so
   // `resolveDbLayout` is consolidated and this IS the admin store boot reads.
   const boot = async (offerMarkets: string | undefined) => {
@@ -428,11 +428,11 @@ describe('e2e arkade offers — what OFFER_MARKETS actually builds', () => {
     await admin.close()
 
     setEnv('SWAP_DB_PATH', swapDbPath)
-    setEnv('ARK_DB_PATH', join(dir, `ark-${randomBytes(6).toString('hex')}.sqlite`))
+    setEnv('WALLET_DB_PATH', join(dir, `ark-${randomBytes(6).toString('hex')}.sqlite`))
     setEnv('OFFER_MARKETS', offerMarkets)
     setEnv('OFFER_MIN_FILL_AMOUNT', '1')
     setEnv('OFFER_MAX_FILL_AMOUNT', '1000000000000')
-    return createServices(loadConfig())
+    return createServices(configFromKnobs(process.env))
   }
 
   it(

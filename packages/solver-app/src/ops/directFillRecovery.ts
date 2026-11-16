@@ -104,12 +104,7 @@ export const createDirectFillRecovery = (deps: DirectFillRecoveryDeps) => {
     const { vtxos } = await deps.chain.getVtxos({ outpoints: attempt.funding })
     const unspent = attempt.funding.every((point) => {
       const found = vtxos.filter((coin) => coin.txid === point.txid && coin.vout === point.vout)
-      return (
-        found.length === 1 &&
-        !found[0]!.spentBy &&
-        !found[0]!.arkTxId &&
-        !(found[0] as { settledBy?: string }).settledBy
-      )
+      return found.length === 1 && !found[0]!.spentBy && !found[0]!.arkTxId && !found[0]!.settledBy
     })
     if (!unspent) return
     const live = await deps.coins()

@@ -25,10 +25,11 @@
  * `test/e2e/assetOffer.e2e.test.ts` against a live Arkade Service.
  */
 import { hex } from '@scure/base'
+import { capture, unwrap } from '@arkade-os/solver-core/util/capture.js'
 import type { ArkadeContext } from './wallet.js'
 import { offerFromFundingTx } from './offerPacket.js'
 import { heldOf, offerFillInputFrom } from './offerFill.js'
-import { fulfillOffer } from './offerFulfill.js'
+import { fulfillOffer, type FulfillOptions } from './offerFulfill.js'
 import { liveOfferOutpoints, type OfferOutpoint } from './offerOutpoints.js'
 
 /**
@@ -78,15 +79,19 @@ const indexerTxSource =
  * Bind a settle port to this deployment's wallet and emulator.
  *
  * Curried rather than a four-argument call because `AssetOfferDeps.settle` is a
- * one-argument port: the row is the only thing that varies per fill.
+ * narrow port: the row is what varies per fill, and `options` per attempt.
  */
-export const offerSettleFor = (deps: OfferSettleDeps): ((intent: OfferFillIntent) => Promise<string>) => {
+export const offerSettleFor = (
+  deps: OfferSettleDeps,
+): ((intent: OfferFillIntent, options?: FulfillOptions) => Promise<string>) => {
   const fetchTx = deps.fetchTx ?? indexerTxSource(deps.ctx)
   const outpointsAt = deps.outpointsAt ?? ((pkScript: string) => liveOfferOutpoints(deps.ctx, pkScript))
   const fulfill = deps.fulfill ?? fulfillOffer
 
-  return async (intent) => {
-    const raw = await fetchTx(intent.offerTxid)
+  return async (intent, options) => {
+    const rawP = capture(fetchTx(intent.offerTxid))
+    const liveP = capture(outpointsAt(intent.offerPkScript))
+    const raw = unwrap(await rawP)
     if (raw === null || raw === '') {
       throw new Error(`no funding transaction for ${intent.offerTxid}: the offer cannot be rebuilt to fill it`)
     }
@@ -131,7 +136,7 @@ export const offerSettleFor = (deps: OfferSettleDeps): ((intent: OfferFillIntent
 
     // BOTH LEGS, because the funding transaction outlives the spend: on its own
     // it reads a cancelled or already-filled deposit as still fundable.
-    const live = await outpointsAt(intent.offerPkScript)
+    const live = unwrap(await liveP)
     const deposit = live.find((o) => o.txid === intent.offerTxid && o.vout === intent.offerVout)
     if (!deposit) {
       throw new Error(`${intent.offerTxid}:${intent.offerVout} is no longer live at ${intent.offerPkScript}`)
@@ -172,6 +177,7 @@ export const offerSettleFor = (deps: OfferSettleDeps): ((intent: OfferFillIntent
         assetAmount,
       },
       { kind: 'offer', id: intent.id },
+      options,
     )
   }
 }

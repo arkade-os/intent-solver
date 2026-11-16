@@ -31,7 +31,11 @@
 
 import { betterSqliteDriver, type SqlDriver } from '@arkade-os/solver-db/driver.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
-import { EVM_RECEIVE_NON_TERMINAL, type EvmReceiveSwapState } from '@arkade-os/solver-core/core/evmSwapState.js'
+import {
+  EvmReceiveMachine,
+  EVM_RECEIVE_NON_TERMINAL,
+  type EvmReceiveSwapState,
+} from '@arkade-os/solver-core/core/evmSwapState.js'
 import { EvmSwapStore, commonFields, text, type Raw } from './evmSwapStore.js'
 
 export interface EvmReceiveSwapRow {
@@ -201,6 +205,7 @@ export class EvmReceiveSwapStore extends EvmSwapStore<EvmReceiveSwapRow, EvmRece
       noun: 'receive',
       toRow,
       nonTerminal: EVM_RECEIVE_NON_TERMINAL,
+      legalEdges: EvmReceiveMachine.edges,
       transitionColumns: new Set([
         'evm_lock_txid',
         'evm_claim_txid',

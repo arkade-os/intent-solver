@@ -39,13 +39,13 @@ beforeEach(() => vi.clearAllMocks())
 
 describe('Taxi funding spend-leaf admission', () => {
   it('names the outpoint and missing leaf before invoking the planner', async () => {
-    const rebuild = createCarrierFillRebuilder({ wallet: {} as never, arkServerUrl: 'http://unused' })
+    const rebuild = createCarrierFillRebuilder({ wallet: {} as never, operatorUrl: 'http://unused' })
     await expect(rebuild(request('51'))).rejects.toThrow(`Taxi input ${txid}:3 spend leaf 51 is not in its tap tree`)
     expect(buildOfferFillPlan).not.toHaveBeenCalled()
   })
 
   it('passes the actual matching tapleaf to the planner', async () => {
-    const rebuild = createCarrierFillRebuilder({ wallet: {} as never, arkServerUrl: 'http://unused' })
+    const rebuild = createCarrierFillRebuilder({ wallet: {} as never, operatorUrl: 'http://unused' })
     await expect(rebuild(request(hex.encode(tree.scripts[0]!)))).rejects.toThrow('planner reached')
     expect(buildOfferFillPlan).toHaveBeenCalledOnce()
     expect(vi.mocked(buildOfferFillPlan).mock.calls[0]![3]?.sponsor?.fund[0]?.tapLeafScript).toEqual(

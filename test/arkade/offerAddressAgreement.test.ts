@@ -2,13 +2,13 @@
  * Derive an offer address as this solver does and as a client's `createOffer`
  * does, and require the SAME STRING — a wrong unit, a rounded value or the local
  * override all pass a mere "is `exitDelay` set?" check and still strand the
- * deposit. The client half is the REAL createOffer against its wallet live-info
- * seam: serverExitDelay is package-internal and otherwise unobservable.
+ * deposit. The client half is the REAL `createOffer` against a stubbed
+ * `/v1/info`: `serverExitDelay` is package-internal and otherwise unobservable.
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import { schnorr } from '@noble/curves/secp256k1.js'
-import { ArkAddress, CSVMultisigTapscript, asset } from '@arkade-os/sdk'
-import { createOffer, offerContract } from '@arkade-os/swap/protocol'
+import { ArkAddress, CSVMultisigTapscript, RestArkProvider, asset } from '@arkade-os/sdk'
+import { createOffer, offerVtxoScript } from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
 import {
   offerExitDelay,
@@ -26,6 +26,7 @@ const USDA = '11'.repeat(34)
 const HRP = 'tark'
 const MAKER_ADDRESS = new ArkAddress(SERVER, xonly(5), HRP).encode()
 const MAKER_SCRIPT = hex.encode(ArkAddress.decode(MAKER_ADDRESS).pkScript)
+const ARKD_URL = 'http://arkd.test'
 
 const terms: QuotedOfferTerms = {
   wantAmount: 19_900n,
@@ -56,23 +57,27 @@ const clientWallet = () => ({
   identity: { xOnlyPublicKey: async () => MAKER_KEY },
   getContractManager: async () =>
     new Proxy({}, { get: (_t, prop) => (prop === 'then' ? undefined : async () => undefined) }),
+  // `createOffer` now reads server info off the wallet rather than a raw
+  // `operatorUrl`; routed through the real provider so the stubbed `/v1/info`
+  // still exercises the SDK's own parsing.
+  getArkadeInfo: async () => new RestArkProvider(ARKD_URL).getInfo(),
 })
 
-const clientOffer = async (unilateralExitDelay: number) =>
-  createOffer(
-    {
-      ...clientWallet(),
-      getArkadeInfo: async () => ({
-        ...JSON.parse(infoBody(String(unilateralExitDelay))),
-        unilateralExitDelay: BigInt(unilateralExitDelay),
-      }),
-    } as never,
-    {
-      wantAmount: terms.wantAmount,
-      wantAsset: asset.AssetId.fromString(USDA),
-      emulatorPubkey: '02' + hex.encode(EMULATOR),
-    },
+const clientOffer = async (unilateralExitDelay: number) => {
+  vi.stubGlobal('fetch', async (url: unknown) =>
+    String(url).includes('/v1/info')
+      ? new Response(infoBody(String(unilateralExitDelay)), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      : new Response('{}', { status: 500 }),
   )
+  return createOffer(clientWallet() as never, {
+    wantAmount: terms.wantAmount,
+    wantAsset: asset.AssetId.fromString(USDA),
+    emulatorPubkey: '02' + hex.encode(EMULATOR),
+  })
+}
 
 const solverOffer = (unilateralExitDelay: number) =>
   offerScriptFrom({
@@ -82,7 +87,9 @@ const solverOffer = (unilateralExitDelay: number) =>
     exitDelay: offerExitDelay(unilateralExitDelay),
   })(terms)
 
-describe('offer address agreement with the protocol client', () => {
+afterEach(() => vi.unstubAllGlobals())
+
+describe('offer address agreement with a 0.0.12 client', () => {
   it.each([
     ['seconds-typed, as a public deployment advertises', 605_184],
     ['block-typed, as a regtest deployment advertises', 144],
@@ -102,7 +109,7 @@ describe('offer address agreement with the protocol client', () => {
     const rebuilt = offerFromTerms(terms, xOnlyPubkey(EMULATOR), exitDelay)
     const theirs = await clientOffer(605_184)
 
-    expect(hex.encode(offerContract(rebuilt, SERVER).pkScript)).toBe(hex.encode(theirs.swapPkScript))
+    expect(hex.encode(offerVtxoScript(rebuilt, SERVER).pkScript)).toBe(hex.encode(theirs.swapPkScript))
   })
 
   it('moves the address when the advertised delay does', async () => {

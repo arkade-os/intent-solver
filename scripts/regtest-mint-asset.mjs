@@ -20,7 +20,7 @@
 // select — so issuing into a wallet that is also serving corridors changes
 // what its float looks like. That is fine for a test wallet between runs, and
 // is why this lives in `scripts/` rather than anywhere the service can reach.
-import { loadConfig } from '../packages/solver-app/dist/config.js'
+import { configFromKnobs } from '../packages/solver-app/dist/config.js'
 import { createArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 
 const [amountArg = '1000', ticker = 'TEST'] = process.argv.slice(2)
@@ -30,7 +30,8 @@ if (amount <= 0n) {
   process.exit(1)
 }
 
-const config = loadConfig()
+// The e2e env file, not a config document: these are regtest tooling.
+const config = configFromKnobs(process.env)
 const arkade = await createArkadeContext(config.arkade)
 
 const asNumber = (v) => (typeof v === 'bigint' ? Number(v) : v)

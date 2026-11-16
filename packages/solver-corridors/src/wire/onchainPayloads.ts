@@ -84,6 +84,7 @@ export const onchainRfqQuotePayload = (
     // these into one field.
     lockup_address: row.lockupAddress,
     htlc_address: row.onchainAddress,
+    refund_without_receiver_delay: row.refundWithoutReceiverDelay,
     // Compare-only, same trust tier as lockup_address's neighbours above:
     // the solver's own claim destination — see payloads.ts's rfqQuotePayload
     // for why this is needed and why it's low-stakes if wrong.
@@ -114,6 +115,8 @@ export const onchainRfqStateFromRow = (row: OnchainSendSwapRow): RfqState => {
     case 'refunded':
       return 'refunded'
     case 'stuck':
+      // Refunded to the CLIENT once their lockup went back; `stuck` is the operator's word, not theirs.
+      if (row.refundOutcome !== null) return 'refunded'
       return 'stuck'
     case 'refused':
       if (row.refundOutcome !== null) return 'refunded'

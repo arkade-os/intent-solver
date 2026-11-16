@@ -46,6 +46,7 @@ export interface DirectFillChain {
     vtxos: readonly (DirectFillOutpoint & {
       spentBy?: string
       arkTxId?: string
+      settledBy?: string
       script?: string
       value?: number
     })[]

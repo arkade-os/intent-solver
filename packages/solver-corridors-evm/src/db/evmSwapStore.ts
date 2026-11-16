@@ -81,6 +81,7 @@ export interface EvmSwapShape<Row, State extends string> {
   noun: string
   toRow: (raw: Raw) => Row
   nonTerminal: readonly State[]
+  legalEdges: Readonly<Record<State, readonly State[]>>
   /** Columns `transition()` and `patch()` may set, so a typo cannot silently write nothing. */
   transitionColumns: ReadonlySet<string>
 }
@@ -171,6 +172,14 @@ export abstract class EvmSwapStore<Row, State extends string> {
     return rows[0] ? this.shape.toRow(rows[0]) : null
   }
 
+  async findByPkScript(pkScript: string): Promise<Row | null> {
+    const rows = (await this.driver.all(
+      `SELECT * FROM ${this.shape.table} WHERE pk_script = ? ORDER BY created_at DESC`,
+      [pkScript],
+    )) as Raw[]
+    return rows[0] ? this.shape.toRow(rows[0]) : null
+  }
+
   /** Non-terminal, not exposed-only: a quote binds until `valid_until`. One table backs every
    * token, so a corridor passes its own `token_address`; a caller summing whole STORES omits it. */
   async committedSats(tokenAddress?: string): Promise<number> {
@@ -240,6 +249,10 @@ export abstract class EvmSwapStore<Row, State extends string> {
   /** Guarded on `from`: of two racing ticks, the loser's UPDATE matches no row and it throws. */
   async transition(id: string, from: State, to: State, fields: Record<string, unknown> = {}): Promise<void> {
     const { table, noun } = this.shape
+    // Throws, unlike a lost CAS: an illegal edge is a caller bug, not a race.
+    if (!this.shape.legalEdges[from]?.includes(to)) {
+      throw new Error(`illegal transition ${from} -> ${to}: not an edge of the evm ${noun} swap lifecycle`)
+    }
     const columns = Object.keys(fields)
     assertColumns(columns, this.shape.transitionColumns, 'transition()')
     const at = this.now()

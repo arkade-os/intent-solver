@@ -13,7 +13,8 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   CANDIDATE_SDK_SYMBOL,
-  CANDIDATE_SWAP_SYMBOL,
+  SWAP_FILL_SYMBOL,
+  SWAP_VERSION,
   CANDIDATE_TAXI_FILL_SYMBOL,
   MANIFEST_PATH,
   PINNED_PACKAGES,
@@ -84,10 +85,11 @@ for (const artifact of manifest.artifacts ?? []) {
 }
 
 const root = readJson(at('package.json'))
-const overrides = root.pnpm?.overrides ?? {}
+const overrides = readJson(at('pnpm-workspace.yaml')).overrides ?? {}
+check(root.pnpm === undefined, 'package.json pnpm settings are ignored; configure pnpm-workspace.yaml')
 check(
   JSON.stringify(Object.keys(overrides).sort()) === JSON.stringify([...PINNED_PACKAGES].sort()),
-  `root pnpm.overrides covers ${Object.keys(overrides).join(', ')}, expected exactly ${PINNED_PACKAGES.join(', ')}`,
+  `workspace overrides cover ${Object.keys(overrides).join(', ')}, expected exactly ${PINNED_PACKAGES.join(', ')}`,
 )
 for (const [name, spec] of Object.entries(overrides)) {
   const artifact = byPackage.get(name)
@@ -98,10 +100,11 @@ for (const [name, spec] of Object.entries(overrides)) {
 }
 
 const clientArchive = byPackage.get('@arkade-taxi/client')?.file
+const swapVersion = byPackage.get('@arkade-os/swap')?.version ?? SWAP_VERSION
 const consumer = readJson(at(TAXI_CONSUMER, 'package.json'))
 const clientSpec = consumer.dependencies?.['@arkade-taxi/client']
-check(Boolean(consumer.dependencies?.['@arkade-os/swap']), `${TAXI_CONSUMER} has no production swap dependency`)
-check(Boolean(root.dependencies?.['@arkade-os/swap']), 'the workspace root has no production swap dependency')
+check(consumer.dependencies?.['@arkade-os/swap'] === swapVersion, `${TAXI_CONSUMER} must pin swap ${swapVersion}`)
+check(root.dependencies?.['@arkade-os/swap'] === swapVersion, `the workspace root must pin swap ${swapVersion}`)
 check(
   clientSpec === fileSpec('./vendor/carrier', clientArchive),
   `${TAXI_CONSUMER} declares @arkade-taxi/client as ${clientSpec}, which is not the frozen archive`,
@@ -186,7 +189,7 @@ if (entry) {
   failIfInvalid()
   for (const [from, name, symbol] of [
     [entry, '@arkade-os/sdk', CANDIDATE_SDK_SYMBOL],
-    [at(TAXI_CONSUMER, 'package.json'), '@arkade-os/swap', CANDIDATE_SWAP_SYMBOL],
+    [at(TAXI_CONSUMER, 'package.json'), '@arkade-os/swap', SWAP_FILL_SYMBOL],
   ]) {
     try {
       await assertCandidateExport(packageRootFrom(from, name), name, symbol)

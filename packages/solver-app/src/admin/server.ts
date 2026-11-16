@@ -24,6 +24,7 @@ import { registerOfferRoutes } from './routes/offers.js'
 import { registerStatusRoutes } from './routes/status.js'
 import { registerDiagnosticsRoutes } from './routes/diagnostics.js'
 import { registerSettingsRoutes } from './routes/settings.js'
+import { registerConfigRevertRoutes } from './routes/configRevert.js'
 import { registerMarketRoutes } from './routes/markets.js'
 import { registerPricingRoutes } from './routes/pricing.js'
 import { registerPricingApplyRoutes } from './routes/pricingApply.js'
@@ -31,6 +32,7 @@ import { registerPnlRoutes } from './routes/pnl.js'
 import { registerActionRoutes } from './routes/actions.js'
 import { registerCardRoutes } from './routes/card.js'
 import { registerEventRoutes } from './routes/events.js'
+import { registerRebalanceRoutes } from './routes/rebalance.js'
 import type { ChangeFeed } from './events.js'
 import type { AdPublisher } from '@arkade-os/solver-transport/relay/adPublisher.js'
 import { createPriceFeed, type FetchPrice } from '@arkade-os/solver-core/price/feed.js'
@@ -80,16 +82,41 @@ export interface AdminDeps {
 
 const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
 
+// Host values a state-changing request may carry — the DNS-rebinding line the same-site
+// check cannot draw (a rebinding fetch is same-origin, Origin host == request host, so only
+// the Host still names the attacker's domain). Empty (inert) when no admin port runs or no host
+// is declared: the pin is opt-in, so a console behind a proxy is never locked out by default.
+export const adminHostAllowlist = (config?: {
+  adminHost?: string
+  adminPort?: number | null
+  adminAllowedHosts?: readonly string[]
+}): Set<string> => {
+  const port = config?.adminPort
+  if (port === null || port === undefined || !config?.adminAllowedHosts?.length) return new Set()
+  const hosts = new Set<string>()
+  for (const host of ['localhost', '127.0.0.1', '[::1]', config?.adminHost]) {
+    if (host) hosts.add(`${host}:${port}`.toLowerCase())
+  }
+  for (const host of config?.adminAllowedHosts ?? []) hosts.add(host.toLowerCase())
+  return hosts
+}
+
 export const buildAdminApp = (deps: AdminDeps): Hono => {
   const app = new Hono()
   const now = deps.now ?? nowSeconds
+  const allowedHosts = adminHostAllowlist(deps.services.config)
 
   /**
-   * Same-site JSON only, ahead of every route: Hono runs handlers in
-   * registration order, so a guard added later runs later. Host rather than
-   * whole origin — a proxy terminating TLS changes the scheme, not the host.
+   * Ahead of every route (Hono runs handlers in registration order). The Host pin
+   * guards reads and writes; the same-site and media-type checks only writes.
    */
   app.use('/api/*', async (c, next) => {
+    // Reads too (a rebinding GET is same-origin and can read audit rows carrying preimages).
+    const host = new URL(c.req.url).host.toLowerCase()
+    if (allowedHosts.size > 0 && !allowedHosts.has(host)) {
+      const message = `${host} is not a Host this console is served at; add it to admin.allowedHosts`
+      return c.json({ error: 'host_not_allowed', message }, 403)
+    }
     if (!MUTATING.has(c.req.method)) return next()
     const origin = c.req.header('origin')
     if (
@@ -117,6 +144,7 @@ export const buildAdminApp = (deps: AdminDeps): Hono => {
   registerOfferRoutes(app, deps)
   app.get('/api/rfq-refusals', (c) => c.json(deps.services.rfqRefusals.recent()))
   registerSettingsRoutes(app, deps)
+  registerConfigRevertRoutes(app, deps)
   // Built once and shared: `feeds.read` is for the preview, never the write probe.
   // Two readers: a saved row may be a grandfathered private feed, a typed URL may not.
   const savedPrice: FetchPrice = deps.fetchPrice ?? createPriceFeed()
@@ -138,6 +166,7 @@ export const buildAdminApp = (deps: AdminDeps): Hono => {
   registerCardRoutes(app, deps)
   registerActionRoutes(app, deps)
   registerEventRoutes(app, deps)
+  registerRebalanceRoutes(app, deps)
 
   // Last, so it can never shadow an /api route: this handler answers almost
   // everything, falling back to index.html for the client's own routing.

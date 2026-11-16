@@ -71,7 +71,7 @@ describe('LndOnchainAdapter.findSpendWitness against a real node', () => {
   let lnd: LndOnchainAdapter
 
   beforeAll(async () => {
-    await requireStack('onchain:BTC->arkade:BTC', ['lnd', 'esplora'])
+    await requireStack('arkade:BTC->onchain:BTC', ['lnd', 'esplora'])
     lnd = await adapter()
   }, SETUP_TIMEOUT_MS)
 

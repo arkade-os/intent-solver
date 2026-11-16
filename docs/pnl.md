@@ -1,7 +1,47 @@
-# Profit and loss
+# Profit and loss and reconciliation
 
 What this solver made, where, and where it went wrong — on the console's **p&l**
 tab and at `GET /api/pnl`.
+
+The **reconciliation** tab answers the wallet question that a P&L cannot:
+what the checkpoint balances were, when they changed, which changes have a
+journal entry, and which intervals have no checkpoint at all. It reads the same
+swap economics as the P&L screen and adds checkpoint history, operator
+withdrawals, and rebalances.
+
+## Plain-language labels
+
+- **Spread kept** is what the solver received minus what it delivered. It
+  includes the quoted fee and the market margin; the swap row does not record
+  those two parts separately.
+- **Fee budget** is the ceiling recorded at quote time. It was never deducted
+  from the result.
+- **Fee paid** is execution cost the rail actually reported. A blank means no
+  rail reported a cost; it does not mean the fee was zero.
+- **After reported fees** is spread minus reported execution fees, but only over
+  the swaps that have both figures. It is not net profit over the whole book.
+- **Balance change** is the difference between checkpoint totals. A positive
+  checkpoint movement is incoming balance, but checkpoints do not record the
+  sender. The page therefore calls it incoming balance, not an external deposit.
+
+## Native asset P&L
+
+Asset quotes keep their fee revenue in the units where it was charged:
+
+- **Input flat fee** is charged in the FROM asset.
+- **Output spread** is earned in the TO asset.
+
+The P&L page and each reconciliation swap row report those amounts by asset. They
+do not convert them to BTC or combine different assets into one headline. A
+USDT/EURT swap can therefore report `+30 USDT` from the input flat fee and
+`+5 EURT` from the output spread as two separate facts.
+
+The split is written with the quote terms, so a later market configuration
+change cannot rewrite it. Rows quoted before this field shipped report no native
+split, so their fee revenue is unknown rather than zero.
+
+The native amounts are gross fee revenue before execution costs. A cost a rail
+actually reported remains separate in the **fee paid** column.
 
 ## Read this first: what is net and what is gross
 
@@ -54,8 +94,8 @@ is a number nobody can stand behind:
   deposit txid, a held-HTLC deadline, or — where no column records the client's
   side — its own lifecycle. Such a row is counted in `openCount`.
 - A realized fill that cannot be priced in sats — a genuine asset-to-asset one —
-  is excluded from the totals and counted in `unpricedCount`, so a stablecoin
-  book never reads as having made nothing.
+  is excluded from the sats totals and counted in `unpricedCount`. Its recorded
+  native fee components remain in `summary.nativePnl` and `record.nativePnl`.
 
 ## What a swap contributes
 
@@ -63,15 +103,14 @@ Every corridor projects its own rows into one shape (`analytics/economics.ts`).
 Only the corridor knows which of its columns the solver received and which it
 paid out, and the asymmetry is real:
 
-| corridor                    | intake                               | outlay                                |
-| --------------------------- | ------------------------------------ | ------------------------------------- |
-| `arkade:BTC->lightning:BTC` | `lockup_value`                       | **the invoice, re-decoded**           |
-| `lightning:BTC->arkade:BTC` | `amount_sats`                        | `payout_sats`                         |
-| `arkade:BTC->onchain:BTC`   | `amount_sats`                        | `payout_sats`                         |
-| `onchain:BTC->arkade:BTC`   | `funded_value_sats` ?? `amount_sats` | `funded_payout_sats` ?? `payout_sats` |
-| `arkade:<X>->arkade:<Y>`    | the client's deposit                 | what the covenant must deliver        |
-| ERC20 send                  | `amount_sats`                        | the ERC20                             |
-| ERC20 receive               | the ERC20                            | `payout_sats`                         |
+| corridor                    | intake               | outlay                         |
+| --------------------------- | -------------------- | ------------------------------ |
+| `arkade:BTC->lightning:BTC` | `lockup_value`       | **the invoice, re-decoded**    |
+| `lightning:BTC->arkade:BTC` | `amount_sats`        | `payout_sats`                  |
+| `arkade:BTC->onchain:BTC`   | `amount_sats`        | `payout_sats`                  |
+| `arkade:<X>->arkade:<Y>`    | the client's deposit | what the covenant must deliver |
+| ERC20 send                  | `amount_sats`        | the ERC20                      |
+| ERC20 receive               | the ERC20            | `payout_sats`                  |
 
 **The Lightning send leg is the one worth checking twice, and not for the reason
 it looks like.** `amount_sats` there is _the lockup_, not the invoice —
@@ -84,10 +123,6 @@ whole corridor at any fee setting. The outlay is the invoice, re-decoded from
 the row: the orchestrator calls the persisted invoice authoritative for exactly
 this question, and `wire/payloads.ts` already answers the client's `to_amount`
 the same way.
-
-`payout_sats` on the onchain-receive leg is read together with
-`funded_value_sats` — mixing an amended intake with a quoted payout invents a
-spread neither number describes.
 
 **Volume** is the sats size of a trade, taken from whichever leg is sats rather
 than from the intake. On the ERC20 receive direction the intake is a token and
@@ -111,7 +146,7 @@ to `unpricedCount`: without it, "nothing is outstanding" and "something is
 outstanding and nobody can price it" render as the same reassuring zero.
 
 > On the two ERC20 legs this is an **upper bound**. Their stores' `fail()`
-> transitions to `stuck` unconditionally, unlike the four BTC stores, which
+> transitions to `stuck` unconditionally, unlike the three BTC stores, which
 > route a failure by exposure. Narrowing it means changing a money path and
 > belongs in its own commit.
 >
@@ -244,9 +279,38 @@ scatter back to the swap that made it. The body is capped at 2,000 records with
 `matchedCount` alongside, so a truncated list can never read as the whole set —
 the per-corridor cap bounds each scan, not their concatenation.
 
-Both routes are read-only, like everything on the console but `actions.ts`, and
-both sit behind the same deployment assumption as the rest of this port: no
+`GET /api/reconciliation` returns the full reconciliation view in one read:
+the same swap summary and record list, checkpoint totals with per-rail deltas,
+checkpoint cadence gaps, incomplete samples, journaled operator withdrawals, and
+rebalance transfers. It accepts the same `window`, `since`, `until`, and
+`limit` parameters as `/api/pnl`.
+
+The checkpoint history is bounded to the latest 2,000 samples. When that bound
+truncates a longer window, the response sets `balance.limited` and the console
+says so instead of presenting the visible history as complete.
+
+When a checkpoint exists just before the selected window, it becomes the opening
+baseline so the first in-window delta is complete. `balance.observedFrom` can
+therefore predate `window.since`, and the console labels that case explicitly.
+`balance.windowFullyCovered` separately says whether history reaches back before
+the selected window; `limited` is true only when the 2,000-sample cap caused the
+shortfall.
+
+For backward compatibility, the API keeps `grossSats` and `netSats`; the console
+labels those figures **spread kept** and **after reported fees**.
+
+The reconciliation route is read-only. In particular, an incoming checkpoint
+increase is an observed balance movement, not proof of an external deposit:
+there is no generic deposit journal today.
+
+All three routes are read-only, like everything on the console but `actions.ts`,
+and they sit behind the same deployment assumption as the rest of this port: no
 authentication, a reverse proxy in front. See [runbook.md](./runbook.md).
+
+`GET /api/pnl` carries `summary.nativePnl.assets`, grouped by `assetId`, with
+`inputFlatFee`, `outputSpread`, and `total` as exact atomic-unit strings.
+`summary.nativePnl.recordCount` says how many realized swaps carried a native
+split. The values are never exchange-rate converted.
 
 ## From a terminal
 

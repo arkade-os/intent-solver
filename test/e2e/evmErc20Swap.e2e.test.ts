@@ -61,6 +61,7 @@ import {
   balanceOf,
   evmChainReady,
   evmRpc,
+  pinAnvilClock,
   broadcastWithNonce,
   fundWithWeth,
   waitForReceipt,
@@ -94,6 +95,7 @@ beforeAll(async () => {
   available = await evmChainReady()
   if (!available) return
   rpc = evmRpc()
+  await pinAnvilClock(rpc)
   backend = createEvmHtlcBackend({ contractAddress: SWAP_ADDRESS, rpc })
   await installContracts(rpc, SWAP_RUNTIME, WETH_RUNTIME)
 }, 120_000)

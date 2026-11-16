@@ -44,15 +44,17 @@ const resyncBody = (): string => {
  */
 describe('the lockup subscription', () => {
   it('iterates the corridor registry rather than naming corridors one by one', () => {
-    expect(resyncBody()).toContain('for (const corridor of services.corridors)')
+    expect(resyncBody()).toContain('[...services.corridors]')
   })
 
   it('drives each corridor with its own findRecoverable and its own tick', () => {
-    // Asserted as ONE call: watching a script and then ticking a DIFFERENT
-    // corridor would look like it worked — the sweep would finish the swap
-    // either way. Substring rather than a whole line, so prettier's wrapping is
-    // not part of the contract.
-    expect(resyncBody()).toContain('watch(await corridor.findRecoverable(), (id) => corridor.tick(id))')
+    // Both on one `corridor` binding: watching a script and then ticking a
+    // DIFFERENT corridor would look like it worked — the sweep would finish
+    // the swap either way. Substring rather than a whole line, so prettier's
+    // wrapping is not part of the contract.
+    expect(resyncBody()).toMatch(/rows: await corridor\.findRecoverable\(\)[\s\S]{0,120}corridor\.tick\(id\)/)
+    // The pair above still matches while `watch` is handed an empty list.
+    expect(resyncBody()).toContain('watch(rows, tick)')
   })
 
   /**
@@ -61,12 +63,9 @@ describe('the lockup subscription', () => {
    * here: a second filter in the loop would be a corridor dropped from the fast
    * path for a reason nothing else in the process agrees with.
    */
-  it.each(['services.store', 'services.onchainStore', 'services.receiveStore', 'services.onchainReceiveStore'])(
-    'no longer singles out %s',
-    (store) => {
-      expect(resyncBody()).not.toContain(store)
-    },
-  )
+  it.each(['services.store', 'services.onchainStore', 'services.receiveStore'])('no longer singles out %s', (store) => {
+    expect(resyncBody()).not.toContain(store)
+  })
 
   it('applies no filter of its own to the registry', () => {
     expect(resyncBody()).not.toMatch(/services\.corridors[\s\S]{0,40}\.filter\(/)

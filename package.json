@@ -1,7 +1,7 @@
 {
   "name": "intent-solver",
   "license": "MIT",
-  "version": "0.3.2",
+  "version": "0.6.0",
   "private": true,
   "description": "Swap provider for Lightning <-> Arkade swaps",
   "type": "module",
@@ -14,19 +14,19 @@
     "build": "pnpm -r build",
     "typecheck": "tsc -p tsconfig.json",
     "typecheck:examples": "tsc -p tsconfig.examples.json",
-    "start": "node --enable-source-maps --experimental-eventsource --env-file=.env packages/solver-app/dist/cli.js watch",
-    "cli": "pnpm build && node --enable-source-maps --experimental-eventsource --env-file=.env packages/solver-app/dist/cli.js",
+    "start": "node --enable-source-maps --experimental-eventsource packages/solver-app/dist/cli.js watch",
+    "cli": "pnpm build && node --enable-source-maps --experimental-eventsource packages/solver-app/dist/cli.js",
     "test": "vitest run --exclude e2e",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "test:watch": "vitest",
     "format": "prettier --write test packages",
     "format:check": "prettier --check test packages",
+    "gen:config-schema": "node scripts/gen-config-schema.mjs",
     "test:perf": "vitest run --config vitest.perf.config.ts",
     "verify:artifacts": "node scripts/carrier-artifacts/verify.mjs"
   },
   "dependencies": {
-    "@arkade-os/sdk": "0.5.0-rc.22",
-    "@arkade-os/swap": "0.1.0-rc.25",
+    "@arkade-os/sdk": "0.5.7-taxi.0",
     "@hono/node-server": "^2.1.0",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.0.0",
@@ -44,15 +44,17 @@
     "@arkade-os/solver-rails-fake": "workspace:*",
     "@arkade-os/solver-rails-lnd": "workspace:*",
     "@arkade-os/solver-transport": "workspace:*",
-    "@arkade-taxi/client": "file:packages/solver-app/vendor/carrier/arkade-taxi-client-0.0.0-f27ae4b6.tgz",
     "better-sqlite3": "^12.11.1",
     "hono": "^4.13.0",
     "light-bolt11-decoder": "^3.2.0",
     "lightning": "^12.2.3",
-    "nostr-tools": "^2.24.1",
+    "nostr-tools": "2.24.1",
+    "@arkade-os/swap": "0.1.6",
+    "@arkade-taxi/client": "file:packages/solver-app/vendor/carrier/arkade-taxi-client-0.1.0-578bf66f.tgz",
     "undici": "7.29.1"
   },
   "devDependencies": {
+    "@arkade-os/solver-discovery": "0.3.0",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^24.13.3",
     "@types/ws": "^8.18.1",
@@ -61,21 +63,7 @@
     "vitest": "^3.2.7",
     "ws": "^8.21.2",
     "@foundry-rs/anvil": "1.7.1",
-    "solc": "0.8.30"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "better-sqlite3",
-      "esbuild",
-      "protobufjs",
-      "@foundry-rs/anvil"
-    ],
-    "overrides": {
-      "@arkade-os/sdk": "file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.5.0-rc.22-3c369d3a.tgz",
-      "@arkade-os/swap": "file:packages/solver-app/vendor/carrier/arkade-os-swap-0.1.0-rc.25-3c369d3a.tgz",
-      "@arkade-taxi/client": "file:packages/solver-app/vendor/carrier/arkade-taxi-client-0.0.0-f27ae4b6.tgz",
-      "@arkade-taxi/covenant": "file:packages/solver-app/vendor/carrier/arkade-taxi-covenant-0.0.0-f27ae4b6.tgz",
-      "@arkade-taxi/protocol": "file:packages/solver-app/vendor/carrier/arkade-taxi-protocol-0.0.0-f27ae4b6.tgz"
-    }
+    "solc": "0.8.30",
+    "zod-to-json-schema": "^3.25.2"
   }
 }

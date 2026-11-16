@@ -1,28 +1,29 @@
 /**
- * Which asset markets this deployment serves over RFQ, and under which env
- * stems.
+ * Which asset markets this deployment serves over RFQ, and under which symbol.
  *
- * Console rows are the serve list, symbol included. `ASSET_MARKETS` is still
- * parsed — it seeds those columns once — but nothing below reads it.
+ * Console rows are the serve list, symbol included. The configured tokens are
+ * still parsed — they seed those columns once — but nothing below reads them.
  */
 import { corridorEnabledFrom } from '@arkade-os/solver-core/core/corridorEnabled.js'
-import {
-  assetRfqEnvStem,
-  type AssetRfqDirection,
-  type ReadableAssetRfqMarket,
-} from '@arkade-os/solver-corridors/corridors/assetRfq.js'
+import { type ReadableAssetRfqMarket } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
 import type { AssetRfqMarket } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import { rfqSymbolFor } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import type { AssetMarketPricingView, CarrierMode } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { assetCardMarkets, type AssetCardMarket } from '@arkade-os/solver-core/core/registryCard.js'
 import type { AssetMarket } from './assetOffers.js'
+import type { AssetMarketRow, ServingSeed } from '../admin/db.js'
 
-/** One served asset, its operator-facing label, and whether each direction is open. */
+/**
+ * One served asset, its operator-facing label, and whether each direction is open.
+ *
+ * Directions by the leg the CLIENT gives, not `sell_base`/`buy_base`: which leg is
+ * the base is a fact about a market row, which config does not have.
+ */
 export interface AssetRfqToken {
   symbol: string
   /** Canonical 68-hex Arkade asset id — the identity, and what reaches the wire. */
   assetId: string
-  enabled: Readonly<Record<AssetRfqDirection, boolean>>
+  enabled: Readonly<{ clientGivesAsset: boolean; clientGetsAsset: boolean }>
   /** `ASSET_<SYMBOL>_APPROVAL_THRESHOLD`, ATOMIC units; null carries no gate. */
   approvalThresholdUnits: bigint | null
 }
@@ -42,8 +43,6 @@ const approvalThresholdFrom = (symbol: string, raw: string | undefined): bigint 
   }
   return BigInt(trimmed)
 }
-
-const DIRECTIONS: readonly AssetRfqDirection[] = ['sell_base', 'buy_base']
 
 /** A direction an operator closed: registered, and refusing every amount. */
 const CLOSED = { min: 0n, max: 0n }
@@ -86,12 +85,11 @@ export const parseAssetRfqTokens = (
     if (seenAsset.has(assetId)) throw new Error(`ASSET_MARKETS lists asset ${assetId} twice`)
     seenSymbol.add(symbol)
     seenAsset.add(assetId)
-    const enabled = Object.fromEntries(
-      DIRECTIONS.map((direction) => {
-        const name = `${assetRfqEnvStem({ symbol }, direction)}_ENABLED`
-        return [direction, corridorEnabledFrom(name, read(name))]
-      }),
-    ) as Record<AssetRfqDirection, boolean>
+    const open = (name: string): boolean => corridorEnabledFrom(name, read(name))
+    const enabled = {
+      clientGivesAsset: open(`ASSET_${symbol}_TO_BTC_ENABLED`),
+      clientGetsAsset: open(`ASSET_${symbol}_FROM_BTC_ENABLED`),
+    }
     const thresholdName = `ASSET_${symbol}_APPROVAL_THRESHOLD`
     return { symbol, assetId, enabled, approvalThresholdUnits: approvalThresholdFrom(symbol, read(thresholdName)) }
   })
@@ -198,6 +196,38 @@ export const samePair = (
   market: { base: string | null; quote: string | null },
   pair: { a: string | null; b: string | null },
 ): boolean => (market.base === pair.a && market.quote === pair.b) || (market.base === pair.b && market.quote === pair.a)
+
+export interface ServingFields {
+  symbol: string | null
+  servesOffer: boolean
+  servesRfq: boolean
+  rfqSellBase: boolean
+  rfqBuyBase: boolean
+}
+
+/** What the config says a row should serve. `taken`: symbols earlier rows hold. */
+export const servingFor = (row: AssetMarketRow, seed: ServingSeed, taken: ReadonlySet<string>): ServingFields => {
+  const assetId = row.base !== null && row.quote !== null ? null : (row.base ?? row.quote)
+  const token = assetId === null ? undefined : seed.tokens.find((candidate) => candidate.assetId === assetId)
+  const derived = assetId === null ? null : (token?.symbol ?? rfqSymbolFor(assetId))
+  // Fail CLOSED on a symbol an earlier row took, the answer `repairServing` gives: a second
+  // row carrying it violates idx_admin_market_symbol, and that throw is a boot nothing repairs.
+  const symbol = derived === null || taken.has(derived) ? null : derived
+  // `sell_base` is the client giving the base, so the asset's side of the row decides which flag is which.
+  const assetIsBase = row.base === assetId
+  const gives = token?.enabled.clientGivesAsset ?? true
+  const gets = token?.enabled.clientGetsAsset ?? true
+  const rfqSellBase = symbol !== null && (assetIsBase ? gives : gets)
+  const rfqBuyBase = symbol !== null && (assetIsBase ? gets : gives)
+  return {
+    symbol,
+    servesOffer: seed.offerMarkets.some((pair) => samePair(row, pair)),
+    // The DIRECTIONS, not the symbol: both closed is a row `checkServing` rejects.
+    servesRfq: rfqSellBase || rfqBuyBase,
+    rfqSellBase,
+    rfqBuyBase,
+  }
+}
 
 const unionBounds = (...bounds: Array<Bounds | null | undefined>): Bounds | undefined => {
   const present = bounds.filter((bound): bound is Bounds => bound !== null && bound !== undefined)

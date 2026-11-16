@@ -3,16 +3,14 @@
  *
  * The discovery half of the taker: an offer rides in its funding transaction's
  * Arkade-extension OP_RETURN as packet type 3, at the MAKER's script — which
- * this wallet does not own and cannot know in advance. That rules out
- * `subscribeForScripts`, the only subscription the TS SDK exposes, and is why
- * this speaks gRPC directly. @see grpcWire.ts
+ * this wallet does not own and cannot know in advance. So it is matched by a
+ * CEL filter arkd evaluates, via `getFilteredSubscription`, not by script.
  *
  * Reconnects, because the alternative is a solver that goes quietly deaf. arkd
  * heartbeats the stream, so silence past `STALE_MS` means a half-open
  * connection rather than an idle market.
  */
-import http2 from 'node:http2'
-import { encodeSubscriptionRequest, grpcFrame, readFrames, decodeSubscriptionResponse } from './grpcWire.js'
+import { RestIndexerProvider, isEventSourceUnavailableError, type IndexerProvider } from '@arkade-os/sdk'
 
 /** Matches any transaction carrying an offer packet. Evaluated by arkd. */
 export const OFFER_PACKET_FILTER = 'has(tx.extension) && hasPacket(tx.extension, 3)'
@@ -20,47 +18,8 @@ export const OFFER_PACKET_FILTER = 'has(tx.extension) && hasPacket(tx.extension,
 /** Silence longer than this means half-open, not idle: arkd beats every 60s. */
 const STALE_MS = 180_000
 
-/** One request's response chunks. Injectable so tests need no arkd. */
-export type GrpcTransport = (url: string, body: Uint8Array, signal: AbortSignal) => AsyncIterable<Uint8Array>
-
-/**
- * gRPC over HTTP/2, which is what arkd actually requires.
- *
- * `fetch` is not an option against a direct arkd: undici speaks HTTP/1.1 and
- * arkd answers a gRPC POST with `505 HTTP Version Not Supported`. It appears to
- * work against a proxied endpoint only because something like Cloudflare
- * terminates h1 and speaks h2 upstream. `node:http2` covers both — h2c to a
- * local arkd, h2 over TLS to a hosted one — and is built in.
- */
-export const http2Transport: GrpcTransport = async function* (url, body, signal) {
-  const target = new URL(url)
-  const client = http2.connect(target.origin)
-  const request = client.request({
-    ':method': 'POST',
-    ':path': target.pathname,
-    'content-type': 'application/grpc',
-    te: 'trailers',
-  })
-  // Unlistened, a session 'error' (a connection reset) is an uncaught exception that ends the process.
-  client.on('error', (error) => request.destroy(error))
-  const onAbort = (): void => {
-    request.close()
-    client.close()
-  }
-  signal.addEventListener('abort', onAbort)
-  try {
-    let status = 0
-    request.on('response', (headers) => void (status = Number(headers[':status'] ?? 0)))
-    request.end(Buffer.from(body))
-    for await (const chunk of request as unknown as AsyncIterable<Buffer>) {
-      if (status !== 0 && status !== 200) throw new Error(`arkd subscription failed: ${status}`)
-      yield new Uint8Array(chunk)
-    }
-  } finally {
-    signal.removeEventListener('abort', onAbort)
-    client.close()
-  }
-}
+/** One connection attempt. Injectable so tests need no arkd. */
+export type FilteredSubscribe = IndexerProvider['getFilteredSubscription']
 
 export interface OfferStreamDeps {
   /** arkd's base URL — the same host the REST indexer is on. */
@@ -70,7 +29,7 @@ export interface OfferStreamDeps {
   reconnectMaxMs?: number
   onError?: (error: unknown) => void
   signal?: AbortSignal
-  transport?: GrpcTransport
+  subscribe?: FilteredSubscribe
 }
 
 /** A transaction arkd matched, still encoded as it sent it. */
@@ -93,17 +52,21 @@ const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
     signal?.addEventListener('abort', done)
   })
 
+const restSubscribe = (arkdUrl: string): FilteredSubscribe => {
+  const indexer = new RestIndexerProvider(arkdUrl.replace(/\/+$/, ''))
+  return (filter, signal) => indexer.getFilteredSubscription(filter, signal)
+}
+
 /**
  * Every transaction matching the filter, until `signal` aborts.
  *
- * Yields only events carrying a tx: heartbeats and the subscription-started
- * message are normal traffic and are consumed silently.
+ * Yields only events carrying a tx: heartbeats are normal traffic and are
+ * consumed silently, after re-arming the watchdog.
  */
 export async function* streamOfferTxs(deps: OfferStreamDeps): AsyncGenerator<OfferTx> {
-  const transport = deps.transport ?? http2Transport
+  const subscribe = deps.subscribe ?? restSubscribe(deps.arkdUrl)
   const minMs = deps.reconnectMinMs ?? 1_000
   const maxMs = deps.reconnectMaxMs ?? 10_000
-  const url = `${deps.arkdUrl.replace(/\/+$/, '')}/ark.v1.IndexerService/GetSubscription`
   let backoff = minMs
 
   while (!deps.signal?.aborted) {
@@ -111,34 +74,28 @@ export async function* streamOfferTxs(deps: OfferStreamDeps): AsyncGenerator<Off
     const attempt = new AbortController()
     const onAbort = (): void => attempt.abort()
     deps.signal?.addEventListener('abort', onAbort)
-    let watchdog = setTimeout(() => attempt.abort(), STALE_MS)
+    let stale = false
+    const arm = () =>
+      setTimeout(() => {
+        stale = true
+        attempt.abort()
+      }, STALE_MS)
+    let watchdog = arm()
 
     try {
-      const chunks = transport(url, grpcFrame(encodeSubscriptionRequest([OFFER_PACKET_FILTER])), attempt.signal)
-
-      // `ArrayBufferLike`, because `readFrames` hands back a subarray view and
-      // a narrower annotation rejects it.
-      let buffer: Uint8Array<ArrayBufferLike> = new Uint8Array(0)
-      for await (const chunk of chunks) {
-        // Reset on DELIVERY, never on the call: `transport` is an async
-        // generator, so invoking it has connected to nothing yet.
+      for await (const message of subscribe({ expressions: [OFFER_PACKET_FILTER] }, attempt.signal)) {
+        // Reset on DELIVERY, never on the call: the iterator connects lazily.
         backoff = minMs
         clearTimeout(watchdog)
-        watchdog = setTimeout(() => attempt.abort(), STALE_MS)
-
-        const merged = new Uint8Array(buffer.length + chunk.length)
-        merged.set(buffer)
-        merged.set(chunk, buffer.length)
-        const { messages, rest } = readFrames(merged)
-        buffer = rest
-        for (const message of messages) {
-          const event = decodeSubscriptionResponse(message)
-          if (event !== null && event.tx !== '') yield event
-        }
+        watchdog = arm()
+        if (message.type === 'event' && message.txid && message.tx) yield { txid: message.txid, tx: message.tx }
       }
+      if (stale) deps.onError?.(new Error(`no frame from arkd in ${STALE_MS / 1000}s, reconnecting`))
     } catch (error) {
       if (deps.signal?.aborted) return
       deps.onError?.(error)
+      // An environment fact, not a stream failure: retrying cannot fix it.
+      if (isEventSourceUnavailableError(error)) return
     } finally {
       clearTimeout(watchdog)
       deps.signal?.removeEventListener('abort', onAbort)

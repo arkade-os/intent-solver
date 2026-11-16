@@ -3,10 +3,7 @@
  * the client has already committed, and once a Lightning HTLC is armed the port
  * cannot release it early ("the only two outcomes remain settle, or wait for E").
  *
- * THAT RULE EXCLUDES `onchain:BTC->arkade:<asset>`: its client's L1 BTC confirms
- * BEFORE the solver funds the asset lockup, so a hold would charge them a
- * locktime wait on money already sent; the exposure cap bounds it instead. Offer
- * fills and asset RFQ ARE gated — their counterparty can still reclaim.
+ * Offer fills and asset RFQ ARE gated — their counterparty can still reclaim.
  */
 
 import { evaluateApproval, type ApprovalCheck } from '@arkade-os/solver-core/core/approvalGate.js'

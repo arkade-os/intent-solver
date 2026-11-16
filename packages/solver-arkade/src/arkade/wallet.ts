@@ -11,8 +11,8 @@
 import Database from 'better-sqlite3'
 import {
   ArkAddress,
-  assertSubmittedArkTxid,
   buildOffchainTx,
+  claimWithPreimageIdentity,
   ConditionWitness,
   createAssetPacket,
   EmulatorPacket,
@@ -20,19 +20,24 @@ import {
   Extension,
   getArkPsbtFields,
   isVtxoSpent,
-  matchServerCheckpoints,
   MnemonicIdentity,
   PrevArkTxField,
   RestArkProvider,
   RestEmulatorProvider,
   setArkPsbtField,
+  signAndSubmitOffchainTx,
   Transaction,
   Wallet,
   type Recipient,
   type TapLeafScript,
   type VirtualCoin,
 } from '@arkade-os/sdk'
-import { SQLiteContractRepository, SQLiteWalletRepository, type SQLExecutor } from '@arkade-os/sdk/repositories/sqlite'
+import {
+  SQLiteBatchRegistrationRepository,
+  SQLiteContractRepository,
+  SQLiteWalletRepository,
+  type SQLExecutor,
+} from '@arkade-os/sdk/repositories/sqlite'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { base64, hex } from '@scure/base'
 import {
@@ -41,19 +46,20 @@ import {
   type TimelockUnit,
   type UnilateralDelays,
 } from '@arkade-os/solver-core/core/timelocks.js'
-import { log } from '@arkade-os/solver-core/util/poll.js'
+import { log, nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { latencyDiagnosticsEnabled } from '@arkade-os/solver-core/util/diagnostics.js'
 import { ensureDatabaseDir } from '@arkade-os/solver-core/util/sqlite.js'
-import { claimIdentity } from './claimIdentity.js'
 import type { CovenantSwapScript } from './covenant.js'
 import { virtualTxPages, vtxoPages } from './indexerPaging.js'
-import { TimedArkProvider, TimedIndexerProvider } from './latencyProviders.js'
+import { SharedSyncIndexerProvider, TimedArkadeProvider, TimedIndexerProvider } from './latencyProviders.js'
 import { createReservationLedger, type ReservationLedger } from './reservations.js'
 import { DirectFillAttempts } from './directFillAttempts.js'
 
-/** The two views any spend below needs; CovenantSwapScript satisfies it (as would any VtxoScript wrapper). */
+/** What {@link claimSwapScript} spends; CovenantSwapScript satisfies it. */
 export interface ClaimableScript {
   claim(): TapLeafScript
   encode(): Uint8Array
+  readonly vhtlcOptions: { readonly server: Uint8Array }
 }
 
 export const sqliteExecutor = (path: string): SQLExecutor & { close(): void } => {
@@ -76,21 +82,10 @@ export const sqliteExecutor = (path: string): SQLExecutor & { close(): void } =>
 
 export interface ArkadeWalletConfig {
   mnemonic: string
-  arkServerUrl: string
+  operatorUrl: string
   databasePath: string
   isMainnet: boolean
   arkadeHrp: string
-  /**
-   * Lowers the SDK's minimum accepted checkpoint exit delay, in seconds.
-   *
-   * Unset leaves the SDK's own per-network floor — 86400 off regtest, 1200 on
-   * it — which is what a deployment should want: the floor bounds how long our
-   * server-independent recourse takes if the Arkade Service stops cooperating.
-   * It exists because a hosted test Service may advertise a far shorter delay
-   * for its own convenience (mutinynet advertises 4096), and `Wallet.create`
-   * refuses to build against it at all. Config decides when that is allowed.
-   */
-  minCheckpointExitDelaySeconds?: number
   /**
    * Believe THIS unilateral exit delay instead of the one the server advertises
    * at `/v1/info`, in seconds. Unset means believe the server.
@@ -149,10 +144,10 @@ export interface ArkadeContext {
   identity: MnemonicIdentity
   /** The server the wallet was built against. Carried because the SDK's own
    * entry points take it separately — the wallet does not expose it. */
-  arkServerUrl: string
+  operatorUrl: string
   /** Unilateral delays this server will accept, derived from its own minimum. */
   unilateralDelays: UnilateralDelays
-  /** As advertised, BEFORE `ARK_UNILATERAL_EXIT_DELAY`: a client compiles an
+  /** As advertised, BEFORE `ARKADE_UNILATERAL_EXIT_DELAY`: a client compiles an
    * offer's exit leaf from this, so that covenant follows the server. */
   advertisedExitDelay: number
   dustSats: bigint
@@ -189,7 +184,7 @@ export interface ArkadeContext {
  * hardcoded — the server refuses any script below its own minimum. The unit is part of
  * that same fact: an arkd configured with block delays advertises a value that IS blocks
  * by the SDK's own `toTimelock` rule, so believing it is one source of truth rather than
- * two that can drift. An `ARK_TIMELOCK_UNIT` knob was considered and dropped for exactly
+ * two that can drift. An `ARKADE_TIMELOCK_UNIT` knob was considered and dropped for exactly
  * that: a disagreement there writes a script whose leaves count a different clock than
  * the server enforcing them.
  *
@@ -200,7 +195,7 @@ export interface ArkadeContext {
 export const resolveTimelockUnit = (params: {
   /** What arkd reports at `/v1/info`, in its own unit. */
   advertisedExitDelay: number
-  /** `ARK_UNILATERAL_EXIT_DELAY`, if the operator set one. */
+  /** `ARKADE_UNILATERAL_EXIT_DELAY`, if the operator set one. */
   unilateralExitDelayOverride?: number
   isMainnet: boolean
 }): { unit: TimelockUnit; notices: string[] } => {
@@ -218,7 +213,7 @@ export const resolveTimelockUnit = (params: {
     // disagreeing sources was right.
     if (overrideUnit !== unit) {
       throw new Error(
-        `ARK_UNILATERAL_EXIT_DELAY=${unilateralExitDelayOverride} is ${overrideUnit}, but this server ` +
+        `rails.arkade.unilateralExitDelay ${unilateralExitDelayOverride} is ${overrideUnit}, but this server ` +
           `advertises ${advertisedExitDelay}, which is ${unit} — an override must be expressed in the ` +
           'same unit as the server it overrides',
       )
@@ -229,7 +224,7 @@ export const resolveTimelockUnit = (params: {
     // server claims to require — and to see BOTH numbers, since the whole reason
     // the override exists is that they disagree.
     notices.push(
-      `ARK_UNILATERAL_EXIT_DELAY=${unilateralExitDelayOverride} ${overrideUnit} overrides the ` +
+      `rails.arkade.unilateralExitDelay ${unilateralExitDelayOverride} ${overrideUnit} overrides the ` +
         `${advertisedExitDelay} ${unit} this server advertises; every covenant written from now uses the override`,
     )
   }
@@ -262,28 +257,25 @@ export const resolveTimelockUnit = (params: {
 export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<ArkadeContext> => {
   const identity = MnemonicIdentity.fromMnemonic(config.mnemonic, { isMainnet: config.isMainnet })
   const executor = sqliteExecutor(config.databasePath)
-  const latencyDiagnostics = process.env.SOLVER_LATENCY_DIAGNOSTICS === '1'
+  const latencyDiagnostics = latencyDiagnosticsEnabled()
 
   const wallet = await Wallet.create({
     identity,
     arkProvider: latencyDiagnostics
-      ? new TimedArkProvider(config.arkServerUrl)
-      : new RestArkProvider(config.arkServerUrl),
-    indexerProvider: latencyDiagnostics ? new TimedIndexerProvider(config.arkServerUrl) : undefined,
+      ? new TimedArkadeProvider(config.operatorUrl)
+      : new RestArkProvider(config.operatorUrl),
+    // The SDK's own default is a plain `RestIndexerProvider` at this same URL.
+    indexerProvider: latencyDiagnostics
+      ? new TimedIndexerProvider(config.operatorUrl)
+      : new SharedSyncIndexerProvider(config.operatorUrl),
     storage: {
       walletRepository: new SQLiteWalletRepository(executor),
       contractRepository: new SQLiteContractRepository(executor),
+      intentRepository: new SQLiteBatchRegistrationRepository(executor),
     },
-    // Passing undefined is safe and is NOT the same as passing a hole: the SDK
-    // folds this into its policy only when set (`!== void 0`, pinned SDK
-    // `dist/chunk-DVOQZAAX.js:12939`), so unset keeps the per-network floor.
-    // Spreading it conditionally here would read as more careful and do the
-    // same thing; the explicit undefined is what makes that checkable.
-    minCheckpointExitDelaySeconds:
-      config.minCheckpointExitDelaySeconds === undefined ? undefined : BigInt(config.minCheckpointExitDelaySeconds),
-    // Safe for the same reason, by a different operator: the SDK takes
-    // `config.onchainProvider || new EsploraProvider(default)` (pinned SDK
-    // `dist/chunk-AEWJU6NZ.js:12457`), so an explicit undefined falls through
+    // Passing undefined is safe and is NOT the same as passing a hole: the SDK takes
+    // `config.onchainProvider || new EsploraProvider(default)` (SDK
+    // `ReadonlyWallet.setupWalletConfig`), so an explicit undefined falls through
     // to the per-network default rather than blanking the provider.
     onchainProvider: config.esploraUrl === undefined ? undefined : new EsploraProvider(config.esploraUrl),
     // NOT a performance tweak, and UNSET IS NOT OFF. The SDK folds an absent
@@ -324,19 +316,19 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
   // chain — refuse to start rather than discover it with money in flight.
   if (info.network !== config.expectedArkdNetwork) {
     throw new Error(
-      `Arkade server at ${config.arkServerUrl} reports network '${info.network}', ` +
-        `expected '${config.expectedArkdNetwork}' — check ARK_SERVER_URL / SWAP_NETWORK`,
+      `Arkade server at ${config.operatorUrl} reports network '${info.network}', ` +
+        `expected '${config.expectedArkdNetwork}' — check rails.arkade.operatorUrl / network`,
     )
   }
 
   const dustSats = BigInt(info.dust)
   // A quote prices against this; zero would remove the sats leg's dust floor.
   if (dustSats <= 0n) {
-    throw new Error(`Arkade server at ${config.arkServerUrl} reports dust=${info.dust}, which no asset can ride on`)
+    throw new Error(`Arkade server at ${config.operatorUrl} reports dust=${info.dust}, which no asset can ride on`)
   }
   const vtxoMinSats = BigInt(info.vtxoMinAmount ?? 0)
   if (vtxoMinSats < 0n || vtxoMinSats > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new Error(`Arkade server at ${config.arkServerUrl} reports invalid vtxoMinAmount=${info.vtxoMinAmount}`)
+    throw new Error(`Arkade server at ${config.operatorUrl} reports invalid vtxoMinAmount=${info.vtxoMinAmount}`)
   }
 
   const advertisedExitDelay = Number(info.unilateralExitDelay)
@@ -351,13 +343,13 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
   const directFills = await DirectFillAttempts.open(
     executor,
     reservations,
-    `${config.arkServerUrl}:${hex.encode(wallet.arkServerPublicKey)}:${hex.encode(await identity.xOnlyPublicKey())}`,
+    `${config.operatorUrl}:${hex.encode(wallet.arkServerPublicKey)}:${hex.encode(await identity.xOnlyPublicKey())}`,
     hex.encode(ArkAddress.decode(await wallet.getAddress()).pkScript),
   )
   return {
     wallet,
     identity,
-    arkServerUrl: config.arkServerUrl,
+    operatorUrl: config.operatorUrl,
     unilateralDelays: deriveUnilateralDelays(config.unilateralExitDelayOverride ?? advertisedExitDelay),
     advertisedExitDelay,
     dustSats,
@@ -375,8 +367,12 @@ export interface FundedOutput {
   txid: string
   vout: number
   value: number
+  /** Mint time used by the server's intent fee program. */
+  createdAt?: Date
   /** Assets carried, when any. Absent rather than empty on a sats lockup. */
   assets?: readonly FundedAsset[]
+  /** Batch expiry in unix seconds, when the server gave a wall-clock one. The block-typed `expiresAtHeight` needs a chain tip, and stays unmapped. */
+  expiresAt?: number
 }
 
 /** One asset balance on a funded output. `assetId` is the canonical 68-hex serialization. */
@@ -402,9 +398,25 @@ export interface FundedAsset {
  * being a poll is deliberate and unchanged by the subscription; what the
  * subscription removed is the wait, not the check.
  */
-export const findLockups = async (ctx: ArkadeContext, pkScriptHex: string): Promise<FundedOutput[]> => {
+export const findLockups = async (ctx: ArkadeContext, pkScriptHex: string): Promise<FundedOutput[]> =>
+  lockupsMatching(ctx, pkScriptHex, { spendableOnly: true })
+
+/**
+ * The outputs {@link findLockups} cannot see: SWEPT but unspent. Every refund
+ * path built on that `spendableOnly` read goes blind the moment arkd sweeps the
+ * batch a lockup sat in, and a swept output has no spend fact either — so
+ * nothing retires the swap. @see refundSweptSwapScript
+ */
+export const findSweptLockups = async (ctx: ArkadeContext, pkScriptHex: string): Promise<FundedOutput[]> =>
+  lockupsMatching(ctx, pkScriptHex, { recoverableOnly: true })
+
+const lockupsMatching = async (
+  ctx: ArkadeContext,
+  pkScriptHex: string,
+  filter: { spendableOnly: true } | { recoverableOnly: true },
+): Promise<FundedOutput[]> => {
   const outputs: FundedOutput[] = []
-  for await (const batch of vtxoPages(ctx.wallet.indexerProvider, { scripts: [pkScriptHex], spendableOnly: true })) {
+  for await (const batch of vtxoPages(ctx.wallet.indexerProvider, { scripts: [pkScriptHex], ...filter })) {
     for (const vtxo of batch) {
       // 256-bit, and the indexer reports it as a STRING: never a `number`.
       const assets = ((vtxo as { assets?: { assetId: string; amount: bigint | string }[] }).assets ?? [])
@@ -414,7 +426,9 @@ export const findLockups = async (ctx: ArkadeContext, pkScriptHex: string): Prom
         txid: vtxo.txid,
         vout: vtxo.vout,
         value: Number(vtxo.value),
+        ...(vtxo.createdAt ? { createdAt: vtxo.createdAt } : {}),
         ...(assets.length > 0 ? { assets } : {}),
+        ...(vtxo.expiresAt ? { expiresAt: Math.floor(vtxo.expiresAt.getTime() / 1000) } : {}),
       })
     }
   }
@@ -427,8 +441,8 @@ const hashMatches = (candidate: Uint8Array, paymentHashHex: string): boolean =>
 
 /**
  * Every candidate witness item a spend of ONE input might carry, in the order
- * worth trying: the Ark-specific condition field first (the mechanism this
- * repo's own `claimIdentity.ts` uses to attach a preimage — `setArkPsbtField(...,
+ * worth trying: the Arkade-specific condition field first (the mechanism this
+ * repo's claims use, via the SDK's `claimWithPreimageIdentity` — `setArkPsbtField(...,
  * ConditionWitness, [preimage])` — confirmed to survive a `toPSBT()`/`fromPSBT()`
  * round trip against the pinned SDK version), then whatever the input's own
  * finalized script witness holds, in case a caller only inspects the raw
@@ -444,7 +458,7 @@ const candidateWitnessItems = (tx: InstanceType<typeof Transaction>, inputIndex:
  * The preimage from whichever transaction claimed one of `outpoints` (covclaimd's claim),
  * verified against `paymentHashHex` — a matching witness SHAPE is not proof. Null means
  * nothing provable yet. `spentBy` names the CHECKPOINT tx, whose input carries the claim
- * leaf's witness, so matching its inputs to `outpoints` needs no special case.
+ * leaf's witness; so does the Arkade tx spending it at vout 0, from submit, before any finalize.
  */
 export const findClaimPreimage = async (
   ctx: ArkadeContext,
@@ -461,8 +475,14 @@ export const findClaimPreimage = async (
 
   // Both spend facts, not just `spentBy` — see lockupSpendEvidence. Truthiness, never
   // presence: both are "" rather than absent for an output they do not apply to.
-  const spendingTxids = [...new Set(vtxos.flatMap((v) => [v.spentBy, v.settledBy]).filter((id): id is string => !!id))]
+  const spendingTxids = [
+    ...new Set(vtxos.flatMap((v) => [v.spentBy, v.settledBy, v.arkTxId]).filter((id): id is string => !!id)),
+  ]
   if (spendingTxids.length === 0) return null
+  const spent = new Set([
+    ...outpoints.map((o) => `${o.txid}:${o.vout}`),
+    ...vtxos.filter((v) => v.spentBy).map((v) => `${v.spentBy}:0`),
+  ])
 
   // Same reason the vtxo read above is paged: a padded script names more spending
   // transactions than one request carries back. A match stops the later chunks too.
@@ -473,9 +493,7 @@ export const findClaimPreimage = async (
       const tx = Transaction.fromPSBT(base64.decode(raw))
       for (let i = 0; i < tx.inputsLength; i++) {
         const input = tx.getInput(i)
-        if (!input.txid) continue
-        const matchesOurOutpoint = outpoints.some((o) => hex.encode(input.txid!) === o.txid && input.index === o.vout)
-        if (!matchesOurOutpoint) continue
+        if (!input.txid || !spent.has(`${hex.encode(input.txid)}:${input.index}`)) continue
         for (const candidate of candidateWitnessItems(tx, i)) {
           if (hashMatches(candidate, paymentHashHex)) return candidate
         }
@@ -488,20 +506,72 @@ export const findClaimPreimage = async (
 export const totalValue = (outputs: readonly FundedOutput[]): number =>
   outputs.reduce((sum, output) => sum + output.value, 0)
 
+/** The address is public: uncapped, sprayed dust pushes every spend past arkd's 40000 `maxTxWeight` (16 run near 13k). */
+// TODO: stopgap. The real bound is arkd's `maxTxWeight` (/v1/info); compute the cap from it
+// with a margin and a pinned per-input weight instead of assuming 16.
+export const MAX_LOCKUP_SPEND_INPUTS = 16
+
+const LOCKUP_SPEND_EXPIRY_MARGIN = 5 * 60
+
+/**
+ * One near-expiry input sinks the whole spend. Value picks WHICH outputs, never their
+ * order: the covenant refund is index-aligned against the caller's array.
+ */
+export const boundedSpendInputs = (funded: readonly FundedOutput[], now: number): FundedOutput[] => {
+  const usable = funded.filter(
+    (output) => output.expiresAt === undefined || output.expiresAt - now > LOCKUP_SPEND_EXPIRY_MARGIN,
+  )
+  if (usable.length <= MAX_LOCKUP_SPEND_INPUTS) return usable
+  const kept = new Set([...usable].sort((a, b) => b.value - a.value).slice(0, MAX_LOCKUP_SPEND_INPUTS))
+  return usable.filter((output) => kept.has(output))
+}
+
+const spendable = (funded: readonly FundedOutput[], verb: string): FundedOutput[] => {
+  const inputs = boundedSpendInputs(funded, nowSeconds())
+  if (inputs.length === 0) {
+    throw new Error(`nothing to ${verb}: every one of the ${funded.length} funded outputs expires too soon to spend`)
+  }
+  return inputs
+}
+
+/**
+ * The outputs a BTC lockup is made of. Anyone can send an asset vtxo to the public lockup address,
+ * and sats riding on one are not what the quote asked for. Refunds still take every output.
+ */
+export const satsOutputs = <O extends { assets?: readonly unknown[] }>(outputs: readonly O[]): O[] =>
+  outputs.filter((o) => !o.assets?.length)
+
+/**
+ * What a claim spends: the asset-free outputs when they cover `amountSats`, else every output, so a
+ * lockup that was paid out against an asset vtxo is still collected (the claim declares its assets).
+ */
+export const claimOutputs = (outputs: readonly FundedOutput[], amountSats: number): FundedOutput[] => {
+  const clean = satsOutputs(outputs)
+  return totalValue(clean) >= amountSats ? clean : [...outputs]
+}
+
 /**
  * Every outpoint this script has ever held — SPENT ONES INCLUDED, unlike {@link findLockups},
  * so {@link findClaimPreimage} can still find the claimed outpoint. `value` lets the receive
  * leg tell its own funding from a dust payment to a public address. Paged like findLockups;
  * unfiltered and `isVtxoSpent` for the reasons at {@link lockupSpendEvidence}.
+ * `unrolled` is the SDK's `isUnrolled` — where the output lives, not whether it was
+ * consumed: an unrolled one is spent on BITCOIN, out of {@link findClaimPreimage}'s reach.
  */
 export const findLockupOutpoints = async (
   ctx: Pick<ArkadeContext, 'wallet'>,
   pkScriptHex: string,
-): Promise<{ txid: string; vout: number; value: number; spent: boolean }[]> => {
-  const outpoints: { txid: string; vout: number; value: number; spent: boolean }[] = []
+): Promise<{ txid: string; vout: number; value: number; spent: boolean; unrolled: boolean }[]> => {
+  const outpoints: { txid: string; vout: number; value: number; spent: boolean; unrolled: boolean }[] = []
   for await (const batch of vtxoPages(ctx.wallet.indexerProvider, { scripts: [pkScriptHex] })) {
     for (const vtxo of batch) {
-      outpoints.push({ txid: vtxo.txid, vout: vtxo.vout, value: Number(vtxo.value), spent: isVtxoSpent(vtxo) })
+      outpoints.push({
+        txid: vtxo.txid,
+        vout: vtxo.vout,
+        value: Number(vtxo.value),
+        spent: isVtxoSpent(vtxo),
+        unrolled: vtxo.isUnrolled === true,
+      })
     }
   }
   return outpoints
@@ -539,72 +609,133 @@ export const lockupSpendEvidence = async (
   return seen ? 'spent' : 'unknown'
 }
 
-/**
- * Spend a swap script's claim leaf, revealing the preimage.
- *
- * The claim leaf is `preimage-condition + receiver + Arkade server`, so this needs
- * both our signature and the server's countersignature. `claimIdentity` carries
- * the rule that the preimage is attached after signing, on both the Arkade
- * transaction and every checkpoint the server hands back.
- *
- * The countersignature round-trip is the dangerous moment: the server answers
- * `submitTx` with checkpoint PSBTs it wants our signature on, and signing input 0
- * attaches the preimage. Nothing structural forces those PSBTs to be the
- * checkpoints we built — a forged one could spend the same lockup outpoint
- * through the same claim leaf to outputs of the server's choosing, and our blind
- * signature would complete the theft (we already paid the Lightning invoice, so
- * the lockup is our money at this point). Hence the rule: **sign nothing the
- * server returned until it is proven to be one of ours** — the response must
- * name the ark tx we submitted, and every returned checkpoint must txid-match a
- * locally built one (witnesses never change a txid, so the server's signature
- * cannot legitimately alter it). `assertSubmittedArkTxid` /
- * `matchServerCheckpoints` are the SDK's own guards for exactly this; a mismatch
- * throws and the swap routes to `stuck` for a human rather than signing.
- */
-export const claimSwapScript = async (
+const withoutConditionWitness = (tx: Transaction): Transaction => {
+  const copy = tx.clone()
+  for (let i = 0; i < copy.inputsLength; i++) {
+    const unknown = copy.getInput(i).unknown ?? []
+    copy.updateInput(i, { unknown: unknown.filter((field) => ConditionWitness.decode(field) === null) })
+  }
+  return copy
+}
+
+/** Replaces rather than appends: arkd echoes a submitted witness back, and btcd refuses a duplicate PSBT key. */
+const preimageSigner = (identity: ArkadeContext['identity'], preimage: Uint8Array) =>
+  claimWithPreimageIdentity(
+    { sign: (tx: Transaction, inputIndexes?: number[]) => identity.sign(withoutConditionWitness(tx), inputIndexes) },
+    preimage,
+  )
+
+/** Spend a swap script's claim leaf, revealing the preimage; throws on any server response the SDK cannot verify. */
+export const claimSwapScriptDetailed = async (
   ctx: ArkadeContext,
   script: ClaimableScript,
   funded: readonly FundedOutput[],
   preimage: Uint8Array,
   destination: string,
-): Promise<string> => {
+): Promise<{ txid: string; inputsActuallySubmitted: FundedOutput[] }> => {
   if (funded.length === 0) throw new Error('nothing to claim: no funded outputs')
-  const signer = claimIdentity(ctx.identity, preimage)
-
-  const { arkTx, checkpoints } = buildOffchainTx(
-    funded.map((output) => ({
+  const inputs = spendable(funded, 'claim')
+  // Anyone can add an asset to a lockup; without its packet arkd refuses the claim, after we already paid.
+  const assetPacket = refundAssetPacket(inputs, 'aggregate')
+  const txid = await signAndSubmitOffchainTx({
+    // Signs every checkpoint before submit, so each carries the preimage arkd v0.9.24+ demands there.
+    identity: preimageSigner(ctx.identity, preimage),
+    provider: ctx.wallet.arkProvider,
+    inputs: inputs.map((output) => ({
       txid: output.txid,
       vout: output.vout,
       value: output.value,
       tapLeafScript: script.claim(),
       tapTree: script.encode(),
     })),
-    [{ script: ArkAddress.decode(destination).pkScript, amount: BigInt(totalValue(funded)) }],
+    outputs: [
+      { script: ArkAddress.decode(destination).pkScript, amount: BigInt(totalValue(inputs)) },
+      ...(assetPacket ? [Extension.create([assetPacket]).txOut()] : []),
+    ],
+    serverUnrollScript: ctx.wallet.serverUnrollScript,
+    // The leaf's own key, not the wallet's live one: a lockup quoted before a signer rotation is co-signed under it.
+    verifyServerSignatures: { serverPubkey: script.vhtlcOptions.server },
+  })
+  return { txid, inputsActuallySubmitted: inputs }
+}
+
+export const claimSwapScript = async (
+  ctx: ArkadeContext,
+  script: ClaimableScript,
+  funded: readonly FundedOutput[],
+  preimage: Uint8Array,
+  destination: string,
+): Promise<string> => (await claimSwapScriptDetailed(ctx, script, funded, preimage, destination)).txid
+
+/**
+ * Finalize OUR spend that arkd accepted and never finalized, which leaves the lockup spent with no output;
+ * arkd answers finalizeTx on a tx it already finalized, as a one-shot submit does, with success.
+ * Null unless every spent output went into one Arkade transaction through `leaf`: only that leaf rebuilds
+ * the checkpoint txid arkd names as the spender, and it needs our signature.
+ */
+const finalizePendingSpend = async (
+  ctx: ArkadeContext,
+  leaf: TapLeafScript,
+  tapTree: Uint8Array,
+  pkScriptHex: string,
+  signer: Pick<ArkadeContext['identity'], 'sign'>,
+): Promise<string | null> => {
+  const spent: VirtualCoin[] = []
+  for await (const batch of vtxoPages(ctx.wallet.indexerProvider, { scripts: [pkScriptHex] })) {
+    spent.push(...batch.filter((vtxo) => isVtxoSpent(vtxo)))
+  }
+  const arkadeTxids = new Set(spent.map((vtxo) => vtxo.arkTxId))
+  const [arkTxid] = arkadeTxids
+  if (spent.length === 0 || arkadeTxids.size !== 1 || !arkTxid) return null
+  const { checkpoints } = buildOffchainTx(
+    spent.map(({ txid, vout, value }) => ({ txid, vout, value, tapLeafScript: leaf, tapTree })),
+    [{ script: hex.decode(pkScriptHex), amount: BigInt(spent.reduce((sum, vtxo) => sum + vtxo.value, 0)) }],
     ctx.wallet.serverUnrollScript,
   )
-
-  // No index list: every input spends the same claim leaf, so all are signed.
-  const signedArkTx = await signer.sign(arkTx)
-  const submitted = await ctx.wallet.arkProvider.submitTx(
-    base64.encode(signedArkTx.toPSBT()),
-    checkpoints.map((c) => base64.encode(c.toPSBT())),
-  )
-
-  // Verify BEFORE signing anything the server sent — see the doc comment.
-  // `matched` keeps the server's order, which is what finalizeTx expects.
-  assertSubmittedArkTxid(submitted, signedArkTx, 'claimSwapScript')
-  const matched = matchServerCheckpoints(submitted.signedCheckpointTxs, checkpoints, 'claimSwapScript')
-
-  const finalCheckpoints = await Promise.all(
-    matched.map(async ({ server }) => {
-      const signed = await signer.sign(server, [0])
-      return base64.encode(signed.toPSBT())
+  if (checkpoints.some((checkpoint, i) => checkpoint.id !== spent[i]!.spentBy)) return null
+  // finalizeTx replaces arkd's stored signatures with the ones sent, so the server's must ride along. Only
+  // its signatures are taken from the indexer's copy: what we sign is the checkpoint we rebuilt.
+  const stored = new Map<string, Transaction>()
+  for await (const batch of virtualTxPages(
+    ctx.wallet.indexerProvider,
+    checkpoints.map((c) => c.id),
+  )) {
+    for (const raw of batch) {
+      const tx = Transaction.fromPSBT(base64.decode(raw))
+      stored.set(tx.id, tx)
+    }
+  }
+  const ours = hex.encode(await ctx.identity.xOnlyPublicKey())
+  const signed = await Promise.all(
+    checkpoints.map(async (checkpoint) => {
+      const theirs = stored.get(checkpoint.id)
+      if (!theirs) throw new Error(`pending spend ${arkTxid}: the indexer served no checkpoint ${checkpoint.id}`)
+      const tx = await signer.sign(checkpoint, [0])
+      const serverSigs = (theirs.getInput(0).tapScriptSig ?? []).filter(([key]) => hex.encode(key.pubKey) !== ours)
+      tx.updateInput(0, { tapScriptSig: [...(tx.getInput(0).tapScriptSig ?? []), ...serverSigs] })
+      return base64.encode(tx.toPSBT())
     }),
   )
-
-  await ctx.wallet.arkProvider.finalizeTx(submitted.arkTxid, finalCheckpoints)
-  return submitted.arkTxid
+  await ctx.wallet.arkProvider.finalizeTx(arkTxid, signed)
+  return arkTxid
 }
+
+/** {@link finalizePendingSpend} through the claim leaf. */
+export const finalizePendingClaim = (
+  ctx: ArkadeContext,
+  script: ClaimableScript,
+  pkScriptHex: string,
+  preimage: Uint8Array,
+): Promise<string | null> =>
+  finalizePendingSpend(ctx, script.claim(), script.encode(), pkScriptHex, preimageSigner(ctx.identity, preimage))
+
+/** {@link finalizePendingSpend} through the `refundWithoutReceiver` leaf. */
+export const finalizePendingRefund = (
+  ctx: ArkadeContext,
+  script: CovenantSwapScript,
+  pkScriptHex: string,
+): Promise<string | null> =>
+  finalizePendingSpend(ctx, script.refundWithoutReceiver(), script.encode(), pkScriptHex, ctx.identity)
 
 /** Raw witness encoding of an empty stack: varint item count 0. */
 export const EMPTY_RAW_WITNESS = Uint8Array.from([0x00])
@@ -630,7 +761,7 @@ export const attachEmulatorPackets = (tx: Transaction, packets: Parameters<typeo
 export type RefundOutputLayout = 'per-input' | 'aggregate'
 
 /**
- * The asset packet a refund of `funded` needs, or null when it carries none.
+ * The asset packet a refund or claim of `funded` needs, or null when it carries none.
  * EVERY asset on EVERY input must be declared, not just the denominating one:
  * omitting one is refused with ASSET_NOT_FOUND, omitting all with `no asset packet`.
  */
@@ -667,8 +798,8 @@ export const refundAssetPacket = (
 }
 
 /**
- * Push a covenant refund: spend every funded output back to the refund
- * destination the script commits to.
+ * Push a covenant refund: spend the funded outputs {@link boundedSpendInputs}
+ * selects back to the refund destination the script commits to.
  *
  * The base program's refund leaf needs no signature of ours — its signers are
  * the Arkade server and the covenant-tweaked emulator key — so historically
@@ -718,9 +849,10 @@ export const refundSwapScript = async (
   refundPkScript: Uint8Array,
 ): Promise<string> => {
   if (funded.length === 0) throw new Error('nothing to refund: no funded outputs')
+  const inputs = spendable(funded, 'refund')
 
   const { arkTx, checkpoints } = buildOffchainTx(
-    funded.map((output) => ({
+    inputs.map((output) => ({
       txid: output.txid,
       vout: output.vout,
       value: output.value,
@@ -731,27 +863,27 @@ export const refundSwapScript = async (
     // the CURRENT INPUT'S index (PUSHCURRENTINPUTINDEX ... INSPECTOUTPUTSCRIPTPUBKEY),
     // so input i's check is satisfied by output i and nothing else. A single
     // aggregate output would fail every input past the first.
-    funded.map((output) => ({ script: refundPkScript, amount: BigInt(output.value) })),
+    inputs.map((output) => ({ script: refundPkScript, amount: BigInt(output.value) })),
     ctx.wallet.serverUnrollScript,
   )
 
-  const fundingTxids = [...new Set(funded.map((output) => output.txid))]
+  const fundingTxids = [...new Set(inputs.map((output) => output.txid))]
   const { txs: fundingTxs } = await ctx.wallet.indexerProvider.getVirtualTxs(fundingTxids)
   const fundingByTxid = new Map<string, Uint8Array>()
   for (const raw of fundingTxs) {
     const tx = Transaction.fromPSBT(base64.decode(raw))
     fundingByTxid.set(tx.id, tx.toBytes(true))
   }
-  funded.forEach((output, vin) => {
+  inputs.forEach((output, vin) => {
     const sourceTx = fundingByTxid.get(output.txid)
     if (!sourceTx) throw new Error(`indexer produced no virtual tx for ${output.txid}: cannot prove the refund prevout`)
     setArkPsbtField(arkTx, vin, PrevArkTxField, sourceTx)
   })
 
-  const assetPacket = refundAssetPacket(funded, 'per-input')
+  const assetPacket = refundAssetPacket(inputs, 'per-input')
   attachEmulatorPackets(arkTx, [
     EmulatorPacket.create(
-      funded.map((_, vin) => ({ vin, script: script.refundArkadeScript, witness: EMPTY_RAW_WITNESS })),
+      inputs.map((_, vin) => ({ vin, script: script.refundArkadeScript, witness: EMPTY_RAW_WITNESS })),
     ),
     ...(assetPacket ? [assetPacket] : []),
   ])
@@ -766,8 +898,7 @@ export const refundSwapScript = async (
   // which the SDK's identity wrapper specifically swallows.
   const signedArkTx = await ctx.identity.sign(arkTx)
   // The emulator verifies "non-arkd" signatures on checkpoints BEFORE it does
-  // its own arkd-side handshake — unlike claimSwapScript's two-phase flow
-  // (submit unsigned, sign the server's OWN co-signed checkpoints, finalize),
+  // its own arkd-side handshake —
   // this is a single submitTx call, so the receiver's checkpoint signature
   // has to be in place upfront. Each checkpoint carries exactly one relevant
   // input, index 0.
@@ -799,7 +930,7 @@ export const refundSwapScript = async (
   // forged response, and persisting it as the refund's txid would bury that.
   const returned = Transaction.fromPSBT(base64.decode(result.signedArkTx))
   if (returned.id !== arkTx.id) {
-    throw new Error(`emulator returned ark tx ${returned.id}, expected ${arkTx.id}`)
+    throw new Error(`emulator returned Arkade transaction ${returned.id}, expected ${arkTx.id}`)
   }
   return returned.id
 }
@@ -814,7 +945,7 @@ export const refundSwapScript = async (
  * the very party who benefits from withholding it.
  *
  * Because the leaf keeps the server and drops the covenant, this is an
- * ordinary two-phase Arkade submission — the same shape {@link claimSwapScript}
+ * ordinary arkd submission — the same shape {@link claimSwapScript}
  * uses — rather than the emulator round trip. Two consequences worth stating:
  *
  * - No emulator packets, so no ArkadeScript pins the destination. That is safe
@@ -841,40 +972,23 @@ export const refundWithoutReceiverSwapScript = async (
   refundPkScript: Uint8Array,
 ): Promise<string> => {
   if (funded.length === 0) throw new Error('nothing to refund: no funded outputs')
-
-  const { arkTx, checkpoints } = buildOffchainTx(
-    funded.map((output) => ({
+  const inputs = spendable(funded, 'refund')
+  const assetPacket = refundAssetPacket(inputs, 'aggregate')
+  return signAndSubmitOffchainTx({
+    identity: ctx.identity,
+    provider: ctx.wallet.arkProvider,
+    inputs: inputs.map((output) => ({
       txid: output.txid,
       vout: output.vout,
       value: output.value,
       tapLeafScript: script.refundWithoutReceiver(),
       tapTree: script.encode(),
     })),
-    [{ script: refundPkScript, amount: BigInt(totalValue(funded)) }],
-    ctx.wallet.serverUnrollScript,
-  )
-
-  // BEFORE signing: the packet changes the output set the signature covers.
-  const assetPacket = refundAssetPacket(funded, 'aggregate')
-  if (assetPacket) attachEmulatorPackets(arkTx, [assetPacket])
-
-  // No index list: every input spends the same leaf, so all are signed.
-  const signedArkTx = await ctx.identity.sign(arkTx)
-  const submitted = await ctx.wallet.arkProvider.submitTx(
-    base64.encode(signedArkTx.toPSBT()),
-    checkpoints.map((c) => base64.encode(c.toPSBT())),
-  )
-
-  assertSubmittedArkTxid(submitted, signedArkTx, 'refundWithoutReceiverSwapScript')
-  const matched = matchServerCheckpoints(submitted.signedCheckpointTxs, checkpoints, 'refundWithoutReceiverSwapScript')
-
-  const finalCheckpoints = await Promise.all(
-    matched.map(async ({ server }) => {
-      const signed = await ctx.identity.sign(server, [0])
-      return base64.encode(signed.toPSBT())
-    }),
-  )
-
-  await ctx.wallet.arkProvider.finalizeTx(submitted.arkTxid, finalCheckpoints)
-  return submitted.arkTxid
+    outputs: [
+      { script: refundPkScript, amount: BigInt(totalValue(inputs)) },
+      ...(assetPacket ? [Extension.create([assetPacket]).txOut()] : []),
+    ],
+    serverUnrollScript: ctx.wallet.serverUnrollScript,
+    verifyServerSignatures: { serverPubkey: script.vhtlcOptions.server },
+  })
 }

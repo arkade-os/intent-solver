@@ -45,6 +45,7 @@ const row: ReceiveSwapRow = {
   settleAttemptedAt: null,
   preimage: null,
   refundArkTxid: null,
+  unrolledRefund: null,
   failureReason: null,
   rfqId: null,
 }

@@ -21,6 +21,7 @@ import {
   evmSendDescriptor,
   evmReceiveDescriptor,
 } from '@arkade-os/solver-corridors-evm/corridors/evmCorridors.js'
+import { seedState } from './fixtures/seedState.js'
 
 const NOW = 1_800_000_000
 const TOKEN = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
@@ -97,15 +98,14 @@ const fundedSend = async () => {
   await sendStore.insertQuote(sendQuote())
   // The client's Arkade lockup is seen. No column records its value on this
   // direction, so the state IS the evidence.
-  await sendStore.transition('send-1', 'quoted', 'funded')
+  await seedState(sendStore, 'send-1', 'funded')
 }
 
 const fundedReceive = async () => {
   await receiveStore.insertQuote(receiveQuote())
   // `evm_lock_txid` is the CLIENT's ERC20 lock — exact evidence here, unlike
   // the send direction which has no column for the client's side at all.
-  await receiveStore.transition('send-1', 'quoted', 'awaiting_lock')
-  await receiveStore.transition('send-1', 'awaiting_lock', 'locked', { evm_lock_txid: `0x${'ab'.repeat(32)}` })
+  await seedState(receiveStore, 'send-1', 'locked', { evm_lock_txid: `0x${'ab'.repeat(32)}` })
 }
 
 describe('the EVM send leg: sats in, token out', () => {
@@ -136,7 +136,7 @@ describe('the EVM send leg: sats in, token out', () => {
    */
   it('reports a stuck row’s loss as the sats notional, never as a token amount', async () => {
     await sendStore.insertQuote(sendQuote())
-    await sendStore.transition('send-1', 'quoted', 'funded')
+    await seedState(sendStore, 'send-1', 'funded')
     await sendStore.fail('send-1', 'funded', 'the ERC20 lock could not be claimed')
     const [record] = (await evmSendReader(evmSendDescriptor(TOKEN_META), sendStore).economics!(WINDOW)).records
     expect(record!.state).toBe('stuck')

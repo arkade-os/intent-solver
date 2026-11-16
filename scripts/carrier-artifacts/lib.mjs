@@ -13,8 +13,8 @@ export const MANIFEST_PATH = `${VENDOR_DIR}/manifest.json`
 
 const TS_SDK = 'https://github.com/arkade-os/ts-sdk.git'
 const ARKADE_TAXI = 'https://github.com/ArkLabsHQ/arkade-taxi.git'
-const SDK_COMMIT = '3c369d3adb4fbcfd4e59f2650d0d439af49f432f'
-const TAXI_COMMIT = 'f27ae4b6238569ff496d11a05faba32344b55245'
+const SDK_COMMIT = '735e40b9c99c1c2ef01d75ccbcba1439e06450bf'
+const TAXI_COMMIT = '578bf66f9fccc0f50d21082c9adb7c2b9979c30a'
 
 // Every package whose resolution must come from a frozen archive, and the exact
 // source each was packed from. Moving to a new candidate is an edit HERE, so a
@@ -22,7 +22,6 @@ const TAXI_COMMIT = 'f27ae4b6238569ff496d11a05faba32344b55245'
 // manifest names any other commit.
 export const PINNED_SOURCES = {
   '@arkade-os/sdk': { repository: TS_SDK, commit: SDK_COMMIT, directory: 'packages/sdk' },
-  '@arkade-os/swap': { repository: TS_SDK, commit: SDK_COMMIT, directory: 'packages/swap' },
   '@arkade-taxi/covenant': { repository: ARKADE_TAXI, commit: TAXI_COMMIT, directory: 'packages/covenant' },
   '@arkade-taxi/protocol': { repository: ARKADE_TAXI, commit: TAXI_COMMIT, directory: 'packages/protocol' },
   '@arkade-taxi/client': { repository: ARKADE_TAXI, commit: TAXI_COMMIT, directory: 'packages/client' },
@@ -59,7 +58,8 @@ export function artifactLicense(manifest, sourceRoot) {
 export const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex')
 
 // Capabilities required from the frozen candidate rather than the registry build.
-export const CANDIDATE_SWAP_SYMBOL = 'buildOfferFillPlan'
+export const SWAP_VERSION = '0.1.6'
+export const SWAP_FILL_SYMBOL = 'buildOfferFillPlan'
 export const CANDIDATE_SDK_SYMBOL = 'SendDeadlineExceededError'
 export const CANDIDATE_TAXI_FILL_SYMBOL = 'TaxiClient'
 
@@ -137,14 +137,17 @@ export function assertInstalledPackages(fromFiles, artifacts, vendorRoot) {
       ...manifest.peerDependencies,
       ...manifest.optionalDependencies,
     }))
-      if (byName.has(name)) pending.push([from, name])
+      if (byName.has(name) || name === '@arkade-os/swap') pending.push([from, name])
   }
   for (const from of fromFiles) enqueue(from)
   while (pending.length) {
     const [from, name] = pending.pop()
     const root = packageRootFrom(from, name)
     if (seen.has(root)) continue
-    assertInstalledPackage(join(vendorRoot, byName.get(name).file), root)
+    const artifact = byName.get(name)
+    if (artifact) assertInstalledPackage(join(vendorRoot, artifact.file), root)
+    else if (readJson(join(root, 'package.json')).version !== SWAP_VERSION)
+      throw new Error(`${root}: expected published swap ${SWAP_VERSION}`)
     seen.add(root)
     enqueue(join(root, 'package.json'))
   }

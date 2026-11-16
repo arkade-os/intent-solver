@@ -11,11 +11,10 @@
  */
 import { diagnose, phaseOfStates, type AdminSwap } from '@arkade-os/solver-core/core/swapView.js'
 import type { CorridorDescriptor } from '@arkade-os/solver-core/core/corridorDescriptor.js'
-import { LN_SEND, LN_RECEIVE, ONCHAIN_SEND, ONCHAIN_RECEIVE } from './index.js'
+import { LN_SEND, LN_RECEIVE, ONCHAIN_SEND } from './index.js'
 import type { SendSwapRow } from '../db/swaps.js'
 import type { ReceiveSwapRow } from '../db/receiveSwaps.js'
 import type { OnchainSendSwapRow } from '../db/onchainSwaps.js'
-import type { OnchainReceiveSwapRow } from '../db/onchainReceiveSwaps.js'
 
 /**
  * The one deliberate exception to "state verbatim". The two SEND corridors
@@ -64,6 +63,3 @@ export const projectReceive = (row: ReceiveSwapRow): AdminSwap => project(LN_REC
 
 export const projectOnchainSend = (row: OnchainSendSwapRow): AdminSwap =>
   project(ONCHAIN_SEND, row, presentedState(row.state, row.refundOutcome), row.payoutSats)
-
-export const projectOnchainReceive = (row: OnchainReceiveSwapRow): AdminSwap =>
-  project(ONCHAIN_RECEIVE, row, row.state, row.payoutSats)

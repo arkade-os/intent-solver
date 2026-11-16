@@ -30,29 +30,16 @@
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
 import { BaseSwapStore, addColumns, numberOrNull, text, type RawRow, type StoreShape } from './baseSwapStore.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { LnReceiveMachine, type LnReceiveSwapState } from '../machines/lnReceive.js'
 
-export type ReceiveSwapState =
-  'quoted' | 'armed' | 'funded' | 'claimed' | 'settled' | 'refunding' | 'refunded' | 'refused' | 'stuck'
+export type ReceiveSwapState = LnReceiveSwapState
 
-export const NON_TERMINAL: readonly ReceiveSwapState[] = ['quoted', 'armed', 'funded', 'claimed', 'refunding']
+export const NON_TERMINAL: readonly ReceiveSwapState[] = LnReceiveMachine.live
 /** States in which the provider's OWN Arkade lockup may be funded and not yet made whole. */
-export const EXPOSED: readonly ReceiveSwapState[] = ['funded', 'claimed', 'refunding']
-
-const LEGAL_EDGES: Record<ReceiveSwapState, readonly ReceiveSwapState[]> = {
-  quoted: ['armed', 'refused'],
-  armed: ['funded', 'refused'],
-  funded: ['claimed', 'refunding', 'refunded', 'stuck'],
-  claimed: ['settled', 'stuck'],
-  refunding: ['refunded', 'claimed', 'stuck'],
-  settled: [],
-  refunded: [],
-  refused: [],
-  stuck: [],
-}
+export const EXPOSED: readonly ReceiveSwapState[] = LnReceiveMachine.exposed
 
 // `refund_locktime` is deliberately absent: it is fixed at insert and the
-// covenant's pkScript is derived from it, so no transition may move it. Same
-// as the sibling receive corridor's own set (`onchainReceiveSwaps.ts`).
+// covenant's pkScript is derived from it, so no transition may move it.
 const TRANSITION_COLUMNS = new Set([
   'htlc_expires_at',
   'arkade_lockup_txid',
@@ -77,6 +64,7 @@ const PATCH_COLUMNS = new Set([
   'settle_attempted_at',
   'arkade_lockup_value',
   'refund_ark_txid',
+  'unrolled_refund',
 ])
 
 export interface ReceiveSwapRow {
@@ -169,6 +157,8 @@ export interface ReceiveSwapRow {
   preimage: string | null
   /** Arkade txid of a covenant refund THIS SERVICE pushed for its own lockup. */
   refundArkTxid: string | null
+  /** JSON `UnrolledSpendRecord`: the L1 refund of a lockup the client unrolled. */
+  unrolledRefund: string | null
 
   failureReason: string | null
   /**
@@ -219,7 +209,8 @@ const RECEIVE_SWAP_COLUMNS = `
   rfq_id                        TEXT,
   fund_started_at               INTEGER,
   invoice_wallet_fingerprint    TEXT,
-  invoice_backend_name          TEXT
+  invoice_backend_name          TEXT,
+  unrolled_refund               TEXT
 `
 
 const SCHEMA = `
@@ -291,6 +282,7 @@ const toRow = (raw: Raw): ReceiveSwapRow => ({
   settleAttemptedAt: numberOrNull(raw.settle_attempted_at),
   preimage: text(raw.preimage),
   refundArkTxid: text(raw.refund_ark_txid),
+  unrolledRefund: text(raw.unrolled_refund),
   failureReason: text(raw.failure_reason),
   rfqId: text(raw.rfq_id),
 })
@@ -349,6 +341,7 @@ export const RECEIVE_SEARCH_COLUMNS: readonly string[] = [
   'payout_address',
   'arkade_lockup_txid',
   'refund_ark_txid',
+  'unrolled_refund',
   'rfq_id',
 ]
 
@@ -358,7 +351,7 @@ const SHAPE: StoreShape<ReceiveSwapRow, ReceiveSwapState> = {
   noun: 'receive swap',
   lifecycleLabel: 'receive swap lifecycle',
   searchColumns: RECEIVE_SEARCH_COLUMNS,
-  legalEdges: LEGAL_EDGES,
+  legalEdges: LnReceiveMachine.edges,
   transitionColumns: TRANSITION_COLUMNS,
   patchColumns: PATCH_COLUMNS,
   live: NON_TERMINAL,
@@ -395,6 +388,7 @@ export class ReceiveSwapStore extends BaseSwapStore<ReceiveSwapRow, ReceiveSwapS
       ['fund_started_at', 'INTEGER'],
       ['invoice_wallet_fingerprint', 'TEXT'],
       ['invoice_backend_name', 'TEXT'],
+      ['unrolled_refund', 'TEXT'],
     ])
   }
 

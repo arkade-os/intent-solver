@@ -216,7 +216,7 @@ const checkServing = (market: AssetMarketConfig): void => {
     )
   }
   if (!market.servesRfq) return
-  if (market.symbol === null) throw new Error('symbol is required on a market declared for RFQ: it is the env stem')
+  if (market.symbol === null) throw new Error('symbol is required on a market declared for RFQ: it names its corridors')
   // The refusal `assetRfqMarketsFrom` makes SILENTLY today. Still legal for OFFERS.
   if (market.base !== null && market.quote !== null) {
     throw new Error(

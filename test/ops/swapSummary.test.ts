@@ -41,7 +41,7 @@ describe('swap summary', () => {
         record('done'),
         record('done'),
         record('failed', { failureReason: 'no route' }),
-        record('failed', { failureReason: 'no route' }),
+        record('failed', { failureReason: 'no route — {"paymentId":"p1"}' }),
         record('failed', { state: 'stuck', failureReason: null }),
         record('failed', { inbound: leg(null), failureReason: 'lockup timeout' }),
         record('open', { state: 'funded' }),
@@ -49,15 +49,16 @@ describe('swap summary', () => {
       reader('lightning:BTC->arkade:BTC', []),
     ])
     expect(formatSwapSummary(summary)).toEqual([
-      'Swaps 2025-10-14 06:00 to 12:00 UTC',
-      'arkade:BTC->lightning:BTC: 2 fulfilled · 3 failed · 1 never funded',
-      '  failed: 2× no route · 1× stuck',
+      '*Swaps* 2025-10-14 06:00 to 12:00 UTC',
+      '• arkade:BTC → lightning:BTC: 2 fulfilled · 3 failed · 1 never funded',
+      '   ↳ 2× no route',
+      '   ↳ 1× stuck',
     ])
   })
 
   it('says so when nothing finished', async () => {
     expect(formatSwapSummary(await summarise([reader('a', [record('open')])]))).toEqual([
-      'Swaps 2025-10-14 06:00 to 12:00 UTC: none finished',
+      '*Swaps* 2025-10-14 06:00 to 12:00 UTC: none finished',
     ])
   })
 
@@ -68,25 +69,25 @@ describe('swap summary', () => {
       reader('c', [record('done')], true),
     ])
     expect(formatSwapSummary(summary)).toEqual([
-      'Swaps 2025-10-14 06:00 to 12:00 UTC',
-      'c: 1 fulfilled (partial: row cap reached)',
-      'a: unreadable (db locked), retried next report',
-      'not counted (no ledger): b',
+      '*Swaps* 2025-10-14 06:00 to 12:00 UTC',
+      '• c: 1 fulfilled (partial: row cap reached)',
+      '• a: unreadable (db locked), retried next report',
+      '• not counted (no ledger): b',
     ])
   })
 
   it('flags a capped read as partial even when nothing in it was counted', async () => {
     const [, line] = formatSwapSummary(await summarise([reader('c', [record('open')], true)]))
-    expect(line).toBe('c: none counted (partial: row cap reached)')
+    expect(line).toBe('• c: none counted (partial: row cap reached)')
   })
 
   it('reads corridors concurrently, so one that never answers does not blank the rest', async () => {
     const hung: SummaryReader = { descriptor: { pair: 'hung' }, economics: () => new Promise(() => {}) }
     const summary = await summarise([hung, reader('ok', [record('done')])], 10)
     expect(formatSwapSummary(summary)).toEqual([
-      'Swaps 2025-10-14 06:00 to 12:00 UTC',
-      'ok: 1 fulfilled',
-      'hung: unreadable (no answer within 10ms), retried next report',
+      '*Swaps* 2025-10-14 06:00 to 12:00 UTC',
+      '• ok: 1 fulfilled',
+      '• hung: unreadable (no answer within 10ms), retried next report',
     ])
   })
 
@@ -112,9 +113,9 @@ describe('swap summary', () => {
     expect(windows.ok!.map((w) => w.since)).toEqual([SINCE, UNTIL])
     expect(windows.flaky!.map((w) => w.since)).toEqual([SINCE, SINCE])
     expect(formatSwapSummary(second)).toEqual([
-      'Swaps 2025-10-14 06:00 to 13:00 UTC',
-      'ok: 1 fulfilled (since 2025-10-14 12:00)',
-      'flaky: 1 fulfilled',
+      '*Swaps* 2025-10-14 06:00 to 13:00 UTC',
+      '• ok: 1 fulfilled (since 2025-10-14 12:00)',
+      '• flaky: 1 fulfilled',
     ])
   })
 
@@ -122,11 +123,11 @@ describe('swap summary', () => {
     const reasons = ['a', 'b', 'c', 'd', 'e', 'f', 'g'].flatMap((r, i) =>
       Array.from({ length: 7 - i }, () => record('failed', { failureReason: r })),
     )
-    const [, , line] = formatSwapSummary(await summarise([reader('p', reasons)]))
-    expect(line).toBe('  failed: 7× a · 6× b · 5× c · 4× d · 3× e · +2 more')
-    const emoji = '🙂'.repeat(100)
+    const lines = formatSwapSummary(await summarise([reader('p', reasons)]))
+    expect(lines.slice(2)).toEqual(['7× a', '6× b', '5× c', '4× d', '3× e', '+2 more'].map((r) => `   ↳ ${r}`))
+    const emoji = '🙂'.repeat(150)
     const [, , only] = formatSwapSummary(await summarise([reader('p', [record('failed', { failureReason: emoji })])]))
-    expect(only).toBe(`  failed: 1× ${'🙂'.repeat(79)}…`)
+    expect(only).toBe(`   ↳ 1× ${'🙂'.repeat(119)}…`)
   })
 
   it('does not start a second read for a corridor whose previous one is still running', async () => {

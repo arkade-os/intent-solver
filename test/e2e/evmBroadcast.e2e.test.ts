@@ -46,6 +46,7 @@ import {
   abiCall,
   evmChainReady,
   evmRpc,
+  pinAnvilClock,
   evmRpcUrl,
   fundWithWeth,
   installContracts,
@@ -102,6 +103,7 @@ beforeAll(async () => {
   // THE TRANSPORT UNDER TEST, used for every read and write below rather than
   // the harness's helper - so the whole file is one more exercise of it.
   rpc = createJsonRpc({ url: evmRpcUrl() })
+  await pinAnvilClock(rpc)
   chainId = Number(BigInt((await rpc('eth_chainId', [])) as string))
   backend = createEvmHtlcBackend({ contractAddress: SWAP_ADDRESS, rpc })
   await installContracts(evmRpc(), SWAP_RUNTIME, WETH_RUNTIME)

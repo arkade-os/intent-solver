@@ -184,14 +184,14 @@ ASSUME BreakDeadlineOrder \/ MarginHolds
 
 VARIABLES
     evmHeight,     \* the EVM chain's block height - the client's timeout clock
-    arkFund,       \* [Swaps -> {"none","funded"}] the solver's lockup visible
+    arkadeFund,       \* [Swaps -> {"none","funded"}] the solver's lockup visible
     evm,           \* [Swaps -> {"none","locked","solverClaimed","clientRefunded"}]
     evmConfirmed,  \* [Swaps -> BOOLEAN] the depth+age probe passed
     claimSent,     \* [Swaps -> BOOLEAN] a claim broadcast is in the mempool
     fundSends      \* [Swaps -> 0..2] fund broadcasts issued; the (B1) counter
 
-LrVars == << evmHeight, arkFund, evm, evmConfirmed, claimSent, fundSends >>
-vars   == << clock, st, loc, conf, serverUp, evmHeight, arkFund, evm,
+LrVars == << evmHeight, arkadeFund, evm, evmConfirmed, claimSent, fundSends >>
+vars   == << clock, st, loc, conf, serverUp, evmHeight, arkadeFund, evm,
              evmConfirmed, claimSent, fundSends >>
 
 (***************************************************************************)
@@ -240,7 +240,7 @@ AllSt == Row
 (* its own sats back (its refund won the covenant).  NoNetLoss: the client *)
 (* may not hold BOTH the sats and its own ERC20 back.                      *)
 (***************************************************************************)
-PaidOut(s)   == arkFund[s] = "funded"
+PaidOut(s)   == arkadeFund[s] = "funded"
 Collected(s) == evm[s] = "solverClaimed" \/ conf[s] = { "solverRefund" }
 NoNetLoss  == \A s \in Swaps : ~(conf[s] = { "clientClaim" }
                                  /\ evm[s] = "clientRefunded")
@@ -249,7 +249,7 @@ NoDoubleFund == \A s \in Swaps : fundSends[s] <= 1
 
 TypeOK == /\ TypeOKCore(Row)
           /\ evmHeight \in 0..MaxHeight
-          /\ arkFund \in [Swaps -> { "none", "funded" }]
+          /\ arkadeFund \in [Swaps -> { "none", "funded" }]
           /\ evm \in [Swaps -> { "none", "locked", "solverClaimed",
                                  "clientRefunded" }]
           /\ evmConfirmed \in [Swaps -> BOOLEAN]
@@ -308,7 +308,7 @@ Urgent(s) ==
     \/ (st[s] \in { "quoted", "awaiting_lock" } /\ evm[s] = "locked"
         /\ evmConfirmed[s] /\ ~TooClose /\ ~QuoteStale)        \* fund now
     \/ st[s] = "locked"                                        \* planner funds unconditionally
-    \/ (st[s] = "funding_arkade" /\ arkFund[s] = "funded")     \* advance now
+    \/ (st[s] = "funding_arkade" /\ arkadeFund[s] = "funded")     \* advance now
     \/ (st[s] = "awaiting_claim" /\ RefundOpen
         /\ conf[s] = {})                                       \* refund now
     \* The refund SPEND in flight holds both clocks: the (R1) margin is the
@@ -348,7 +348,7 @@ HeightTick ==
         => ~(\E w \in Workers : loc[w].phase = "sentFund"))
     /\ evmHeight' = evmHeight + 1
     /\ UNCHANGED << clock, st, loc, conf, serverUp >>
-    /\ UNCHANGED << arkFund, evm, evmConfirmed, claimSent, fundSends >>
+    /\ UNCHANGED << arkadeFund, evm, evmConfirmed, claimSent, fundSends >>
 
 Tick ==
     /\ TickCore
@@ -371,7 +371,7 @@ ClientLocksEvm(s) ==
     /\ ~HeightUp
     /\ evm' = [evm EXCEPT ![s] = "locked"]
     /\ UNCHANGED << clock, st, loc, conf, serverUp, evmHeight >>
-    /\ UNCHANGED << arkFund, evmConfirmed, claimSent, fundSends >>
+    /\ UNCHANGED << arkadeFund, evmConfirmed, claimSent, fundSends >>
 
 \* The depth+age probe passes (RULE 1): provenDepth measured, never fed
 \* back from config (orchestrator's observe(), the provenDepth probe).
@@ -380,7 +380,7 @@ ConfirmEvmLock(s) ==
     /\ ~evmConfirmed[s]
     /\ evmConfirmed' = [evmConfirmed EXCEPT ![s] = TRUE]
     /\ UNCHANGED << clock, st, loc, conf, serverUp, evmHeight >>
-    /\ UNCHANGED << arkFund, evm, claimSent, fundSends >>
+    /\ UNCHANGED << arkadeFund, evm, claimSent, fundSends >>
 
 \* The client takes its ERC20 back, once its own timeout height opens.
 \* The contract deletes the lock; a solver claim after this reverts.
@@ -389,17 +389,17 @@ ClientRefundsEvm(s) ==
     /\ HeightUp
     /\ evm' = [evm EXCEPT ![s] = "clientRefunded"]
     /\ UNCHANGED << clock, st, loc, conf, serverUp, evmHeight >>
-    /\ UNCHANGED << arkFund, evmConfirmed, claimSent, fundSends >>
+    /\ UNCHANGED << arkadeFund, evmConfirmed, claimSent, fundSends >>
 
 \* The client claims the Arkade lockup - the collaborative spend, server
 \* co-signed, and THE PREIMAGE REVEAL.  The contested output: SwapCore's
 \* conf, at most one winner.
 ClientClaimsArkade(s) ==
-    /\ arkFund[s] = "funded"
+    /\ arkadeFund[s] = "funded"
     /\ serverUp
     /\ SpendAccepted(s, "clientClaim")
     /\ UNCHANGED << clock, st, loc, serverUp, evmHeight >>
-    /\ UNCHANGED << arkFund, evm, evmConfirmed, claimSent, fundSends >>
+    /\ UNCHANGED << arkadeFund, evm, evmConfirmed, claimSent, fundSends >>
 
 \* The miner lands the broadcast claim: the solver takes the ERC20.  An
 \* environment step, as in EvmSend - the mempool owes no worker anything.
@@ -410,7 +410,7 @@ ClaimMines(s) ==
     /\ evm[s] = "locked"
     /\ evm' = [evm EXCEPT ![s] = "solverClaimed"]
     /\ UNCHANGED << clock, st, loc, conf, serverUp, evmHeight >>
-    /\ UNCHANGED << arkFund, evmConfirmed, claimSent, fundSends >>
+    /\ UNCHANGED << arkadeFund, evmConfirmed, claimSent, fundSends >>
 
 (***************************************************************************)
 (* WORKER ACTIONS.  The observation snapshot is one ReadSwap; the planner  *)
@@ -427,7 +427,7 @@ ReadSwap(w, s) ==
              [] st[s] \in { "quoted", "awaiting_lock" } ->
                     IF evm[s] = "locked" THEN "locked" ELSE "empty"
              [] st[s] = "funding_arkade" ->
-                    IF arkFund[s] = "funded" THEN "funded" ELSE "clear"
+                    IF arkadeFund[s] = "funded" THEN "funded" ELSE "clear"
              [] OTHER ->
                     IF PReadable(s) THEN "revealed" ELSE "clear")
     /\ UNCHANGED LrVars
@@ -503,15 +503,15 @@ FundArkade(w, s) ==
        \/ /\ CasLost(s, loc[w].seen)
           /\ Park(w)
     /\ UNCHANGED << clock, conf, serverUp >>
-    /\ UNCHANGED << evmHeight, arkFund, evm, evmConfirmed, claimSent >>
+    /\ UNCHANGED << evmHeight, arkadeFund, evm, evmConfirmed, claimSent >>
 
 \* The fund broadcast lands: the solver's sats sit in the covenant.  THE
 \* irreversible act of this corridor.  Arkade acceptance is final (the
 \* server co-signs; there is no mempool), so the landing is one step.
-ArkFundLands(w, s) ==
+ArkadeFundLands(w, s) ==
     /\ At(w, s, "sentFund")
-    /\ arkFund[s] = "none"
-    /\ arkFund' = [arkFund EXCEPT ![s] = "funded"]
+    /\ arkadeFund[s] = "none"
+    /\ arkadeFund' = [arkadeFund EXCEPT ![s] = "funded"]
     /\ IF FundCommitFirst
        THEN fundSends' = [fundSends EXCEPT ![s] = fundSends[s] + 1]
        ELSE UNCHANGED fundSends
@@ -560,7 +560,7 @@ ClaimBroadcast(w, s) ==
     /\ ~claimSent[s]
     /\ claimSent' = [claimSent EXCEPT ![s] = TRUE]
     /\ UNCHANGED << clock, st, loc, conf, serverUp, evmHeight >>
-    /\ UNCHANGED << arkFund, evm, evmConfirmed, fundSends >>
+    /\ UNCHANGED << arkadeFund, evm, evmConfirmed, fundSends >>
 
 \* The recording CAS, and (B3) its receipt.  SHIPPED (plan's record_claim
 \* arm): the row records `claimed` only once the claim is MINED, and the
@@ -580,7 +580,7 @@ RecordClaimed(w, s) ==
        \/ CasLost(s, "claiming")
     /\ Park(w)
     /\ UNCHANGED << clock, conf, serverUp, evmHeight >>
-    /\ UNCHANGED << arkFund, evm, evmConfirmed, claimSent, fundSends >>
+    /\ UNCHANGED << arkadeFund, evm, evmConfirmed, claimSent, fundSends >>
 
 \* refund_arkade: no preimage and the Arkade window has closed
 \* (plan, case awaiting_claim).  The CAS, then the spend, then the
@@ -588,7 +588,7 @@ RecordClaimed(w, s) ==
 \* RefundSpendAtomic = FALSE is that shipped
 \* split.  What used to make the split cost money was that nothing re-drove
 \* refunding_arkade, so a crash between the CAS and the spend stranded the
-\* row with the covenant unspent (F4).  RedriveArkRefund below is the fix;
+\* row with the covenant unspent (F4).  RedriveArkadeRefund below is the fix;
 \* this action is only the first attempt.
 RefundArkade(w, s) ==
     /\ Saw(w, s, "awaiting_claim")
@@ -617,7 +617,7 @@ RefundArkade(w, s) ==
 \* output; if the client's claim landed first the call throws and the row
 \* parks in refunding_arkade.  Arkade acceptance is final, so the spend IS
 \* the refund.
-SubmitArkRefund(w, s) ==
+SubmitArkadeRefund(w, s) ==
     /\ At(w, s, "sentRefund")
     /\ ~RefundSpendAtomic
     /\ IF /\ serverUp
@@ -627,7 +627,7 @@ SubmitArkRefund(w, s) ==
        ELSE /\ Park(w)
             /\ UNCHANGED conf
     /\ UNCHANGED << clock, st, serverUp, evmHeight >>
-    /\ UNCHANGED << arkFund, evm, evmConfirmed, claimSent, fundSends >>
+    /\ UNCHANGED << arkadeFund, evm, evmConfirmed, claimSent, fundSends >>
 
 \* (B5) THE RE-DRIVE, and what closes F4.  planEvmReceive returns
 \* refund_arkade from refunding_arkade whenever the lockup is still funded
@@ -638,7 +638,7 @@ SubmitArkRefund(w, s) ==
 \* is the unspent covenant the shipped planner sees as `arkadeLockupFunded`,
 \* and `res = "clear"` keeps the pre-switch rule's precedence - a preimage
 \* sends the row to the claim instead, exactly as from every other state.
-RedriveArkRefund(w, s) ==
+RedriveArkadeRefund(w, s) ==
     /\ RefundRedrivenWhileUnspent
     /\ Saw(w, s, "refunding_arkade")
     /\ loc[w].res = "clear"
@@ -660,7 +660,7 @@ RecordRefunded(w, s) ==
        \/ CasLost(s, "refunding_arkade")
     /\ Park(w)
     /\ UNCHANGED << clock, conf, serverUp, evmHeight >>
-    /\ UNCHANGED << arkFund, evm, evmConfirmed, claimSent, fundSends >>
+    /\ UNCHANGED << arkadeFund, evm, evmConfirmed, claimSent, fundSends >>
 
 \* THE PRE-SWITCH RULE, late arm (RULE 4): P seen at or after the client's
 \* timeout height - the ERC20 may already be client-refunded, so the row
@@ -689,12 +689,12 @@ DriveRow(w, s) ==
        InsertQuote(w, s)   \/ RefuseQuoted(w, s)
     \/ FundArkade(w, s)    \/ AwaitClaim(w, s)
     \/ ClaimEvm(w, s)      \/ StickLate(w, s)
-    \/ RefundArkade(w, s)  \/ RedriveArkRefund(w, s)
+    \/ RefundArkade(w, s)  \/ RedriveArkadeRefund(w, s)
 
 PushChain(w, s) ==
-       ArkFundLands(w, s)
+       ArkadeFundLands(w, s)
     \/ ClaimBroadcast(w, s) \/ RecordClaimed(w, s)
-    \/ SubmitArkRefund(w, s) \/ RecordRefunded(w, s)
+    \/ SubmitArkadeRefund(w, s) \/ RecordRefunded(w, s)
 
 Env(s) ==
        ClientLocksEvm(s) \/ ConfirmEvmLock(s) \/ ClientRefundsEvm(s)
@@ -710,7 +710,7 @@ Next ==
 Init ==
     /\ InitCore("none")
     /\ evmHeight = 0
-    /\ arkFund = [ s \in Swaps |-> "none" ]
+    /\ arkadeFund = [ s \in Swaps |-> "none" ]
     /\ evm = [ s \in Swaps |-> "none" ]
     /\ evmConfirmed = [ s \in Swaps |-> FALSE ]
     /\ claimSent = [ s \in Swaps |-> FALSE ]
@@ -895,7 +895,7 @@ ERSpendKinds == { "clientClaim", "solverRefund" }
 (*                                                                         *)
 (* KNOWN-VACUOUS IN THE GREEN CFG (coverage run, -coverage 1):             *)
 (*                                                                         *)
-(*   SubmitArkRefund  fires 0:0 - by construction: it is gated on          *)
+(*   SubmitArkadeRefund  fires 0:0 - by construction: it is gated on          *)
 (*     ~RefundSpendAtomic and the green cfg sets the fold.  The mutation   *)
 (*     EvmReceive_RefundStrand.cfg exercises it.                           *)
 (*   GiveUp           fires 0:N - enabled often, but every GiveUp          *)

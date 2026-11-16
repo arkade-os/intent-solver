@@ -2,15 +2,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RestArkProvider, RestIndexerProvider } from '@arkade-os/sdk'
 import {
   SharedSyncIndexerProvider,
-  TimedArkProvider,
+  TimedArkadeProvider,
   TimedIndexerProvider,
   sendPhaseTimings,
   withProviderTimingScope,
 } from '@arkade-os/solver-arkade/arkade/latencyProviders.js'
+import { setLatencyDiagnostics } from '@arkade-os/solver-core/util/diagnostics.js'
 
 afterEach(() => {
   vi.restoreAllMocks()
-  vi.unstubAllEnvs()
+  setLatencyDiagnostics(false)
 })
 
 describe('latency providers', () => {
@@ -20,7 +21,7 @@ describe('latency providers', () => {
     const output = vi.spyOn(console, 'log').mockImplementation(() => {})
     const query = { scripts: ['sensitive-script'], pageIndex: 0, pageSize: 500 }
 
-    vi.stubEnv('SOLVER_LATENCY_DIAGNOSTICS', '1')
+    setLatencyDiagnostics(true)
     await expect(
       withProviderTimingScope({ fundRef: 'swap-ref' }, () =>
         new TimedIndexerProvider('http://localhost').getVtxos(query),
@@ -41,9 +42,9 @@ describe('latency providers', () => {
     const failure = new Error('submission response lost')
     vi.spyOn(RestArkProvider.prototype, 'submitTx').mockRejectedValue(failure)
     const output = vi.spyOn(console, 'log').mockImplementation(() => {})
-    const provider = new TimedArkProvider('http://localhost')
+    const provider = new TimedArkadeProvider('http://localhost')
 
-    vi.stubEnv('SOLVER_LATENCY_DIAGNOSTICS', '1')
+    setLatencyDiagnostics(true)
     await expect(
       withProviderTimingScope({ fundRef: 'swap-ref' }, () => provider.submitTx('signed-transaction', [])),
     ).rejects.toBe(failure)
@@ -59,9 +60,9 @@ describe('latency providers', () => {
     })
     vi.spyOn(RestArkProvider.prototype, 'finalizeTx').mockResolvedValue(undefined)
     const output = vi.spyOn(console, 'log').mockImplementation(() => {})
-    const provider = new TimedArkProvider('http://localhost')
+    const provider = new TimedArkadeProvider('http://localhost')
     const scope = { fundRef: 'swap-ref' }
-    vi.stubEnv('SOLVER_LATENCY_DIAGNOSTICS', '1')
+    setLatencyDiagnostics(true)
 
     const started = performance.now()
     await withProviderTimingScope(scope, async () => {
@@ -73,7 +74,7 @@ describe('latency providers', () => {
     expect(phases.submitMs).toBeGreaterThanOrEqual(0)
     expect(phases.finalizeMs).toBeGreaterThanOrEqual(0)
     expect(phases.afterFinalizeMs).toBeGreaterThanOrEqual(0)
-    expect(output.mock.calls.some((call) => call.join(' ').includes('ark_finalize_timing'))).toBe(true)
+    expect(output.mock.calls.some((call) => call.join(' ').includes('arkade_finalize_timing'))).toBe(true)
     expect(output.mock.calls.at(-1)?.join(' ')).toContain('"fundRef":"swap-ref"')
   })
 })

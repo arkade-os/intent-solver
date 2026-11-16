@@ -22,6 +22,7 @@
  */
 
 import { beforeAll, describe, expect, it } from 'vitest'
+import { asTimelockHeight } from '@arkade-os/solver-core/ports/evm.js'
 import { hex } from '@scure/base'
 import { EvmSendSwapService } from '@arkade-os/solver-corridors-evm/send/evmOrchestrator.js'
 import { EvmSendSwapStore } from '@arkade-os/solver-corridors-evm/db/evmSendSwaps.js'
@@ -65,6 +66,7 @@ beforeAll(async () => {
       throw new Error('a quote must not build a lock')
     }) as never,
     blockHeight: async () => 20_000_000,
+    timelockHeight: async () => asTimelockHeight(20_000_000),
     arkade: ops,
     // Wide, so a shared regtest wallet's other rows never refuse this.
     solverEvmAddress: new Uint8Array(20).fill(0x42),
@@ -91,6 +93,7 @@ beforeAll(async () => {
       minConfirmations: 12,
       minAgeSeconds: 780,
       cadence: { fastestSecondsPerBlock: 12, slowestSecondsPerBlock: 15 },
+      timelockCadence: { fastestSecondsPerBlock: 12, slowestSecondsPerBlock: 15 },
       quoteValiditySeconds: 60,
     },
   })

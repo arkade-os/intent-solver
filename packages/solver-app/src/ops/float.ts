@@ -47,9 +47,13 @@ import {
   runVtxoLifecycle,
   LOCKUP_CONTRACT_TYPE,
   RENEWAL_THRESHOLD_MS,
+  type BlockedLockupOutput,
   type LockupDeadline,
   type VtxoLifecycleReport,
 } from '@arkade-os/solver-arkade/arkade/vtxoLifecycle.js'
+import type { SweptLockupRefund, SweptRefundDecision } from '@arkade-os/solver-arkade/arkade/sweptLockupRefund.js'
+import type { SendSwapRow } from '@arkade-os/solver-corridors/db/swaps.js'
+import { paymentVerdict } from './paymentVerdict.js'
 import type { ReleaseReservation } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import { poolTarget } from '@arkade-os/solver-arkade/arkade/vtxoPool.js'
 import { pinInputs, poolPlan, resplitFloat } from './pool.js'
@@ -59,25 +63,20 @@ import { planBoardingSettle } from '@arkade-os/solver-arkade/arkade/boardingSett
 import type { Services } from './services.js'
 
 export const settleReservedRenewal = async (arkade: ArkadeContext, params: SettleParams): Promise<string> => {
+  const repository = arkade.wallet.intentRepository
+  if (!repository) throw new Error('renewal requires a durable batch registration repository')
+  const locked = new Set((await repository.getLockedVtxoOutpoints()).map((coin) => `${coin.txid}:${coin.vout}`))
   const reserved = arkade.reservations.reserved()
-  if (params.inputs.some((coin) => reserved.has(`${coin.txid}:${coin.vout}`))) {
+  if (
+    params.inputs.some((coin) => reserved.has(`${coin.txid}:${coin.vout}`) || locked.has(`${coin.txid}:${coin.vout}`))
+  ) {
     throw new Error('renewal input is reserved by another operation')
   }
   const release = arkade.reservations.reserve(params.inputs)
-  let preparing = false
-  let registrationAttempted = false
   try {
-    const txid = await arkade.wallet.settle(params, undefined, {
-      onPhase: (phase) => {
-        if (phase === 'preparing') preparing = true
-        if (phase === 'registration_attempt') registrationAttempted = true
-      },
-    })
+    return await arkade.wallet.settle(params)
+  } finally {
     release()
-    return txid
-  } catch (error) {
-    if (preparing && !registrationAttempted) release()
-    throw error
   }
 }
 
@@ -103,15 +102,18 @@ export const lockupDeadlinesOf = async (services: Services): Promise<readonly Lo
   // The READER set, deliberately — never `services.corridors`. That one holds
   // only corridors with a live SERVICE, and a corridor an operator switched off
   // still has funded lockups whose deadlines this guard exists to respect.
-  const rows = await liveLockupRows(services.readers)
+  const [rows, solverKey, manager] = await Promise.all([
+    liveLockupRows(services.readers),
+    services.arkade.identity.xOnlyPublicKey(),
+    services.arkade.wallet.getContractManager(),
+  ])
   // Both sides of this comparison are written by the same `hex.encode`, so it
   // is an exact match rather than a normalised one. A send leg's value comes
   // from the trader over the wire and could arrive in any case, but a
   // mismatch there yields `false` — which is already the right answer for a
   // send leg — so case can only ever confirm the correct outcome, never
   // invert it.
-  const solverPubkey = hex.encode(await services.arkade.identity.xOnlyPublicKey())
-  const manager = await services.arkade.wallet.getContractManager()
+  const solverPubkey = hex.encode(solverKey)
   // `getContracts`, never `getContractsWithVtxos`: that one re-syncs against
   // the indexer (every call, with `vtxoSyncMaxAgeMs` unset) and rethrows a
   // non-retryable answer. Only the stored params are read here, already local.
@@ -171,6 +173,93 @@ const migrationDue = (failed: boolean): boolean => {
 }
 
 /**
+ * A swept refund is a BATCH ROUND, minutes of a queued pass that also renews
+ * and recovers, so one script failing every pass delays both. Shares
+ * {@link migrationClock}, this module's one seam for both throttles.
+ */
+const SWEPT_REFUND_RETRY_MS = 5 * 60_000
+const SWEPT_REFUND_RETRY_MAX_MS = 2 * 60 * 60_000
+const sweptRefundThrottle = new Map<string, { lastFailure: number; consecutiveFailures: number }>()
+
+export const resetSweptRefundThrottle = (): void => sweptRefundThrottle.clear()
+
+const sweptRefundDue = (script: string): boolean => {
+  const held = sweptRefundThrottle.get(script)
+  if (!held) return true
+  const backoff = Math.min(SWEPT_REFUND_RETRY_MS * 2 ** (held.consecutiveFailures - 1), SWEPT_REFUND_RETRY_MAX_MS)
+  return migrationClock.nowMs() - held.lastFailure >= backoff
+}
+
+const sweptRefundFailed = (script: string): void => {
+  const held = sweptRefundThrottle.get(script)
+  sweptRefundThrottle.set(script, {
+    lastFailure: migrationClock.nowMs(),
+    consecutiveFailures: (held?.consecutiveFailures ?? 0) + 1,
+  })
+}
+
+const sweptRefundDecision =
+  (services: Services) =>
+  async (row: SendSwapRow): Promise<SweptRefundDecision> => {
+    const verdict = await paymentVerdict(services, row)
+    const evidence = JSON.stringify(verdict)
+    if (verdict.verdict === 'not-paid-refund-is-safe') {
+      return { refund: true, reason: `swept lockup refunded: the Lightning payment never landed — ${evidence}` }
+    }
+    return { refund: false, why: evidence }
+  }
+
+/**
+ * THIS IS WHAT UN-WEDGES THE GUARD: a not-ours lockup never matures out of the
+ * recoverable set, so only spending it clears one. Asks each send corridor in
+ * turn; one that does not own the script answers null.
+ */
+const refundBlockingSweptLockups = async (
+  services: Services,
+  blocked: readonly BlockedLockupOutput[],
+  note: (line: string) => void,
+): Promise<void> => {
+  // NOT-OURS only: an immature lockup is ours and its clock does clear it, so
+  // refunding one would rob a swap still able to settle.
+  const scripts = [...new Set(blocked.filter((output) => output.notOurs).map((output) => output.script))]
+  const decide = sweptRefundDecision(services)
+  for (const script of scripts) {
+    if (!sweptRefundDue(script)) continue
+    const attempts: (() => Promise<SweptLockupRefund>)[] = [
+      ...(services.service ? [() => services.service!.refundSweptLockup(script, decide)] : []),
+      ...(services.onchainService ? [() => services.onchainService!.refundSweptLockup(script)] : []),
+      ...(services.evmSendService ? [() => services.evmSendService!.refundSweptLockup(script)] : []),
+    ]
+    try {
+      let outcome: SweptLockupRefund = null
+      for (const attempt of attempts) {
+        outcome = await attempt()
+        if (outcome) break
+      }
+      if (!outcome) {
+        note(`swept lockup at ${script} blocks recovery and no send swap of ours owns it`)
+        continue
+      }
+      if ('txid' in outcome) {
+        sweptRefundThrottle.delete(script)
+        log(
+          `refunded swept lockup at ${script} for swap ${outcome.swapId} in ${outcome.txid}`,
+          outcome.closedFrom === undefined ? '' : `(closed from ${outcome.closedFrom})`,
+        )
+        continue
+      }
+      note(
+        `swept lockup at ${script} blocks recovery and is held by send swap ${outcome.swapId} ` +
+          `(${outcome.heldInState})${outcome.why === undefined ? '' : `: ${outcome.why}`}`,
+      )
+    } catch (error) {
+      sweptRefundFailed(script)
+      note(`swept refund of ${script} failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+}
+
+/**
  * One lifecycle pass — renew, then recover — against the live wallet.
  *
  * Nothing here throws: {@link runVtxoLifecycle} collects failures into its
@@ -215,8 +304,10 @@ const floatLifecycle = async (services: Services): Promise<VtxoLifecycleReport> 
     // Pinning the active signer's coins too would hold every funding off for the call.
     let release: ReleaseReservation | null = null
     try {
+      const manager = await wallet.getContractManager()
+      await manager.reconcilePendingBatchRegistrations?.()
       const [contracts, info] = await Promise.all([
-        (await wallet.getContractManager()).getContractsWithVtxos({ type: ['default', 'delegate'] }),
+        manager.getContractsWithVtxos({ type: ['default', 'delegate'] }),
         wallet.arkProvider.getInfo(),
       ])
       const signers = signerSetFromInfo(info)
@@ -281,15 +372,8 @@ const floatLifecycle = async (services: Services): Promise<VtxoLifecycleReport> 
         // reads the ledger two network calls before selection is final, and a funding
         // can pin a coin in between. The renewal yields: a failed funding is a dead
         // swap, a deferred renewal one coin closer to expiry.
-        settle: async (inputs, outputs) => {
-          const release = pinInputs(services, inputs)
-          if (release === null) throw new Error('inputs pinned by a funding since selection')
-          try {
-            return await wallet.settle({ inputs: [...inputs], outputs: [...outputs] })
-          } finally {
-            release()
-          }
-        },
+        settle: (inputs, outputs) =>
+          settleReservedRenewal(services.arkade, { inputs: [...inputs], outputs: [...outputs] }),
         // The shape a renewal should carve its proceeds into, so the float
         // comes back able to fund several swaps at once rather than one.
         // Same target `pool`/`mintPool` work from, so the two cannot drift.
@@ -331,6 +415,17 @@ const floatLifecycle = async (services: Services): Promise<VtxoLifecycleReport> 
     nowSeconds,
   })
 
+  // Whatever this clears is recovered on the NEXT pass: the batch has not
+  // confirmed yet, and re-reading the set here would double the pass's cost.
+  const reconciled: string[] = []
+  if (report.recoveryBlockedBy && report.recoveryBlockedBy.length > 0) {
+    try {
+      await refundBlockingSweptLockups(services, report.recoveryBlockedBy, (line) => reconciled.push(line))
+    } catch (error) {
+      reconciled.push(`swept refund pass failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
   // Folded in rather than returned separately: `failures` is already the one
   // place a caller looks, and a migration problem is a float problem. The
   // migrated count rides the same report so the watch loop logs it and the
@@ -342,7 +437,7 @@ const floatLifecycle = async (services: Services): Promise<VtxoLifecycleReport> 
     ...report,
     boarded: boarding.txid,
     migrated: migration.migrated,
-    failures: [...migration.failures, ...boarding.failures, ...report.failures, ...renewalWarnings],
+    failures: [...migration.failures, ...boarding.failures, ...report.failures, ...renewalWarnings, ...reconciled],
   }
 }
 
@@ -357,9 +452,11 @@ const settleBoardedSats = async (services: Services, warn: (message: string) => 
   if (utxos.length === 0) return null
 
   const vtxoManager = await wallet.getVtxoManager()
-  const expired = await vtxoManager.getExpiredBoardingUtxos()
-  const info = await wallet.arkProvider.getInfo()
-  const address = await wallet.getAddress()
+  const [expired, info, address] = await Promise.all([
+    vtxoManager.getExpiredBoardingUtxos(),
+    wallet.arkProvider.getInfo(),
+    wallet.getAddress(),
+  ])
 
   const plan = planBoardingSettle({
     boarding: utxos,
@@ -388,9 +485,10 @@ const settleBoardedSats = async (services: Services, warn: (message: string) => 
 }
 
 /** Why an automatic mint did not spend, when it declined to. */
-export type AutoMintSkip = 'disabled' | 'shape_is_fine'
+export type AutoMintSkip = string
 
-export type AutoMintOutcome = { minted: false; skipped: AutoMintSkip } | { minted: true; result: unknown }
+export type AutoMintOutcome =
+  { minted: false; skipped: AutoMintSkip } | { minted: false; refused: string } | { minted: true; result: unknown }
 
 /**
  * Reshape the float only when its SHAPE needs it — the automatic half of minting.
@@ -416,5 +514,10 @@ export const maybeMintPool = async (
   // swaps; `reason` says why when it is. Either way there is nothing to spend
   // a fee on, and this is the ordinary answer rather than a failure.
   if (plan.outputs.length === 0) return { minted: false, skipped: 'shape_is_fine' }
-  return { minted: true, result: await deps.mint(services) }
+  const result = await deps.mint(services)
+  if (result && typeof result === 'object') {
+    if ('refused' in result && typeof result.refused === 'string') return { minted: false, refused: result.refused }
+    if ('skipped' in result && typeof result.skipped === 'string') return { minted: false, skipped: result.skipped }
+  }
+  return { minted: true, result }
 }

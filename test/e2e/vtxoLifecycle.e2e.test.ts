@@ -304,9 +304,8 @@ describe('e2e vtxo lifecycle — the solver’s own float', () => {
       const balance = await arkade.ctx.wallet.getBalance()
       await expect(settleReservedRenewal(arkade.ctx, renewal!)).rejects.toBeInstanceOf(Error)
       expect(await arkade.ctx.wallet.getBalance()).toEqual(balance)
-      expect(arkade.ctx.reservations.reserved()).toEqual(
-        new Set(renewal!.inputs.map((coin) => `${coin.txid}:${coin.vout}`)),
-      )
+      expect(arkade.ctx.reservations.reserved().size).toBe(0)
+      expect(await arkade.ctx.wallet.intentRepository!.getLockedVtxoOutpoints()).toEqual([])
     },
     SWAP_TIMEOUT_MS,
   )

@@ -34,7 +34,7 @@ export interface TaxiCarrierFillComposition {
   /** The two `Wallet` members are the conflict spend's, read only once one is due. */
   wallet: IWallet & Pick<Wallet, 'arkProvider' | 'serverUnrollScript'>
   identity: Identity
-  arkServerUrl: string
+  operatorUrl: string
   dustSats: bigint
   offerHex: (row: AssetRfqSwapRow) => string
   /** Where a fill pays this solver back — its own address, never the quote's. */
@@ -93,7 +93,7 @@ export const completeTaxiReceiveCarrier = (
       solverKeys: deps.solverKeys,
       serverKey: deps.serverKey,
       fill: {
-        rebuild: createCarrierFillRebuilder({ wallet: deps.wallet, arkServerUrl: deps.arkServerUrl }),
+        rebuild: createCarrierFillRebuilder({ wallet: deps.wallet, operatorUrl: deps.operatorUrl }),
         sign: carrierFillSigner(deps.identity),
       },
       now: deps.now,

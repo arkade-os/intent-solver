@@ -14,6 +14,8 @@ import { receiverPaidTransport } from './support/receiverPaidTransport.js'
 import { nostrRfqTransport } from '@arkade-os/swap/nostr'
 import { hex } from '@scure/base'
 import { createArkadeContext, type ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { envToDocument } from '@arkade-os/solver-app/config/fromEnv.js'
+import { legacyEnvNames } from '@arkade-os/solver-app/config/load.js'
 import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
 import { runFloatLifecycle } from '@arkade-os/solver-app/ops/float.js'
 import type { Services } from '@arkade-os/solver-app/ops/services.js'
@@ -181,7 +183,7 @@ const taxiInventory = async (): Promise<{ sats: bigint; assets: string[] }> => {
   if (!response.ok) throw new Error(`Taxi funding API returned HTTP ${response.status}`)
   const funding = (await response.json()) as { arkAddress: string }
   const script = hex.encode(ArkAddress.decode(funding.arkAddress).pkScript)
-  const { vtxos } = await new RestIndexerProvider(process.env.ARK_SERVER_URL).getVtxos({
+  const { vtxos } = await new RestIndexerProvider(process.env.ARKADE_OPERATOR_URL).getVtxos({
     scripts: [script],
     spendableOnly: true,
   })
@@ -201,8 +203,8 @@ const party = async (mnemonic = generateMnemonic(wordlist, 128)): Promise<Arkade
   const profile = NETWORKS.regtest!
   return createArkadeContext({
     mnemonic,
-    arkServerUrl: process.env.ARK_SERVER_URL!,
-    esploraUrl: process.env.ARK_ESPLORA_URL ?? process.env.ESPLORA_URL,
+    operatorUrl: process.env.ARKADE_OPERATOR_URL!,
+    esploraUrl: process.env.ARKADE_ESPLORA_URL ?? process.env.ESPLORA_URL,
     databasePath: join(workdir, `wallet-${Math.random().toString(16).slice(2)}.sqlite`),
     isMainnet: false,
     arkadeHrp: profile.arkadeHrp,
@@ -299,9 +301,8 @@ beforeAll(async () => {
       readers: createCorridorReaderSet([]),
     } as unknown as Services)
     expect(report.migrated).toBe(0)
-    expect(report.failures).toContain(
-      `deprecated-signer migration deferred: ${coins.length} candidate coin(s) reserved by another operation`,
-    )
+    expect(report.renewed).toBeNull()
+    expect(report.failures).toEqual([])
     expect(solver.reservations.reserved()).toEqual(new Set(coins.map(({ txid, vout }) => `${txid}:${vout}`)))
     expect((await solver.wallet.getBalance()).available).toBe(solverBefore.sats)
     expect(await assetUnits(solver.wallet)).toBe(solverBefore.assets)
@@ -320,13 +321,13 @@ beforeAll(async () => {
     ...process.env,
     SWAP_NETWORK: 'regtest',
     LN_BACKEND: 'fake',
-    ARK_MNEMONIC: solverMnemonic,
-    ARK_SERVER_URL: process.env.ARK_SERVER_URL!,
+    WALLET_MNEMONIC: solverMnemonic,
+    ARKADE_OPERATOR_URL: process.env.ARKADE_OPERATOR_URL!,
     EMULATOR_URL: process.env.EMULATOR_URL!,
     ESPLORA_URL: process.env.ESPLORA_URL ?? 'http://localhost:3000/api',
-    ARK_ESPLORA_URL: process.env.ARK_ESPLORA_URL ?? process.env.ESPLORA_URL ?? 'http://localhost:3000/api',
+    ARKADE_ESPLORA_URL: process.env.ARKADE_ESPLORA_URL ?? process.env.ESPLORA_URL ?? 'http://localhost:3000/api',
     SWAP_DB_PATH: swapDbPath,
-    ARK_DB_PATH: join(workdir, 'solver-wallet.sqlite'),
+    WALLET_DB_PATH: join(workdir, 'solver-wallet.sqlite'),
     RELAY_URL: relayUrl,
     RELAY_PROTOCOL: 'nostr',
     TAXI_URL: taxiUrl,
@@ -338,10 +339,16 @@ beforeAll(async () => {
     ADMIN_PORT: solverAdminPort,
     ADMIN_HOST: '127.0.0.1',
   }
+  const childEnv: NodeJS.ProcessEnv = {
+    ...env,
+    SOLVER_CONFIG: undefined,
+    SOLVER_CONFIG_JSON: JSON.stringify(envToDocument(env, [])),
+  }
+  for (const name of legacyEnvNames(childEnv)) delete childEnv[name]
   const cli = join(process.cwd(), 'packages/solver-app/dist/cli.js')
   daemon = spawn(process.execPath, ['--enable-source-maps', '--experimental-eventsource', cli, 'relay'], {
     cwd: process.cwd(),
-    env,
+    env: childEnv,
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -408,7 +415,7 @@ describe('running solver to Taxi on regtest', () => {
         verified.descriptor,
         { url: forwardedTaxiUrl, operatorKey: info.operatorKey },
         asset.AssetId.fromString(assetId),
-        process.env.ARK_SERVER_URL!,
+        process.env.ARKADE_OPERATOR_URL!,
       )
       const rfqId = randomBytes(32).toString('hex')
       const swap = await requestArkadeSwap(buyer.wallet, carrier.transport, {
@@ -477,7 +484,7 @@ describe('running solver to Taxi on regtest', () => {
           hrp: arkade.profile.arkadeHrp,
         },
         {
-          arkdUrl: process.env.ARK_SERVER_URL!,
+          arkdUrl: process.env.ARKADE_OPERATOR_URL!,
           emulatorUrl: process.env.EMULATOR_URL!,
           network: 'regtest',
           serverUnrollScript: hex.encode(buyer.wallet.serverUnrollScript.script),

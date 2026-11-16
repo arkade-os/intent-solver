@@ -1,0 +1,223 @@
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
+import type { SqlDriver } from '@arkade-os/solver-core/core/driver.js'
+import type { RebalanceTransfer } from '@arkade-os/solver-core/ports/rebalance.js'
+import { RebalanceStore, parseTransferCursor } from '../../packages/solver-app/src/ops/rebalanceStore.js'
+
+const transfer = (id: string, overrides: Partial<RebalanceTransfer> = {}): RebalanceTransfer => ({
+  id,
+  requestKey: `request-${id}`,
+  origin: 'manual',
+  poolId: 'rail:onchain',
+  netSats: 1_000,
+  debitSats: 1_010,
+  feeSats: 10,
+  policyRevision: 'revision-1',
+  createdAt: 100,
+  updatedAt: 100,
+  expiresAt: 500,
+  state: 'quoted',
+  deposit: { kind: 'onchain', destination: 'destination-1', amountSats: 1_000, netSats: 1_000, feeSats: 0 },
+  inputs: [{ txid: 'aa'.repeat(32), vout: 0, value: 2_000 }],
+  routeData: { receipt: 'public-recovery-id' },
+  ...overrides,
+})
+
+describe('rebalance journal', () => {
+  let dir: string
+  let driver: SqlDriver
+  let store: RebalanceStore
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'rebalance-journal-'))
+    driver = betterSqliteDriver(join(dir, 'swaps.sqlite'))
+    store = await RebalanceStore.open(driver)
+  })
+
+  afterEach(async () => {
+    await driver.close()
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('reopens complete recovery data and persists amounts as exact decimal strings', async () => {
+    const row = transfer('1', {
+      state: 'needs_reconciliation',
+      chargedAt: 110,
+      fundingTxid: 'bb'.repeat(32),
+      receivingFeeAllowanceSats: 1000,
+    })
+    await store.create(row)
+    const raw = await driver.get<{ data: string }>('SELECT data FROM rebalance_transfer WHERE id = ?', [row.id])
+    expect(JSON.parse(raw!.data).netSats).toBe('1000')
+    expect(JSON.parse(raw!.data).inputs[0].value).toBe('2000')
+    expect(JSON.parse(raw!.data).receivingFeeAllowanceSats).toBe('1000')
+    await driver.close()
+    driver = betterSqliteDriver(join(dir, 'swaps.sqlite'))
+    store = await RebalanceStore.open(driver)
+    expect(await store.get(row.id)).toEqual(row)
+    expect(await store.byKey(row.requestKey)).toEqual(row)
+    expect(await store.active()).toEqual([row])
+    expect(await store.lastAttempt()).toBe(110)
+  })
+
+  it('refuses request-key collisions and preserves the original record', async () => {
+    const row = transfer('1')
+    await store.create(row)
+    await expect(store.create(transfer('2', { requestKey: row.requestKey }))).rejects.toThrow()
+    await expect(store.save({ ...row, requestKey: 'changed' })).rejects.toThrow()
+    expect(await store.byKey(row.requestKey)).toEqual(row)
+    await expect(store.save(transfer('missing'))).rejects.toThrow()
+  })
+
+  it('permits pending transfers but atomically rejects a second critical submission', async () => {
+    const first = transfer('1', { state: 'submitting', chargedAt: 110 })
+    const second = transfer('2')
+    const pendingSecond = { ...second, state: 'pending' as const, chargedAt: 120, fundingTxid: 'bb'.repeat(32) }
+    await store.create(first)
+    await store.create(second)
+    await store.save(pendingSecond)
+    await expect(store.create(transfer('3', { state: 'needs_reconciliation', chargedAt: 120 }))).rejects.toThrow()
+    await expect(store.save({ ...pendingSecond, state: 'needs_reconciliation' })).rejects.toThrow()
+    expect((await store.get(second.id))?.state).toBe('pending')
+    await store.save({ ...first, state: 'pending', fundingTxid: 'aa'.repeat(32) })
+    await store.save({ ...pendingSecond, state: 'needs_reconciliation' })
+    expect((await store.active()).map((row) => row.id).sort()).toEqual(['1', '2'])
+  })
+
+  it('migrates a journal with the legacy one-active index without a uniqueness gap', async () => {
+    const pending = transfer('old', { state: 'pending', chargedAt: 110, fundingTxid: 'aa'.repeat(32) })
+    await store.create(pending)
+    await driver.exec(
+      "DROP INDEX idx_rebalance_critical_source; CREATE UNIQUE INDEX idx_rebalance_active_source ON rebalance_transfer ((1)) WHERE state IN ('submitting', 'pending', 'needs_reconciliation')",
+    )
+    await driver.close()
+    driver = betterSqliteDriver(join(dir, 'swaps.sqlite'))
+    store = await RebalanceStore.open(driver)
+    await store.create(transfer('new', { state: 'pending', chargedAt: 120, fundingTxid: 'bb'.repeat(32) }))
+    expect((await store.active()).map((row) => row.id).sort()).toEqual(['new', 'old'])
+    await store.create(transfer('critical', { state: 'submitting', chargedAt: 130 }))
+    await expect(
+      store.create(transfer('uncertain', { state: 'needs_reconciliation', chargedAt: 140 })),
+    ).rejects.toThrow()
+  })
+
+  it('keeps charged terminal input protections durable until a source snapshot clears them', async () => {
+    await store.create(transfer('credited', { state: 'completed', chargedAt: 110, fundingTxid: 'aa'.repeat(32) }))
+    await store.create(transfer('returned', { state: 'refunded', chargedAt: 120, fundingTxid: 'bb'.repeat(32) }))
+    await store.create(transfer('cleared', { state: 'completed', chargedAt: 130, sourceInputsClearedAt: 140 }))
+    await store.create(transfer('unsubmitted', { state: 'cancelled' }))
+    expect((await store.protectedTerminalInputs()).map((row) => row.id).sort()).toEqual(['credited', 'returned'])
+    await driver.close()
+    driver = betterSqliteDriver(join(dir, 'swaps.sqlite'))
+    store = await RebalanceStore.open(driver)
+    expect((await store.protectedTerminalInputs()).map((row) => row.id).sort()).toEqual(['credited', 'returned'])
+  })
+
+  it('charges uncertain and refunded transfers but releases definite pre-spend failures', async () => {
+    const now = 100_000
+    await store.create(transfer('old', { state: 'completed', chargedAt: now - 86_400 }))
+    await store.create(transfer('future', { state: 'completed', chargedAt: now + 1 }))
+    await store.create(transfer('refunded', { state: 'refunded', chargedAt: now - 30 }))
+    await store.create(transfer('failed', { state: 'failed', chargedAt: now - 20 }))
+    await store.create(transfer('cancelled', { state: 'cancelled', chargedAt: now - 10 }))
+    await store.create(transfer('uncertain', { state: 'needs_reconciliation', chargedAt: now }))
+    expect(await store.rollingDebit(now)).toBe(2_020)
+    expect(await store.lastAttempt()).toBe(now + 1)
+    await store.save(transfer('uncertain', { state: 'pending', chargedAt: now, updatedAt: now }))
+    expect(await store.rollingDebit(now)).toBe(2_020)
+  })
+
+  it('lists latest records with a bounded limit and rejects unsafe debit values', async () => {
+    await store.create(transfer('1'))
+    await store.create(transfer('2', { createdAt: 101 }))
+    expect((await store.list(1)).map((row) => row.id)).toEqual(['2'])
+    await expect(store.create(transfer('bad', { debitSats: Number.MAX_SAFE_INTEGER + 1 }))).rejects.toThrow()
+    expect(await store.lastAttempt()).toBe(0)
+  })
+
+  it('pages equal timestamps without duplicates or skipping older transfers', async () => {
+    for (const [id, createdAt] of [
+      ['b', 101],
+      ['a', 101],
+      ['c', 100],
+      ['b-old', 100],
+      ['a-old', 100],
+      ['z', 99],
+    ] as const)
+      await store.create(transfer(id, { createdAt }))
+    const first = await store.page(2)
+    expect(first.transfers.map((row) => row.id)).toEqual(['b', 'a'])
+    expect(parseTransferCursor(first.nextCursor!)).toEqual({ createdAt: 101, id: 'a' })
+    await store.create(transfer('new', { createdAt: 102 }))
+    const second = await store.page(2, parseTransferCursor(first.nextCursor!))
+    expect(second.transfers.map((row) => row.id)).toEqual(['c', 'b-old'])
+    const third = await store.page(2, parseTransferCursor(second.nextCursor!))
+    expect(third.transfers.map((row) => row.id)).toEqual(['a-old', 'z'])
+    expect(third.nextCursor).toBeNull()
+  })
+
+  it('reaches transfers past the original 100-row overview limit and rejects bad cursors', async () => {
+    for (let i = 0; i < 105; i++) await store.create(transfer(`row-${i}`, { createdAt: i }))
+    const first = await store.page(100)
+    expect(first.transfers).toHaveLength(100)
+    const older = await store.page(20, parseTransferCursor(first.nextCursor!))
+    expect(older.transfers.map((row) => row.id)).toEqual(['row-4', 'row-3', 'row-2', 'row-1', 'row-0'])
+    expect(older.nextCursor).toBeNull()
+    for (const invalid of ['', 'bad', '!!!', Buffer.from('[1,"bad:colon"]').toString('base64url')])
+      expect(() => parseTransferCursor(invalid)).toThrow('invalid transfer cursor')
+    await expect(store.page(0)).rejects.toThrow()
+    await expect(store.page(101)).rejects.toThrow()
+  })
+
+  it('preserves maximum safe debit exactly and fails closed when aggregate charges overflow', async () => {
+    const row = transfer('1', { state: 'completed', chargedAt: 100, debitSats: Number.MAX_SAFE_INTEGER })
+    await store.create(row)
+    expect((await store.get(row.id))?.debitSats).toBe(Number.MAX_SAFE_INTEGER)
+    expect(await store.rollingDebit(100)).toBe(Number.MAX_SAFE_INTEGER)
+    await store.create(transfer('2', { state: 'completed', chargedAt: 100 }))
+    await expect(store.rollingDebit(100)).rejects.toThrow()
+  })
+
+  it('retains an unsuccessful automatic attempt clock after reopening without charging a debit', async () => {
+    await store.recordAttempt(300)
+    await store.recordAttempt(200)
+    expect(await store.lastAttempt()).toBe(300)
+    expect(await store.rollingDebit(300)).toBe(0)
+    await driver.close()
+    driver = betterSqliteDriver(join(dir, 'swaps.sqlite'))
+    store = await RebalanceStore.open(driver)
+    expect(await store.lastAttempt()).toBe(300)
+    expect(await store.rollingDebit(300)).toBe(0)
+    await store.create(transfer('charged', { state: 'completed', chargedAt: 400 }))
+    expect(await store.lastAttempt()).toBe(400)
+    await store.recordAttempt(500)
+    expect(await store.lastAttempt()).toBe(500)
+    await expect(store.recordAttempt(-1)).rejects.toThrow()
+  })
+
+  it('refuses charge-erasing updates and keeps valid recovery transitions available', async () => {
+    const row = transfer('submitted', { state: 'submitting', chargedAt: 110 })
+    await store.create(row)
+    for (const change of [
+      { state: 'quoted' as const },
+      { state: 'cancelled' as const },
+      { state: 'failed' as const },
+      { chargedAt: undefined },
+      { chargedAt: 111 },
+      { debitSats: 1_000 },
+    ]) {
+      await expect(store.save({ ...row, ...change })).rejects.toThrow()
+      expect(await store.get(row.id)).toEqual(row)
+      expect(await store.rollingDebit(110)).toBe(row.debitSats)
+    }
+    await store.save({ ...row, state: 'needs_reconciliation' })
+    await store.save({ ...row, state: 'pending' })
+    await store.save({ ...row, state: 'refunded' })
+    await expect(store.save({ ...row, state: 'failed' })).rejects.toThrow()
+    expect(await store.rollingDebit(110)).toBe(row.debitSats)
+    expect((await store.get(row.id))?.state).toBe('refunded')
+  })
+})

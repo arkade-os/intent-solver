@@ -48,6 +48,7 @@ const build = async (over: Partial<EvmSendServiceDeps> = {}) => {
     claimArkade: vi.fn(),
     lockFor: vi.fn(),
     blockHeight: vi.fn().mockResolvedValue(20_000_000),
+    timelockHeight: vi.fn().mockResolvedValue(20_000_000),
     arkade: {
       providerPubkey: key(1),
       serverPubkey: key(2),
@@ -78,6 +79,7 @@ const build = async (over: Partial<EvmSendServiceDeps> = {}) => {
       minConfirmations: 12,
       minAgeSeconds: 780,
       cadence: { fastestSecondsPerBlock: 12, slowestSecondsPerBlock: 15 },
+      timelockCadence: { fastestSecondsPerBlock: 12, slowestSecondsPerBlock: 15 },
       quoteValiditySeconds: 60,
       orderMarginSeconds: 7_500,
     },
@@ -173,6 +175,25 @@ describe('the happy path', () => {
       expect(outcome.swap.evmTimeout).toBeGreaterThan(20_000_000)
       expect(outcome.swap.refundLocktime).toBe(NOW + DELAY + 7_500)
     }
+  })
+
+  it('sizes the timeout on the block.number clock where it is not the chain height', async () => {
+    const { service } = await build({
+      blockHeight: vi.fn().mockResolvedValue(514_431_756),
+      timelockHeight: vi.fn().mockResolvedValue(26_193_574),
+      chain: {
+        contractAddress: '0x' + 'de'.repeat(20),
+        chainId: 42161,
+        minConfirmations: 12,
+        minAgeSeconds: 780,
+        cadence: { fastestSecondsPerBlock: 0.25, slowestSecondsPerBlock: 0.5 },
+        timelockCadence: { fastestSecondsPerBlock: 12, slowestSecondsPerBlock: 24 },
+        quoteValiditySeconds: 60,
+        orderMarginSeconds: 7_500,
+      },
+    })
+    const outcome = await service.quote(request())
+    expect(outcome.accepted && outcome.swap.evmTimeout).toBe(26_193_574 + Math.floor(DELAY / 24))
   })
 })
 
@@ -358,6 +379,22 @@ describe('the EVM refund address', () => {
  * the control was passed, never that it is consulted before the insert.
  */
 describe('the exposure cap under concurrency', () => {
+  it('holds no headroom while the price feed is answering', async () => {
+    let answer!: (price: { mantissa: bigint; scale: number }) => void
+    const fetchPrice = vi.fn(() => new Promise((resolve) => (answer = resolve)))
+    const admission = new AdmissionControl()
+    const { service } = await build({ admission, fetchPrice, maxExposedSats: 150_000 } as never)
+
+    const quoting = service.quote(request())
+    await vi.waitFor(() => expect(fetchPrice).toHaveBeenCalled())
+    const other = await admission.reserve(150_000, async () => 0, 150_000)
+    expect(other).not.toBeNull()
+    other!.release()
+
+    answer({ mantissa: 50_000n, scale: 0 })
+    expect((await quoting).accepted).toBe(true)
+  })
+
   it('admits only one of two quotes that do not both fit', async () => {
     // Room for one 100_000-sat swap, not two. `totalCommitted` stays at 0
     // throughout, which is exactly the window the race lives in: neither row is

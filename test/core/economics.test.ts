@@ -81,6 +81,23 @@ describe('economicsOf: a cross-asset swap', () => {
     expect(record.rate).toEqual({ numerator: '50000000', denominator: '100000' })
   })
 
+  it('keeps native fee revenue in the asset where it was charged', () => {
+    const record = economicsOf({
+      ...base,
+      inbound: token('1000000000', 'usdt'),
+      outbound: token('995000000', 'eurt'),
+      nativePnl: [
+        { assetId: 'usdt', amount: '30000000', decimals: 6, source: 'input_flat_fee' },
+        { assetId: 'eurt', amount: '5000000', decimals: 6, source: 'output_spread' },
+      ],
+    })
+    expect(record.grossSats).toBeNull()
+    expect(record.nativePnl).toEqual([
+      { assetId: 'usdt', amount: '30000000', decimals: 6, source: 'input_flat_fee' },
+      { assetId: 'eurt', amount: '5000000', decimals: 6, source: 'output_spread' },
+    ])
+  })
+
   it('ignores a supplied spread on a sats-to-sats swap, where the legs already say it', () => {
     const record = economicsOf({ ...base, inbound: sats(100_300), outbound: sats(100_000), quotedSpreadSats: 9_999 })
     expect(record.grossSats).toBe(300)

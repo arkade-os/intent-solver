@@ -21,7 +21,10 @@
  * - `quoted`   terms issued; awaiting the client's deposit until `valid_until`
  * - `funded`   a deposit matching the quoted terms is at the offer's script;
  *              NOTHING submitted, and no solver capital is committed yet
- * - `filling`  `fulfill` submitted — the one EXPOSED state
+ * - `filling`  an attempt holds the row — the one EXPOSED state — and
+ *              `fill_phase` says how far it got (@see FillPhase). Only
+ *              `selecting` may be walked back, by the one refusal above the
+ *              submission; @see AssetRfqSwapStore.revertUnsubmitted
  * - `filled`   the fill landed; the client is paid and the deposit is ours
  * - `refused`  declined, the quote lapsed unfunded, or (only via
  *              `refuseNeverSubmittedCarrierAttempt` / `refuseCancelledCarrierAttempt`)
@@ -46,12 +49,22 @@ import {
   encodeCarrierAttempt,
   type CarrierAttempt,
 } from './carrierAttempt.js'
-import { BaseSwapStore, addColumns, numberOrNull, type RawRow, type StoreShape } from './baseSwapStore.js'
+import {
+  BaseSwapStore,
+  addColumns,
+  numberOrNull,
+  text,
+  type FillPhase,
+  type RawRow,
+  type StoreShape,
+} from './baseSwapStore.js'
 import { pageQuery, takePage, type PageOptions, type PageRawFields } from '@arkade-os/solver-core/core/page.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { announceTransition } from '@arkade-os/solver-core/core/businessEvent.js'
+import { AssetRfqMachine, type AssetRfqSwapState } from '../machines/assetRfq.js'
 import { clampLedgerLimit, type LedgerWindow } from '@arkade-os/solver-core/analytics/economics.js'
 
-export type AssetRfqSwapState = 'quoted' | 'funded' | 'filling' | 'filled' | 'refused' | 'stuck'
+export type { AssetRfqSwapState }
 
 /** The carrier terms a NEGOTIATION was issued under, when the client named a
  * mode. Absent on every legacy row. IMMUTABLE: these are the Taxi obligation
@@ -74,35 +87,8 @@ export interface AssetRfqCarrierTerms {
   taxiKey?: string
 }
 
-export const NON_TERMINAL: readonly AssetRfqSwapState[] = ['quoted', 'funded', 'filling']
-
-/**
- * The one state where this solver's own capital is committed and not yet
- * recovered.
- *
- * Only `filling`. Before it nothing has been submitted; after it the fill has
- * landed, and `fulfill` pays the client and takes the deposit in the SAME
- * transaction — so there is no interval where the payout is gone and the
- * deposit is not yet ours. `quoted` and `funded` hold no exposure at all: the
- * money at the offer address is the CLIENT's until a fill spends it.
- */
-export const EXPOSED: readonly AssetRfqSwapState[] = ['filling']
-
-const LEGAL_EDGES: Record<AssetRfqSwapState, readonly AssetRfqSwapState[]> = {
-  // `refused` from `quoted` is the lapsed-quote path (§ 5's late funding), and
-  // from `funded` too: a deposit can be observed and the quote can still be
-  // found expired at action time, which must refuse rather than fill.
-  quoted: ['funded', 'refused'],
-  funded: ['filling', 'refused'],
-  // No edge back to `funded`. Once `fulfill` is submitted its outcome is either
-  // known or unknown, and "unknown" is `stuck` — never a retry, which is how a
-  // solver double-spends its own float. `refused` is absent too: it is reached
-  // only through the two methods that durably prove the fill cannot land.
-  filling: ['filled', 'stuck'],
-  filled: [],
-  refused: [],
-  stuck: [],
-}
+export const NON_TERMINAL: readonly AssetRfqSwapState[] = AssetRfqMachine.live
+export const EXPOSED: readonly AssetRfqSwapState[] = AssetRfqMachine.exposed
 
 /**
  * Columns a transition may set.
@@ -112,11 +98,12 @@ const LEGAL_EDGES: Record<AssetRfqSwapState, readonly AssetRfqSwapState[]> = {
  * so a row that could edit any of them could describe a contract that was never
  * funded — and `offer_pk_script` is what a deposit is recognised by.
  */
-const TRANSITION_COLUMNS = new Set(['deposit_txid', 'deposit_vout', 'fill_txid', 'failure_reason'])
+const TRANSITION_COLUMNS = new Set(['deposit_txid', 'deposit_vout', 'fill_txid', 'failure_reason', 'fill_phase'])
 
 export interface AssetRfqSwapRow {
   id: string
   state: AssetRfqSwapState
+  fillPhase: FillPhase | null
   createdAt: number
   updatedAt: number
   /** The client-chosen correlation key for the whole negotiation (§ 4.5). */
@@ -125,9 +112,13 @@ export interface AssetRfqSwapRow {
   /** What the client deposits. `null` is BTC, matching the offer packet. */
   fromAssetId: string | null
   fromAmount: bigint
+  fromDecimals: number | null
+  fromFlatFee: bigint | null
   /** What the covenant obliges any spend to deliver. */
   toAssetId: string | null
   toAmount: bigint
+  toDecimals: number | null
+  toSpread: bigint | null
   /** The client's own two covenant parameters, from its request. */
   makerPkScript: string
   makerPublicKey: string
@@ -178,8 +169,12 @@ export interface AssetRfqQuoteRecord {
   pair: string
   fromAssetId: string | null
   fromAmount: bigint
+  fromDecimals?: number
+  fromFlatFee?: bigint
   toAssetId: string | null
   toAmount: bigint
+  toDecimals?: number
+  toSpread?: bigint
   makerPkScript: string
   makerPublicKey: string
   offerPkScript: string
@@ -338,8 +333,12 @@ const COLUMNS = `
   pair             TEXT NOT NULL,
   from_asset_id    TEXT,
   from_amount      TEXT NOT NULL,
+  from_decimals    INTEGER,
+  from_flat_fee    TEXT,
   to_asset_id      TEXT,
   to_amount        TEXT NOT NULL,
+  to_decimals      INTEGER,
+  to_spread        TEXT,
   maker_pk_script  TEXT NOT NULL,
   maker_public_key TEXT NOT NULL,
   offer_pk_script  TEXT NOT NULL,
@@ -356,7 +355,8 @@ const COLUMNS = `
   fill_price_mantissa    TEXT,
   fill_price_scale       INTEGER,
   carrier_terms          TEXT,
-  carrier_attempt        TEXT
+  carrier_attempt        TEXT,
+  fill_phase             TEXT
 `
 
 const SCHEMA = `
@@ -376,7 +376,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_asset_rfq_swap_rfq_id ON asset_rfq_swap(rf
 -- it, of which at most one fill can succeed. Partial, so a lapsed or stuck
 -- negotiation does not block a later legitimate one at the same address.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_asset_rfq_swap_live_offer
-  ON asset_rfq_swap(offer_pk_script) WHERE state IN ('quoted', 'funded', 'filling', 'filled');
+  ON asset_rfq_swap(offer_pk_script) WHERE state IN (${AssetRfqMachine.sqlList(AssetRfqMachine.where('holdsOfferScript'))});
 
 CREATE TABLE IF NOT EXISTS asset_rfq_swap_event (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -399,14 +399,19 @@ type Raw = Record<string, string | number | null>
 const toRow = (raw: Raw): AssetRfqSwapRow => ({
   id: String(raw.id),
   state: String(raw.state) as AssetRfqSwapState,
+  fillPhase: text(raw.fill_phase) as FillPhase | null,
   createdAt: Number(raw.created_at),
   updatedAt: Number(raw.updated_at),
   rfqId: String(raw.rfq_id),
   pair: String(raw.pair),
   fromAssetId: raw.from_asset_id === null ? null : String(raw.from_asset_id),
   fromAmount: BigInt(String(raw.from_amount)),
+  fromDecimals: numberOrNull(raw.from_decimals),
+  fromFlatFee: bigIntOrNull(raw.from_flat_fee),
   toAssetId: raw.to_asset_id === null ? null : String(raw.to_asset_id),
   toAmount: BigInt(String(raw.to_amount)),
+  toDecimals: numberOrNull(raw.to_decimals),
+  toSpread: bigIntOrNull(raw.to_spread),
   makerPkScript: String(raw.maker_pk_script),
   makerPublicKey: String(raw.maker_public_key),
   offerPkScript: String(raw.offer_pk_script),
@@ -438,7 +443,7 @@ const SHAPE: StoreShape<AssetRfqSwapRow, AssetRfqSwapState> = {
   noun: 'asset rfq swap',
   lifecycleLabel: 'asset rfq lifecycle',
   searchColumns: [],
-  legalEdges: LEGAL_EDGES,
+  legalEdges: AssetRfqMachine.edges,
   transitionColumns: TRANSITION_COLUMNS,
   patchColumns: new Set(),
   live: NON_TERMINAL,
@@ -494,10 +499,15 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
       ['quote_implied_mantissa', 'TEXT'],
       ['quote_implied_scale', 'INTEGER'],
       ['quote_gives_base', 'INTEGER'],
+      ['from_decimals', 'INTEGER'],
+      ['from_flat_fee', 'TEXT'],
+      ['to_decimals', 'INTEGER'],
+      ['to_spread', 'TEXT'],
       ['fill_price_mantissa', 'TEXT'],
       ['fill_price_scale', 'INTEGER'],
       ['carrier_terms', 'TEXT'],
       ['carrier_attempt', 'TEXT'],
+      ['fill_phase', 'TEXT'],
     ])
   }
 
@@ -541,10 +551,11 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
     await this.driver.run(
       `INSERT INTO asset_rfq_swap (
          id, state, created_at, updated_at, rfq_id, pair, from_asset_id, from_amount,
-         to_asset_id, to_amount, maker_pk_script, maker_public_key, offer_pk_script,
+         from_decimals, from_flat_fee, to_asset_id, to_amount, to_decimals, to_spread,
+         maker_pk_script, maker_public_key, offer_pk_script,
          offer_address, solver_pubkey, valid_until, deposit_txid, deposit_vout, fill_txid, failure_reason,
          quote_implied_mantissa, quote_implied_scale, quote_gives_base, carrier_terms
-       ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?)`,
+       ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?)`,
       [
         record.id,
         at,
@@ -553,8 +564,12 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
         record.pair,
         record.fromAssetId,
         record.fromAmount.toString(),
+        record.fromDecimals ?? null,
+        record.fromFlatFee?.toString() ?? null,
         record.toAssetId,
         record.toAmount.toString(),
+        record.toDecimals ?? null,
+        record.toSpread?.toString() ?? null,
         record.makerPkScript,
         record.makerPublicKey,
         record.offerPkScript,
@@ -590,7 +605,7 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
   /** The live negotiation watching an offer script, if this solver has one. */
   async findLiveByOfferScript(offerPkScript: string): Promise<AssetRfqSwapRow | undefined> {
     const raw = await this.driver.get<Raw>(
-      `SELECT * FROM asset_rfq_swap WHERE offer_pk_script = ? AND state IN ('quoted', 'funded', 'filling', 'filled')`,
+      `SELECT * FROM asset_rfq_swap WHERE offer_pk_script = ? AND state IN (${AssetRfqMachine.sqlList(AssetRfqMachine.where('holdsOfferScript'))})`,
       [offerPkScript],
     )
     return raw ? toRow(raw) : undefined
@@ -615,7 +630,7 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
    */
   override async committedSats(pair?: string): Promise<number> {
     const raws = await this.driver.all<Raw>(
-      `SELECT to_amount FROM asset_rfq_swap WHERE state = 'filling' AND to_asset_id IS NULL` +
+      `SELECT to_amount FROM asset_rfq_swap WHERE state IN (${AssetRfqMachine.sqlList(AssetRfqMachine.where('outgoing'))}) AND to_asset_id IS NULL` +
         (pair === undefined ? '' : ' AND pair = ?'),
       pair === undefined ? [] : [pair],
     )
@@ -652,6 +667,36 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
     const raw = await this.driver.all<Raw & PageRawFields>(sql, params)
     const { page, nextCursor } = takePage(raw, limit)
     return { rows: page.map(toRow), nextCursor }
+  }
+
+  /**
+   * The ONE edge back out of `filling`, and sound only for its one caller: a fill
+   * refused with `OfferNotSubmittedError`, raised above the call that submits.
+   * Compare-and-swap on the state AND the phase, for the reason `OfferFillStore` gives. Deliberately
+   * absent from `AssetRfqMachine.edges`, so the generic `filling -> funded` keeps throwing —
+   * an edge cannot say "only when nothing was sent", so this is reached by name.
+   */
+  async revertUnsubmitted(id: string): Promise<boolean> {
+    const result = await this.driver.run(
+      `UPDATE asset_rfq_swap SET state = 'funded', fill_phase = NULL, updated_at = ?
+       WHERE id = ? AND state = 'filling' AND fill_phase = 'selecting'`,
+      [this.now(), id],
+    )
+    if (result.changes === 1) {
+      await this.recordEvent(id, 'filling', 'funded', null)
+      announceTransition(this.onTransition, id, 'filling', 'funded')
+    }
+    return result.changes === 1
+  }
+
+  /** THE LATCH. @see OfferFillStore.markSubmitting */
+  async markSubmitting(id: string): Promise<boolean> {
+    const result = await this.driver.run(
+      `UPDATE asset_rfq_swap SET fill_phase = 'submitting', updated_at = ?
+       WHERE id = ? AND state = 'filling' AND fill_phase = 'selecting'`,
+      [this.now(), id],
+    )
+    return result.changes === 1
   }
 
   override async fail(id: string, from: AssetRfqSwapState, reason: string): Promise<void> {

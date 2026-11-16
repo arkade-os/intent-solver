@@ -31,6 +31,21 @@ describe('loadEvmChainConfig', () => {
     expect(config!.minAgeSeconds).toBe(780)
   })
 
+  it('gives block.number its own cadence only when both bounds are set', () => {
+    expect(loadEvmChainConfig(env())!.timelockCadence).toBeNull()
+    const arbitrum = env({ EVM_TIMELOCK_FASTEST_SECONDS_PER_BLOCK: '12', EVM_TIMELOCK_SLOWEST_SECONDS_PER_BLOCK: '24' })
+    expect(loadEvmChainConfig(arbitrum)!.timelockCadence).toEqual({
+      fastestSecondsPerBlock: 12,
+      slowestSecondsPerBlock: 24,
+    })
+    expect(() => loadEvmChainConfig(env({ EVM_TIMELOCK_FASTEST_SECONDS_PER_BLOCK: '12' }))).toThrow(/go together/)
+    expect(() =>
+      loadEvmChainConfig(
+        env({ EVM_TIMELOCK_FASTEST_SECONDS_PER_BLOCK: '24', EVM_TIMELOCK_SLOWEST_SECONDS_PER_BLOCK: '12' }),
+      ),
+    ).toThrow(/must be <=/)
+  })
+
   it('treats a missing RPC url as "corridor not enabled", not an error', () => {
     expect(loadEvmChainConfig(env({ EVM_RPC_URL: undefined }))).toBeNull()
     expect(loadEvmChainConfig(env({ EVM_RPC_URL: '   ' }))).toBeNull()

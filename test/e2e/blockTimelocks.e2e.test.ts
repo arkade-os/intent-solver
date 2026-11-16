@@ -29,7 +29,7 @@
  *     delay (a value below 512, e.g. 20). A seconds-typed arkd SKIPS the
  *     block-specific assertions rather than failing them — the point is to test
  *     block mode where it exists, not to demand every deployment run it.
- *   - the usual e2e env file with ARK_MNEMONIC / ARK_SERVER_URL / EMULATOR_URL
+ *   - the usual e2e env file with WALLET_MNEMONIC / ARKADE_OPERATOR_URL / EMULATOR_URL
  */
 import { beforeAll, afterAll, describe, expect, it } from 'vitest'
 import { hex } from '@scure/base'

@@ -47,20 +47,26 @@ import { fixedFeePricing, type PricingStrategy } from '@arkade-os/solver-core/co
 import { RFQ_PAIR_RECEIVE } from '../wire/lightningReceivePayloads.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { satsOutputs } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
+import { parseUnrolledSpend, type UnrolledSpendRecord } from '@arkade-os/solver-arkade/arkade/unrolledSpend.js'
 import { covenantScriptFromRow } from '../send/arkadeOps.js'
 import type { CovenantScriptRow } from '../send/orchestrator.js'
 import { claimPacketStamp } from './claimPacket.js'
 import type { ReceiveArkadeOps } from './arkadeOps.js'
+import { LockupPreimageReader } from './lockupPreimage.js'
+import { applyUnrolledSpendStep } from '../unrolledSpendStep.js'
+import type { OnchainBackend } from '@arkade-os/solver-core/ports/onchain.js'
 import { FundNotSubmittedError } from './fundLockup.js'
 import type { CovclaimdClient } from './covclaimd.js'
 import type { LightningBackend } from '@arkade-os/solver-core/ports/lightning.js'
-import type { ReceiveSwapRow, ReceiveSwapStore } from '../db/receiveSwaps.js'
+import { EXPOSED, type ReceiveSwapRow, type ReceiveSwapStore } from '../db/receiveSwaps.js'
 import type { SendSwapRow } from '../db/swaps.js'
 import { GiveUp, json, log, messageOf, nowSeconds, poll } from '@arkade-os/solver-core/util/poll.js'
 import { sweep } from '@arkade-os/solver-core/util/sweep.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
+import { adoptFunding } from '../legs/arkadeLockup.js'
 
 const DEADLINE_SECONDS_PURPOSE = 'order the refund deadline against the HTLC'
 
@@ -178,6 +184,8 @@ export interface ReceiveServiceDeps {
     | 'getKnownInvoiceState'
   >
   arkade: ReceiveArkadeOps
+  /** Reads `P` off the L1 claim of a lockup the client unrolled. The rail's own wallet in production. */
+  onchain?: Pick<OnchainBackend, 'findSpendWitness'>
   /**
    * OPTIONAL. When set, the solver hands covclaimd the sealed packet so the
    * claim can be pushed with the client offline. When absent (or null), the
@@ -325,9 +333,11 @@ export class ReceiveSwapService {
   private readonly pricing: PricingStrategy
 
   private readonly admission: AdmissionStrategy
+  private readonly preimages: LockupPreimageReader
 
   constructor(private readonly deps: ReceiveServiceDeps) {
     this.admission = deps.admission
+    this.preimages = new LockupPreimageReader(deps.arkade, deps.onchain, (id, error) => this.onTickError?.(id, error))
     this.now = deps.now ?? nowSeconds
     this.quoteLimiter = deps.quoteLimiter ?? new RateLimiter(QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, this.now)
     this.fee = deps.fee ?? FREE
@@ -407,21 +417,14 @@ export class ReceiveSwapService {
       return { accepted: false, reason: 'invalid_payout_address' }
     }
 
-    if (await store.findLiveByPaymentHash(request.paymentHash)) {
-      return { accepted: false, reason: 'duplicate_swap' }
-    }
-    // The same check against the OTHER corridors' stores, BEFORE the mint
-    // side effect below: a hash live anywhere else is spoken for.
-    for (const peer of this.deps.peerStores ?? []) {
-      if (await peer.findLiveByPaymentHash(request.paymentHash)) {
-        return { accepted: false, reason: 'duplicate_swap' }
-      }
-    }
-    // A coupling is receive-then-send, so a live send on this hash is a conflict.
-    // Refuse before createHoldInvoice so a declined quote leaves no hold invoice.
-    if (await this.deps.coupledSendStore?.findLiveByPaymentHash(request.paymentHash)) {
-      return { accepted: false, reason: 'duplicate_swap' }
-    }
+    // Before the mint below: a hash live anywhere is spoken for, and a declined
+    // quote must not leave a hold invoice.
+    const spokenFor = await Promise.all([
+      store.findLiveByPaymentHash(request.paymentHash),
+      ...(this.deps.peerStores ?? []).map((peer) => peer.findLiveByPaymentHash(request.paymentHash)),
+      ...(this.deps.coupledSendStore ? [this.deps.coupledSendStore.findLiveByPaymentHash(request.paymentHash)] : []),
+    ])
+    if (spokenFor.some(Boolean)) return { accepted: false, reason: 'duplicate_swap' }
     if (request.requesterKey !== undefined && !this.quoteLimiter.take(request.requesterKey)) {
       return { accepted: false, reason: 'rate_limited' }
     }
@@ -729,6 +732,13 @@ export class ReceiveSwapService {
         )
         return false
       }
+      // A funded refusal still answers `findLiveByPaymentHash` but never reaches `funded`; stop
+      // waiting, or it pins this row in `quoted` and holds its capacity for a swap that cannot be.
+      if (coupled.state === 'refused') {
+        await this.retireInvoice(row.paymentHash)
+        await store.fail(row.id, 'quoted', 'coupled send was refused; the receive leg can never fund against it')
+        return false
+      }
       if (coupled.state !== 'funded') return false
       if (
         !refundWithoutReceiverDelayCovers(
@@ -740,7 +750,10 @@ export class ReceiveSwapService {
         await store.fail(row.id, 'quoted', 'refused to fund: coupled send refund timing is unsafe')
         return false
       }
-      const outputs = await arkade.findLockups(coupled.pkScript)
+      // Asset-free only: the coupled send refuses a lockup whose sats sit on an
+      // asset vtxo, so an asset-carrying output must not count toward the
+      // payout this receive leg is about to make.
+      const outputs = satsOutputs(await arkade.findLockups(coupled.pkScript))
       // Exact value, not a minimum, for the same reason the funding guard
       // below filters exactly: a lockup a sat short is not a smaller swap, it
       // is a swap whose collect leg would not cover this payout.
@@ -838,13 +851,8 @@ export class ReceiveSwapService {
     // existing exposure must be adopted regardless. Otherwise a row whose funding
     // crashed and whose invoice has since expired is failed at `armed` with capital
     // already moved and no outpoint for `whenRefunding` to act on.
-    const historical = await arkade.findLockupOutpoints(row.pkScript)
-    const ours = historical.filter((o) => o.value === row.payoutSats)
-    // Prefer an unspent one when both exist: that is the refundable outpoint,
-    // and it is the one `whenRefunding` must target. Either way `whenFunded`
-    // searches ALL historical outpoints for the preimage, so recording one
-    // does not lose the other.
-    const alreadyFunded = ours.find((o) => !o.spent) ?? ours[0]
+    // `whenFunded` searches ALL historical outpoints for the preimage, so recording one loses neither.
+    const alreadyFunded = adoptFunding(await arkade.findLockupOutpoints(row.pkScript), row.payoutSats)
     if (alreadyFunded) {
       // Transition rather than wait in `armed`: `funded` already owns the
       // "learn P, or recover/refund past the deadline" obligation, whereas
@@ -857,10 +865,28 @@ export class ReceiveSwapService {
       })
     }
     // A lost funding response cannot be turned into a clean refusal by invoice expiry.
-    if (row.fundStartedAt !== null) return false
+    if (row.fundStartedAt !== null) {
+      // But it must not hold exposure in `armed` forever. A lagging funding is still adopted
+      // above, so wait until the REFUND DEADLINE — by then any real lockup has appeared, and a
+      // still-empty script means the swap is dead. Escalate to `stuck` (not `refused`: a lost
+      // response may mean a lockup is out there for an operator to refund).
+      const deadline = await refundDeadlineSeconds(
+        row.refundLocktime,
+        this.now,
+        this.deps.chainTip,
+        DEADLINE_SECONDS_PURPOSE,
+      )
+      if (this.now() >= deadline) {
+        await store.transition(row.id, 'armed', 'stuck', {
+          failure_reason:
+            'funding response lost; refund deadline reached with no lockup adopted — review for a stray lockup',
+        })
+      }
+      return false
+    }
 
     // Re-polled HERE, immediately before funding — not trusted from whenQuoted's
-    // observation, which can be minutes stale. Only 'armed' status's E is
+    // observation, nor sampled beside the adoption scan. Only 'armed' status's E is
     // trusted; any other status (cancelled, or a backend quirk) is treated as
     // "nothing real to fund against" for this gate.
     const fresh = await ln.getHoldState(row.paymentHash)
@@ -1040,8 +1066,15 @@ export class ReceiveSwapService {
     const { store, arkade } = this.deps
     const observeStarted = performance.now()
     const outputs = await arkade.findLockups(row.pkScript)
+    if (row.arkadeLockupTxid === null || row.arkadeLockupVout === null) {
+      await store.fail(row.id, 'funded', 'funded state with no funded outpoint recorded')
+      return false
+    }
+    // Gate on the RECORDED funded output, not an empty script: dust on the public
+    // lockup address must not defer claim detection to the refund deadline.
+    const fundedSpendable = outputs.some((o) => o.txid === row.arkadeLockupTxid && o.vout === row.arkadeLockupVout)
 
-    if (outputs.length > 0) {
+    if (fundedSpendable) {
       // The refund-deadline check comes BEFORE the reveal attempt, not after:
       // revealToCovclaimd can throw (covclaimd unreachable), and if that check
       // ran second it would never be reached while covclaimd stays down —
@@ -1049,7 +1082,7 @@ export class ReceiveSwapService {
       // is that the provider's own refund path must open regardless of
       // whether settlement is still going well. Past the deadline there is
       // also no point revealing any more: `whenRefunding`'s own recheck still
-      // catches a claim that lands right at the boundary.
+      // catches a claim that lands right at the boundary. Read AFTER the lockup.
       if (await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip)) {
         return store.transition(row.id, 'funded', 'refunding', {})
       }
@@ -1061,14 +1094,6 @@ export class ReceiveSwapService {
       return false
     }
 
-    // Nothing spendable left — most likely covclaimd's claim landed.
-    if (row.arkadeLockupTxid === null || row.arkadeLockupVout === null) {
-      // Unreachable by construction: `funded` is only ever entered with these
-      // set (whenArmed polls until it finds them). Guarded so a bad edit
-      // fails loudly rather than reading null silently.
-      await store.fail(row.id, 'funded', 'funded state with no funded outpoint recorded')
-      return false
-    }
     // ALL historical outpoints, not just the recorded one. The recorded
     // outpoint is this row's refund target, but it is not guaranteed to be the
     // one that got claimed — a row adopted out of a crashed funding attempt
@@ -1079,7 +1104,7 @@ export class ReceiveSwapService {
     // empty, so indexer lag never narrows this to less than it was before.
     const historical = await arkade.findLockupOutpoints(row.pkScript)
     const searchable = historical.length > 0 ? historical : [{ txid: row.arkadeLockupTxid, vout: row.arkadeLockupVout }]
-    const preimage = await arkade.findClaimPreimage(searchable, row.paymentHash)
+    const preimage = await this.preimages.find(row, searchable)
     if (preimage) {
       const transitioned = await store.transition(row.id, 'funded', 'claimed', { preimage: hex.encode(preimage) })
       log(
@@ -1225,13 +1250,39 @@ export class ReceiveSwapService {
     // recheck exists to prevent.
     const historical = await arkade.findLockupOutpoints(row.pkScript)
     const searchable = historical.length > 0 ? historical : [{ txid: row.arkadeLockupTxid, vout: row.arkadeLockupVout }]
-    const late = await arkade.findClaimPreimage(searchable, row.paymentHash)
+    const late = await this.preimages.find(row, searchable)
     if (late) {
       return store.transition(row.id, 'refunding', 'claimed', { preimage: hex.encode(late) })
     }
 
+    // Ahead of `findLockups`, which reads an unrolled lockup as empty, and of any
+    // offchain refund of a sibling output, which would record `refunded` over it.
+    const unrolled = historical.find(
+      (o) => o.unrolled && o.txid === row.arkadeLockupTxid && o.vout === row.arkadeLockupVout,
+    )
+    if (unrolled && arkade.refundUnrolled) {
+      const covenantRow = receiveCovenantRowFor(row)
+      const save = (record: UnrolledSpendRecord) => store.patch(row.id, { unrolled_refund: JSON.stringify(record) })
+      const step = await arkade.refundUnrolled(covenantRow, unrolled, parseUnrolledSpend(row.unrolledRefund), save)
+      return applyUnrolledSpendStep(
+        store,
+        row,
+        { from: 'refunding', to: 'refunded' },
+        step,
+        row.htlcExpiresAt !== null && this.now() < row.htlcExpiresAt,
+        () => unilateralExitRecourse(covenantRow, { solverPubkey: arkade.solverPubkey }),
+      )
+    }
+
     const outputs = await arkade.findLockups(row.pkScript)
-    if (outputs.length === 0) {
+    // Keyed on the RECORDED funded output, not an empty script: dust must not be
+    // refunded into terminal `refunded` while a claim trails the `late` recheck.
+    const fundedOutput = outputs.find((o) => o.txid === row.arkadeLockupTxid && o.vout === row.arkadeLockupVout)
+    if (!fundedOutput) {
+      // Our own refund, finalized (one-shot) or accepted before its response reached us. A throw keeps
+      // the row refunding, so the sweep retries a finalize arkd refused.
+      const own = await arkade.finalizePendingRefund?.(receiveCovenantRowFor(row))
+      if (own) return store.transition(row.id, 'refunding', 'refunded', { refund_ark_txid: own })
       // Nothing left to refund and no claim readable either. Two very
       // different things look identical from here, and only TIME separates
       // them (see EMPTY_LOCKUP_GRACE): ordinary lag between these two reads,
@@ -1250,7 +1301,11 @@ export class ReceiveSwapService {
       if (row.htlcExpiresAt !== null && this.now() < row.htlcExpiresAt) return false
       // Still nothing, and nothing left to collect. A human needs to look, same
       // posture the onchain leg takes for its own ambiguous-witness case.
-      await store.fail(row.id, 'refunding', 'lockup empty during refunding with no matching claim found; needs review')
+      await store.fail(
+        row.id,
+        'refunding',
+        'funded output gone during refunding with no matching claim found; needs review',
+      )
       return false
     }
 
@@ -1306,6 +1361,14 @@ export class ReceiveSwapService {
   async refundNow(id: string): Promise<string | null> {
     const { store, arkade } = this.deps
     const row = await store.get(id)
+    // Only where the lockup can be open and unresolved — EXPOSED or stuck. Elsewhere a refund
+    // spends nothing it should, and the patch below would just restart the grace clock.
+    if (!EXPOSED.includes(row.state) && row.state !== 'stuck') {
+      const hint = row.state === 'armed' ? ' — let the sweep escalate a lost funding to stuck first, then refund' : ''
+      throw new Error(
+        `swap ${id} is ${row.state}: nothing to refund here — the solver's lockup is open only while funded/claimed/refunding or stuck${hint}`,
+      )
+    }
     const outputs = await arkade.findLockups(row.pkScript)
     if (outputs.length === 0) return null
     const txid = await arkade.refund(receiveCovenantRowFor(row), outputs)

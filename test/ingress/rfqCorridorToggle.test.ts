@@ -15,7 +15,6 @@ import { describe, expect, it, vi } from 'vitest'
 import { respondToRfqRequest } from '@arkade-os/solver-transport/ingress/rfq.js'
 import { setFrom, type RfqServices } from '../support/corridorSet.js'
 import { RFQ_PAIR_RECEIVE } from '@arkade-os/solver-corridors/wire/lightningReceivePayloads.js'
-import { RFQ_PAIR_ONCHAIN_RECEIVE } from '@arkade-os/solver-corridors/wire/onchainReceivePayloads.js'
 import { RFQ_PAIR_ONCHAIN_SEND } from '@arkade-os/solver-corridors/wire/onchainPayloads.js'
 import { RFQ_PAIR_SEND } from '@arkade-os/solver-corridors/wire/payloads.js'
 
@@ -51,7 +50,6 @@ const CORRIDORS = [
   ['send', RFQ_PAIR_SEND],
   ['onchainSend', RFQ_PAIR_ONCHAIN_SEND],
   ['receive', RFQ_PAIR_RECEIVE],
-  ['onchainReceive', RFQ_PAIR_ONCHAIN_RECEIVE],
 ] as const
 
 describe('rfq dispatch — a disabled corridor', () => {
@@ -77,7 +75,7 @@ describe('rfq dispatch — a disabled corridor', () => {
   })
 
   it('still carries the requester’s correlation id, so the refusal names which negotiation it killed', async () => {
-    const outcome = await dispatch({}, payloadFor(RFQ_PAIR_ONCHAIN_RECEIVE))
+    const outcome = await dispatch({}, payloadFor(RFQ_PAIR_RECEIVE))
     expect(outcome.payload).toMatchObject({ rfq_id: RFQ_ID })
   })
 })

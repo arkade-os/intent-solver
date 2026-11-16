@@ -21,6 +21,7 @@ import {
 import { CLAIM_PACKET_TYPE } from '@arkade-os/swap'
 import { MAX_REFUND_HORIZON } from '@arkade-os/solver-core/core/receive.js'
 import { json, log, nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { latencyDiagnosticsEnabled } from '@arkade-os/solver-core/util/diagnostics.js'
 
 export const LOCKUP_FUNDING_FILTER = { withRecoverable: false, genericallySpendableOnly: true } as const
 
@@ -52,6 +53,7 @@ export const fundLockup = async (
   address: string,
   amountSats: number,
   stamp?: ClaimPacketStamp,
+  horizonSeconds: number = MAX_REFUND_HORIZON,
 ): Promise<string> => {
   const started = performance.now()
   const fundRef = randomUUID()
@@ -61,13 +63,12 @@ export const fundLockup = async (
   let reserveMs = 0
   let release: () => void
   try {
-    const selection = await selectFundingInputs(ctx, amountSats, fundRef)
+    const selection = await selectFundingInputs(ctx, amountSats, fundRef, horizonSeconds)
     inputs = selection.inputs
     readMs = selection.readMs
     selectMs = selection.selectMs
-    const reserveStarted = performance.now()
-    release = ctx.reservations.reserve(inputs)
-    reserveMs = Math.round(performance.now() - reserveStarted)
+    reserveMs = selection.reserveMs
+    release = selection.release
   } catch (error) {
     log(
       'receive_fund_timing',
@@ -120,7 +121,7 @@ export const fundLockup = async (
     // shrinks the spendable float with nothing left to free it. If the send
     // DID land, the coins are spent and the next read will not offer them.
     release()
-    if (process.env.SOLVER_LATENCY_DIAGNOSTICS === '1') {
+    if (latencyDiagnosticsEnabled()) {
       log(
         'wallet_send_phase_timing',
         json({
@@ -149,7 +150,7 @@ export const fundLockup = async (
 }
 
 /** The read-select-refuse half, which runs entirely before any funding request exists. */
-const selectFundingInputs = async (ctx: ArkadeContext, amountSats: number, scope: string) => {
+const selectFundingInputs = async (ctx: ArkadeContext, amountSats: number, scope: string, horizonSeconds: number) => {
   // GATED read, not `getVtxos`. The SDK's own note on `getVtxos` is that
   // feeding it to `sendBitcoin({ selectedVtxos })` bypasses the
   // generic-spending gate — which here would mean funding one lockup out of
@@ -167,24 +168,30 @@ const selectFundingInputs = async (ctx: ArkadeContext, amountSats: number, scope
   const selection = selectLockupFunding({
     candidates: spendable,
     amountSats,
-    horizonSeconds: MAX_REFUND_HORIZON,
+    horizonSeconds,
     nowSeconds: nowSeconds(),
     reserved: ctx.reservations.reserved(),
     dustSats: Number(ctx.dustSats),
     vtxoMinSats: Number(ctx.vtxoMinSats),
   })
+  const selectMs = Math.round(performance.now() - selectStarted)
   if (!selection.ok) {
     throw new FundNotSubmittedError(`refusing to fund lockup of ${amountSats} sats: ${selection.reason}`)
   }
+  // Pinned in the same synchronous turn as the `reserved()` read above, so a funding
+  // running beside this one cannot select these coins in the gap before we reserve.
+  const reserveStarted = performance.now()
+  const release = ctx.reservations.reserve(selection.inputs)
+  const reserveMs = Math.round(performance.now() - reserveStarted)
   if (!selection.clearedHorizon) {
     // Not fatal — see selectLockupFunding on why this is a preference — but
     // never silent. It means the lockup inherits a batch that may lapse before
     // the swap resolves, which is worth seeing in a log when a claim later
     // fails for reasons that look unrelated.
     log(
-      `funding lockup of ${amountSats} sats from coins that do not outlive the ${MAX_REFUND_HORIZON}s refund horizon:`,
+      `funding lockup of ${amountSats} sats from coins that do not outlive the ${horizonSeconds}s refund horizon:`,
       'float needs renewing, or this network batches shorter than the horizon',
     )
   }
-  return { inputs: [...selection.inputs], readMs, selectMs: Math.round(performance.now() - selectStarted) }
+  return { inputs: [...selection.inputs], release, readMs, selectMs, reserveMs }
 }
