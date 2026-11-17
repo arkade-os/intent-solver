@@ -1781,7 +1781,7 @@ const field = (key, attrs, read = (text) => text) =>
   h('input', {
     value: String(marketDraft[key] ?? ''),
     ...attrs,
-    oninput: (e) => ((marketDraft[key] = read(e.target.value)), schedulePreview()),
+    oninput: (e) => (typed(key, read(e.target.value)), schedulePreview()),
   })
 
 /** One grid row. `hidden` rather than absent, so `morph` matches the rows after it to the same nodes. */
@@ -1826,10 +1826,17 @@ const issuerLabel = (id) => {
   return entry.label ?? undefined
 }
 
+/** What the operator types is theirs, a cleared box included: no later fill takes it back. */
+const typed = (key, value) => {
+  marketDraft.typed ??= new Set()
+  marketDraft.typed.add(key)
+  marketDraft[key] = value
+}
+
 /** Writes only over blank or over its own last guess, so a value the operator typed is never replaced. */
 const fill = (key, value) => {
   const filled = (marketDraft.filled ??= {})
-  if (marketDraft[key] !== '' && marketDraft[key] !== filled[key]) return false
+  if (marketDraft.typed?.has(key) || (marketDraft[key] !== '' && marketDraft[key] !== filled[key])) return false
   filled[key] = value
   if (marketDraft[key] === value) return false
   marketDraft[key] = value
@@ -3039,7 +3046,7 @@ const pricingTable = (overrides, marketRows) =>
         pricingSelection?.key === key,
         () => selectPricing({ kind: 'market', key }, pricingMarketForms.get(key) ?? draftFrom(row)),
         h('td', row.symbol ? h('b', row.symbol, ' ') : null, legNode(row.base), ' / ', legNode(row.quote)),
-        h('td.num', `${row.feeBps} bps`),
+        h('td.num', row.feeBps === null ? '—' : `${row.feeBps} bps`),
         h(
           'td.state',
           row.enabled

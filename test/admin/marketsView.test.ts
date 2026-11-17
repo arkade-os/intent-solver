@@ -660,6 +660,15 @@ describe('a new market fills what the lookup and the config know', () => {
       buyBase: { min: '10000', max: '1000000' },
     })
   })
+
+  it('leaves a prefilled limit the operator cleared empty on the next answer', async () => {
+    const panel = await typed({ label: LABEL })
+    panel.previewPanel()
+    await panel.refreshPreview()
+    fire(labelled(panel.marketsView(), 'BTC → USDA min'), 'input', { value: '' })
+    await panel.refreshPreview()
+    expect(panel.draft()).toMatchObject({ sellBaseMin: '', sellBaseMax: '1000000000' })
+  })
 })
 
 describe('the simple form writes the columns the server reads', () => {

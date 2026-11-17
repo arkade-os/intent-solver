@@ -6,11 +6,12 @@ import * as simpleMarket from '../../packages/solver-app/src/admin/static/simple
 const source = readFileSync(new URL('../../packages/solver-app/src/admin/static/app.js', import.meta.url), 'utf8')
 const definitions = source.slice(source.indexOf('const blankMarket'), source.indexOf('const tip'))
 const view = source.slice(source.indexOf('/* ---- unified pricing'), source.indexOf('const auditView'))
-type Element = { spec: string; props: Record<string, (event: unknown) => void>; children: Element[] }
+type Element = { spec: string; props: Record<string, (event: unknown) => void>; children: Element[]; text: string }
 const h = (spec: string, ...args: unknown[]): Element => ({
   spec,
   props: typeof args[0] === 'object' && !Array.isArray(args[0]) ? (args[0] as Element['props']) : {},
-  children: args.filter((arg): arg is Element => !!arg && typeof arg === 'object' && 'spec' in arg),
+  children: args.flat().filter((arg): arg is Element => !!arg && typeof arg === 'object' && 'spec' in arg),
+  text: args.filter((arg) => typeof arg === 'string').join(''),
 })
 const asset = (hex: string) => hex.repeat(34)
 const saved = (hex: string, symbol: string) => ({
@@ -52,12 +53,14 @@ const harness = (answer = { revision: 'r', applied: [] as string[], unapplied: [
     let previewSide = 'from', previewDirection = 'sell_base', previewAmounts = { sell_base: '', buy_base: '' }
     const readDraftFeed = () => false
     const schedulePreview = () => syncPricingMarket()
+    const legNode = (leg) => h('span', String(leg))
     ${definitions}
     ${view}
     return { selectPricing, syncPricingMarket, pricingKnobField, pricingPreviewRequest, applyPricingDraft, pricingDraft,
       stagePricingOverride, removeKnobs: () => state.data.settings.knobs = [],
       setOutcome: value => pricingOutcome = value, outcome: () => pricingOutcome,
       current: () => marketDraft, selection: () => pricingSelection, adoptSavedPair, blankMarket, marketBody,
+      table: () => pricingTable(pricingOverrides(), pricingRows()),
       ask: (direction, text) => ((previewDirection = direction), (previewAmounts[direction] = text)) }
   `,
   )(
@@ -87,6 +90,7 @@ const harness = (answer = { revision: 'r', applied: [] as string[], unapplied: [
     adoptSavedPair: () => boolean
     blankMarket: () => Record<string, unknown>
     marketBody: (draft: Record<string, unknown>) => Record<string, unknown>
+    table: () => Element
     ask: (direction: 'sell_base' | 'buy_base', text: string) => void
     stagePricingOverride: (key: string, value: string | null) => void
     removeKnobs: () => void
@@ -225,6 +229,16 @@ describe('the market preview request', () => {
       ui.ask('buy_base', text)
       expect(ui.pricingPreviewRequest(), text).not.toHaveProperty('amount')
     }
+  })
+
+  it('lists a staged market whose fee box was cleared with a dash, not "null bps"', () => {
+    const ui = harness()
+    ui.selectPricing({ kind: 'market', key: ui.markets[0]!.marketKey })
+    ui.current().feeBps = ''
+    ui.syncPricingMarket()
+    const fees = ui.table().children.map((row) => row.children[1]!.text)
+    expect(fees).toContain('—')
+    expect(fees.join(' ')).not.toContain('null')
   })
 
   it('sends blank decimals as null for the server to refuse, never as 0', () => {
