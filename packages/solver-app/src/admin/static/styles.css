@@ -548,6 +548,7 @@ nav .more {
   color: var(--text);
   padding: 9px 10px 9px 18px;
   font-size: 13px;
+  overflow-wrap: anywhere;
 }
 
 .restart-banner .mono {
@@ -1443,6 +1444,7 @@ details.raw {
   border-radius: var(--radius);
   padding: 10px 12px;
   margin: 0 0 12px;
+  overflow-wrap: anywhere;
 }
 
 /* A standing fact about a list, kept to one quiet line rather than a box to read past. */
