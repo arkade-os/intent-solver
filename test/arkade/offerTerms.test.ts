@@ -13,10 +13,9 @@
 import { describe, it, expect } from 'vitest'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { asset } from '@arkade-os/sdk'
-import { offerVtxoScript } from '@arkade-os/swap/protocol'
+import { assetSwapContractVersion, offerVtxoScript } from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
 import {
-  assetOfferGeneration,
   offerExitDelay,
   offerFromTerms,
   offerScriptFrom,
@@ -48,7 +47,6 @@ const derive = offerScriptFrom(derivation)
 
 describe('offerScriptFrom', () => {
   it('compiles the same covenant the SDK does from the equivalent offer', () => {
-    // 'previous' = the v2 baseline. @see assetOfferGeneration
     const direct = offerVtxoScript(
       {
         wantAmount: 1_000n,
@@ -59,7 +57,7 @@ describe('offerScriptFrom', () => {
         exitDelay: EXIT,
       },
       SERVER,
-      'previous',
+      'asset-swap-v2',
     )
     expect(derive(terms()).pkScript).toBe(hex.encode(direct.pkScript))
     expect(derive(terms()).address).toBe(direct.address('tark', SERVER).encode())
@@ -117,7 +115,7 @@ describe('offerScriptFrom', () => {
 })
 
 describe('contract version', () => {
-  const sdk = (generation: 'current' | 'previous'): string =>
+  const sdk = (contractVersion: string): string =>
     hex.encode(
       offerVtxoScript(
         {
@@ -129,20 +127,18 @@ describe('contract version', () => {
           exitDelay: EXIT,
         },
         SERVER,
-        generation,
+        assetSwapContractVersion(contractVersion),
       ).pkScript,
     )
 
-  it('maps v3 to the current tree and everything else to the previous one', () => {
-    expect(assetOfferGeneration(RFQ_ASSET_SWAP_V3)).toBe('current')
-    expect(assetOfferGeneration(RFQ_ASSET_SWAP_V2)).toBe('previous')
-    expect(assetOfferGeneration(undefined)).toBe('previous')
+  it('refuses a version the SDK cannot derive instead of falling back to v2', () => {
+    expect(() => derive(terms(), 'asset-swap-v9')).toThrow(/unknown contract version/)
   })
 
   it('derives v2 for the baseline and v3 only when it is named', () => {
-    expect(derive(terms()).pkScript).toBe(sdk('previous'))
-    expect(derive(terms(), RFQ_ASSET_SWAP_V2).pkScript).toBe(sdk('previous'))
-    expect(derive(terms(), RFQ_ASSET_SWAP_V3).pkScript).toBe(sdk('current'))
+    expect(derive(terms()).pkScript).toBe(sdk(RFQ_ASSET_SWAP_V2))
+    expect(derive(terms(), RFQ_ASSET_SWAP_V2).pkScript).toBe(sdk(RFQ_ASSET_SWAP_V2))
+    expect(derive(terms(), RFQ_ASSET_SWAP_V3).pkScript).toBe(sdk(RFQ_ASSET_SWAP_V3))
   })
 
   it('puts a v3 deposit at a different address than a v2 one', () => {

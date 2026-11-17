@@ -12,15 +12,8 @@
  */
 import { asset, type RelativeTimelock } from '@arkade-os/sdk'
 import { isEncodableRelativeDelay, relativeDelayFrom } from '@arkade-os/solver-core/core/timelocks.js'
-import { RFQ_ASSET_SWAP_V3 } from '@arkade-os/solver-core/core/rfqContract.js'
-import { offerVtxoScript, type Offer } from '@arkade-os/swap/protocol'
+import { assetSwapContractVersion, offerVtxoScript, type Offer } from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
-
-// Everything but v3 — baseline and absent included — is the PREVIOUS tree. Always
-// passed explicitly: a release that moved the SDK default would otherwise strand a
-// v2 client's deposit at an address it never derived.
-export const assetOfferGeneration = (contractVersion?: string): 'current' | 'previous' =>
-  contractVersion === RFQ_ASSET_SWAP_V3 ? 'current' : 'previous'
 
 /**
  * The covenant parameters, all of them already decided.
@@ -118,7 +111,8 @@ export const offerScriptFrom = (
     const script = offerVtxoScript(
       offerFromTerms(terms, emulatorPubkey, deps.exitDelay),
       deps.serverPubkey,
-      assetOfferGeneration(contractVersion),
+      // Explicit, not the SDK default: absent is the wire baseline; an unknown id throws.
+      assetSwapContractVersion(contractVersion),
     )
     // Both from the SAME compiled script: the address is what the client is
     // told and the pkScript is what the deposit is recognised by, so two
