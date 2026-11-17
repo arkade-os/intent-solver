@@ -231,6 +231,7 @@ main > div > .toolbar,
 main h2.section-title,
 .pricing-page > .toolbar,
 .pricing-page > details,
+.pricing-changes > details,
 .pricing-apply {
   border: 1px solid var(--glass-edge);
   background: var(--glass);
@@ -627,7 +628,7 @@ main > div > .toolbar,
 .activity-section {
   min-width: 0;
   margin-top: 14px;
-  padding: 18px 20px;
+  padding: 16px 10px;
   border-radius: 24px;
 }
 
@@ -748,13 +749,13 @@ th {
   letter-spacing: 0.04em;
   color: var(--text-dim);
   border-bottom: 1px solid var(--line-strong);
-  padding: 10px 12px;
+  padding: 10px;
   white-space: nowrap;
 }
 
 td {
   border-bottom: 1px solid var(--line);
-  padding: 8px 12px;
+  padding: 8px 10px;
   white-space: nowrap;
 }
 
@@ -2120,7 +2121,8 @@ html[data-vt='view'] nav .slens {
   padding: 10px 0;
 }
 
-.pricing-page > details {
+.pricing-page > details,
+.pricing-changes > details {
   margin-top: 14px;
   padding: 14px 18px;
   border-radius: 22px;
