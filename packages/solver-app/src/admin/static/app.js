@@ -1672,7 +1672,8 @@ const bpsFrom = (value) => (value === null || value === undefined ? '' : String(
 
 /**
  * EVERY editable column, including the ones no field below renders: PUT is a
- * full replace, so a column the draft drops is one that save deletes.
+ * full replace, so a column the draft drops is one that save deletes. Amounts
+ * are held in whole units of their leg, as the form shows them.
  */
 const draftFrom = (market) => ({
   base: market.base ?? 'BTC',
@@ -1683,14 +1684,14 @@ const draftFrom = (market) => ({
   pricePath: market.pricePath,
   toleranceBps: String(market.toleranceBps),
   feeBps: String(market.feeBps),
-  sellBaseFeeFlat: String(market.sellBaseFeeFlat),
-  buyBaseFeeFlat: String(market.buyBaseFeeFlat),
+  sellBaseFeeFlat: toHuman(String(market.sellBaseFeeFlat), market.baseDecimals),
+  buyBaseFeeFlat: toHuman(String(market.buyBaseFeeFlat), market.quoteDecimals),
   sellBaseFeeBps: bpsFrom(market.sellBaseFeeBps),
   buyBaseFeeBps: bpsFrom(market.buyBaseFeeBps),
-  sellBaseMin: market.sellBase?.min ?? '',
-  sellBaseMax: market.sellBase?.max ?? '',
-  buyBaseMin: market.buyBase?.min ?? '',
-  buyBaseMax: market.buyBase?.max ?? '',
+  sellBaseMin: market.sellBase ? toHuman(market.sellBase.min, market.quoteDecimals) : '',
+  sellBaseMax: market.sellBase ? toHuman(market.sellBase.max, market.quoteDecimals) : '',
+  buyBaseMin: market.buyBase ? toHuman(market.buyBase.min, market.baseDecimals) : '',
+  buyBaseMax: market.buyBase ? toHuman(market.buyBase.max, market.baseDecimals) : '',
   enabled: market.enabled,
   symbol: market.symbol ?? '',
   servesOffer: market.servesOffer,
@@ -1721,39 +1722,50 @@ const draftInt = (value) => {
  * Decimals and bps go as JSON NUMBERS because they are small and the server
  * demands integers; the amount bounds go as STRINGS because they are atomic
  * units and a bigint does not survive JSON.parse.
+ *
+ * Amounts convert here, with the decimals in force NOW: converted as typed,
+ * a later decimals fix would leave the wire 10^n off what the form shows.
  */
-const marketBody = (d) => ({
-  base: d.base,
-  quote: d.quote,
-  baseDecimals: draftInt(d.baseDecimals),
-  quoteDecimals: draftInt(d.quoteDecimals),
-  feedUrl: d.feedUrl,
-  pricePath: d.pricePath,
-  toleranceBps: draftInt(d.toleranceBps),
-  feeBps: draftInt(d.feeBps),
-  sellBaseFeeFlat: d.sellBaseFeeFlat.trim(),
-  buyBaseFeeFlat: d.buyBaseFeeFlat.trim(),
-  sellBaseFeeBps: draftInt(d.sellBaseFeeBps),
-  buyBaseFeeBps: draftInt(d.buyBaseFeeBps),
-  sellBase: draftBounds(d.sellBaseMin, d.sellBaseMax),
-  buyBase: draftBounds(d.buyBaseMin, d.buyBaseMax),
-  enabled: d.enabled,
-  symbol: String(d.symbol ?? '').trim(),
-  servesOffer: d.servesOffer,
-  servesRfq: d.servesRfq,
-  rfqSellBase: d.rfqSellBase,
-  rfqBuyBase: d.rfqBuyBase,
-  carrierMode: d.carrierMode,
-})
+const marketBody = (d) => {
+  // Raw text when it does not convert: the server refuses it, where a guess would misprice.
+  const atomic = (key, leg) => toAtomic(d[key], d[`${leg}Decimals`]) ?? String(d[key] ?? '').trim()
+  return {
+    base: d.base,
+    quote: d.quote,
+    baseDecimals: draftInt(d.baseDecimals),
+    quoteDecimals: draftInt(d.quoteDecimals),
+    feedUrl: d.feedUrl,
+    pricePath: d.pricePath,
+    toleranceBps: draftInt(d.toleranceBps),
+    feeBps: draftInt(d.feeBps),
+    sellBaseFeeFlat: atomic('sellBaseFeeFlat', 'base') || '0',
+    buyBaseFeeFlat: atomic('buyBaseFeeFlat', 'quote') || '0',
+    sellBaseFeeBps: draftInt(d.sellBaseFeeBps),
+    buyBaseFeeBps: draftInt(d.buyBaseFeeBps),
+    sellBase: draftBounds(atomic('sellBaseMin', 'quote'), atomic('sellBaseMax', 'quote')),
+    buyBase: draftBounds(atomic('buyBaseMin', 'base'), atomic('buyBaseMax', 'base')),
+    enabled: d.enabled,
+    symbol: String(d.symbol ?? '').trim(),
+    servesOffer: d.servesOffer,
+    servesRfq: d.servesRfq,
+    rfqSellBase: d.rfqSellBase,
+    rfqBuyBase: d.rfqBuyBase,
+    carrierMode: d.carrierMode,
+  }
+}
 
-/** "Add market" naming a stored pair opens the stored row: staging the blank form under its key would overwrite it. */
+/**
+ * "Add market" naming a pair already stored, or already pending in the draft, opens that market: staging
+ * the blank form under its key would overwrite it. The form's own staged entry is not another market.
+ */
 const adoptSavedPair = () => {
   if (!marketDraft || marketDraft.marketKey) return false
   const key = pairKey(marketDraft.base, marketDraft.quote)
   const row = (state.data.markets?.markets ?? []).find((market) => market.marketKey === key)
-  if (!row) return false
+  const pending = state.view === 'pricing' && pricingDraft.markets.has(key) && pricingSelection?.draftKey !== key
+  if (!row && !pending) return false
   if (state.view !== 'pricing') {
-    openMarketForm({ ...draftFrom(row), adopted: true })
+    openMarketForm({ ...draftFrom(row), adopted: 'saved' })
     return true
   }
   const staged = pricingSelection?.draftKey
@@ -1762,7 +1774,7 @@ const adoptSavedPair = () => {
     pricingMarketForms.delete(staged)
   }
   marketDraft = null
-  selectPricing({ kind: 'market', key, adopted: true }, draftFrom(row))
+  selectPricing({ kind: 'market', key, adopted: row ? 'saved' : 'pending' }, row ? draftFrom(row) : null)
   return true
 }
 
@@ -1872,11 +1884,12 @@ const fillLimits = (feed) => {
   const limits = limitDefaults(feed, marketDraft.quoteDecimals)
   if (!limits) return false
   const [btcIn, assetIn] = directions(marketDraft)
+  const [asset, btc] = [(atomic) => toHuman(atomic, marketDraft.quoteDecimals), (sats) => toHuman(sats, 8)]
   return [
-    fill(btcIn.min, limits.asset.min),
-    fill(btcIn.max, limits.asset.max),
-    fill(assetIn.min, limits.btc.min),
-    fill(assetIn.max, limits.btc.max),
+    fill(btcIn.min, asset(limits.asset.min)),
+    fill(btcIn.max, asset(limits.asset.max)),
+    fill(assetIn.min, btc(limits.btc.min)),
+    fill(assetIn.max, btc(limits.btc.max)),
   ].some(Boolean)
 }
 
@@ -1890,16 +1903,24 @@ const feedReadout = () => {
   const path = marketDraft.pricePath || derivedPricePath(marketDraft.feedUrl)
   const reading = path ? `reading ${path}${marketDraft.pricePath ? '' : ' (from the URL)'}` : 'needs a JSON path'
   const feed = lastFeed?.key === feedKey() ? lastFeed.feed : null
+  const setPath = marketDraft.pathShown
+    ? null
+    : [
+        ' · ',
+        h('button.link', { onclick: () => ((marketDraft.pathShown = true), schedulePreview()) }, 'set a JSON path'),
+      ]
   if (feed?.state === 'resolved') {
     return [
       h('b', `1 ${nameOf('base')} = ${priceText(feed.mantissa, feed.scale)} ${nameOf('quote')}`),
       ` · read ${ago(Math.floor(feed.readAt / 1000))} ago · ${reading}`,
+      setPath,
     ]
   }
   return [
     feed ? `${feed.reason} · ` : '',
     h('span.faint', reading),
     readDraftFeed() ? null : [' ', h('button.link', { onclick: readFeed }, 'read price')],
+    setPath,
   ]
 }
 
@@ -1921,27 +1942,16 @@ const assetNote = (id, label, issuer, said) => {
 const limitWarning = (side, digits) => {
   const [min, max] = [marketDraft[side.min], marketDraft[side.max]].map((value) => String(value ?? '').trim())
   if (!marketDraft[side.open]) return 'switched off: the client cannot trade this way'
-  if (digits === null) return `set the ${nameOf(side.receives)} decimals first`
   if (min === '' && max === '') return 'closed to RFQ until both limits are set'
   if (min === '' || max === '') return 'needs both limits'
-  return /^\d+$/.test(min) && /^\d+$/.test(max) ? '' : 'not an amount at these decimals'
+  if (digits === null) return `set the ${nameOf(side.receives)} decimals to price these`
+  return toAtomic(min, digits) !== null && toAtomic(max, digits) !== null ? '' : `not an amount with ${digits} decimals`
 }
 
 const limitRow = (side) => {
   const digits = decimalsOf(marketDraft[`${side.receives}Decimals`])
   const bound = (key, word) =>
-    field(
-      key,
-      {
-        'aria-label': `${arrow(side)} ${word}`,
-        class: 'amount',
-        inputmode: 'decimal',
-        value: digits === null ? '' : toHuman(marketDraft[key], digits),
-        disabled: digits === null,
-        placeholder: digits === null ? '—' : word,
-      },
-      (text) => toAtomic(text, digits) ?? text.trim(),
-    )
+    field(key, { 'aria-label': `${arrow(side)} ${word}`, class: 'amount', inputmode: 'decimal', placeholder: word })
   return h(
     'div.limit',
     h(
@@ -1963,26 +1973,14 @@ const limitRow = (side) => {
   )
 }
 
-/** Blank sends "0": the server refuses an empty flat fee rather than reading it as none. */
-const flatFee = (side) => {
-  const digits = decimalsOf(marketDraft[`${side.gives}Decimals`])
-  return h(
+/** Blank goes out as "0": the server refuses an empty flat fee rather than reading it as none. */
+const flatFee = (side) =>
+  h(
     'span.pair',
     `${arrow(side)} `,
-    field(
-      side.flat,
-      {
-        'aria-label': `${arrow(side)} flat fee`,
-        class: 'amount',
-        inputmode: 'decimal',
-        value: digits === null ? '' : toHuman(marketDraft[side.flat], digits),
-        disabled: digits === null,
-      },
-      (text) => toAtomic(text, digits) || text.trim() || '0',
-    ),
+    field(side.flat, { 'aria-label': `${arrow(side)} flat fee`, class: 'amount', inputmode: 'decimal' }),
     ` ${nameOf(side.gives)}`,
   )
-}
 
 const checkbox = (label, key, hint) =>
   h(
@@ -2201,8 +2199,7 @@ const quoteResult = (side, feed) => {
   const sample = samples.find((candidate) => candidate.amount === asked)
   if (!sample) return h('p.notice', 'the server sent no answer for this amount')
   if (!sample.ok) {
-    const digits = decimalsOf(marketDraft[`${side.receives}Decimals`])
-    const [min, max] = [side.min, side.max].map((key) => toHuman(marketDraft[key], digits))
+    const [min, max] = [side.min, side.max].map((key) => String(marketDraft[key] ?? '').trim())
     return h(
       'p.notice',
       h('span.phase.phase-failed', REFUSED[sample.reason] ?? sample.reason),
@@ -2390,7 +2387,9 @@ const marketForm = (save = saveMarket, close = () => ((marketDraft = null), rend
   const sats = state.data.markets?.carrier?.sats ?? '?'
   const charged = carrierCharged(marketDraft.carrierMode, carrierDefaultDraft)
   const feedUrl = String(marketDraft.feedUrl ?? '').trim()
-  const showPath = marketDraft.pricePath !== '' || (feedUrl !== '' && !derivedPricePath(feedUrl))
+  // Once shown it stays for this draft: hidden as its path is cleared, the row would take the caret with it.
+  if (marketDraft.pricePath !== '' || (feedUrl !== '' && !derivedPricePath(feedUrl))) marketDraft.pathShown = true
+  const showPath = marketDraft.pathShown === true
   const adopted = state.view === 'pricing' ? pricingSelection?.adopted : marketDraft.adopted
   return h(
     'section.panel.market-form',
@@ -2404,7 +2403,13 @@ const marketForm = (save = saveMarket, close = () => ((marketDraft = null), rend
       },
       saved ? `${pairName()} market` : 'Add market',
     ),
-    h('p.notice', { hidden: !adopted }, `${pairName()} already exists — editing it.`),
+    h(
+      'p.notice',
+      { hidden: !adopted },
+      adopted === 'pending'
+        ? `${pairName()} is already in your pending changes — editing it.`
+        : `${pairName()} already exists — editing it.`,
+    ),
     h(
       'div.form-grid',
       row(
@@ -2490,8 +2495,7 @@ const marketForm = (save = saveMarket, close = () => ((marketDraft = null), rend
             'span.note',
             charged
               ? `Each asset rides on ${sats} sats: the client pays them on ${arrow(btcIn)} and gets them back on ${arrow(assetIn)}.`
-              : `We pay the ${sats} sats on every ${arrow(btcIn)} swap` +
-                  (Number(marketDraft.feeBps) === 0 ? ', so at fee 0 that direction never breaks even.' : '.'),
+              : `We pay the ${sats} sats on every ${arrow(btcIn)} swap.`,
             marketDraft.carrierMode === 'inherit' ? ' Following the deployment default (Advanced).' : '',
           ),
         ],

@@ -204,7 +204,7 @@ describe('adding a market for a pair that is already stored', () => {
     expect(ui.pricingDraft.size).toBe(1)
     ui.current().quote = asset('aa')
     expect(ui.adoptSavedPair()).toBe(true)
-    expect(ui.selection()).toMatchObject({ kind: 'market', key: ui.markets[0]!.marketKey, adopted: true })
+    expect(ui.selection()).toMatchObject({ kind: 'market', key: ui.markets[0]!.marketKey, adopted: 'saved' })
     expect(ui.current()).toMatchObject({ symbol: 'A', feeBps: '50', carrierMode: 'inherit', quoteDecimals: '6' })
     expect(ui.pricingDraft.size).toBe(0)
   })
@@ -226,6 +226,28 @@ describe('adding a market for a pair that is already stored', () => {
     ui.current().quote = asset('cc')
     expect(ui.adoptSavedPair()).toBe(false)
     expect(ui.selection().key).toBeNull()
+  })
+
+  it('reopens a pair already pending in the draft instead of laying the blank form over it', () => {
+    const ui = harness()
+    const key = simpleMarket.pairKey('BTC', asset('cc'))
+    ui.selectPricing({ kind: 'market', key: null }, ui.blankMarket())
+    Object.assign(ui.current(), { quote: asset('cc'), feeBps: '25' })
+    ui.selectPricing({ kind: 'market', key: null }, ui.blankMarket())
+    ui.current().quote = asset('cc')
+    expect(ui.adoptSavedPair()).toBe(true)
+    expect(ui.selection()).toMatchObject({ kind: 'market', key, adopted: 'pending' })
+    expect(ui.current().feeBps).toBe('25')
+    ui.syncPricingMarket()
+    expect(ui.pricingDraft.payload().markets).toMatchObject([{ quote: asset('cc'), feeBps: 25 }])
+  })
+
+  it('does not adopt its own staged entry when the same id arrives again', () => {
+    const ui = harness()
+    ui.selectPricing({ kind: 'market', key: null }, ui.blankMarket())
+    ui.current().quote = asset('cc')
+    ui.syncPricingMarket()
+    expect(ui.adoptSavedPair()).toBe(false)
   })
 })
 

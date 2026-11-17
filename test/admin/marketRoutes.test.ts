@@ -19,6 +19,7 @@ import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
 import { assetMarketKey, assetMarketPolicy, DEFAULT_SERVING } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { assetRfqMarketsFrom } from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
 import { priceFrom } from '@arkade-os/solver-core/core/priceFeed.js'
+import * as simpleMarket from '../../packages/solver-app/src/admin/static/simpleMarket.js'
 
 const USDT = 'aa'.repeat(34)
 const KEY = assetMarketKey(null, USDT)
@@ -36,7 +37,10 @@ const consoleForm = () => {
   const end = appSource.indexOf('/* ==== asset markets — END')
   if (start === -1 || end === -1) throw new Error('the market form moved out of the slice this guard reads')
   try {
-    return new Function(`${appSource.slice(start, end)}\nreturn { blankMarket, draftFrom, marketBody }`)() as {
+    return new Function(
+      ...Object.keys(simpleMarket),
+      `${appSource.slice(start, end)}\nreturn { blankMarket, draftFrom, marketBody }`,
+    )(...Object.values(simpleMarket)) as {
       blankMarket: () => Record<string, unknown>
       draftFrom: (row: Record<string, unknown>) => Record<string, unknown>
       marketBody: (draft: Record<string, unknown>) => Record<string, unknown>

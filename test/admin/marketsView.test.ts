@@ -180,7 +180,7 @@ describe('the form speaks the API’s dialect', () => {
     // 2^53 silently, and in the direction that widens it.
     const block = marketsBlock()
     expect(block).toContain('toleranceBps: draftInt(d.toleranceBps)')
-    expect(block).toContain('sellBase: draftBounds(d.sellBaseMin, d.sellBaseMax)')
+    expect(block).toContain("sellBase: draftBounds(atomic('sellBaseMin', 'quote'), atomic('sellBaseMax', 'quote'))")
     expect(block).toMatch(/min: min\.trim\(\), max: max\.trim\(\)/)
   })
 
@@ -536,7 +536,7 @@ describe('the preview panel, run rather than grepped', () => {
 
   it('names a refusal in words and states the limits it broke', async () => {
     const refused = { ...RESOLVED, samples: [{ amount: '100000000', ok: false, reason: 'amount_out_of_range' }] }
-    const panel = previewHarness(refused, { quoteDecimals: '6', sellBaseMin: '1000000', sellBaseMax: '9000000' })
+    const panel = previewHarness(refused, { quoteDecimals: '6', sellBaseMin: '1', sellBaseMax: '9' })
     const node = panel.previewPanel()
     fire(labelled(node, 'amount the client sends'), 'input', { value: '1' })
     await panel.refreshPreview()
@@ -667,7 +667,7 @@ describe('a new market fills what the lookup and the config know', () => {
     await panel.refreshPreview()
     fire(labelled(panel.marketsView(), 'BTC → USDA min'), 'input', { value: '' })
     await panel.refreshPreview()
-    expect(panel.draft()).toMatchObject({ sellBaseMin: '', sellBaseMax: '1000000000' })
+    expect(panel.draft()).toMatchObject({ sellBaseMin: '', sellBaseMax: '1000' })
   })
 })
 
@@ -678,14 +678,39 @@ describe('the simple form writes the columns the server reads', () => {
     const btcBase = previewHarness(RESOLVED, { quote: USDA, quoteDecimals: '6', symbol: 'USDA' })
     let view = btcBase.marketsView()
     fire(labelled(view, 'BTC → USDA min'), 'input', { value: '10' })
+    fire(labelled(view, 'BTC → USDA max'), 'input', { value: '20' })
+    fire(labelled(view, 'USDA → BTC min'), 'input', { value: '0.001' })
     fire(labelled(view, 'USDA → BTC max'), 'input', { value: '0.01' })
-    expect(btcBase.draft()).toMatchObject({ sellBaseMin: '10000000', buyBaseMax: '1000000' })
+    expect(btcBase.marketBody(btcBase.draft())).toMatchObject({
+      sellBase: { min: '10000000', max: '20000000' },
+      buyBase: { min: '100000', max: '1000000' },
+    })
 
     const assetBase = previewHarness(RESOLVED, ASSET_BASE)
     view = assetBase.marketsView()
     fire(labelled(view, 'BTC → USDA min'), 'input', { value: '10' })
+    fire(labelled(view, 'BTC → USDA max'), 'input', { value: '20' })
+    fire(labelled(view, 'USDA → BTC min'), 'input', { value: '0.001' })
     fire(labelled(view, 'USDA → BTC max'), 'input', { value: '0.01' })
-    expect(assetBase.draft()).toMatchObject({ buyBaseMin: '10000000', sellBaseMax: '1000000' })
+    expect(assetBase.marketBody(assetBase.draft())).toMatchObject({
+      buyBase: { min: '10000000', max: '20000000' },
+      sellBase: { min: '100000', max: '1000000' },
+    })
+  })
+
+  it('keeps typed whole units when the decimals are corrected, and scales the wire by the new ones', () => {
+    const panel = previewHarness(RESOLVED, { quote: USDA, quoteDecimals: '8', symbol: 'USDA' })
+    const view = panel.marketsView()
+    fire(labelled(view, 'BTC → USDA min'), 'input', { value: '10' })
+    fire(labelled(view, 'BTC → USDA max'), 'input', { value: '1000' })
+    fire(labelled(view, 'USDA → BTC flat fee'), 'input', { value: '1' })
+    fire(findAll(view, (node) => node.attrs['aria-label'] === 'USDA decimals')[0]!, 'input', { value: '6' })
+    expect(panel.draft()).toMatchObject({ sellBaseMin: '10', sellBaseMax: '1000', buyBaseFeeFlat: '1' })
+    expect(panel.marketBody(panel.draft())).toMatchObject({
+      quoteDecimals: 6,
+      sellBase: { min: '10000000', max: '1000000000' },
+      buyBaseFeeFlat: '1000000',
+    })
   })
 
   it('switches each direction through its own rfq flag', () => {
@@ -702,7 +727,14 @@ describe('the simple form writes the columns the server reads', () => {
     const view = panel.marketsView()
     fire(labelled(view, 'BTC → USDA flat fee'), 'input', { value: '0.0000033' })
     fire(labelled(view, 'USDA → BTC flat fee'), 'input', { value: '' })
-    expect(panel.draft()).toMatchObject({ sellBaseFeeFlat: '330', buyBaseFeeFlat: '0' })
+    expect(panel.marketBody(panel.draft())).toMatchObject({ sellBaseFeeFlat: '330', buyBaseFeeFlat: '0' })
+  })
+
+  it('says who pays the carrier without a break-even claim the per-direction fees would make wrong', () => {
+    const covered = { quote: USDA, quoteDecimals: '6', symbol: 'USDA', carrierMode: 'off', feeBps: '0' }
+    const text = textOf(previewHarness(RESOLVED, { ...covered, sellBaseFeeFlat: '0.0000033' }).marketsView())
+    expect(text).toContain('We pay the 330 sats on every BTC → USDA swap.')
+    expect(text).not.toContain('never breaks even')
   })
 
   it('writes priced or off from the carrier switch, and inherit only from Advanced', () => {
@@ -714,6 +746,31 @@ describe('the simple form writes the columns the server reads', () => {
     expect(panel.draft().carrierMode).toBe('inherit')
     fire(labelled(view, 'the client pays the carrier'), 'input', { checked: true })
     expect(panel.draft().carrierMode).toBe('priced')
+  })
+})
+
+describe('the JSON path row', () => {
+  const BINANCE = 'https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT'
+  const pathHidden = (view: StubNode) =>
+    findAll(view, (node) => node.className.includes('span2')).find(
+      (node) => findAll(node, (input) => input.attrs['aria-label'] === 'json path').length > 0,
+    )!.attrs.hidden !== undefined
+
+  it('stays on screen while its path is cleared under a URL the path derives from', () => {
+    const panel = previewHarness(RESOLVED, { feedUrl: BINANCE, pricePath: '/price' })
+    expect(pathHidden(panel.marketsView())).toBe(false)
+    fire(labelled(panel.marketsView(), 'json path'), 'input', { value: '' })
+    expect(pathHidden(panel.marketsView())).toBe(false)
+  })
+
+  it('opens on request, for a path other than the one the URL derives', () => {
+    const panel = previewHarness(RESOLVED, { feedUrl: BINANCE })
+    const view = panel.marketsView()
+    expect(pathHidden(view)).toBe(true)
+    const link = findAll(view, (node) => node.tagName === 'button' && textOf(node).includes('set a JSON path'))
+    expect(link).toHaveLength(1)
+    fire(link[0]!, 'click', {})
+    expect(pathHidden(panel.marketsView())).toBe(false)
   })
 })
 
