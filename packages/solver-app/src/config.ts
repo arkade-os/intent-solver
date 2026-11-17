@@ -462,8 +462,8 @@ export interface Config {
   configPaths: ReadonlyMap<string, string>
   /** A registered rail's own block of the document, for that rail to validate. */
   lightningRailBlock: unknown | null
-  /** The document as the operator wrote it, before any profile; null when none was read. */
-  configDocument: unknown | null
+  /** The document as the operator wrote it, before any profile; absent when none was read. */
+  configDocument?: unknown
   /**
    * Whether this solver advertises itself on Nostr (kind 38859).
    *
@@ -1082,7 +1082,6 @@ export const configFromKnobs = (env: Knobs): Config => {
     evmChain: loadEvmChainConfig(env),
     configPaths: new Map(),
     lightningRailBlock: null,
-    configDocument: null,
     /** `off` (default) | `manual` | `auto`. See docs/rfq-protocol.md § 3. */
     nostrAdPublish: ((): AdPublishMode => {
       const raw = (env.NOSTR_AD_PUBLISH ?? 'off').trim().toLowerCase()

@@ -76,6 +76,12 @@ describe('exportDocument', () => {
     expect(exporting).toThrow(`corridors["${LN_SEND}"].maxSats is 2000000 here but would load as 1000000`)
   })
 
+  it('refuses, with the loader’s reason, a range a file would not load at all', () => {
+    const exporting = () => exportDocument(load(base()), { LN_SEND_MIN_SATS: '1500000', LN_SEND_MAX_SATS: '2000000' })
+    expect(exporting).toThrow(UnexportableConfig)
+    expect(exporting).toThrow(/cannot hold what this console runs: .*empty/)
+  })
+
   it('writes nothing an override does not move', () => {
     const exported = exportDocument(load(base()), {
       LN_SEND_FEE_BPS: '10',

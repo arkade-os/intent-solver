@@ -25,7 +25,7 @@ import { CORRIDORS, FREE, type Corridor, type Fee } from '@arkade-os/solver-core
 import { descriptorFor } from '@arkade-os/solver-corridors/corridors/index.js'
 import { MAX_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/send.js'
 import { assetMarketKey } from '@arkade-os/solver-core/core/assetMarketConfig.js'
-import { log } from '@arkade-os/solver-core/util/poll.js'
+import { log, messageOf } from '@arkade-os/solver-core/util/poll.js'
 import { lightningRailFor } from '../ops/rails.js'
 import { redactDocument, setAt } from '../config/fromEnv.js'
 import { BTC_FAMILY, CORRIDOR_FIELDS, corridorKnob, PATHS, SECRET_KNOBS } from '../config/knobs.js'
@@ -347,15 +347,22 @@ export const exportDocument = (config: Config, overrides: Record<string, string>
     setAt(doc, at, live[key])
   }
   // The loader narrows a corridor's range to the deployment's and the console does not, so a widened one is lost.
-  const reloaded = editableKnobValues(loadConfig({ env: { SOLVER_CONFIG_JSON: JSON.stringify(doc) } }))
+  const cannot = 'a config file cannot hold what this console runs'
+  let reloaded: ReturnType<typeof editableKnobValues>
+  try {
+    reloaded = editableKnobValues(loadConfig({ env: { SOLVER_CONFIG_JSON: JSON.stringify(doc) } }))
+  } catch (error) {
+    throw new UnexportableConfig(`${cannot}: ${messageOf(error)}`)
+  }
   const lost = editableKeys().filter((key) => reloaded[key] !== live[key])
   if (lost.length > 0) {
     const each = lost.map(
       (key) => `${config.configPaths.get(key) ?? key} is ${live[key]} here but would load as ${reloaded[key]}`,
     )
+    const ranged = lost.some((key) => /_M(IN|AX)_SATS$/.test(key))
     throw new UnexportableConfig(
-      `a config file cannot hold what this console runs: ${each.join('; ')}. A file narrows each corridor's ` +
-        `range to limits.maxSwapSats and the network's own range; bring the console value inside it first.`,
+      `${cannot}: ${each.join('; ')}` +
+        (ranged ? ". A file narrows each corridor's range to limits.maxSwapSats and the network's own range" : ''),
     )
   }
   return redactDocument(doc, new Set([...SECRET_KNOBS].flatMap((knob) => config.configPaths.get(knob) ?? [])))
