@@ -157,6 +157,14 @@
   color-scheme: light;
 }
 
+/* Without color-mix (Safari before 16.2) the glass tint would drop out and leave text on the backdrop. */
+@supports not (color: color-mix(in srgb, red 50%, blue)) {
+  :root,
+  [data-theme='light'] {
+    --glass: var(--raised);
+  }
+}
+
 * {
   box-sizing: border-box;
 }
@@ -2756,8 +2764,14 @@ input.amount {
     border-left: 3px solid var(--line-strong);
   }
 
-  tr.note td:first-child {
+  tr.note td:first-child,
+  tbody tr.selected td:first-child {
     border-left: none;
+    box-shadow: none;
+  }
+
+  tbody tr.selected {
+    box-shadow: inset 3px 0 0 var(--accent);
   }
 
   .ladder tr.loss {
