@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url'
 // The REAL ordered-save client, not a stand-in: it is what turns the route's 200-carrying-`unapplied`
 // into a throw, so a harness that stubbed it would be measuring its own mock rather than the seam.
 import { applyPricing } from '../../packages/solver-app/src/admin/static/pricingSave.js'
+import * as simpleMarket from '../../packages/solver-app/src/admin/static/simpleMarket.js'
 
 const appSource = readFileSync(
   fileURLToPath(new URL('../../packages/solver-app/src/admin/static/app.js', import.meta.url)),
@@ -178,8 +179,8 @@ describe('the form speaks the API’s dialect', () => {
     // An atomic-unit bound is a bigint; a JSON number would lose a ceiling past
     // 2^53 silently, and in the direction that widens it.
     const block = marketsBlock()
-    expect(block).toContain('toleranceBps: Number(d.toleranceBps)')
-    expect(block).toContain('sellBase: draftBounds(d.sellBaseMin, d.sellBaseMax)')
+    expect(block).toContain('toleranceBps: draftInt(d.toleranceBps)')
+    expect(block).toContain("sellBase: draftBounds(atomic('sellBaseMin', 'quote'), atomic('sellBaseMax', 'quote'))")
     expect(block).toMatch(/min: min\.trim\(\), max: max\.trim\(\)/)
   })
 
@@ -205,9 +206,9 @@ describe('the form is laid out rather than run together', () => {
   it('carries a plain-English sentence for the fields that decide money', () => {
     const block = marketsBlock()
     for (const phrase of [
-      'Our margin, taken out of what the customer receives',
-      'Bounds on what we pay out in this direction',
-      'Our margin when the customer hands us the base asset',
+      'Our margin, taken out of what the client receives',
+      'Bounds on what the client receives per swap',
+      'Our margin for one direction only',
     ]) {
       expect(block).toContain(phrase)
     }
@@ -222,15 +223,17 @@ describe('the form is laid out rather than run together', () => {
   })
 
   it('renders an input for each per-direction spread, which #171 stored but never showed', () => {
-    const block = marketsBlock()
-    expect(block).toContain("'sellBaseFeeBps'")
-    expect(block).toContain("'buyBaseFeeBps'")
+    const panel = previewHarness(RESOLVED)
+    const view = panel.marketsView()
+    fire(labelled(view, 'BTC → asset fee bps'), 'input', { value: '20' })
+    fire(labelled(view, 'asset → BTC fee bps'), 'input', { value: '35' })
+    expect(panel.draft()).toMatchObject({ sellBaseFeeBps: '20', buyBaseFeeBps: '35' })
   })
 
   it('carries the saved key on the draft, and keeps it off the wire body', () => {
     const block = marketsBlock()
     expect(block).toContain('marketKey: market.marketKey')
-    const body = block.slice(block.indexOf('const marketBody'), block.indexOf('const field'))
+    const body = block.slice(block.indexOf('const marketBody'), block.indexOf('const adoptSavedPair'))
     expect(body).not.toContain('marketKey')
   })
 
@@ -292,12 +295,6 @@ describe('the preview panel', () => {
     expect(marketsBlock()).toContain('marketKey: marketDraft.marketKey')
   })
 
-  it('spends the amber only on a row under the break-even', () => {
-    const block = marketsBlock()
-    expect(block).toContain("loss ? '.loss' : ''")
-    expect(block).toContain('const belowBreakEven =')
-  })
-
   it('declares schedulePreview nowhere — Task 10 owns the binding', () => {
     expect(marketsBlock().match(/(?:let|const|var)\s+schedulePreview\b/g)).toHaveLength(1)
   })
@@ -348,6 +345,8 @@ class StubNode {
 const stubDoc = () => ({
   createElement: (tag: string) => new StubNode(tag),
   createTextNode: (text: string) => new StubNode('#text', text),
+  // Nothing is mounted here, so the in-place form repaint finds no live form; morph.test.ts runs that path.
+  querySelector: () => null,
 })
 
 const textOf = (node: StubNode): string => [node.text, ...node.childNodes.map(textOf)].join(' ')
@@ -362,7 +361,11 @@ const helperBlock = (): string => {
 }
 
 // Same new-Function + named-error pattern as marketRoutes.test.ts:33-46: run rather than grepped.
-const previewHarness = (response: unknown, draft: Record<string, unknown> = {}) => {
+const previewHarness = (
+  response: unknown,
+  draft: Record<string, unknown> = {},
+  { label, knobs = [] }: { label?: Record<string, unknown>; knobs?: unknown[] } = {},
+) => {
   const pending: (() => void)[] = []
   const sent: (string | undefined)[] = []
   const params = [
@@ -371,16 +374,18 @@ const previewHarness = (response: unknown, draft: Record<string, unknown> = {}) 
     'api',
     'shortId',
     'ago',
+    'sats',
     'state',
     'render',
     'load',
     'fail',
     'setTimeout',
     'clearTimeout',
+    ...Object.keys(simpleMarket),
   ]
   const body = `${helperBlock()}\n${marketsBlock()}
     marketDraft = { ...blankMarket(), marketKey: 'k', ...${JSON.stringify(draft)} }
-    return { previewPanel, refreshPreview, schedulePreview, marketsView }`
+    return { previewPanel, refreshPreview, schedulePreview, marketsView, draft: () => marketDraft, marketBody }`
   const args = [
     stubDoc(),
     StubNode,
@@ -389,13 +394,20 @@ const previewHarness = (response: unknown, draft: Record<string, unknown> = {}) 
       if (path.startsWith('/api/assets/')) {
         // A macrotask, so a retry loop fails this test instead of starving the event loop.
         await new Promise((resolve) => setImmediate(resolve))
+        if (label) return { assetId: path.slice('/api/assets/'.length), ...label }
         throw new Error('500')
       }
       return response
     },
     (value: unknown) => String(value),
     () => '1m',
-    { data: { markets: { carrier: { sats: '330', rfqPriced: false, offerCharged: false }, markets: [] } } },
+    (value: unknown) => Number(value).toLocaleString('en-US'),
+    {
+      data: {
+        markets: { carrier: { sats: '330', rfqPriced: false, offerCharged: false }, markets: [] },
+        settings: { knobs },
+      },
+    },
     () => {
       throw new Error('render() from the preview would eat the caret')
     },
@@ -403,6 +415,7 @@ const previewHarness = (response: unknown, draft: Record<string, unknown> = {}) 
     () => {},
     (fn: () => void) => (pending.push(fn), pending.length),
     () => pending.pop(),
+    ...Object.values(simpleMarket),
   ]
   try {
     const built = new Function(...params, body)(...args) as {
@@ -410,11 +423,17 @@ const previewHarness = (response: unknown, draft: Record<string, unknown> = {}) 
       refreshPreview: () => Promise<void>
       schedulePreview: () => void
       marketsView: () => StubNode
+      draft: () => Record<string, unknown>
+      marketBody: (draft: Record<string, unknown>) => Record<string, unknown>
     }
     return { ...built, pending, sent }
   } catch (error) {
     throw new Error('the preview moved out of the slice this guard reads', { cause: error })
   }
+}
+
+const settle = async () => {
+  for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve))
 }
 
 const findAll = (node: StubNode, match: (node: StubNode) => boolean): StubNode[] => [
@@ -433,6 +452,13 @@ const control = (root: StubNode, label: string, tag: string): StubNode => {
 
 const fire = (node: StubNode, type: string, target: unknown): void =>
   (node.listeners[type] as (event: unknown) => void)({ target })
+
+/** The one control carrying this aria-label. */
+const labelled = (root: StubNode, label: string): StubNode => {
+  const found = findAll(root, (node) => node.attrs['aria-label'] === label)
+  expect(found, label).toHaveLength(1)
+  return found[0]!
+}
 
 /** First node in the tree whose class list contains `className`, DOM-order (self before children). */
 const findByClass = (node: StubNode, className: string): StubNode | null => {
@@ -454,9 +480,11 @@ const gridChildShape = (node: StubNode): string => {
   return `unexpected child: ${[node.tagName, ...classes].join('.')}`
 }
 
-const painted = async (response: unknown): Promise<string> => {
+/** The panel after one answer, with `amount` typed as what the client sends, in whole units. */
+const painted = async (response: unknown, amount = ''): Promise<string> => {
   const panel = previewHarness(response)
   const node = panel.previewPanel()
+  if (amount) fire(labelled(node, 'amount the client sends'), 'input', { value: amount })
   await panel.refreshPreview()
   expect(node.childNodes.length).toBeGreaterThan(0)
   return textOf(node)
@@ -475,7 +503,11 @@ const RESOLVED = {
       amount: '100000000',
       fromAmount: '100000000',
       toAmount: '99500000000',
+      midPayout: '100000000000',
       spreadFee: '500000000',
+      flatFee: '0',
+      carrierCharged: '330',
+      carrierReturned: '0',
       marginBps: 50,
     },
   ],
@@ -484,10 +516,58 @@ const RESOLVED = {
 }
 
 describe('the preview panel, run rather than grepped', () => {
-  it('paints the amounts the server sent', async () => {
-    const text = await painted(RESOLVED)
+  it('paints the amounts the server sent for the amount the operator typed', async () => {
+    const text = await painted(RESOLVED, '1')
     expect(text).toContain('99,500')
     expect(text).toContain('50 bps')
+    expect(text).toContain('330 sats, paid by the client')
+  })
+
+  it('asks for the typed amount in atomic units, and prompts rather than inventing one', async () => {
+    const panel = previewHarness(RESOLVED)
+    const node = panel.previewPanel()
+    await panel.refreshPreview()
+    expect(JSON.parse(String(panel.sent.at(-1)))).not.toHaveProperty('amount')
+    expect(textOf(node)).toContain('Type what the client sends')
+    fire(labelled(node, 'amount the client sends'), 'input', { value: '0.5' })
+    await panel.refreshPreview()
+    expect(JSON.parse(String(panel.sent.at(-1)))).toMatchObject({ direction: 'sell_base', amount: '50000000' })
+  })
+
+  it('shows no quote from an answer for the other direction', async () => {
+    const panel = previewHarness(RESOLVED, { quoteDecimals: '8' })
+    const node = panel.previewPanel()
+    fire(labelled(node, 'amount the client sends'), 'input', { value: '1' })
+    await panel.refreshPreview()
+    expect(textOf(node)).toContain('99,500')
+    const other = findAll(node, (button) => button.tagName === 'button' && button.attrs['aria-pressed'] === 'false')
+    fire(other[0]!, 'click', {})
+    fire(labelled(node, 'amount the client sends'), 'input', { value: '1' })
+    await panel.refreshPreview()
+    expect(textOf(node)).not.toContain('99,500')
+    expect(textOf(node)).toContain('pricing…')
+  })
+
+  it('names a refusal in words and states the limits it broke', async () => {
+    const refused = { ...RESOLVED, samples: [{ amount: '100000000', ok: false, reason: 'amount_out_of_range' }] }
+    const panel = previewHarness(refused, { quoteDecimals: '6', sellBaseMin: '1', sellBaseMax: '9' })
+    const node = panel.previewPanel()
+    fire(labelled(node, 'amount the client sends'), 'input', { value: '1' })
+    await panel.refreshPreview()
+    expect(textOf(node)).toContain('outside the limits for this direction')
+    expect(textOf(node)).toContain('the client may receive 1–9 asset')
+  })
+
+  it('spends the amber only on a result under the break-even', async () => {
+    const receives = async (amountSats: string) => {
+      const panel = previewHarness({ ...RESOLVED, breakEven: { kind: 'at', amountSats } })
+      const node = panel.previewPanel()
+      fire(labelled(node, 'amount the client sends'), 'input', { value: '1' })
+      await panel.refreshPreview()
+      return findAll(node, (row) => row.tagName === 'tr' && textOf(row).includes('client receives'))[0]!
+    }
+    expect((await receives('200000000')).className).toContain('loss')
+    expect((await receives('66000')).className).not.toContain('loss')
   })
 
   it('says feed-unresolved rather than showing a stale ladder', async () => {
@@ -531,8 +611,8 @@ describe('the preview panel, run rather than grepped', () => {
   })
 
   it('labels a BTC leg as BTC, not sats — the amount is already decimals-formatted', async () => {
-    const text = await painted(RESOLVED)
-    expect(text).toMatch(/1\.00000000\s+BTC/)
+    const text = await painted(RESOLVED, '1')
+    expect(text).toMatch(/1\.00000000\s*BTC/)
     expect(text).not.toContain('1.00000000 sats')
   })
 })
@@ -540,10 +620,189 @@ describe('the preview panel, run rather than grepped', () => {
 describe('asset labels in the form', () => {
   it('asks once for an asset whose lookup fails, rather than re-asking on every repaint', async () => {
     const panel = previewHarness(RESOLVED, { quote: 'ab'.repeat(34) })
-    const view = panel.marketsView()
-    for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve))
+    panel.marketsView()
+    await settle()
+    expect(textOf(panel.marketsView())).toContain('asset lookup failed')
     expect(panel.sent.filter((sent) => sent?.startsWith('/api/assets/'))).toHaveLength(1)
-    expect(textOf(view)).toContain('asset lookup failed')
+  })
+})
+
+const USDA = 'aa'.repeat(34)
+const LABEL = { ticker: 'usda', name: 'A Dollar', decimals: 6 }
+
+describe('a new market fills what the lookup and the config know', () => {
+  const typed = async (options: Parameters<typeof previewHarness>[2], draft: Record<string, unknown> = {}) => {
+    const panel = previewHarness(RESOLVED, { marketKey: null, ...draft }, options)
+    fire(labelled(panel.marketsView(), 'asset id'), 'input', { value: USDA })
+    await settle()
+    return panel
+  }
+
+  it('takes the decimals and the ticker from the issuer', async () => {
+    const panel = await typed({ label: LABEL })
+    expect(panel.draft()).toMatchObject({ quote: USDA, quoteDecimals: '6', symbol: 'USDA' })
+    expect(textOf(panel.marketsView())).toContain("the issuer's ticker")
+  })
+
+  it('prefers the symbol the ASSET_MARKETS knob gives the asset', async () => {
+    const panel = await typed({ label: LABEL, knobs: [{ key: 'ASSET_MARKETS', value: `USDK:${USDA}` }] })
+    expect(panel.draft().symbol).toBe('USDK')
+  })
+
+  it('asks for decimals when the issuer published none, and never fills a saved row', async () => {
+    const bare = await typed({ label: {} })
+    expect(bare.draft()).toMatchObject({ quoteDecimals: '', symbol: '' })
+    expect(textOf(bare.marketsView())).toContain('the issuer published no metadata — enter its decimals')
+    const saved = previewHarness(RESOLVED, { quote: USDA, quoteDecimals: '8', symbol: '' }, { label: LABEL })
+    saved.marketsView()
+    await settle()
+    expect(saved.draft()).toMatchObject({ quoteDecimals: '8', symbol: '' })
+    expect(textOf(saved.marketsView())).toContain('issuer says 6, this form says 8')
+  })
+
+  it('never overwrites a value the operator typed', async () => {
+    const panel = await typed({ label: LABEL }, { quoteDecimals: '2', symbol: 'MINE' })
+    expect(panel.draft()).toMatchObject({ quoteDecimals: '2', symbol: 'MINE' })
+  })
+
+  it('prefills both limits once the feed answers, at two significant figures', async () => {
+    const panel = await typed({ label: LABEL })
+    panel.previewPanel()
+    await panel.refreshPreview()
+    expect(panel.marketBody(panel.draft())).toMatchObject({
+      sellBase: { min: '10000000', max: '1000000000' },
+      buyBase: { min: '10000', max: '1000000' },
+    })
+  })
+
+  it('leaves a prefilled limit the operator cleared empty on the next answer', async () => {
+    const panel = await typed({ label: LABEL })
+    panel.previewPanel()
+    await panel.refreshPreview()
+    fire(labelled(panel.marketsView(), 'BTC → USDA min'), 'input', { value: '' })
+    await panel.refreshPreview()
+    expect(panel.draft()).toMatchObject({ sellBaseMin: '', sellBaseMax: '1000' })
+  })
+})
+
+describe('the simple form writes the columns the server reads', () => {
+  const ASSET_BASE = { base: USDA, quote: 'BTC', baseDecimals: '6', quoteDecimals: '8', symbol: 'USDA' }
+
+  it('writes limits typed in whole units to the leg the client receives', () => {
+    const btcBase = previewHarness(RESOLVED, { quote: USDA, quoteDecimals: '6', symbol: 'USDA' })
+    let view = btcBase.marketsView()
+    fire(labelled(view, 'BTC → USDA min'), 'input', { value: '10' })
+    fire(labelled(view, 'BTC → USDA max'), 'input', { value: '20' })
+    fire(labelled(view, 'USDA → BTC min'), 'input', { value: '0.001' })
+    fire(labelled(view, 'USDA → BTC max'), 'input', { value: '0.01' })
+    expect(btcBase.marketBody(btcBase.draft())).toMatchObject({
+      sellBase: { min: '10000000', max: '20000000' },
+      buyBase: { min: '100000', max: '1000000' },
+    })
+
+    const assetBase = previewHarness(RESOLVED, ASSET_BASE)
+    view = assetBase.marketsView()
+    fire(labelled(view, 'BTC → USDA min'), 'input', { value: '10' })
+    fire(labelled(view, 'BTC → USDA max'), 'input', { value: '20' })
+    fire(labelled(view, 'USDA → BTC min'), 'input', { value: '0.001' })
+    fire(labelled(view, 'USDA → BTC max'), 'input', { value: '0.01' })
+    expect(assetBase.marketBody(assetBase.draft())).toMatchObject({
+      buyBase: { min: '10000000', max: '20000000' },
+      sellBase: { min: '100000', max: '1000000' },
+    })
+  })
+
+  it('keeps typed whole units when the decimals are corrected, and scales the wire by the new ones', () => {
+    const panel = previewHarness(RESOLVED, { quote: USDA, quoteDecimals: '8', symbol: 'USDA' })
+    const view = panel.marketsView()
+    fire(labelled(view, 'BTC → USDA min'), 'input', { value: '10' })
+    fire(labelled(view, 'BTC → USDA max'), 'input', { value: '1000' })
+    fire(labelled(view, 'USDA → BTC flat fee'), 'input', { value: '1' })
+    fire(findAll(view, (node) => node.attrs['aria-label'] === 'USDA decimals')[0]!, 'input', { value: '6' })
+    expect(panel.draft()).toMatchObject({ sellBaseMin: '10', sellBaseMax: '1000', buyBaseFeeFlat: '1' })
+    expect(panel.marketBody(panel.draft())).toMatchObject({
+      quoteDecimals: 6,
+      sellBase: { min: '10000000', max: '1000000000' },
+      buyBaseFeeFlat: '1000000',
+    })
+  })
+
+  it('switches each direction through its own rfq flag', () => {
+    const btcBase = previewHarness(RESOLVED, { quote: USDA, symbol: 'USDA' })
+    fire(labelled(btcBase.marketsView(), 'BTC → USDA open'), 'input', { checked: false })
+    expect(btcBase.draft()).toMatchObject({ rfqSellBase: false, rfqBuyBase: true })
+    const assetBase = previewHarness(RESOLVED, ASSET_BASE)
+    fire(labelled(assetBase.marketsView(), 'BTC → USDA open'), 'input', { checked: false })
+    expect(assetBase.draft()).toMatchObject({ rfqSellBase: true, rfqBuyBase: false })
+  })
+
+  it('takes a flat fee in the units of the leg the client gives, and sends 0 for blank', () => {
+    const panel = previewHarness(RESOLVED, { quote: USDA, quoteDecimals: '6', symbol: 'USDA' })
+    const view = panel.marketsView()
+    fire(labelled(view, 'BTC → USDA flat fee'), 'input', { value: '0.0000033' })
+    fire(labelled(view, 'USDA → BTC flat fee'), 'input', { value: '' })
+    expect(panel.marketBody(panel.draft())).toMatchObject({ sellBaseFeeFlat: '330', buyBaseFeeFlat: '0' })
+
+    const assetBase = previewHarness(RESOLVED, ASSET_BASE)
+    const reversed = assetBase.marketsView()
+    fire(labelled(reversed, 'BTC → USDA flat fee'), 'input', { value: '0.0000033' })
+    fire(labelled(reversed, 'USDA → BTC flat fee'), 'input', { value: '1.5' })
+    expect(assetBase.marketBody(assetBase.draft())).toMatchObject({ buyBaseFeeFlat: '330', sellBaseFeeFlat: '1500000' })
+  })
+
+  it('says who pays the carrier without a break-even claim the per-direction fees would make wrong', () => {
+    const covered = { quote: USDA, quoteDecimals: '6', symbol: 'USDA', carrierMode: 'off', feeBps: '0' }
+    const text = textOf(previewHarness(RESOLVED, { ...covered, sellBaseFeeFlat: '0.0000033' }).marketsView())
+    expect(text).toContain('We pay the 330 sats on every BTC → USDA swap.')
+    expect(text).not.toContain('never breaks even')
+  })
+
+  it('writes priced or off from the carrier switch, and inherit only from Advanced', () => {
+    const panel = previewHarness(RESOLVED)
+    const view = panel.marketsView()
+    fire(labelled(view, 'the client pays the carrier'), 'input', { checked: false })
+    expect(panel.draft().carrierMode).toBe('off')
+    fire(labelled(view, 'follow the deployment default'), 'input', { checked: true })
+    expect(panel.draft().carrierMode).toBe('inherit')
+    fire(labelled(view, 'the client pays the carrier'), 'input', { checked: true })
+    expect(panel.draft().carrierMode).toBe('priced')
+  })
+})
+
+describe('the JSON path row', () => {
+  const BINANCE = 'https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT'
+  const pathHidden = (view: StubNode) =>
+    findAll(view, (node) => node.className.includes('span2')).find(
+      (node) => findAll(node, (input) => input.attrs['aria-label'] === 'json path').length > 0,
+    )!.attrs.hidden !== undefined
+
+  it('stays on screen while its path is cleared under a URL the path derives from', () => {
+    const panel = previewHarness(RESOLVED, { feedUrl: BINANCE, pricePath: '/price' })
+    expect(pathHidden(panel.marketsView())).toBe(false)
+    fire(labelled(panel.marketsView(), 'json path'), 'input', { value: '' })
+    expect(pathHidden(panel.marketsView())).toBe(false)
+  })
+
+  it('does not latch open on the first characters of a URL typed one key at a time', () => {
+    const panel = previewHarness(RESOLVED)
+    fire(labelled(panel.marketsView(), 'price feed url'), 'input', { value: 'h' })
+    expect(pathHidden(panel.marketsView())).toBe(false)
+    fire(labelled(panel.marketsView(), 'price feed url'), 'input', { value: BINANCE })
+    const view = panel.marketsView()
+    expect(pathHidden(view)).toBe(true)
+    expect(findAll(view, (node) => node.tagName === 'button' && textOf(node).includes('set a JSON path'))).toHaveLength(
+      1,
+    )
+  })
+
+  it('opens on request, for a path other than the one the URL derives', () => {
+    const panel = previewHarness(RESOLVED, { feedUrl: BINANCE })
+    const view = panel.marketsView()
+    expect(pathHidden(view)).toBe(true)
+    const link = findAll(view, (node) => node.tagName === 'button' && textOf(node).includes('set a JSON path'))
+    expect(link).toHaveLength(1)
+    fire(link[0]!, 'click', {})
+    expect(pathHidden(panel.marketsView())).toBe(false)
   })
 })
 
@@ -551,8 +810,8 @@ describe('the markets view mounts what it builds', () => {
   it('renders the form and the preview panel side by side, not the panel alone', () => {
     const panel = previewHarness(RESOLVED)
     const text = textOf(panel.marketsView())
-    expect(text).toContain('A pair may be configured once. Submitting one that exists edits it.')
-    expect(text).toContain('preview — what a customer is quoted')
+    expect(text).toContain('Limits')
+    expect(text).toContain('preview — what a client is quoted')
   })
 
   it('holds only the five known row shapes — a stray wrapper fails by name, not by a moved total', () => {
@@ -567,18 +826,18 @@ describe('the markets view mounts what it builds', () => {
 describe('a serving control repaints the preview it sits beside', () => {
   // These came from a branch with no preview and the merge parked them next to one.
   const cases = [
-    { label: 'serves rfq', tag: 'input', event: 'input', target: { checked: false } },
-    { label: 'rfq buy base', tag: 'input', event: 'input', target: { checked: false } },
-    { label: 'carrier mode', tag: 'select', event: 'change', target: { value: 'priced' } },
+    { label: 'answer RFQ quotes', find: (view: StubNode) => control(view, 'answer RFQ quotes', 'input') },
+    { label: 'BTC → asset open', find: (view: StubNode) => labelled(view, 'BTC → asset open') },
+    { label: 'the carrier switch', find: (view: StubNode) => labelled(view, 'the client pays the carrier') },
   ] as const
 
-  it.each(cases)('reschedules the preview when $label changes', ({ label, tag, event, target }) => {
+  it.each(cases)('reschedules the preview when $label changes', ({ find }) => {
     const panel = previewHarness(RESOLVED)
     const view = panel.marketsView()
     const before = panel.pending[0]
     expect(before).toBeTypeOf('function')
 
-    fire(control(view, label, tag), event, target)
+    fire(find(view), 'input', { checked: false })
 
     expect(panel.pending).toHaveLength(1)
     expect(panel.pending[0]).toBeTypeOf('function')
@@ -588,12 +847,12 @@ describe('a serving control repaints the preview it sits beside', () => {
   it('reprices against the new carrier mode, which moves the margin and the break-even', async () => {
     const panel = previewHarness(RESOLVED)
     const view = panel.marketsView()
-    fire(control(view, 'carrier mode', 'select'), 'change', { value: 'priced' })
+    fire(labelled(view, 'the client pays the carrier'), 'input', { checked: false })
     await panel.refreshPreview()
     const body = JSON.parse(String(panel.sent.at(-1))) as { market: { carrierMode: string; servesRfq: boolean } }
-    expect(body.market.carrierMode).toBe('priced')
+    expect(body.market.carrierMode).toBe('off')
 
-    fire(control(view, 'serves rfq', 'input'), 'input', { checked: false })
+    fire(control(view, 'answer RFQ quotes', 'input'), 'input', { checked: false })
     await panel.refreshPreview()
     expect((JSON.parse(String(panel.sent.at(-1))) as typeof body).market.servesRfq).toBe(false)
   })

@@ -1540,6 +1540,76 @@ tr.note td:first-child {
   padding: 10px 0;
 }
 
+.market-form .form-grid {
+  grid-template-columns: 7.5rem minmax(0, 1fr);
+  row-gap: 10px;
+}
+
+.market-form .form-grid .span2 {
+  grid-column: 2 / -1;
+}
+
+.market-form .form-grid .group {
+  grid-column: 1 / -1;
+}
+
+.market-form .note {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-faint);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.market-form .note:empty {
+  display: none;
+}
+
+.market-form .note b {
+  color: var(--text-dim);
+  font-weight: 600;
+}
+
+.market-form .form-grid input.amount,
+input.amount {
+  width: 7rem;
+}
+
+.market-form .form-grid input.short {
+  width: 5rem;
+}
+
+.market-form .limit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin-bottom: 4px;
+}
+
+.market-form .limit label.check {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+.market-form .limit .note {
+  flex-basis: 100%;
+  margin: 0 0 4px;
+}
+
+.market-form .pair {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 14px 4px 0;
+}
+
+.market-form details.advanced {
+  margin-top: 6px;
+  padding: 8px 0 0;
+  border-top: 1px solid var(--line);
+}
+
 @media (max-width: 700px) {
   main {
     padding-inline: 12px;
