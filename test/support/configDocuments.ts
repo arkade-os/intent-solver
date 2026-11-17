@@ -81,7 +81,7 @@ export const FULL_DOCUMENT = {
   },
   offers: {
     markets: ['BTC/USDA'],
-    covenantVersions: ['offer-v1', 'offer-v2'],
+    contractVersions: ['offer-v1', 'offer-v2'],
     minFillAmount: '1000',
     maxFillAmount: '500000000',
     chargeCarrier: false,
@@ -89,7 +89,7 @@ export const FULL_DOCUMENT = {
     quoteValiditySeconds: 30,
   },
   rfq: {
-    covenantVersions: [
+    contractVersions: [
       'lightning-send-v2',
       'lightning-receive-v2',
       'onchain-send-v2',

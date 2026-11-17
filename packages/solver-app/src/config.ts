@@ -31,8 +31,8 @@ import type { ArkadeWalletConfig } from '@arkade-os/solver-arkade/arkade/wallet.
 import type { AdPublishMode } from '@arkade-os/solver-transport/relay/adPublisher.js'
 import { parseSentryDsn, type SentryOptions } from './ops/sentry.js'
 import { loadEvmChainConfig, type EvmChainConfig } from '@arkade-os/solver-rails-evm/evm/config.js'
-import { OFFER_COVENANT_VERSIONS, type OfferCovenantVersion } from '@arkade-os/solver-core/core/offerCovenant.js'
-import { RFQ_COVENANT_VERSION_ID, type RfqCovenantVersion } from '@arkade-os/solver-core/core/rfqCovenant.js'
+import { OFFER_CONTRACT_VERSIONS, type OfferContractVersion } from '@arkade-os/solver-core/core/offerContract.js'
+import { RFQ_CONTRACT_VERSION_ID, type RfqContractVersion } from '@arkade-os/solver-core/core/rfqContract.js'
 
 /** The network a deployment that sets nothing runs as. */
 const DEFAULT_NETWORK = 'regtest'
@@ -99,7 +99,7 @@ const requiredBigintFromEnv = (env: Knobs, name: string): bigint => {
   return BigInt(raw)
 }
 
-const covenantVersionsFromEnv = (
+const contractVersionsFromEnv = (
   name: string,
   raw: string | undefined,
   knownVersions: readonly string[],
@@ -111,7 +111,7 @@ const covenantVersionsFromEnv = (
   const unknown = entries.filter((entry) => !known.has(entry))
   if (unknown.length > 0) {
     throw new Error(
-      `${name} must list a supported covenant identifier (${knownVersions.join(', ')}), ` +
+      `${name} must list a supported contract version (${knownVersions.join(', ')}), ` +
         `comma-separated; got ${unknown.map((entry) => JSON.stringify(entry)).join(', ')}`,
     )
   }
@@ -121,18 +121,18 @@ const covenantVersionsFromEnv = (
   return entries
 }
 
-const rfqCovenantVersionsFromEnv = (raw: string | undefined): readonly RfqCovenantVersion[] | null => {
+const rfqContractVersionsFromEnv = (raw: string | undefined): readonly RfqContractVersion[] | null => {
   if (!raw?.trim()) return null
   const entries = raw.split(',').map((entry) => entry.trim())
-  const invalid = entries.filter((entry) => !RFQ_COVENANT_VERSION_ID.test(entry))
+  const invalid = entries.filter((entry) => !RFQ_CONTRACT_VERSION_ID.test(entry))
   if (invalid.length > 0) {
     throw new Error(
-      'RFQ_COVENANT_VERSIONS must list version names or content hashes, comma-separated; ' +
+      'RFQ_CONTRACT_VERSIONS must list version names or content hashes, comma-separated; ' +
         `got ${invalid.map((entry) => JSON.stringify(entry)).join(', ')}`,
     )
   }
   if (new Set(entries).size !== entries.length) {
-    throw new Error('RFQ_COVENANT_VERSIONS must not repeat a version')
+    throw new Error('RFQ_CONTRACT_VERSIONS must not repeat a version')
   }
   return entries
 }
@@ -287,13 +287,13 @@ export interface Config {
   offerMinFillAmount: bigint
   offerMaxFillAmount: bigint
   /**
-   * Offer covenant versions this deployment accepts on the packet path.
+   * Offer contract versions this deployment accepts on the packet path.
    *
    * @deprecated Packet-style offers are kept for existing deployments.
    */
-  offerCovenantVersions: readonly OfferCovenantVersion[]
+  offerContractVersions: readonly OfferContractVersion[]
   /**
-   * Covenant versions this deployment serves across every RFQ method.
+   * Contract versions this deployment serves across every RFQ method.
    *
    * One allowlist rather than one per corridor: each corridor declares the
    * version it speaks, and the host refuses its quote path when that string is
@@ -303,7 +303,7 @@ export interface Config {
    * Null is unset: this build's defaults, plus each injected corridor's own
    * version, so a consumer corridor keeps quoting where nothing was configured.
    */
-  rfqCovenantVersions: readonly RfqCovenantVersion[] | null
+  rfqContractVersions: readonly RfqContractVersion[] | null
   /**
    * `OFFER_CHARGE_CARRIER`. Off by default: the MAKER prices this path and the
    * card has no field to tell them the carrier exists, so charging would refuse
@@ -1039,13 +1039,13 @@ export const configFromKnobs = (env: Knobs): Config => {
   const offerMaxFillAmount = offerMarkets.length > 0 ? requiredBigintFromEnv(env, 'OFFER_MAX_FILL_AMOUNT') : 0n
   const offerChargesDeliveredCarrier = env.OFFER_CHARGE_CARRIER?.trim() === 'true'
   const assetCarrierPricing = env.ASSET_CARRIER_PRICING?.trim() === 'true'
-  const offerCovenantVersions = covenantVersionsFromEnv(
-    'OFFER_COVENANT_VERSIONS',
-    env.OFFER_COVENANT_VERSIONS,
-    OFFER_COVENANT_VERSIONS,
-    OFFER_COVENANT_VERSIONS,
+  const offerContractVersions = contractVersionsFromEnv(
+    'OFFER_CONTRACT_VERSIONS',
+    env.OFFER_CONTRACT_VERSIONS,
+    OFFER_CONTRACT_VERSIONS,
+    OFFER_CONTRACT_VERSIONS,
   )
-  const rfqCovenantVersions = rfqCovenantVersionsFromEnv(env.RFQ_COVENANT_VERSIONS)
+  const rfqContractVersions = rfqContractVersionsFromEnv(env.RFQ_CONTRACT_VERSIONS)
   // Refused at boot rather than per offer: inverted bounds refuse every offer,
   // which is indistinguishable from a quiet market and would be diagnosed as
   // one. `evaluateOfferFill` compares against both, so it cannot report this.
@@ -1078,8 +1078,8 @@ export const configFromKnobs = (env: Knobs): Config => {
     offerMarkets,
     offerMinFillAmount,
     offerMaxFillAmount,
-    offerCovenantVersions,
-    rfqCovenantVersions,
+    offerContractVersions,
+    rfqContractVersions,
     offerChargesDeliveredCarrier,
     assetCarrierPricing,
     // Read here so a malformed list refuses at boot beside every other knob.

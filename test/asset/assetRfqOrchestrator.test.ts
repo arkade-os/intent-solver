@@ -171,25 +171,25 @@ describe('quote', () => {
     })
   })
 
-  it('passes the negotiated covenant version through to the derivation', async () => {
+  it('passes the negotiated contract version through to the derivation', async () => {
     const seen: (string | undefined)[] = []
     const { service } = await harness({
-      deriveOffer: (_terms, covenantVersion) => {
-        seen.push(covenantVersion)
+      deriveOffer: (_terms, contractVersion) => {
+        seen.push(contractVersion)
         return { pkScript: OFFER_SCRIPT, address: 'ark1qoffer' }
       },
     })
-    await service.quote(request({ covenantVersion: 'asset-swap-v3' }))
+    await service.quote(request({ contractVersion: 'asset-swap-v3' }))
     expect(seen[0]).toBe('asset-swap-v3')
   })
 
   it.each([
-    ['the negotiated version', { covenantVersion: 'asset-swap-v3' }, 'asset-swap-v3'],
+    ['the negotiated version', { contractVersion: 'asset-swap-v3' }, 'asset-swap-v3'],
     ['NULL for a request that named none', {}, null],
   ])('persists %s and reads it back', async (_label, over, stored) => {
     const { service, store } = await harness()
     await service.quote(request(over))
-    expect((await store.findByRfqId(RFQ_ID))?.covenantVersion).toBe(stored)
+    expect((await store.findByRfqId(RFQ_ID))?.contractVersion).toBe(stored)
   })
 
   it.each([

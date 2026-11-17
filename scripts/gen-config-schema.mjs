@@ -19,7 +19,7 @@ const uniqueOfferVersions = (node, key) => {
   const typed = Object.fromEntries(
     Object.entries(node).map(([childKey, value]) => [childKey, uniqueOfferVersions(value, childKey)]),
   )
-  return key === 'covenantVersions' && typed.type === 'array' ? { ...typed, uniqueItems: true } : typed
+  return key === 'contractVersions' && typed.type === 'array' ? { ...typed, uniqueItems: true } : typed
 }
 
 export const configJsonSchema = (documentSchema) => ({

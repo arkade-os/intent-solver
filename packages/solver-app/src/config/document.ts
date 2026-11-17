@@ -5,8 +5,8 @@
  * once the document is flattened, by the same readers the environment used.
  */
 import { z } from 'zod'
-import { OFFER_COVENANT_VERSIONS } from '@arkade-os/solver-core/core/offerCovenant.js'
-import { RFQ_COVENANT_VERSION_ID } from '@arkade-os/solver-core/core/rfqCovenant.js'
+import { OFFER_CONTRACT_VERSIONS } from '@arkade-os/solver-core/core/offerContract.js'
+import { RFQ_CONTRACT_VERSION_ID } from '@arkade-os/solver-core/core/rfqContract.js'
 
 const UNKNOWN_KEY = 'unknown key'
 
@@ -21,16 +21,16 @@ const str = z.string()
 const num = z.number()
 const bool = z.boolean()
 const strings = z.array(z.string())
-const offerCovenantVersion = z.enum(OFFER_COVENANT_VERSIONS, {
-  errorMap: () => ({ message: `must be one of ${OFFER_COVENANT_VERSIONS.join(', ')}` }),
+const offerContractVersion = z.enum(OFFER_CONTRACT_VERSIONS, {
+  errorMap: () => ({ message: `must be one of ${OFFER_CONTRACT_VERSIONS.join(', ')}` }),
 })
-const offerCovenantVersions = z
-  .array(offerCovenantVersion)
+const offerContractVersions = z
+  .array(offerContractVersion)
   .min(1)
   .refine((values) => new Set(values).size === values.length, { message: 'must not repeat a version' })
-const rfqCovenantVersion = z.string().regex(RFQ_COVENANT_VERSION_ID, 'must be a version name or content hash')
-const rfqCovenantVersions = z
-  .array(rfqCovenantVersion)
+const rfqContractVersion = z.string().regex(RFQ_CONTRACT_VERSION_ID, 'must be a version name or content hash')
+const rfqContractVersions = z
+  .array(rfqContractVersion)
   .min(1)
   .refine((values) => new Set(values).size === values.length, { message: 'must not repeat a version' })
 
@@ -132,7 +132,7 @@ const buildSchema = (railNames: readonly string[]) =>
     corridors: z.record(str, corridorTerms),
     offers: section({
       markets: strings,
-      covenantVersions: offerCovenantVersions,
+      contractVersions: offerContractVersions,
       minFillAmount: decimal,
       maxFillAmount: decimal,
       chargeCarrier: bool,
@@ -140,7 +140,7 @@ const buildSchema = (railNames: readonly string[]) =>
       quoteValiditySeconds: num,
     }),
     rfq: section({
-      covenantVersions: rfqCovenantVersions,
+      contractVersions: rfqContractVersions,
     }),
     relay: section({
       url: str,

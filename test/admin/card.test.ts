@@ -5,7 +5,7 @@ import { schnorr } from '@noble/curves/secp256k1.js'
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
 import { cardOmissions, deploymentCard, type CardSource } from '@arkade-os/solver-app/admin/routes/card.js'
-import { RFQ_COVENANT_VERSIONS } from '@arkade-os/solver-core/core/rfqCovenant.js'
+import { RFQ_CONTRACT_VERSIONS } from '@arkade-os/solver-core/core/rfqContract.js'
 import { verifyCardSig, type SolverCard } from '@arkade-os/solver-core/core/registryCard.js'
 import { AdPublisher, type AdPublishMode } from '@arkade-os/solver-transport/relay/adPublisher.js'
 
@@ -61,7 +61,7 @@ const makeDeps = (
     assetMarkets?: unknown[]
     assetRfqMarkets?: unknown[]
     offerMarkets?: Array<{ a: string | null; b: string | null }>
-    rfqCovenantVersions?: string[]
+    rfqContractVersions?: string[]
     evmCorridors?: { corridor: string; enabled: boolean }[]
     offerFill?: { min: bigint; max: bigint }
     livePolicy?: Record<string, unknown>
@@ -70,7 +70,7 @@ const makeDeps = (
   } = {},
 ) => {
   const bootPolicy = {
-    rfqCovenantVersions: over.rfqCovenantVersions ?? [...RFQ_COVENANT_VERSIONS],
+    rfqContractVersions: over.rfqContractVersions ?? [...RFQ_CONTRACT_VERSIONS],
     corridorEnabled: over.allDisabled
       ? allCorridors(false)
       : { ...allCorridors(true), 'arkade:BTC->lightning:BTC': over.lnSendEnabled ?? true },
@@ -241,22 +241,22 @@ describe('GET /api/card', () => {
     const asset = body.card!.markets.find((m) => quoteId(m) === `arkade:mutinynet/asset:${ASSET}`)!
     expect(asset).toMatchObject({ fee_flat: '1000000', min_quote_amount: '0', max_quote_amount: '0' })
 
-    const withoutCovenant = async (market: typeof configured) =>
+    const withoutContractVersion = async (market: typeof configured) =>
       (
         await getCard(
           makeDeps({
             assetMarkets: [market],
             assetRfqMarkets: [{ ...market, symbol: 'ASSET', sellBase: { min: 0n, max: 0n } }],
-            rfqCovenantVersions: RFQ_COVENANT_VERSIONS.filter((version) => !version.startsWith('asset-swap-')),
+            rfqContractVersions: RFQ_CONTRACT_VERSIONS.filter((version) => !version.startsWith('asset-swap-')),
           }),
         )
       ).body
-    const off = await withoutCovenant(configured)
+    const off = await withoutContractVersion(configured)
     expect(off.card!.markets.some((m) => quoteId(m) === `arkade:mutinynet/asset:${ASSET}`)).toBe(false)
     expect(off.cardOmitted).toEqual([
-      'asset RFQ markets are omitted: none of asset-swap-v2, asset-swap-v3 is in rfq.covenantVersions',
+      'asset RFQ markets are omitted: none of asset-swap-v2, asset-swap-v3 is in rfq.contractVersions',
     ])
-    const faulty = await withoutCovenant({ ...configured, baseDecimals: 6 })
+    const faulty = await withoutContractVersion({ ...configured, baseDecimals: 6 })
     expect(faulty.cardOmitted.join(' ')).toContain('the BTC leg is 8 decimals (sats), got 6')
 
     const v3Only = (
@@ -264,7 +264,7 @@ describe('GET /api/card', () => {
         makeDeps({
           assetMarkets: [configured],
           assetRfqMarkets: [{ ...configured, symbol: 'ASSET', sellBase: { min: 0n, max: 0n } }],
-          rfqCovenantVersions: ['asset-swap-v3'],
+          rfqContractVersions: ['asset-swap-v3'],
         }),
       )
     ).body
@@ -677,10 +677,10 @@ describe('deploymentCard', () => {
     expect(verifyCardSig(card)).toBe(true)
   })
 
-  it('omits a direction whose RFQ covenant version is disabled', async () => {
+  it('omits a direction whose RFQ contract version is disabled', async () => {
     const source = sourceOf(
       makeDeps({
-        rfqCovenantVersions: RFQ_COVENANT_VERSIONS.filter((version) => version !== 'lightning-send-v2'),
+        rfqContractVersions: RFQ_CONTRACT_VERSIONS.filter((version) => version !== 'lightning-send-v2'),
       }),
     )
     const card = await deploymentCard(source)
@@ -693,7 +693,7 @@ describe('deploymentCard', () => {
 
   it('reports omitted asset RFQ markets only when there are some to omit', () => {
     const notes = (assetRfqMarkets: unknown[]) =>
-      cardOmissions(sourceOf(makeDeps({ rfqCovenantVersions: ['lightning-send-v2'], assetRfqMarkets }))).join(' ')
+      cardOmissions(sourceOf(makeDeps({ rfqContractVersions: ['lightning-send-v2'], assetRfqMarkets }))).join(' ')
     expect(notes([])).not.toContain('asset RFQ markets')
     expect(notes([{ symbol: 'ASSET' }])).toContain('asset RFQ markets are omitted')
   })

@@ -23,7 +23,7 @@ import {
   xOnlyPubkey,
   type QuotedOfferTerms,
 } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
-import { RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_V3 } from '@arkade-os/solver-core/core/rfqCovenant.js'
+import { RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_V3 } from '@arkade-os/solver-core/core/rfqContract.js'
 
 const xonly = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
 const SERVER = xonly(2)
@@ -116,7 +116,7 @@ describe('offerScriptFrom', () => {
   })
 })
 
-describe('covenant version', () => {
+describe('contract version', () => {
   const sdk = (generation: 'current' | 'previous'): string =>
     hex.encode(
       offerVtxoScript(

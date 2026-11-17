@@ -306,7 +306,7 @@
             "type": "string"
           }
         },
-        "covenantVersions": {
+        "contractVersions": {
           "type": "array",
           "items": {
             "type": "string",
@@ -343,7 +343,7 @@
     "rfq": {
       "type": "object",
       "properties": {
-        "covenantVersions": {
+        "contractVersions": {
           "type": "array",
           "items": {
             "type": "string",

@@ -127,7 +127,7 @@ export interface AssetRfqDeps {
    * The offer covenant this solver will watch, derived from terms it has
    * already fixed. `offerVtxoScript` in the composition root.
    */
-  deriveOffer: (terms: OfferTerms, covenantVersion?: string) => { pkScript: string; address: string }
+  deriveOffer: (terms: OfferTerms, contractVersion?: string) => { pkScript: string; address: string }
   /** What is funded at the offer's script, or null while nothing is. */
   depositAt: (offerPkScript: string, depositLeg: AssetLeg | null) => Promise<ObservedDeposit | null>
   /** Spendable balance per asset id — `available`, never `total`. */
@@ -169,8 +169,8 @@ export interface AssetRfqQuoteRequest {
   amountSide: 'from' | 'to'
   makerPkScript: string
   makerPublicKey: string
-  /** The negotiated covenant, if any. Absent derives the corridor's baseline. */
-  covenantVersion?: string
+  /** The negotiated contract version, if any. Absent derives the corridor's baseline. */
+  contractVersion?: string
 }
 
 /** How much of one leg a deposit holds — sats when the leg is BTC. */
@@ -312,7 +312,7 @@ export class AssetRfqSwapService {
         makerPkScript: request.makerPkScript,
         makerPublicKey: request.makerPublicKey,
       },
-      request.covenantVersion,
+      request.contractVersion,
     )
 
     try {
@@ -337,7 +337,7 @@ export class AssetRfqSwapService {
         // while the quote was outstanding; against its own feed it would measure
         // the configured spread and nothing else.
         ...quoteSnapshot({ resolved, market: priced, pair, feed, carrierSats: market.carrierSats }),
-        ...(request.covenantVersion === undefined ? {} : { covenantVersion: request.covenantVersion }),
+        ...(request.contractVersion === undefined ? {} : { contractVersion: request.contractVersion }),
       })
       return { accepted: true, swap, carrierSats: market.carrierSats }
     } catch (error) {

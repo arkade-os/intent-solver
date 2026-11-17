@@ -56,7 +56,8 @@ try {
     bolt11,
     onEvent: (name, data) => {
       if (name === 'decoded') console.log(`sending ${data.amountSats} sats, payment hash ${data.paymentHash}`)
-      if (name === 'funded') console.log(`funded ${data.amountSats} sats at own derivation, arkadeTxid ${data.fundTxid}`)
+      if (name === 'funded')
+        console.log(`funded ${data.amountSats} sats at own derivation, arkadeTxid ${data.fundTxid}`)
     },
   })
 } catch (error) {

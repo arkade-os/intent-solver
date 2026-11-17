@@ -2,18 +2,18 @@ import { describe, expect, it } from 'vitest'
 import {
   RFQ_ASSET_SWAP_V2,
   RFQ_ASSET_SWAP_V3,
-  RFQ_COVENANT_VERSIONS,
+  RFQ_CONTRACT_VERSIONS,
   RFQ_EVM_RECEIVE_V1,
   RFQ_EVM_SEND_V1,
   RFQ_LIGHTNING_RECEIVE_V2,
   RFQ_LIGHTNING_SEND_V2,
   RFQ_ONCHAIN_SEND_V2,
-  rfqCovenantEnabled,
-} from '@arkade-os/solver-core/core/rfqCovenant.js'
+  rfqContractEnabled,
+} from '@arkade-os/solver-core/core/rfqContract.js'
 
-describe('RFQ covenant versions', () => {
+describe('RFQ contract versions', () => {
   it('serves every built-in method, asset-swap on both v2 and v3', () => {
-    expect(RFQ_COVENANT_VERSIONS).toEqual([
+    expect(RFQ_CONTRACT_VERSIONS).toEqual([
       RFQ_LIGHTNING_SEND_V2,
       RFQ_LIGHTNING_RECEIVE_V2,
       RFQ_ONCHAIN_SEND_V2,
@@ -25,8 +25,8 @@ describe('RFQ covenant versions', () => {
   })
 
   it('uses stable string identifiers that can be names or content hashes', () => {
-    expect(RFQ_COVENANT_VERSIONS.every((version) => typeof version === 'string' && version.length > 0)).toBe(true)
-    expect(RFQ_COVENANT_VERSIONS).toEqual([
+    expect(RFQ_CONTRACT_VERSIONS.every((version) => typeof version === 'string' && version.length > 0)).toBe(true)
+    expect(RFQ_CONTRACT_VERSIONS).toEqual([
       'lightning-send-v2',
       'lightning-receive-v2',
       'onchain-send-v2',
@@ -38,9 +38,9 @@ describe('RFQ covenant versions', () => {
   })
 
   it('serves the build defaults while unset, and only the operator list once set', () => {
-    expect(rfqCovenantEnabled(null, RFQ_ASSET_SWAP_V2)).toBe(true)
-    expect(rfqCovenantEnabled(null, RFQ_ASSET_SWAP_V3)).toBe(true)
-    expect(rfqCovenantEnabled(null, 'custom-v1')).toBe(false)
-    expect(rfqCovenantEnabled(['custom-v1'], RFQ_ASSET_SWAP_V2)).toBe(false)
+    expect(rfqContractEnabled(null, RFQ_ASSET_SWAP_V2)).toBe(true)
+    expect(rfqContractEnabled(null, RFQ_ASSET_SWAP_V3)).toBe(true)
+    expect(rfqContractEnabled(null, 'custom-v1')).toBe(false)
+    expect(rfqContractEnabled(['custom-v1'], RFQ_ASSET_SWAP_V2)).toBe(false)
   })
 })

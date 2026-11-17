@@ -346,7 +346,7 @@ describe('the fill phase', () => {
     await legacy.close()
   })
 
-  it('reads a row from before covenant_version as NULL, and settles it on the v2 tree', async () => {
+  it('reads a row from before contract_version as NULL, and settles it on the v2 tree', async () => {
     const xonly = (fill: number) => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
     const derivation = {
       serverPubkey: xonly(2),
@@ -382,7 +382,7 @@ describe('the fill phase', () => {
 
     const store = await AssetRfqSwapStore.open(driver, () => 1_000)
     const row = await store.get('old')
-    expect(row.covenantVersion).toBeNull()
+    expect(row.contractVersion).toBeNull()
     const fulfill = async () => 'fill'.padEnd(64, '0')
     const settle = quotedOfferSettleFor({
       ctx: {} as never,

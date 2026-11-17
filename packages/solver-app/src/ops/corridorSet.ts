@@ -18,7 +18,7 @@ import {
 } from '@arkade-os/solver-core/core/corridor.js'
 import type { EvmCorridorPolicy } from '@arkade-os/solver-core/core/evmCorridorConfig.js'
 import { extractRfqId, rfqRefusalPayload } from '@arkade-os/solver-core/core/rfqProtocol.js'
-import { RFQ_COVENANT_VERSIONS } from '@arkade-os/solver-core/core/rfqCovenant.js'
+import { RFQ_CONTRACT_VERSIONS } from '@arkade-os/solver-core/core/rfqContract.js'
 import {
   lightningSendCorridor,
   lightningReceiveCorridor,
@@ -96,21 +96,21 @@ export interface FlatCorridorDeps {
   assetRfqMarkets?: readonly AssetRfqMarket[]
   /** Whether the three BTC corridors' LND answers. Unset means always. */
   railUp?: () => boolean
-  /** Covenant versions this deployment serves. Absent leaves the gate off for hand-built sets. */
-  rfqCovenantVersions?: ReadonlySet<string>
+  /** Contract versions this deployment serves. Absent leaves the gate off for hand-built sets. */
+  rfqContractVersions?: ReadonlySet<string>
 }
 
-/** `rfq.covenantVersions` as served; unset adds each injected corridor's own versions to this build's defaults. */
-export const servedCovenantVersions = (
+/** `rfq.contractVersions` as served; unset adds each injected corridor's own versions to this build's defaults. */
+export const servedContractVersions = (
   configured: readonly string[] | null,
   extra: readonly Corridor[],
 ): ReadonlySet<string> =>
   new Set(
     configured ?? [
-      ...RFQ_COVENANT_VERSIONS,
+      ...RFQ_CONTRACT_VERSIONS,
       ...extra.flatMap((corridor) => [
-        corridor.descriptor.covenantVersion,
-        ...(corridor.descriptor.covenantVersions ?? []),
+        corridor.descriptor.contractVersion,
+        ...(corridor.descriptor.contractVersions ?? []),
       ]),
     ],
   )
@@ -190,7 +190,7 @@ export const corridorSetFromDeps = (deps: FlatCorridorDeps, extra: readonly Corr
   // colliding with a built-in is refused at composition rather than shadowing
   // it at dispatch. Last, so they never delay a built-in's status answer.
   return createCorridorSet([...corridors, ...extra], {
-    supportedCovenantVersions: deps.rfqCovenantVersions,
+    supportedContractVersions: deps.rfqContractVersions,
   })
 }
 

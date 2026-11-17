@@ -416,7 +416,7 @@ packages:
     engines: {node: '>=20'}
 
   '@arkade-os/sdk@file:vendor/arkade-os-sdk-0.5.6.tgz':
-    resolution: {integrity: sha512-8ntZUiy2fKjoHYIUITqQYLdyon7WGE0Y+NVa7H15VVGEW9OcsEvrPOeFICdactntN7Dsz4W4b5HV/JLIs/DI1g==, tarball: file:vendor/arkade-os-sdk-0.5.6.tgz}
+    resolution: {integrity: sha512-0c4wegau5lwK+BKl5wPHqAwbMIoFANP3MKPJNU7ln7pbFGpAM+wYdCqxIrAuolDoCCPuvuPJ43eP9itAktt7+A==, tarball: file:vendor/arkade-os-sdk-0.5.6.tgz}
     version: 0.5.6
     engines: {node: '>=22.13.0 <27'}
     peerDependencies:
@@ -445,7 +445,7 @@ packages:
     engines: {node: '>=20.19'}
 
   '@arkade-os/swap@file:vendor/arkade-os-swap-0.1.6.tgz':
-    resolution: {integrity: sha512-6v8F8MpwmothoonXNp052quLBov+TeKoI1i2MzwWajVD0aoF1uh12m4PBV/F/pyd9Bt/n7tI0PDTy/0dD3jqsQ==, tarball: file:vendor/arkade-os-swap-0.1.6.tgz}
+    resolution: {integrity: sha512-WO4AEc2/w37XbFmLpFiY1fjzX5e879Aa7DSMdxQbFfXSngSdoCAlDuKGgy8IhYW8sPberWQ7s9gQzg9WRukfqw==, tarball: file:vendor/arkade-os-swap-0.1.6.tgz}
     version: 0.1.6
     engines: {node: '>=22.13.0'}
     peerDependencies:

@@ -77,7 +77,7 @@ send, but each is a real edge an operator must know before scaling.
 
 - **The server-independent exit is operator-driven, not automatic.** The swap
   script carries a `unilateralClaim` leaf (provider-only, behind a CSV) and
-  `cli unilateral-exit` now spends it, so a *censoring* server is a delay and a
+  `cli unilateral-exit` now spends it, so a _censoring_ server is a delay and a
   fee bill rather than the unmitigated full-amount loss it once was. The two
   forms differ in what they touch, and the difference is the whole safety
   boundary:
@@ -105,7 +105,7 @@ send, but each is a real edge an operator must know before scaling.
 
 - **Covenant refund is a hard 2-of-2 of Arkade server + emulator.** The client-key
   refund leaf was traded away for a stateless client. Permanent loss or key
-  rotation of *either* service strands failed-swap lockups forever (a temporary
+  rotation of _either_ service strands failed-swap lockups forever (a temporary
   outage only defers — the CLTV leaf has no expiry and the sweep retries). The
   emulator key is snapshotted per swap at quote time, so a rotation only breaks
   swaps quoted before it; the fix if this becomes real is to add the client-key
@@ -158,17 +158,17 @@ timestamp. MTP lags wall clock by roughly an hour on mainnet.
 Observed live: a covenant funded with a 15-minute refund deadline was still
 rejected with `FORFEIT_CLOSURE_LOCKED` well past the wall-clock deadline. At that
 moment the tip block's timestamp was already ~250s past the locktime, yet MTP was
-~80 minutes *behind* it. The refund only matures once MTP crosses the locktime,
+~80 minutes _behind_ it. The refund only matures once MTP crosses the locktime,
 ~8 blocks later.
 
 Two consequences:
 
 - **For the real send leg this is safe and immaterial.** `refundLocktimeFor`
   quotes a deadline ~7 days out; an MTP lag of ~1h against that is negligible, and
-  it moves the client's refund *later* in wall-clock terms, never earlier — the
+  it moves the client's refund _later_ in wall-clock terms, never earlier — the
   safe direction for the provider, whose own claim path is collaborative (no
   locktime) and unaffected.
 - **For testing, a near-future locktime is unusable.** `test-refund` therefore
-  defaults its deadline to three hours in the *past*, which MTP has already
+  defaults its deadline to three hours in the _past_, which MTP has already
   crossed, so the refund is spendable immediately and exercises the identical
   leaf. A positive offset can still be passed to exercise the waiting path.

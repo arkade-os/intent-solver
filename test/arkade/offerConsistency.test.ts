@@ -11,8 +11,8 @@
 import { describe, it, expect } from 'vitest'
 import { offerVtxoScript, type Offer } from '@arkade-os/swap/protocol'
 import { schnorr } from '@noble/curves/secp256k1.js'
-import { offerCovenantMatch, offerIsConsistent } from '@arkade-os/solver-arkade/arkade/offerConsistency.js'
-import { OFFER_COVENANT_V1, OFFER_COVENANT_V2 } from '@arkade-os/solver-core/core/offerCovenant.js'
+import { offerContractMatch, offerIsConsistent } from '@arkade-os/solver-arkade/arkade/offerConsistency.js'
+import { OFFER_CONTRACT_V1, OFFER_CONTRACT_V2 } from '@arkade-os/solver-core/core/offerContract.js'
 
 const xonly = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
 const SERVER = xonly(2)
@@ -65,21 +65,21 @@ describe('offerIsConsistent', () => {
     expect([honest[0], honest[1]]).toEqual([0x51, 0x20])
   })
 
-  it('reports the legacy covenant version when the offer has no exit leaf', () => {
-    expect(offerCovenantMatch(offerWith({ swapPkScript: honest }), SERVER)).toEqual({ version: OFFER_COVENANT_V1 })
+  it('reports the legacy contract version when the offer has no exit leaf', () => {
+    expect(offerContractMatch(offerWith({ swapPkScript: honest }), SERVER)).toEqual({ version: OFFER_CONTRACT_V1 })
   })
 
-  it('reports the current covenant version when the offer has an exit leaf', () => {
+  it('reports the current contract version when the offer has an exit leaf', () => {
     const exitDelay = { type: 'seconds', value: 4096n }
     const withExit = offerWith({ swapPkScript: new Uint8Array(34), exitDelay })
     const script = offerVtxoScript(withExit, SERVER).pkScript
-    expect(offerCovenantMatch({ ...withExit, swapPkScript: script }, SERVER)).toEqual({ version: OFFER_COVENANT_V2 })
+    expect(offerContractMatch({ ...withExit, swapPkScript: script }, SERVER)).toEqual({ version: OFFER_CONTRACT_V2 })
   })
 
   it('does not let a packet omit the exit leaf while funding a script that has one', () => {
     const exitDelay = { type: 'seconds', value: 4096n }
     const withExit = offerWith({ swapPkScript: new Uint8Array(34), exitDelay })
     const script = offerVtxoScript(withExit, SERVER).pkScript
-    expect(offerCovenantMatch(offerWith({ swapPkScript: script }), SERVER)).toBeNull()
+    expect(offerContractMatch(offerWith({ swapPkScript: script }), SERVER)).toBeNull()
   })
 })
