@@ -534,6 +534,20 @@ describe('the preview panel, run rather than grepped', () => {
     expect(JSON.parse(String(panel.sent.at(-1)))).toMatchObject({ direction: 'sell_base', amount: '50000000' })
   })
 
+  it('shows no quote from an answer for the other direction', async () => {
+    const panel = previewHarness(RESOLVED, { quoteDecimals: '8' })
+    const node = panel.previewPanel()
+    fire(labelled(node, 'amount the client sends'), 'input', { value: '1' })
+    await panel.refreshPreview()
+    expect(textOf(node)).toContain('99,500')
+    const other = findAll(node, (button) => button.tagName === 'button' && button.attrs['aria-pressed'] === 'false')
+    fire(other[0]!, 'click', {})
+    fire(labelled(node, 'amount the client sends'), 'input', { value: '1' })
+    await panel.refreshPreview()
+    expect(textOf(node)).not.toContain('99,500')
+    expect(textOf(node)).toContain('pricing…')
+  })
+
   it('names a refusal in words and states the limits it broke', async () => {
     const refused = { ...RESOLVED, samples: [{ amount: '100000000', ok: false, reason: 'amount_out_of_range' }] }
     const panel = previewHarness(refused, { quoteDecimals: '6', sellBaseMin: '1', sellBaseMax: '9' })

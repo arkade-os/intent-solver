@@ -2287,6 +2287,8 @@ const quoteBody = () => {
   if ((previewData.invalid ?? []).length > 0) return refusedFields(fieldName)
   const feed = previewData.feed
   if (feed?.state !== 'resolved') return h('p.notice', `no price yet — ${feed?.reason ?? 'the feed did not answer'}`)
+  // Samples match by atomic amount alone, and 1 BTC and 100 units at 6 decimals are the same number.
+  if (previewData.direction !== previewDirection) return h('p.muted', 'pricing…')
   const side = directions(marketDraft).find((candidate) => candidate.wire === previewDirection)
   return h(
     'div',
