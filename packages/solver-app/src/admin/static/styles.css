@@ -1423,6 +1423,52 @@ html[data-vt]::view-transition-new(root) {
   animation: none;
 }
 
+html[data-vt='view'] main {
+  view-transition-name: main;
+}
+
+html[data-vt='view'] nav .slens {
+  view-transition-name: nav-lens;
+}
+
+::view-transition-old(main) {
+  animation: vt-out 0.16s var(--ease) both;
+}
+
+::view-transition-new(main) {
+  animation: vt-in 0.26s var(--ease) both;
+}
+
+::view-transition-group(nav-lens) {
+  animation-duration: 0.38s;
+  animation-timing-function: var(--ease-lens);
+}
+
+@keyframes vt-out {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes vt-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+/* The dock holds still; unnamed, the named `main` scrolled beneath it would paint over it. */
+@media (max-width: 760px) {
+  html[data-vt='view'] nav {
+    view-transition-name: dock;
+  }
+
+  ::view-transition-old(dock),
+  ::view-transition-new(dock) {
+    animation: none;
+  }
+}
+
 /*
  * The swap search. Wide enough for a full payment hash, because the commonest
  * use is pasting one whole and seeing whether this solver ever saw it.

@@ -5541,6 +5541,7 @@ const viewFromHash = () => {
 }
 
 const go = (view) => {
+  const moved = view !== state.view
   if (view === 'wallet' && state.view !== 'wallet') rebalancePanel.loaded = false
   state.view = view
   // A result belongs to the view it happened on; carrying it across would have
@@ -5550,8 +5551,12 @@ const go = (view) => {
   // back expects to land where they were. replaceState made the browser's back
   // button leave the console entirely.
   if (location.hash !== `#${view}`) history.pushState(null, '', `#${view}`)
-  load(view)
+  if (moved) show(view)
+  else load(view)
 }
+
+/** Navigation animates and a poll never does; nor under a scrim, which the named `main` would paint over. */
+const show = (view) => (state.detail || state.dialog ? load(view) : withViewTransition('view', () => load(view)))
 
 const BODIES = {
   pricing: pricingView,
@@ -5773,7 +5778,7 @@ window.addEventListener('hashchange', () => {
   if (view === 'wallet') rebalancePanel.loaded = false
   state.result = null
   state.view = view
-  load(view)
+  show(view)
 })
 
 // A menu closes on any click outside it.
