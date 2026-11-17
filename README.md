@@ -402,6 +402,10 @@ The console keeps its own state beside the document: overridden corridor terms
 and limits, and which directions each asset market serves. The document is the
 baseline that state starts from, and the console's **Revert to config file**
 puts it back — the whole console, or one market — after showing every change.
+**Export config** goes the other way: it downloads the document this solver
+booted from with the console's setting overrides written in, each credential
+replaced by a `<PLACEHOLDER>` the loader refuses until it is filled back in. Market serving and the rebalance policy have no place in the document
+and stay in the console.
 
 ### Config — required
 

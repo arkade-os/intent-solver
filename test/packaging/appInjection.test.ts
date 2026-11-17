@@ -139,6 +139,7 @@ const solverConfig = (): Config => {
     evmChain: null,
     configPaths: new Map(),
     lightningRailBlock: null,
+    configDocument: null,
     nostrAdPublish: 'off',
   }
 }

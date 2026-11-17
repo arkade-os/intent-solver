@@ -138,6 +138,30 @@ describe('GET /api/settings', () => {
   })
 })
 
+describe('GET /api/config/export', () => {
+  const exported = (config: Record<string, unknown>) =>
+    build({ LN_SEND_FEE_BPS: '25' }, { config }).app.fetch(new Request('http://admin/api/config/export'))
+
+  it('answers the booted document with the stored overrides in, and no credential', async () => {
+    const configDocument = { network: 'regtest', rails: { arkade: { mnemonic: 'secret words never real' } } }
+    const response = await exported({ ...baseConfig, configDocument, configPaths: new Map() })
+    expect(response.status).toBe(200)
+    const text = await response.text()
+    expect(text).not.toContain('secret words never real')
+    expect(JSON.parse(text)).toEqual({
+      network: 'regtest',
+      rails: { arkade: { mnemonic: '<RAILS_ARKADE_MNEMONIC>' } },
+      corridors: { 'arkade:BTC->lightning:BTC': { enabled: true, feeBps: 25 } },
+    })
+  })
+
+  it('refuses when the solver was not started from a document', async () => {
+    const response = await exported({ ...baseConfig, configDocument: null })
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({ error: 'no_document' })
+  })
+})
+
 describe('GET /api/settings — what is actually pending', () => {
   const read = async (overrides: Record<string, string>, over: Record<string, unknown> = {}) => {
     const { app } = build(overrides, over)

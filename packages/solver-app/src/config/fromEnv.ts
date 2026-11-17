@@ -12,9 +12,9 @@ import { parseEvmTokens } from '@arkade-os/solver-core/core/evmCorridorConfig.js
 import { messageOf } from '@arkade-os/solver-core/util/poll.js'
 import { swapDbPath } from '../config.js'
 import { parseAssetRfqTokens } from '../ops/assetRfqMarkets.js'
-import { lightningRailFor } from '../ops/rails.js'
+import { lightningRailFor, lightningRailNames } from '../ops/rails.js'
 import { redactMnemonics, SECRET_KEY } from '../ops/sentry.js'
-import { DECIMAL, documentSchema, type SolverDocument } from './document.js'
+import { DECIMAL, documentSchema, jsonPath, type SolverDocument } from './document.js'
 import { BTC_FAMILY, CORRIDOR_FIELDS, corridorKnob, EVM_FIELDS, legacyEnvName, PATHS, SECRET_KNOBS } from './knobs.js'
 import { legacyEnvNames, loadConfig, type LoadOptions } from './load.js'
 
@@ -58,7 +58,7 @@ const decodeAt = (segments: readonly string[], raw: string): unknown => {
   return raw
 }
 
-const setAt = (doc: Record<string, unknown>, segments: readonly string[], value: unknown): void => {
+export const setAt = (doc: Record<string, unknown>, segments: readonly string[], value: unknown): void => {
   let node = doc
   for (const key of segments.slice(0, -1)) node = (node[key] ??= {}) as Record<string, unknown>
   node[segments.at(-1)!] = value
@@ -231,6 +231,38 @@ export const documentForLog = (doc: unknown, env: NodeJS.ProcessEnv): string | n
     2,
   )
   return unnamed ? null : text
+}
+
+const placeholder = (at: readonly (string | number)[]): string =>
+  `<${at
+    .join('_')
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/\W+/g, '_')
+    .toUpperCase()}>`
+
+/**
+ * The document with each credential as a `<PATH>` placeholder the loader refuses, so a copy cannot boot until
+ * every one is filled back in. `secretPaths` places the settings SECRET_KNOBS names; a rail's own block is
+ * reachable only by key name and value shape, and every URL in it counts, as an RPC URL's key can sit in its path.
+ */
+export const redactDocument = (doc: unknown, secretPaths: ReadonlySet<string>): unknown => {
+  const rails = new Set(lightningRailNames())
+  const walk = (node: unknown, at: readonly (string | number)[]): unknown => {
+    const key = String(at.at(-1) ?? '')
+    const named = secretPaths.has(jsonPath(at)) || SECRET_FIELD.test(key) || /priceFeed$/i.test(key)
+    const inRail = at[0] === 'rails' && at[1] === 'lightning' && rails.has(String(at[2]))
+    if (
+      typeof node === 'string'
+        ? named || credentialShaped(node) || (inRail && /^[a-z][a-z0-9+.-]*:\/\//i.test(node))
+        : named && node !== null && typeof node === 'object'
+    ) {
+      return placeholder(at)
+    }
+    if (Array.isArray(node)) return node.map((item, index) => walk(item, [...at, index]))
+    if (node === null || typeof node !== 'object') return node
+    return Object.fromEntries(Object.entries(node).map(([name, value]) => [name, walk(value, [...at, name])]))
+  }
+  return walk(doc, [])
 }
 
 /** The export for a deployment started under the old variables, for its log. */

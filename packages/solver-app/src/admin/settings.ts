@@ -27,6 +27,8 @@ import { MAX_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/send.js'
 import { assetMarketKey } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { log } from '@arkade-os/solver-core/util/poll.js'
 import { lightningRailFor } from '../ops/rails.js'
+import { redactDocument, setAt } from '../config/fromEnv.js'
+import { BTC_FAMILY, CORRIDOR_FIELDS, corridorKnob, PATHS, SECRET_KNOBS } from '../config/knobs.js'
 
 export type KnobSource = 'config' | 'override'
 
@@ -312,6 +314,34 @@ export const applyOverrides = (config: Config, overrides: Record<string, string>
     lockupTimeoutSeconds,
     assetCarrierPricing,
   }
+}
+
+const DOCUMENT_PATHS: ReadonlyMap<string, readonly string[]> = new Map<string, readonly string[]>([
+  ...PATHS.map(([path, knob]) => [knob, path.split('.')] as const),
+  ...CORRIDORS.flatMap((corridor) =>
+    CORRIDOR_FIELDS[BTC_FAMILY[corridor]!].map(
+      (field) => [corridorKnob(stemOf(corridor), field), ['corridors', corridor, field]] as const,
+    ),
+  ),
+])
+
+/**
+ * The document this solver booted from with the stored overrides written in, credentials as placeholders.
+ * Only a value an override moves is written, so the file stays the operator's own.
+ */
+export const exportDocument = (config: Config, overrides: Record<string, string>): unknown => {
+  const booted = editableKnobValues(config)
+  const live = editableKnobValues(applyOverrides(config, overrides))
+  const doc = structuredClone(config.configDocument) as Record<string, unknown>
+  for (const key of editableKeys().filter((key) => live[key] !== booted[key])) {
+    const at = DOCUMENT_PATHS.get(key)!
+    // A corridor block's presence alone turns it on (`enabled ?? true`), so a block written to says which.
+    if (at[0] === 'corridors') {
+      setAt(doc, ['corridors', at[1]!, 'enabled'], live[`${stemOf(at[1] as Corridor)}_ENABLED`])
+    }
+    setAt(doc, at, live[key])
+  }
+  return redactDocument(doc, new Set([...SECRET_KNOBS].flatMap((knob) => config.configPaths.get(knob) ?? [])))
 }
 
 /**

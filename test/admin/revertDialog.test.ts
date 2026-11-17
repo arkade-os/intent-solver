@@ -3,6 +3,7 @@
  */
 import { describe, it, expect, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
+import { resolveObjectURL } from 'node:buffer'
 import { fileURLToPath } from 'node:url'
 
 const appSource = readFileSync(
@@ -21,14 +22,19 @@ interface Node {
   spec: string
   attrs: Record<string, unknown>
   children: unknown[]
+  click: () => void
 }
+
+const clicked: Node[] = []
 
 const h = (spec: string, ...rest: unknown[]): Node => {
   const attrs =
     rest[0] && typeof rest[0] === 'object' && !Array.isArray(rest[0]) && !('spec' in (rest[0] as object))
       ? (rest.shift() as Record<string, unknown>)
       : {}
-  return { spec, attrs, children: rest.flat(Infinity).filter((child) => child !== null && child !== undefined) }
+  const children = rest.flat(Infinity).filter((child) => child !== null && child !== undefined)
+  const node: Node = { spec, attrs, children, click: () => void clicked.push(node) }
+  return node
 }
 
 const textOf = (node: unknown): string =>
@@ -54,7 +60,7 @@ const ui = (state: Record<string, unknown>, api = vi.fn(), load = vi.fn(async ()
     'closeConfirm',
     'actButton',
     'fail',
-    `${revertBlock()}; return { openRevert, applyRevert, revertDialog, revertButton }`,
+    `${revertBlock()}; return { openRevert, applyRevert, revertDialog, revertButton, exportConfig }`,
   )(
     state,
     h,
@@ -73,6 +79,7 @@ const ui = (state: Record<string, unknown>, api = vi.fn(), load = vi.fn(async ()
     applyRevert: () => Promise<void>
     revertDialog: (d: object) => Node
     revertButton: (scope: object, label: string) => Node | null
+    exportConfig: () => Promise<void>
   }
 
 const NOW = {
@@ -163,6 +170,32 @@ describe('where the buttons live', () => {
 
   it('opens from the shared confirm slot', () => {
     expect(appSource).toContain("if (d.kind === 'revert') return revertDialog(d)")
+  })
+
+  it('offers the config export beside the whole revert', () => {
+    expect(pricingView()).toMatch(/onclick: \(\) => exportConfig\(\),\s*\},\s*'Export config',\s*\),\s*revertButton\(/)
+  })
+})
+
+describe('exporting the config', () => {
+  it('saves what the server answers as solver-config.json', async () => {
+    const api = vi.fn(async () => ({ network: 'regtest' }))
+    await ui({}, api).exportConfig()
+    expect(api).toHaveBeenCalledWith('/api/config/export')
+    const link = clicked.at(-1)!
+    expect(link).toMatchObject({ spec: 'a', attrs: { download: 'solver-config.json' } })
+    expect(await resolveObjectURL(String(link.attrs.href))!.text()).toBe('{\n  "network": "regtest"\n}\n')
+  })
+
+  it('puts a refusal in the banner rather than in a file', async () => {
+    const state: Record<string, unknown> = {}
+    const before = clicked.length
+    await ui(
+      state,
+      vi.fn(async () => Promise.reject(new Error('this solver was not started from a config document'))),
+    ).exportConfig()
+    expect(state.banner).toBe('this solver was not started from a config document')
+    expect(clicked).toHaveLength(before)
   })
 })
 

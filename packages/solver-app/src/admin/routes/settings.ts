@@ -38,6 +38,7 @@ import {
   validateOverride,
   editableKeys,
   applyOverrides,
+  exportDocument,
   pendingRestartKeys,
   LIVE_KEYS,
 } from '../settings.js'
@@ -78,6 +79,14 @@ export const registerSettingsRoutes = (app: Hono, deps: AdminDeps): void => {
       pendingRestart: pending,
       restartNotice: RESTART_NOTICE,
     })
+  })
+
+  app.get('/api/config/export', async (c) => {
+    const { config, adminStore } = deps.services
+    if (!config.configDocument) {
+      return c.json({ error: 'no_document', message: 'this solver was not started from a config document' }, 409)
+    }
+    return c.json(exportDocument(config, await adminStore.getOverrides()))
   })
 
   app.patch('/api/settings', async (c) => {

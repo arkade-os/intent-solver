@@ -3196,6 +3196,16 @@ const pricingView = () => {
         : null,
       h(
         'span.revert',
+        h(
+          'button.act',
+          {
+            title:
+              'The config file this solver booted with, console setting changes written in. Each credential comes ' +
+              'out as a <PLACEHOLDER> to fill back in. Markets and the rebalance policy stay in the console.',
+            onclick: () => exportConfig(),
+          },
+          'Export config',
+        ),
         revertButton({ scope: 'all' }, 'Revert to config file'),
         saved
           ? revertButton(
@@ -4304,6 +4314,18 @@ const revertButton = (scope, label) => {
     },
     matches ? 'matches config file' : label,
   )
+}
+
+/** Read through `api`, not a download link: a failed export must reach the banner, never a file named like a config. */
+const exportConfig = async () => {
+  try {
+    const doc = await api('/api/config/export')
+    const href = URL.createObjectURL(new Blob([`${JSON.stringify(doc, null, 2)}\n`], { type: 'application/json' }))
+    h('a', { href, download: 'solver-config.json' }).click()
+    setTimeout(() => URL.revokeObjectURL(href), 60_000)
+  } catch (error) {
+    fail(error)
+  }
 }
 
 const editKnob = (knob) => {
