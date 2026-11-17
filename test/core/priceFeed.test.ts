@@ -58,6 +58,7 @@ describe('reading a price', () => {
     ['undefined', undefined],
     ['an object', { price: 1 }],
     ['a boolean', true],
+    ['a bigint, which JSON cannot even quote', 42n],
   ])('refuses %s rather than coercing it', (_why, value) => {
     expect(() => priceFrom(value)).toThrow(/must be a number or a numeric string/)
   })

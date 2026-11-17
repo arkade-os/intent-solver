@@ -43,7 +43,13 @@ const DECIMAL = /^(\d+)(?:\.(\d+))?$/
 const MAX_PRICE_DIGITS = 36
 
 const quoted = (value: unknown): string => {
-  const text = JSON.stringify(value) ?? String(value)
+  let text: string
+  try {
+    text = JSON.stringify(value) ?? String(value)
+  } catch {
+    // A bigint, or a cycle: the refusal must not be lost to a TypeError from formatting it.
+    text = String(value)
+  }
   return text.length > 64 ? `${text.slice(0, 64)}… (${text.length} characters)` : text
 }
 
