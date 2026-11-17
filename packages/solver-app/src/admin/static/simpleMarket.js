@@ -96,10 +96,12 @@ export const directions = (draft) => {
 }
 
 /** Open to RFQ with no payout bound: RFQ reads a missing bound as closed, so that direction would quote nothing. */
+const halfStated = (bound) => !bound || String(bound.min ?? '').trim() === '' || String(bound.max ?? '').trim() === ''
+
 export const unboundedOpenDirections = (body) =>
   body.enabled === false || body.servesRfq === false
     ? []
-    : directions(body).filter((side) => body[side.open] !== false && !body[side.bound])
+    : directions(body).filter((side) => body[side.open] !== false && halfStated(body[side.bound]))
 
 /** solver-core's `defaultPricePath`, restated because the console cannot import it; a test pins the two together. */
 export const derivedPricePath = (feedUrl) => {
@@ -128,7 +130,7 @@ export const limitDefaults = (feed, assetDecimals) => {
   const asset = (sats) =>
     twoFigures((sats * BigInt(feed.mantissa) * 10n ** BigInt(digits)) / (10n ** BigInt(feed.scale) * 10n ** 8n))
   const [min, max] = [asset(10_000n), asset(1_000_000n)]
-  return max === 0n
+  return min === 0n || max === 0n
     ? null
     : { btc: { min: '10000', max: '1000000' }, asset: { min: min.toString(), max: max.toString() } }
 }

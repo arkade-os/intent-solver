@@ -96,7 +96,8 @@ const stringOverrides = (
 
 const amountFrom = (raw: unknown): { ok: true; amount: bigint | null } | { ok: false; invalid: DraftRefusal[] } => {
   if (raw === undefined) return { ok: true, amount: null }
-  if (typeof raw !== 'string' || !/^[0-9]+$/.test(raw) || BigInt(raw) === 0n) {
+  // 78 digits holds any uint256, so a longer string is refused before BigInt parses it.
+  if (typeof raw !== 'string' || raw.length > 78 || !/^[0-9]+$/.test(raw) || BigInt(raw) === 0n) {
     return {
       ok: false,
       invalid: [{ key: 'amount', reason: 'amount must be a decimal string of atomic units, above zero' }],

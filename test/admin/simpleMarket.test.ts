@@ -102,6 +102,11 @@ describe('which columns a direction writes', () => {
 })
 
 describe('a direction open to RFQ without limits', () => {
+  it('counts a limit with only one end typed as no limit', () => {
+    const half = { base: null, quote: USDA, sellBase: { min: '10', max: '' }, buyBase: { min: '1', max: '2' } }
+    expect(unboundedOpenDirections(half).map((side) => side.wire)).toEqual(['sell_base'])
+  })
+
   const body = {
     base: null,
     quote: USDA,
@@ -161,5 +166,9 @@ describe('limit defaults for a new market', () => {
     expect(limitDefaults({ mantissa: '10421850', scale: 2 }, '')).toBeNull()
     expect(limitDefaults(null, '6')).toBeNull()
     expect(limitDefaults({ mantissa: '1', scale: 8 }, 0)).toBeNull()
+  })
+
+  it('offers nothing when the minimum would round to zero, which would quote from one atomic unit', () => {
+    expect(limitDefaults({ mantissa: '1', scale: 0 }, 2)).toBeNull()
   })
 })

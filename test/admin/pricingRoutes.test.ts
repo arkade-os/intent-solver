@@ -474,14 +474,17 @@ describe('POST /api/pricing/preview — a named amount', () => {
     await adminStore.close()
   })
 
-  it.each(['0', '000', '1.5', '-1', '', 1000, null])('refuses amount %j, still showing the feed', async (amount) => {
-    const { ask, adminStore } = await saved()
-    const body = await ask('from', amount)
-    expect(body.invalid).toMatchObject([{ key: 'amount' }])
-    expect(body.samples).toEqual([])
-    expect(body.feed).toMatchObject({ state: 'resolved' })
-    await adminStore.close()
-  })
+  it.each(['0', '000', '1.5', '-1', '', 1000, null, '1'.repeat(79)])(
+    'refuses amount %j, still showing the feed',
+    async (amount) => {
+      const { ask, adminStore } = await saved()
+      const body = await ask('from', amount)
+      expect(body.invalid).toMatchObject([{ key: 'amount' }])
+      expect(body.samples).toEqual([])
+      expect(body.feed).toMatchObject({ state: 'resolved' })
+      await adminStore.close()
+    },
+  )
 
   it.each([
     // FROM names sats while the bound is on the USDX payout, which one BTC overshoots.
