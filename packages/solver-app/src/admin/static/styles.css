@@ -321,6 +321,10 @@ nav button.theme:hover {
   color: var(--text);
 }
 
+nav .more {
+  display: none;
+}
+
 @media (max-width: 760px) {
   #root {
     grid-template-columns: minmax(0, 1fr);
@@ -350,8 +354,6 @@ nav button.theme:hover {
     flex-direction: row;
     gap: 2px;
     padding: 5px;
-    overflow-x: auto;
-    scrollbar-width: none;
     border: 1px solid var(--glass-edge);
     border-radius: 999px;
     background: var(--float-bg);
@@ -360,10 +362,50 @@ nav button.theme:hover {
     backdrop-filter: blur(20px) saturate(1.5);
   }
 
-  nav button {
-    flex: 0 0 auto;
+  nav > button {
+    flex: 1 1 0;
+    min-width: 0;
     border-radius: 999px;
-    padding: 9px 12px;
+    padding: 9px 2px;
+    font-size: 11.5px;
+    text-align: center;
+  }
+
+  nav > .secondary,
+  nav > .spacer,
+  nav > .theme {
+    display: none;
+  }
+
+  nav .more {
+    display: block;
+  }
+
+  /* In the top layer, so the dock's backdrop filter cannot become its containing block. */
+  .nav-more {
+    inset: auto 8px calc(66px + env(safe-area-inset-bottom)) auto;
+    min-width: 200px;
+    margin: 0;
+    padding: 6px;
+    border: 1px solid var(--glass-edge);
+    border-radius: 18px;
+    background: var(--raised);
+    box-shadow: var(--glass-shadow);
+    color: var(--text);
+  }
+
+  .nav-more:popover-open {
+    display: grid;
+    gap: 2px;
+  }
+
+  .nav-more button {
+    padding: 10px 12px;
+    border-radius: 12px;
+  }
+
+  .nav-more button[aria-current='true'] {
+    background: var(--lens);
   }
 }
 
@@ -1631,10 +1673,11 @@ html[data-vt='view'] nav .slens {
   align-items: baseline;
 }
 
+/* Wraps rather than spilling its tip over the input when the column is narrower than the label. */
 .form-grid > .label {
   color: var(--text-dim);
   text-align: right;
-  white-space: nowrap;
+  overflow-wrap: break-word;
 }
 
 .form-grid > .hint {
@@ -1944,6 +1987,10 @@ input.amount {
 
   .pricing-page .form-grid {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+  }
+
+  .pricing-page .form-grid > .label {
+    text-align: left;
   }
 
   .pricing-page .form-grid > .hint,

@@ -546,27 +546,46 @@ const revealTheme = (button, theme) => {
 // Before the first paint, so the console never flashes the wrong ground.
 setTheme(preferredTheme())
 
-const nav = () =>
+/** A phone's dock holds these; the rest wait behind More, so the dock never scrolls out of sight. */
+const DOCK = ['overview', 'activity', 'wallet', 'pricing']
+
+const themeToggle = (spec, before = () => {}) =>
   h(
+    spec,
+    {
+      title: `Switch to ${currentTheme() === 'light' ? 'dark' : 'light'} mode. Follows your system until you pick one.`,
+      onclick: (e) => (revealTheme(e.currentTarget, currentTheme() === 'light' ? 'dark' : 'light'), before(e)),
+    },
+    currentTheme() === 'light' ? 'Dark mode' : 'Light mode',
+  )
+
+const nav = () => {
+  const lens = (on) => (on ? h('i.slens', { 'aria-hidden': 'true' }) : null)
+  const close = (e) => e.currentTarget.closest('[popover]').hidePopover()
+  const away = !DOCK.includes(state.view)
+  return h(
     'nav',
     VIEWS.map(([id]) =>
       h(
-        'button',
+        DOCK.includes(id) ? 'button' : 'button.secondary',
         { 'aria-current': String(state.view === id), onclick: () => go(id) },
-        state.view === id ? h('i.slens', { 'aria-hidden': 'true' }) : null,
+        lens(state.view === id),
         PAGES[id],
       ),
     ),
     h('span.spacer'),
+    themeToggle('button.theme'),
+    h('button.more', { popovertarget: 'nav-more', 'aria-current': String(away) }, lens(away), 'More'),
     h(
-      'button.theme',
-      {
-        title: `Switch to ${currentTheme() === 'light' ? 'dark' : 'light'} mode. Follows your system until you pick one.`,
-        onclick: (e) => revealTheme(e.currentTarget, currentTheme() === 'light' ? 'dark' : 'light'),
-      },
-      currentTheme() === 'light' ? 'Dark mode' : 'Light mode',
+      'div.nav-more',
+      { id: 'nav-more', popover: '' },
+      VIEWS.filter(([id]) => !DOCK.includes(id)).map(([id]) =>
+        h('button', { 'aria-current': String(state.view === id), onclick: (e) => (close(e), go(id)) }, PAGES[id]),
+      ),
+      themeToggle('button.theme', close),
     ),
   )
+}
 
 /* ---- views -------------------------------------------------------------- */
 
