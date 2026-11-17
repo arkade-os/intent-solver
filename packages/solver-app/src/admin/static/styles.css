@@ -2726,8 +2726,13 @@ input.amount {
     display: none;
   }
 
+  /* A phone has no hover to read the rest, so a clipped value gets three lines instead of one. */
   .clip {
+    display: -webkit-box;
     max-width: 100%;
+    white-space: normal;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
   }
 
   table:not(:has(> thead)) tr {

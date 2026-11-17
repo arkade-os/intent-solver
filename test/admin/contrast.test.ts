@@ -59,7 +59,6 @@ const tokensIn = (selector: string): Record<string, string> => {
   return tokens
 }
 
-/** `top` laid over `bottom` at `share` (0..1), channel by channel, as the compositor blends a translucent fill. */
 const over = (top: string, share: number, bottom: string): string =>
   '#' +
   [1, 3, 5]
@@ -71,10 +70,7 @@ const over = (top: string, share: number, bottom: string): string =>
     })
     .join('')
 
-/**
- * A `glass/<light>` background: `--raised` at `--glass-alpha`, the glass at its thinnest, over one of
- * the backdrop's lights at its brightest. Blur only averages that light with dimmer ground around it.
- */
+/** `glass/<light>`: `--raised` at `--glass-alpha` (glass at its thinnest) over that light at its brightest. */
 const colourOf = (tokens: Record<string, string>, selector: string, name: string): string => {
   if (!name.startsWith('glass/')) return tokens[name]!
   const alpha = blockOf(selector).match(/--glass-alpha:\s*(\d+)%/)
