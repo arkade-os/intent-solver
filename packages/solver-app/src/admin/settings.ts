@@ -338,7 +338,8 @@ export const exportDocument = (config: Config, overrides: Record<string, string>
   const live = editableKnobValues(applyOverrides(config, overrides))
   const doc = structuredClone(config.configDocument) as Record<string, unknown>
   for (const key of editableKeys().filter((key) => live[key] !== booted[key])) {
-    const at = DOCUMENT_PATHS.get(key)!
+    const at = DOCUMENT_PATHS.get(key)
+    if (!at) continue // left unwritten, so the reload check below refuses the export by name
     // A corridor block's presence alone turns it on (`enabled ?? true`), so a block written to says which.
     if (at[0] === 'corridors') {
       setAt(doc, ['corridors', at[1]!, 'enabled'], live[`${stemOf(at[1] as Corridor)}_ENABLED`])
