@@ -35,6 +35,7 @@ import {
   tickerSymbol,
   toAtomic,
   toHuman,
+  unboundedOpenDirections,
 } from './simpleMarket.js'
 
 /* ---- tiny element helper ------------------------------------------------ */
@@ -2797,6 +2798,21 @@ const pricingPreviewRequest = () =>
 const applyPricingDraft = async () => {
   syncPricingMarket()
   if (!pricingDraft.size || pricingDraft.busy) return
+  const unbounded = [...pricingDraft.markets.values()].flatMap((body) =>
+    unboundedOpenDirections(body).map((side) => {
+      const name = (leg) => (isBtcLeg(body[leg]) ? 'BTC' : body.symbol || 'the asset')
+      return `${name(side.gives)} → ${name(side.receives)}`
+    }),
+  )
+  if (unbounded.length > 0) {
+    pricingOutcome = {
+      message:
+        `Not applied: ${unbounded.join(' and ')} ${unbounded.length === 1 ? 'is' : 'are'} switched on without both ` +
+        'limits, so the market would quote nothing that way. Set both limits, or switch the direction off.',
+      failed: true,
+    }
+    return render()
+  }
   pricingOutcome = null
   const applying = pricingDraft.apply(api)
   render()

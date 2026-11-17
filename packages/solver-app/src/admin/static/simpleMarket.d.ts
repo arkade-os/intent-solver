@@ -42,6 +42,16 @@ export declare const issuerDecimals: (label: AssetLabel | null | undefined) => n
 export declare const carrierModeFor: (charged: boolean) => 'priced' | 'off'
 export declare const carrierCharged: (mode: string, chargedByDefault: boolean) => boolean
 export declare const directions: (draft: MarketLegs) => [Direction, Direction]
+export declare const unboundedOpenDirections: (
+  body: MarketLegs & {
+    enabled?: boolean
+    servesRfq?: boolean
+    rfqSellBase?: boolean
+    rfqBuyBase?: boolean
+    sellBase?: Range | null
+    buyBase?: Range | null
+  },
+) => Direction[]
 export declare const derivedPricePath: (feedUrl: string) => string | null
 export declare const limitDefaults: (
   feed: { mantissa: string; scale: number } | null | undefined,

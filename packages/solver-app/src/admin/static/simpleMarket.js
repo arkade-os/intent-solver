@@ -95,6 +95,12 @@ export const directions = (draft) => {
   return assetLeg(draft) === 'base' ? [side('buy_base'), side('sell_base')] : [side('sell_base'), side('buy_base')]
 }
 
+/** Open to RFQ with no payout bound: RFQ reads a missing bound as closed, so that direction would quote nothing. */
+export const unboundedOpenDirections = (body) =>
+  body.enabled === false || body.servesRfq === false
+    ? []
+    : directions(body).filter((side) => body[side.open] !== false && !body[side.bound])
+
 /** solver-core's `defaultPricePath`, restated because the console cannot import it; a test pins the two together. */
 export const derivedPricePath = (feedUrl) => {
   const url = String(feedUrl ?? '').trim()

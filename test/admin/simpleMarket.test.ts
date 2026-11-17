@@ -13,6 +13,7 @@ import {
   tickerSymbol,
   toAtomic,
   toHuman,
+  unboundedOpenDirections,
 } from '../../packages/solver-app/src/admin/static/simpleMarket.js'
 
 const USDA = 'aa'.repeat(34)
@@ -97,6 +98,27 @@ describe('which columns a direction writes', () => {
     const [btcIn, assetIn] = directions({ base: USDA, quote: 'BTC' })
     expect(btcIn).toMatchObject({ wire: 'buy_base', gives: 'quote', receives: 'base', open: 'rfqBuyBase' })
     expect(assetIn).toMatchObject({ wire: 'sell_base', gives: 'base', receives: 'quote', max: 'sellBaseMax' })
+  })
+})
+
+describe('a direction open to RFQ without limits', () => {
+  const body = {
+    base: null,
+    quote: USDA,
+    sellBase: { min: '1', max: '2' },
+    buyBase: null,
+    rfqSellBase: true,
+    rfqBuyBase: true,
+  }
+
+  it('is named, since RFQ reads a missing bound as closed', () => {
+    expect(unboundedOpenDirections(body).map((side) => side.wire)).toEqual(['buy_base'])
+  })
+
+  it('is no fault once switched off, disabled, or not serving RFQ', () => {
+    expect(unboundedOpenDirections({ ...body, rfqBuyBase: false })).toEqual([])
+    expect(unboundedOpenDirections({ ...body, enabled: false })).toEqual([])
+    expect(unboundedOpenDirections({ ...body, servesRfq: false })).toEqual([])
   })
 })
 

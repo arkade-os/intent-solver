@@ -27,6 +27,8 @@ const saved = (hex: string, symbol: string) => ({
   feeBps: 50,
   sellBaseFeeFlat: '0',
   buyBaseFeeFlat: '0',
+  sellBase: { min: '1000000', max: '1000000000' },
+  buyBase: { min: '10000', max: '1000000' },
   enabled: true,
   servesOffer: false,
   servesRfq: true,
@@ -159,6 +161,16 @@ describe('the unified pricing editor', () => {
       },
     })
     expect(ui.pricingDraft.size).toBe(0)
+  })
+
+  it('refuses to apply a market that opens a direction without both limits', async () => {
+    const ui = harness()
+    const { marketKey, ...body } = saved('cc', 'C')
+    ui.pricingDraft.stageMarket(marketKey, { ...body, sellBase: null })
+    await ui.applyPricingDraft()
+    expect(ui.sent).toEqual([])
+    expect(ui.outcome()).toMatchObject({ failed: true, message: expect.stringContaining('BTC → C') })
+    expect(ui.pricingDraft.size).toBe(1)
   })
 
   it('reverting the carrier toggle cancels its queued change while a market is open', () => {
