@@ -326,6 +326,7 @@ nav button.theme:hover {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  /* No backdrop filter here: it would make the sidebar the containing block of the fixed dock. */
   .sidebar {
     position: static;
     height: auto;
@@ -333,12 +334,36 @@ nav button.theme:hover {
     margin: 8px 8px 0;
     padding: 12px;
     border-radius: 20px;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+
+  .status {
+    padding-bottom: 0;
+    border-bottom: none;
   }
 
   nav {
+    position: fixed;
+    z-index: 45;
+    inset: auto 8px calc(8px + env(safe-area-inset-bottom));
     flex-direction: row;
+    gap: 2px;
+    padding: 5px;
     overflow-x: auto;
     scrollbar-width: none;
+    border: 1px solid var(--glass-edge);
+    border-radius: 999px;
+    background: var(--float-bg);
+    box-shadow: var(--glass-shadow);
+    -webkit-backdrop-filter: blur(20px) saturate(1.5);
+    backdrop-filter: blur(20px) saturate(1.5);
+  }
+
+  nav button {
+    flex: 0 0 auto;
+    border-radius: 999px;
+    padding: 9px 12px;
   }
 }
 
@@ -1354,6 +1379,41 @@ tr.note td:first-child {
   .scrim {
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
+  }
+}
+
+@media (max-width: 760px) {
+  main {
+    padding-bottom: calc(88px + env(safe-area-inset-bottom));
+  }
+
+  .scrim,
+  .scrim.drawer {
+    place-items: end stretch;
+    padding: 0;
+  }
+
+  /* Dialogs and the swap pane rise from the bottom as sheets, over the dock. */
+  .dialog,
+  .dialog.confirm,
+  .dialog.confirm.revert,
+  .dialog.detail {
+    max-width: none;
+    max-height: 92dvh;
+    border-width: 1px 0 0;
+    border-radius: 24px 24px 0 0;
+    padding-bottom: calc(24px + env(safe-area-inset-bottom));
+  }
+
+  .dialog.detail {
+    height: 92dvh;
+  }
+
+  @keyframes drawer-in {
+    from {
+      transform: translateY(40%);
+      opacity: 0;
+    }
   }
 }
 
