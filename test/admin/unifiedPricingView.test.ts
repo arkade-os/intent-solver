@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { PricingDraft } from '../../packages/solver-app/src/admin/static/pricingDraft.js'
+import * as simpleMarket from '../../packages/solver-app/src/admin/static/simpleMarket.js'
 
 const source = readFileSync(new URL('../../packages/solver-app/src/admin/static/app.js', import.meta.url), 'utf8')
 const definitions = source.slice(source.indexOf('const blankMarket'), source.indexOf('const tip'))
@@ -45,9 +46,10 @@ const harness = (answer = { revision: 'r', applied: [] as string[], unapplied: [
     'render',
     'load',
     'tip',
+    ...Object.keys(simpleMarket),
     `
     let marketDraft = null, carrierDefaultDraft = false, previewData = null, previewError = null, previewRequest = 0
-    let previewSide = 'from', previewDirection = 'sell_base'
+    let previewSide = 'from', previewDirection = 'sell_base', previewAmounts = { sell_base: '', buy_base: '' }
     const readDraftFeed = () => false
     const schedulePreview = () => syncPricingMarket()
     ${definitions}
@@ -55,7 +57,8 @@ const harness = (answer = { revision: 'r', applied: [] as string[], unapplied: [
     return { selectPricing, syncPricingMarket, pricingKnobField, pricingPreviewRequest, applyPricingDraft, pricingDraft,
       stagePricingOverride, removeKnobs: () => state.data.settings.knobs = [],
       setOutcome: value => pricingOutcome = value, outcome: () => pricingOutcome,
-      current: () => marketDraft }
+      current: () => marketDraft, selection: () => pricingSelection, adoptSavedPair, blankMarket, marketBody,
+      ask: (direction, text) => ((previewDirection = direction), (previewAmounts[direction] = text)) }
   `,
   )(
     PricingDraft,
@@ -68,14 +71,23 @@ const harness = (answer = { revision: 'r', applied: [] as string[], unapplied: [
     () => {},
     async () => {},
     (text: string) => text,
+    ...Object.values(simpleMarket),
   ) as {
     selectPricing: (selection: unknown, draft?: unknown) => void
     syncPricingMarket: () => void
     pricingKnobField: (knob: unknown, label: string, explanation: string) => Element[]
-    pricingPreviewRequest: () => { market: { feeBps: number }; overrides: Record<string, string> }
+    pricingPreviewRequest: () => Record<string, unknown> & {
+      market: { feeBps: number }
+      overrides: Record<string, string>
+    }
     applyPricingDraft: () => Promise<void>
     pricingDraft: PricingDraft
     current: () => Record<string, unknown>
+    selection: () => Record<string, unknown>
+    adoptSavedPair: () => boolean
+    blankMarket: () => Record<string, unknown>
+    marketBody: (draft: Record<string, unknown>) => Record<string, unknown>
+    ask: (direction: 'sell_base' | 'buy_base', text: string) => void
     stagePricingOverride: (key: string, value: string | null) => void
     removeKnobs: () => void
     setOutcome: (value: unknown) => void
@@ -164,5 +176,63 @@ describe('the unified pricing editor', () => {
     ui.current().quote = ''
     ui.syncPricingMarket()
     expect(ui.pricingDraft.size).toBe(0)
+  })
+})
+
+describe('adding a market for a pair that is already stored', () => {
+  it('opens the stored row instead of laying the blank form over it', () => {
+    const ui = harness()
+    ui.selectPricing({ kind: 'market', key: null }, ui.blankMarket())
+    ui.current().quote = asset('aa').slice(0, 10)
+    ui.syncPricingMarket()
+    expect(ui.pricingDraft.size).toBe(1)
+    ui.current().quote = asset('aa')
+    expect(ui.adoptSavedPair()).toBe(true)
+    expect(ui.selection()).toMatchObject({ kind: 'market', key: ui.markets[0]!.marketKey, adopted: true })
+    expect(ui.current()).toMatchObject({ symbol: 'A', feeBps: '50', carrierMode: 'inherit', quoteDecimals: '6' })
+    expect(ui.pricingDraft.size).toBe(0)
+  })
+
+  it('keeps edits already staged on that row', () => {
+    const ui = harness()
+    ui.selectPricing({ kind: 'market', key: ui.markets[0]!.marketKey })
+    ui.current().feeBps = '60'
+    ui.selectPricing({ kind: 'market', key: null }, ui.blankMarket())
+    ui.current().quote = asset('aa')
+    ui.adoptSavedPair()
+    expect(ui.current().feeBps).toBe('60')
+    expect(ui.pricingDraft.payload().markets).toMatchObject([{ symbol: 'A', feeBps: 60 }])
+  })
+
+  it('leaves a pair nothing stores as a new market', () => {
+    const ui = harness()
+    ui.selectPricing({ kind: 'market', key: null }, ui.blankMarket())
+    ui.current().quote = asset('cc')
+    expect(ui.adoptSavedPair()).toBe(false)
+    expect(ui.selection().key).toBeNull()
+  })
+})
+
+describe('the market preview request', () => {
+  it('carries the typed amount in atomic units of the leg the client sends, and omits it when blank', () => {
+    const ui = harness()
+    ui.selectPricing({ kind: 'market', key: ui.markets[0]!.marketKey })
+    ui.ask('sell_base', '0.01')
+    expect(ui.pricingPreviewRequest()).toMatchObject({ direction: 'sell_base', side: 'from', amount: '1000000' })
+    ui.ask('buy_base', '12.5')
+    expect(ui.pricingPreviewRequest()).toMatchObject({ direction: 'buy_base', amount: '12500000' })
+    for (const text of ['', '1.1234567', 'abc']) {
+      ui.ask('buy_base', text)
+      expect(ui.pricingPreviewRequest(), text).not.toHaveProperty('amount')
+    }
+  })
+
+  it('sends blank decimals as null for the server to refuse, never as 0', () => {
+    const ui = harness()
+    expect(ui.marketBody(ui.blankMarket())).toMatchObject({ baseDecimals: 8, quoteDecimals: null })
+    expect(ui.marketBody({ ...ui.blankMarket(), feeBps: ' ', toleranceBps: '1e1' })).toMatchObject({
+      feeBps: null,
+      toleranceBps: '1e1',
+    })
   })
 })
