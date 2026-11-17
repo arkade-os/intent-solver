@@ -2,8 +2,9 @@
  * Solver console.
  *
  * The one design rule, and everything else follows from it: COLOUR IS RESERVED
- * FOR RISK. `exposed` is amber, `failed` is brick, and `open`/`done` get no
- * colour at all — they are plain text.
+ * FOR RISK. `exposed` is amber, `failed` is coral, and `open`/`done` get no
+ * colour at all — they are plain text. Arkade purple marks only what the
+ * operator can do, and the mark: never a state.
  *
  * That is not minimalism for its own sake. The four corridors disagree about
  * what their state words mean (`claimed` is terminal success on the two send
@@ -12,40 +13,78 @@
  * "done" were blue, amber would be one of five competing colours instead of
  * the only saturated thing on the screen.
  *
- * Sans for prose and controls, monospace for data: tables, ids, amounts and
- * JSON. All-monospace made every sentence on the page as hard to read as a
- * txid. System stack only — no webfont, because there is no build step and an
- * ops box should not need a CDN.
+ * Geist for prose, Geist Mono for data and controls. All-monospace made every
+ * sentence on the page as hard to read as a txid. Both are served from `fonts/`,
+ * never a CDN; TT Firs Neue is licensed and never shipped, so titles fall back.
  */
 
-:root {
-  /* Cool near-black, deliberately off the framework ramps. Dark because this
-     is read in dim rooms during long sessions, not for fashion. */
-  --ground: #0d0f12;
-  --raised: #14171c;
-  --line: #232830;
-  --line-strong: #333a45;
+@font-face {
+  font-family: 'Geist';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url(fonts/geist-latin-wght-normal.woff2) format('woff2-variations');
+}
 
-  --text: #d5d9df;
-  --text-dim: #8a929e;
+@font-face {
+  font-family: 'Geist Mono';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url(fonts/geist-mono-latin-wght-normal.woff2) format('woff2-variations');
+}
+
+:root {
+  /* Arkade's Dark UI, with the steps between derived. Dark because this
+     is read in dim rooms during long sessions, not for fashion. */
+  --ground: #121016;
+  --raised: #1c1921;
+  --line: #2b2732;
+  --line-strong: #3e3948;
+
+  --text: #efedf3;
+  --text-dim: #b4aebf;
   /* Was #5b636e — 3.16:1 on ground, 2.96:1 on raised, both under the 4.5:1 AA
      floor. This is the token the raw row JSON and the timeline use: small
      monospace, the worst place to be short of contrast. */
-  --text-faint: #7a818a;
+  --text-faint: #9a93a5;
 
   /* The only two saturated colours in the interface. */
   --exposed: #e0a33e;
   --exposed-bg: #2a2113;
   /* Was #c05a4d — 4.40:1 on ground, 3.85:1 on its own chip. Both under AA, on
      the colour whose whole job is to say a swap FAILED. */
-  --failed: #c66b5f;
+  --failed: #ff8a70;
   --failed-bg: #2a1917;
 
-  --focus: #6d8ba6;
+  --focus: #9987e5;
+  --accent: #6851ad;
+  --on-accent: #fffdf8;
+  --accent-ink: #d9d2ff;
+  --lens-solid: #2f2a3d;
+  --logo: #ffffff;
 
-  --mono: ui-monospace, 'SF Mono', 'Cascadia Mono', 'Segoe UI Mono', 'Roboto Mono', Menlo, Consolas, monospace;
-  --sans: ui-sans-serif, system-ui, 'Segoe UI', Roboto, sans-serif;
-  --radius: 6px;
+  /* Glass is chrome only: never behind failed, exposed or faint text on the page. */
+  --glass: linear-gradient(145deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
+  --glass-glow: radial-gradient(130% 55% at 0% 0%, rgba(104, 81, 173, 0.18), transparent 70%);
+  --glass-edge: rgba(255, 255, 255, 0.08);
+  --glass-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06), inset 0 -1px 0 rgba(0, 0, 0, 0.3), 0 24px 60px -30px rgba(0, 0, 0, 0.75);
+  --hi: rgba(255, 255, 255, 0.08);
+  --float-bg: rgba(28, 25, 33, 0.94);
+  --float-shadow: 0 30px 70px -30px rgba(0, 0, 0, 0.85);
+  --scrim: rgba(8, 6, 12, 0.6);
+  --solid-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03), 0 20px 44px -30px rgba(0, 0, 0, 0.85);
+  --track: rgba(255, 255, 255, 0.03);
+  --lens: linear-gradient(135deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.04) 50%, rgba(153, 135, 229, 0.14));
+  --lens-ring: 0 0 0 1px rgba(153, 135, 229, 0.36), 0 4px 14px rgba(0, 0, 0, 0.45);
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --ease-lens: cubic-bezier(0.2, 0.8, 0.25, 1.12);
+
+  --mono: 'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', 'Segoe UI Mono', Menlo, Consolas, monospace;
+  --sans: 'Geist', ui-sans-serif, system-ui, 'Segoe UI', Roboto, sans-serif;
+  --display: 'TT Firs Neue', 'TT Firs Neue Trl Medium', 'Geist', system-ui, sans-serif;
+  --radius: 12px;
   /* Native scrollbars, checkboxes and dropdowns follow the theme instead of flashing white. */
   color-scheme: dark;
 }
@@ -63,24 +102,43 @@
  * one of them cannot see the other.
  */
 [data-theme='light'] {
-  --ground: #fbfbfc;
+  --ground: #fbf9f3;
   --raised: #ffffff;
-  --line: #e2e5ea;
-  --line-strong: #c2c8d1;
+  --line: #e6e3dc;
+  --line-strong: #d1cdc6;
 
-  --text: #1a1d22;
-  --text-dim: #565d66;
-  /* Sits at the AA floor exactly: the lightest this may be and stay legible,
-     which is what a "faint" token is for. `--text-dim` is deliberately darker
-     so the hierarchy survives the inversion. */
-  --text-faint: #6e757e;
+  --text: #151219;
+  --text-dim: #3d3846;
+  /* About 63 percent ink on paper; below roughly 58 percent, faint text falls under AA. */
+  --text-faint: #69646e;
 
-  --exposed: #8d6727;
-  --exposed-bg: #fbf0d8;
-  --failed: #ab5045;
-  --failed-bg: #fdeae8;
+  --exposed: #86601f;
+  --exposed-bg: #fbefd5;
+  /* Coral ink, which clears AA on paper by a hair: nothing tinted may sit behind it. */
+  --failed: #c8402a;
+  --failed-bg: #fef4f1;
 
-  --focus: #5d768d;
+  --focus: #381993;
+  --accent: #381993;
+  --on-accent: #fffdf8;
+  --accent-ink: #381993;
+  --lens-solid: #ebe8f4;
+  --logo: #381993;
+
+  --glass: linear-gradient(145deg, rgba(255, 253, 248, 0.82), rgba(255, 253, 248, 0.5));
+  --glass-glow: radial-gradient(130% 55% at 0% 0%, rgba(217, 210, 255, 0.4), transparent 70%);
+  --glass-edge: rgba(21, 18, 25, 0.08);
+  --glass-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95), inset 0 -1px 0 rgba(21, 18, 25, 0.05),
+    0 20px 50px -32px rgba(56, 25, 147, 0.28);
+  --hi: rgba(255, 255, 255, 0.95);
+  --float-bg: rgba(255, 255, 255, 0.94);
+  --float-shadow: 0 30px 70px -36px rgba(43, 17, 118, 0.45);
+  --scrim: rgba(21, 18, 25, 0.32);
+  --solid-shadow: 0 2px 5px rgba(21, 18, 25, 0.05);
+  --track: rgba(255, 255, 255, 0.5);
+  --lens: linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(255, 255, 255, 0.65) 50%, rgba(56, 25, 147, 0.08));
+  --lens-ring: 0 0 0 1px rgba(56, 25, 147, 0.22), 0 3px 12px rgba(43, 17, 118, 0.12);
   color-scheme: light;
 }
 
@@ -96,8 +154,10 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* Mono like every brand link, but never uppercased: these carry ids an operator matches against logs. */
 a {
-  color: inherit;
+  color: var(--accent-ink);
+  font-family: var(--mono);
   text-underline-offset: 2px;
 }
 
@@ -120,15 +180,20 @@ pre,
 
 .sidebar {
   position: sticky;
-  top: 0;
-  height: 100vh;
+  top: 12px;
+  height: calc(100vh - 24px);
   overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 18px;
+  margin: 12px 0 12px 12px;
   padding: 18px 12px;
-  background: var(--raised);
-  border-right: 1px solid var(--line);
+  border: 1px solid var(--glass-edge);
+  border-radius: 24px;
+  background: var(--glass-glow), var(--glass);
+  box-shadow: var(--glass-shadow);
+  -webkit-backdrop-filter: blur(18px) saturate(1.3);
+  backdrop-filter: blur(18px) saturate(1.3);
 }
 
 .content {
@@ -153,14 +218,30 @@ pre,
 }
 
 .brand {
-  font-size: 15px;
-  font-weight: 700;
-  letter-spacing: 0.01em;
+  font-family: var(--display);
+  font-size: 17px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+
+/* The public brand kit's mark, in the colourways it allows: purple on light, white on dark. */
+.brand::before {
+  content: '';
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  margin-right: 9px;
+  vertical-align: -3px;
+  background: var(--logo);
+  -webkit-mask: url(arkade-mark.svg) center / contain no-repeat;
+  mask: url(arkade-mark.svg) center / contain no-repeat;
 }
 
 .brand .faint {
+  font-family: var(--sans);
   font-size: 12px;
   font-weight: 400;
+  letter-spacing: 0;
 }
 
 .at-risk {
@@ -172,7 +253,9 @@ pre,
 button.flag {
   appearance: none;
   align-self: flex-start;
-  font: 600 12px/1.4 var(--sans);
+  font: 500 11.5px/1.5 var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
   color: var(--exposed);
   background: var(--exposed-bg);
   border: 1px solid var(--exposed);
@@ -189,12 +272,16 @@ nav {
 }
 
 nav button {
+  position: relative;
+  isolation: isolate;
   appearance: none;
   background: none;
   border: none;
   border-radius: var(--radius);
   color: var(--text-dim);
-  font: 500 14px/1.4 var(--sans);
+  font: 500 13px/1.4 var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
   padding: 7px 10px;
   text-align: left;
   cursor: pointer;
@@ -207,7 +294,19 @@ nav button:hover {
 
 nav button[aria-current='true'] {
   color: var(--text);
-  background: var(--line);
+}
+
+/* Its own element, so a navigation can glide it from the old item to the new one. */
+nav .slens {
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  border: 1px solid var(--glass-edge);
+  border-radius: inherit;
+  background: var(--lens);
+  box-shadow:
+    inset 0 1px 0 var(--hi),
+    var(--lens-ring);
 }
 
 /* Pushed to the bottom of the sidebar by the shared `.spacer`: reachable, never
@@ -215,7 +314,7 @@ nav button[aria-current='true'] {
    navigation. */
 nav button.theme {
   color: var(--text-faint);
-  font-size: 13px;
+  font-size: 12px;
 }
 
 nav button.theme:hover {
@@ -227,19 +326,44 @@ nav button.theme:hover {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  /* No backdrop filter here: it would make the sidebar the containing block of the fixed dock. */
   .sidebar {
     position: static;
     height: auto;
     gap: 10px;
+    margin: 8px 8px 0;
     padding: 12px;
-    border-right: none;
-    border-bottom: 1px solid var(--line);
+    border-radius: 20px;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+
+  .status {
+    padding-bottom: 0;
+    border-bottom: none;
   }
 
   nav {
+    position: fixed;
+    z-index: 45;
+    inset: auto 8px calc(8px + env(safe-area-inset-bottom));
     flex-direction: row;
+    gap: 2px;
+    padding: 5px;
     overflow-x: auto;
     scrollbar-width: none;
+    border: 1px solid var(--glass-edge);
+    border-radius: 999px;
+    background: var(--float-bg);
+    box-shadow: var(--glass-shadow);
+    -webkit-backdrop-filter: blur(20px) saturate(1.5);
+    backdrop-filter: blur(20px) saturate(1.5);
+  }
+
+  nav button {
+    flex: 0 0 auto;
+    border-radius: 999px;
+    padding: 9px 12px;
   }
 }
 
@@ -281,10 +405,11 @@ main {
 
 .page-head h1 {
   margin: 0;
-  font-size: 22px;
-  font-weight: 600;
-  line-height: 1.3;
-  letter-spacing: -0.01em;
+  font-family: var(--display);
+  font-size: 26px;
+  font-weight: 500;
+  line-height: 1.2;
+  letter-spacing: -0.03em;
 }
 
 main h2 {
@@ -326,23 +451,35 @@ main h2.section-title {
 
 /* Activity's sections as tabs: one table at a time instead of four stacked. */
 .tabs {
-  display: flex;
+  --n: 4;
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(var(--n), 1fr);
   gap: 4px;
-  border-bottom: 1px solid var(--line);
-  overflow-x: auto;
-  scrollbar-width: none;
+  width: max-content;
+  max-width: 100%;
+  padding: 5px;
+  border: 1px solid var(--glass-edge);
+  border-radius: 999px;
+  background: var(--track);
+  box-shadow: var(--glass-shadow);
+  -webkit-backdrop-filter: blur(16px) saturate(1.25);
+  backdrop-filter: blur(16px) saturate(1.25);
 }
 
 .tabs button {
+  position: relative;
+  z-index: 1;
   white-space: nowrap;
   appearance: none;
   background: none;
   border: none;
-  border-bottom: 2px solid transparent;
-  margin-bottom: -1px;
-  padding: 8px 12px;
+  border-radius: 999px;
+  padding: 7px 14px;
   color: var(--text-dim);
-  font: 500 14px/1.4 var(--sans);
+  font: 500 13px/1.4 var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
   cursor: pointer;
 }
 
@@ -352,13 +489,56 @@ main h2.section-title {
 
 .tabs button[aria-selected='true'] {
   color: var(--text);
-  border-bottom-color: var(--text);
 }
 
 .tabs .count {
   margin-left: 6px;
   color: var(--text-faint);
   font: 12px var(--mono);
+}
+
+/* Faint reads 3.7:1 on the dark lens. */
+.tabs button[aria-selected='true'] .count {
+  color: var(--text-dim);
+}
+
+.tabs .lens {
+  position: absolute;
+  top: 5px;
+  bottom: 5px;
+  left: 5px;
+  width: calc((100% - 10px - 4px * (var(--n) - 1)) / var(--n));
+  border: 1px solid var(--glass-edge);
+  border-radius: 999px;
+  background: var(--lens);
+  box-shadow:
+    inset 0 1px 0 var(--hi),
+    var(--lens-ring);
+  transform: translateX(calc(var(--i) * (100% + 4px)));
+  transition: transform 0.36s var(--ease-lens);
+  pointer-events: none;
+}
+
+@media (max-width: 800px) {
+  .tabs {
+    display: flex;
+    width: 100%;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .tabs button {
+    flex: 0 0 auto;
+  }
+
+  .tabs .lens {
+    display: none;
+  }
+
+  .tabs button[aria-selected='true'] {
+    background: var(--lens-solid);
+    box-shadow: var(--lens-ring);
+  }
 }
 
 /* ---- tables ------------------------------------------------------------ */
@@ -374,7 +554,9 @@ table {
 
 th {
   text-align: left;
-  font: 600 12px/1.4 var(--sans);
+  font: 500 11.5px/1.4 var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
   color: var(--text-dim);
   border-bottom: 1px solid var(--line-strong);
   padding: 8px 10px;
@@ -443,9 +625,9 @@ td.num {
 
 .phase {
   display: inline-block;
-  padding: 0 7px;
+  padding: 0 8px;
   border: 1px solid var(--line-strong);
-  border-radius: 4px;
+  border-radius: 999px;
   color: var(--text-dim);
   font: 500 12px/1.6 var(--sans);
   white-space: nowrap;
@@ -502,6 +684,7 @@ td.num {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--raised);
+  box-shadow: var(--solid-shadow);
   padding: 14px 16px;
 }
 
@@ -547,7 +730,7 @@ td.num {
   padding: 10px 12px;
   background: var(--ground);
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--radius);
   white-space: pre-wrap;
   word-break: break-all;
   font-size: 12px;
@@ -638,7 +821,9 @@ textarea {
 button.act {
   min-height: 30px;
   background: var(--raised);
-  font-weight: 500;
+  font: 500 12.5px/1.4 var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
   cursor: pointer;
 }
 
@@ -651,12 +836,15 @@ button.act.armed {
   color: var(--exposed);
 }
 
-/* The one step a screen leads with. */
+/* The one step a screen leads with. Purple never reaches an armed one, which stays amber below. */
 button.act.primary {
-  background: var(--text);
-  border-color: var(--text);
-  color: var(--ground);
   font-weight: 600;
+}
+
+button.act.primary:not(.armed) {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
 }
 
 button.act.armed.primary {
@@ -693,7 +881,9 @@ details.menu > summary {
   border-radius: 4px;
   padding: 5px 10px;
   color: var(--text);
-  font-weight: 500;
+  font: 500 12.5px/1.4 var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
 }
 
 details.menu > summary::-webkit-details-marker {
@@ -714,10 +904,12 @@ details.menu > summary::after {
   flex-direction: column;
   min-width: 200px;
   padding: 4px;
-  background: var(--raised);
+  background: var(--float-bg);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--float-shadow);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
 }
 
 .menu-list button.act {
@@ -753,8 +945,10 @@ button.link {
   background: none;
   border: none;
   padding: 4px 6px;
-  color: var(--text-dim);
-  font: 500 13px/1.4 var(--sans);
+  color: var(--accent-ink);
+  font: 500 12.5px/1.4 var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
   text-decoration: underline;
   text-decoration-color: var(--line-strong);
   text-underline-offset: 3px;
@@ -781,7 +975,9 @@ summary {
 .scrim {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--scrim);
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
   display: grid;
   place-items: center;
   padding: 1rem;
@@ -791,10 +987,13 @@ summary {
 .dialog {
   background: var(--raised);
   border: 1px solid var(--line-strong);
-  border-radius: 8px;
+  border-radius: 24px;
+  box-shadow:
+    inset 0 1px 0 var(--hi),
+    var(--float-shadow);
   max-width: 560px;
   width: 100%;
-  padding: 18px 20px;
+  padding: 22px 24px;
   /*
    * Scrolls INSIDE the scrim rather than overflowing it. The scrim centres its
    * child, so a dialog taller than the viewport was clipped at BOTH ends with
@@ -904,15 +1103,13 @@ body:has(.scrim) {
 /* The swap pane: a drawer the height of the window, so the list it came from stays in view beside it. */
 .scrim.drawer {
   place-items: stretch end;
-  padding: 0;
+  padding: 12px;
 }
 
 .dialog.detail {
   max-width: 760px;
-  height: 100vh;
-  max-height: 100vh;
-  border-width: 0 0 0 1px;
-  border-radius: 0;
+  height: calc(100vh - 24px);
+  max-height: calc(100vh - 24px);
   padding: 0 24px 40px;
   animation: drawer-in 0.16s ease-out;
 }
@@ -933,8 +1130,10 @@ body:has(.scrim) {
   align-items: flex-start;
   gap: 16px;
   margin: 0 -24px 16px;
-  padding: 16px 24px 12px;
-  background: var(--raised);
+  padding: 18px 24px 12px;
+  background: var(--float-bg);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--line);
 }
 
@@ -1029,9 +1228,10 @@ details.raw {
   flex-wrap: wrap;
   align-items: baseline;
   gap: 4px 8px;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--glass-edge);
   border-left: 3px solid var(--text-dim);
-  background: var(--raised);
+  background: var(--float-bg);
+  box-shadow: var(--glass-shadow);
   border-radius: var(--radius);
   padding: 8px 12px;
   margin: 0 0 12px;
@@ -1057,7 +1257,7 @@ details.raw {
 
 .bar {
   height: 8px;
-  border-radius: 4px;
+  border-radius: 999px;
   background: var(--line);
   overflow: hidden;
   margin: 4px 0 8px;
@@ -1153,6 +1353,119 @@ tr.note td:first-child {
     opacity: 0.5;
   }
   .dialog.detail {
+    animation: none;
+  }
+  .tabs .lens {
+    transition: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .sidebar,
+  .toast,
+  .menu-list,
+  .detail-head,
+  .tabs,
+  nav {
+    background: var(--raised);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+
+  .tabs .lens,
+  nav .slens {
+    background: var(--lens-solid);
+  }
+
+  .scrim {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+
+@media (max-width: 760px) {
+  main {
+    padding-bottom: calc(88px + env(safe-area-inset-bottom));
+  }
+
+  .scrim,
+  .scrim.drawer {
+    place-items: end stretch;
+    padding: 0;
+  }
+
+  /* Dialogs and the swap pane rise from the bottom as sheets, over the dock. */
+  .dialog,
+  .dialog.confirm,
+  .dialog.confirm.revert,
+  .dialog.detail {
+    max-width: none;
+    max-height: 92dvh;
+    border-width: 1px 0 0;
+    border-radius: 24px 24px 0 0;
+    padding-bottom: calc(24px + env(safe-area-inset-bottom));
+  }
+
+  .dialog.detail {
+    height: 92dvh;
+  }
+
+  @keyframes drawer-in {
+    from {
+      transform: translateY(40%);
+      opacity: 0;
+    }
+  }
+}
+
+/* The theme reveal draws the new page over the old itself; the default cross-fade would fight it. */
+html[data-vt]::view-transition-old(root),
+html[data-vt]::view-transition-new(root) {
+  animation: none;
+}
+
+html[data-vt='view'] main {
+  view-transition-name: main;
+}
+
+html[data-vt='view'] nav .slens {
+  view-transition-name: nav-lens;
+}
+
+::view-transition-old(main) {
+  animation: vt-out 0.16s var(--ease) both;
+}
+
+::view-transition-new(main) {
+  animation: vt-in 0.26s var(--ease) both;
+}
+
+::view-transition-group(nav-lens) {
+  animation-duration: 0.38s;
+  animation-timing-function: var(--ease-lens);
+}
+
+@keyframes vt-out {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes vt-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+/* The dock holds still; unnamed, the named `main` scrolled beneath it would paint over it. */
+@media (max-width: 760px) {
+  html[data-vt='view'] nav {
+    view-transition-name: dock;
+  }
+
+  ::view-transition-old(dock),
+  ::view-transition-new(dock) {
     animation: none;
   }
 }
@@ -1275,6 +1588,7 @@ tr.note td:first-child {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--raised);
+  box-shadow: var(--solid-shadow);
   padding: 12px 14px;
 }
 
@@ -1391,7 +1705,7 @@ tr.note td:first-child {
   padding: 8px 10px;
   background: var(--ground);
   border: 1px solid var(--line-strong);
-  border-radius: 4px;
+  border-radius: var(--radius);
   color: var(--text);
   text-align: left;
   white-space: normal;
@@ -1445,7 +1759,7 @@ tr.note td:first-child {
   border: 1px solid var(--exposed);
   background: var(--exposed-bg);
   color: var(--exposed);
-  border-radius: 4px;
+  border-radius: var(--radius);
   padding: 8px 10px;
   margin: 10px 0 0;
   line-height: 1.45;
@@ -1464,24 +1778,22 @@ tr.note td:first-child {
 
 .seg {
   display: inline-flex;
+  gap: 2px;
+  padding: 3px;
   border: 1px solid var(--line-strong);
-  border-radius: 4px;
-  overflow: hidden;
+  border-radius: 999px;
+  background: var(--track);
 }
 
 .seg button {
   appearance: none;
   background: none;
   border: none;
-  border-right: 1px solid var(--line-strong);
+  border-radius: 999px;
   color: var(--text-faint);
-  font: 500 13px/1.4 var(--sans);
-  padding: 4px 10px;
+  font: 500 12.5px/1.4 var(--mono);
+  padding: 3px 10px;
   cursor: pointer;
-}
-
-.seg button:last-child {
-  border-right: none;
 }
 
 .seg button:hover {
@@ -1490,6 +1802,9 @@ tr.note td:first-child {
 
 .seg button[aria-pressed='true'] {
   background: var(--line);
+  box-shadow:
+    inset 0 1px 0 var(--hi),
+    var(--lens-ring);
   color: var(--text);
 }
 
@@ -1782,9 +2097,9 @@ input.amount {
 }
 
 .wallet-actions .act {
-  background: var(--text);
-  color: var(--ground);
-  border-color: var(--text);
+  background: var(--accent);
+  color: var(--on-accent);
+  border-color: var(--accent);
 }
 
 .wallet-pools {
@@ -1818,6 +2133,7 @@ input.amount {
   background: var(--raised);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
+  box-shadow: var(--solid-shadow);
 }
 
 .wallet-quote {
@@ -1876,7 +2192,7 @@ input.amount {
   margin: 20px 0;
   padding: 16px 20px 20px;
   border: 1px solid var(--line-strong);
-  border-radius: 4px;
+  border-radius: var(--radius);
 }
 
 .wallet-fieldset legend {
@@ -1903,6 +2219,7 @@ input.amount {
   background: var(--raised);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius);
+  box-shadow: var(--solid-shadow);
 }
 
 .wallet-history h3 {

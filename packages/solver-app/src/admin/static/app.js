@@ -510,19 +510,59 @@ const chooseTheme = (theme) => {
 
 const currentTheme = () => (document.documentElement.dataset.theme === 'light' ? 'light' : 'dark')
 
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)')
+let viewTransition = null
+
+/** Names exist only while `html[data-vt]` is set: a permanent one is a stacking context that traps the scrim. */
+const withViewTransition = (kind, update) => {
+  if (!document.startViewTransition || reducedMotion.matches) return void update()
+  const root = document.documentElement
+  root.dataset.vt = kind
+  const transition = (viewTransition = document.startViewTransition(() =>
+    Promise.race([update(), new Promise((resolve) => setTimeout(resolve, 300))]),
+  ))
+  const done = () => {
+    if (viewTransition === transition) delete root.dataset.vt
+  }
+  transition.finished.then(done, done)
+  transition.ready.catch(() => {})
+  return transition
+}
+
+const revealTheme = (button, theme) => {
+  const box = button.getBoundingClientRect()
+  const [x, y] = [box.left + box.width / 2, box.top + box.height / 2]
+  const radius = Math.hypot(Math.max(x, innerWidth - x), Math.max(y, innerHeight - y))
+  withViewTransition('theme', () => (chooseTheme(theme), render()))
+    ?.ready.then(() =>
+      document.documentElement.animate(
+        { clipPath: [`circle(0 at ${x}px ${y}px)`, `circle(${radius}px at ${x}px ${y}px)`] },
+        { duration: 550, easing: 'cubic-bezier(0.2, 0.7, 0.2, 1)', pseudoElement: '::view-transition-new(root)' },
+      ),
+    )
+    .catch(() => {})
+}
+
 // Before the first paint, so the console never flashes the wrong ground.
 setTheme(preferredTheme())
 
 const nav = () =>
   h(
     'nav',
-    VIEWS.map(([id]) => h('button', { 'aria-current': String(state.view === id), onclick: () => go(id) }, PAGES[id])),
+    VIEWS.map(([id]) =>
+      h(
+        'button',
+        { 'aria-current': String(state.view === id), onclick: () => go(id) },
+        state.view === id ? h('i.slens', { 'aria-hidden': 'true' }) : null,
+        PAGES[id],
+      ),
+    ),
     h('span.spacer'),
     h(
       'button.theme',
       {
         title: `Switch to ${currentTheme() === 'light' ? 'dark' : 'light'} mode. Follows your system until you pick one.`,
-        onclick: () => (chooseTheme(currentTheme() === 'light' ? 'dark' : 'light'), render()),
+        onclick: (e) => revealTheme(e.currentTarget, currentTheme() === 'light' ? 'dark' : 'light'),
       },
       currentTheme() === 'light' ? 'Dark mode' : 'Light mode',
     ),
@@ -1024,6 +1064,8 @@ const activityView = () => {
           counts[key] === undefined ? null : h('span.count', String(counts[key])),
         ),
       ),
+      // Kept across renders, so a new `--i` slides it by CSS transition and a poll never moves it.
+      h('i.lens', { 'aria-hidden': 'true', style: `--i: ${ACTIVITY_SECTIONS.indexOf(tab)}` }),
     ),
     h(
       'section.activity-section',
@@ -5499,6 +5541,7 @@ const viewFromHash = () => {
 }
 
 const go = (view) => {
+  const moved = view !== state.view
   if (view === 'wallet' && state.view !== 'wallet') rebalancePanel.loaded = false
   state.view = view
   // A result belongs to the view it happened on; carrying it across would have
@@ -5508,8 +5551,12 @@ const go = (view) => {
   // back expects to land where they were. replaceState made the browser's back
   // button leave the console entirely.
   if (location.hash !== `#${view}`) history.pushState(null, '', `#${view}`)
-  load(view)
+  if (moved) show(view)
+  else load(view)
 }
+
+/** Navigation animates and a poll never does; nor under a scrim, which the named `main` would paint over. */
+const show = (view) => (state.detail || state.dialog ? load(view) : withViewTransition('view', () => load(view)))
 
 const BODIES = {
   pricing: pricingView,
@@ -5731,7 +5778,7 @@ window.addEventListener('hashchange', () => {
   if (view === 'wallet') rebalancePanel.loaded = false
   state.result = null
   state.view = view
-  load(view)
+  show(view)
 })
 
 // A menu closes on any click outside it.
