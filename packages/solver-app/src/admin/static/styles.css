@@ -1365,7 +1365,8 @@ tr.note td:first-child {
   .toast,
   .menu-list,
   .detail-head,
-  .tabs {
+  .tabs,
+  nav {
     background: var(--raised);
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
