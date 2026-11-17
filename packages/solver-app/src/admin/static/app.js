@@ -561,7 +561,7 @@ const themeToggle = (spec, before = () => {}) =>
 
 const nav = () => {
   const lens = (on) => (on ? h('i.slens', { 'aria-hidden': 'true' }) : null)
-  const close = (e) => e.currentTarget.closest('[popover]').hidePopover()
+  const close = (e) => e.currentTarget.closest('[popover]')?.hidePopover?.()
   const away = !DOCK.includes(state.view)
   return h(
     'nav',
