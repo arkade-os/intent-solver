@@ -73,6 +73,8 @@ describe('reading a price', () => {
     expect(priceFrom(`${digits}.${digits}`).scale).toBe(36)
     expect(() => priceFrom(`1.${digits}1`)).toThrow(/at most 36 digits/)
     expect(() => priceFrom(`${digits}1.5`)).toThrow(/at most 36 digits/)
+    expect(() => priceFrom('x'.repeat(74))).toThrow(/at most 36 digits/)
+    expect(() => priceFrom('x'.repeat(73))).toThrow(/plain decimal/)
   })
 
   it('quotes a megabyte feed value in its error by length, not in full', () => {

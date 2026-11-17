@@ -67,12 +67,14 @@ const quoted = (value: unknown): string => {
 export const priceFrom = (value: unknown): Price => {
   const text = typeof value === 'number' ? String(value) : typeof value === 'string' ? value.trim() : null
   if (text === null) throw new Error(`price must be a number or a numeric string, got ${quoted(value)}`)
+  const tooLong = () =>
+    new Error(`price must have at most ${MAX_PRICE_DIGITS} digits each side of the point, got ${quoted(text)}`)
+  // Before the regex too, so a megabyte value is neither scanned nor captured.
+  if (text.length > 2 * MAX_PRICE_DIGITS + 1) throw tooLong()
   const match = DECIMAL.exec(text)
   if (!match) throw new Error(`price must be a plain decimal, got ${quoted(text)}`)
   const [, whole = '', fraction = ''] = match
-  if (whole.length > MAX_PRICE_DIGITS || fraction.length > MAX_PRICE_DIGITS) {
-    throw new Error(`price must have at most ${MAX_PRICE_DIGITS} digits each side of the point, got ${quoted(text)}`)
-  }
+  if (whole.length > MAX_PRICE_DIGITS || fraction.length > MAX_PRICE_DIGITS) throw tooLong()
   const mantissa = BigInt(whole + fraction)
   if (mantissa <= 0n) throw new Error(`price must be positive, got ${quoted(text)}`)
   return { mantissa, scale: fraction.length }
