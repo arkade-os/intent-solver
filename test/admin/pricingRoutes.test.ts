@@ -422,6 +422,63 @@ describe('POST /api/pricing/preview — asset markets', () => {
   })
 })
 
+describe('POST /api/pricing/preview — a named amount', () => {
+  type Sample = { ok: boolean; amount: string; fromAmount?: string; toAmount?: string }
+
+  const saved = async () => {
+    const { app, adminStore } = await build()
+    await save(app, marketBody())
+    const ask = async (side: 'from' | 'to', amount?: unknown) =>
+      (await preview(app, { target: 'market', market: marketBody(), direction: 'sell_base', side, amount })).body
+    return { ask, adminStore }
+  }
+
+  it.each(['from', 'to'] as const)('prices one %s amount exactly as the ladder does', async (side) => {
+    const { ask, adminStore } = await saved()
+    const rung = ((await ask(side)).samples as Sample[]).find((sample) => sample.ok)!
+    expect((await ask(side, rung.amount)).samples).toEqual([rung])
+    expect(rung[side === 'from' ? 'fromAmount' : 'toAmount']).toBe(rung.amount)
+    await adminStore.close()
+  })
+
+  it('keeps the ladder when no amount is named, and every other field either way', async () => {
+    const { ask, adminStore } = await saved()
+    const { samples: ladder, ...rest } = await ask('from')
+    const { samples: single, ...restAtAmount } = await ask('from', '5000')
+    expect((ladder as Sample[]).map((sample) => sample.amount)).toEqual([
+      '33',
+      '331',
+      '1000',
+      '10000',
+      '100000',
+      '100833',
+      '1008330',
+    ])
+    expect(single).toMatchObject([{ amount: '5000', ok: true }])
+    expect(restAtAmount).toEqual(rest)
+    await adminStore.close()
+  })
+
+  it.each(['0', '000', '1.5', '-1', '', 1000, null])('refuses amount %j, still showing the feed', async (amount) => {
+    const { ask, adminStore } = await saved()
+    const body = await ask('from', amount)
+    expect(body.invalid).toMatchObject([{ key: 'amount' }])
+    expect(body.samples).toEqual([])
+    expect(body.feed).toMatchObject({ state: 'resolved' })
+    await adminStore.close()
+  })
+
+  it.each([
+    // FROM names sats while the bound is on the USDX payout, which one BTC overshoots.
+    ['from', '100000000'],
+    ['to', '100000001'],
+  ] as const)('returns an out-of-bounds %s amount as the resolver’s refusal, unfiltered', async (side, amount) => {
+    const { ask, adminStore } = await saved()
+    expect((await ask(side, amount)).samples).toEqual([{ amount, ok: false, reason: 'amount_out_of_range' }])
+    await adminStore.close()
+  })
+})
+
 describe('POST /api/pricing/preview — BTC corridors', () => {
   it('prices a ladder against a drafted override', async () => {
     const { app, adminStore } = await build()
