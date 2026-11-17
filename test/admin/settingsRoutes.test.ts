@@ -13,6 +13,9 @@ import {
   type AssetMarketConfig,
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { createServicesBody } from '../support/createServicesBody.js'
+import { loadConfig } from '@arkade-os/solver-app/config/load.js'
+
+const inline = (doc: unknown) => ({ env: { SOLVER_CONFIG_JSON: JSON.stringify(doc) } })
 
 const baseConfig = {
   network: 'regtest',
@@ -139,24 +142,40 @@ describe('GET /api/settings', () => {
 })
 
 describe('GET /api/config/export', () => {
-  const exported = (config: Record<string, unknown>) =>
-    build({ LN_SEND_FEE_BPS: '25' }, { config }).app.fetch(new Request('http://admin/api/config/export'))
+  const doc = {
+    network: 'regtest',
+    rails: {
+      arkade: { mnemonic: 'secret words never real', operatorUrl: 'http://arkade.test', emulatorUrl: 'http://e.test' },
+      lightning: { backend: 'fake' },
+    },
+    corridors: { 'arkade:BTC->lightning:BTC': { feeBps: 10 } },
+  }
+  const exported = (overrides: Record<string, string>, config: unknown = loadConfig(inline(doc))) =>
+    build(overrides, { config }).app.fetch(new Request('http://admin/api/config/export'))
 
   it('answers the booted document with the stored overrides in, and no credential', async () => {
-    const configDocument = { network: 'regtest', rails: { arkade: { mnemonic: 'secret words never real' } } }
-    const response = await exported({ ...baseConfig, configDocument, configPaths: new Map() })
+    const response = await exported({ LN_SEND_FEE_BPS: '25' })
     expect(response.status).toBe(200)
     const text = await response.text()
     expect(text).not.toContain('secret words never real')
     expect(JSON.parse(text)).toEqual({
-      network: 'regtest',
-      rails: { arkade: { mnemonic: '<RAILS_ARKADE_MNEMONIC>' } },
+      ...doc,
+      rails: { ...doc.rails, arkade: { ...doc.rails.arkade, mnemonic: '<RAILS_ARKADE_MNEMONIC>' } },
       corridors: { 'arkade:BTC->lightning:BTC': { enabled: true, feeBps: 25 } },
     })
   })
 
+  it('refuses, saying why, when a file could not hold what the console runs', async () => {
+    const response = await exported({ LN_SEND_MAX_SATS: '2000000' })
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({
+      error: 'unexportable',
+      message: expect.stringContaining('maxSats is 2000000 here but would load as 1000000'),
+    })
+  })
+
   it('refuses when the solver was not started from a document', async () => {
-    const response = await exported({ ...baseConfig, configDocument: null })
+    const response = await exported({}, { ...baseConfig, configDocument: null })
     expect(response.status).toBe(409)
     expect(await response.json()).toMatchObject({ error: 'no_document' })
   })

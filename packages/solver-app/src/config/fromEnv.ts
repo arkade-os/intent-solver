@@ -251,13 +251,9 @@ export const redactDocument = (doc: unknown, secretPaths: ReadonlySet<string>): 
     const key = String(at.at(-1) ?? '')
     const named = secretPaths.has(jsonPath(at)) || SECRET_FIELD.test(key) || /priceFeed$/i.test(key)
     const inRail = at[0] === 'rails' && at[1] === 'lightning' && rails.has(String(at[2]))
-    if (
-      typeof node === 'string'
-        ? named || credentialShaped(node) || (inRail && /^[a-z][a-z0-9+.-]*:\/\//i.test(node))
-        : named && node !== null && typeof node === 'object'
-    ) {
-      return placeholder(at)
-    }
+    const shaped =
+      typeof node === 'string' && (credentialShaped(node) || (inRail && /^[a-z][a-z0-9+.-]*:\/\//i.test(node)))
+    if ((named && node !== null) || shaped) return placeholder(at)
     if (Array.isArray(node)) return node.map((item, index) => walk(item, [...at, index]))
     if (node === null || typeof node !== 'object') return node
     return Object.fromEntries(Object.entries(node).map(([name, value]) => [name, walk(value, [...at, name])]))

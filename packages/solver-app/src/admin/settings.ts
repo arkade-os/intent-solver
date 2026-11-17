@@ -29,6 +29,7 @@ import { log } from '@arkade-os/solver-core/util/poll.js'
 import { lightningRailFor } from '../ops/rails.js'
 import { redactDocument, setAt } from '../config/fromEnv.js'
 import { BTC_FAMILY, CORRIDOR_FIELDS, corridorKnob, PATHS, SECRET_KNOBS } from '../config/knobs.js'
+import { loadConfig } from '../config/load.js'
 
 export type KnobSource = 'config' | 'override'
 
@@ -325,6 +326,9 @@ const DOCUMENT_PATHS: ReadonlyMap<string, readonly string[]> = new Map<string, r
   ),
 ])
 
+/** The console holds a value no config file can: the file would boot to something else. */
+export class UnexportableConfig extends Error {}
+
 /**
  * The document this solver booted from with the stored overrides written in, credentials as placeholders.
  * Only a value an override moves is written, so the file stays the operator's own.
@@ -340,6 +344,18 @@ export const exportDocument = (config: Config, overrides: Record<string, string>
       setAt(doc, ['corridors', at[1]!, 'enabled'], live[`${stemOf(at[1] as Corridor)}_ENABLED`])
     }
     setAt(doc, at, live[key])
+  }
+  // The loader narrows a corridor's range to the deployment's and the console does not, so a widened one is lost.
+  const reloaded = editableKnobValues(loadConfig({ env: { SOLVER_CONFIG_JSON: JSON.stringify(doc) } }))
+  const lost = editableKeys().filter((key) => reloaded[key] !== live[key])
+  if (lost.length > 0) {
+    const each = lost.map(
+      (key) => `${config.configPaths.get(key) ?? key} is ${live[key]} here but would load as ${reloaded[key]}`,
+    )
+    throw new UnexportableConfig(
+      `a config file cannot hold what this console runs: ${each.join('; ')}. A file narrows each corridor's ` +
+        `range to limits.maxSwapSats and the network's own range; bring the console value inside it first.`,
+    )
   }
   return redactDocument(doc, new Set([...SECRET_KNOBS].flatMap((knob) => config.configPaths.get(knob) ?? [])))
 }

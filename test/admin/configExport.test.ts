@@ -2,7 +2,12 @@ import { describe, it, expect } from 'vitest'
 import type { LightningRail, LightningRailModule } from '@arkade-os/solver-app/index.js'
 import { registerLightningRail } from '@arkade-os/solver-app/ops/rails.js'
 import { loadConfig, type LoadOptions } from '@arkade-os/solver-app/config/load.js'
-import { applyOverrides, editableKnobValues, exportDocument } from '@arkade-os/solver-app/admin/settings.js'
+import {
+  applyOverrides,
+  editableKnobValues,
+  exportDocument,
+  UnexportableConfig,
+} from '@arkade-os/solver-app/admin/settings.js'
 
 const RAIL = 'example-rail'
 registerLightningRail(RAIL, {
@@ -65,6 +70,12 @@ describe('exportDocument', () => {
     expect(reloaded.lnBackend).toBe(config.lnBackend)
   })
 
+  it('refuses a corridor range the console widened past what a file can hold', () => {
+    const exporting = () => exportDocument(load(base()), { LN_SEND_MAX_SATS: '2000000', LN_SEND_FEE_BPS: '25' })
+    expect(exporting).toThrow(UnexportableConfig)
+    expect(exporting).toThrow(`corridors["${LN_SEND}"].maxSats is 2000000 here but would load as 1000000`)
+  })
+
   it('writes nothing an override does not move', () => {
     const exported = exportDocument(load(base()), {
       LN_SEND_FEE_BPS: '10',
@@ -114,6 +125,7 @@ describe('exportDocument', () => {
           [RAIL]: {
             apiKey: secrets['rails.lightning.example-rail.apiKey'],
             rpcUrl: secrets['rails.lightning.example-rail.rpcUrl'],
+            apiToken: 987_654_321,
             region: 'eu',
           },
         },
@@ -158,7 +170,7 @@ describe('exportDocument', () => {
     }
     const exported = exportDocument(load(doc), {})
     const text = JSON.stringify(exported)
-    for (const value of [MNEMONIC, ...Object.values(secrets)]) expect(text).not.toContain(value)
+    for (const value of [MNEMONIC, ...Object.values(secrets), '987654321']) expect(text).not.toContain(value)
     expect(exported).toMatchObject({
       rails: {
         arkade: { mnemonic: '<RAILS_ARKADE_MNEMONIC>', operatorUrl: 'http://localhost:7070' },
@@ -167,6 +179,7 @@ describe('exportDocument', () => {
           [RAIL]: {
             apiKey: '<RAILS_LIGHTNING_EXAMPLE_RAIL_API_KEY>',
             rpcUrl: '<RAILS_LIGHTNING_EXAMPLE_RAIL_RPC_URL>',
+            apiToken: '<RAILS_LIGHTNING_EXAMPLE_RAIL_API_TOKEN>',
             region: 'eu',
           },
         },
