@@ -1055,7 +1055,7 @@ const activityView = () => {
     'div.activity',
     h(
       'div.tabs',
-      { role: 'tablist' },
+      { role: 'tablist', style: `--n: ${ACTIVITY_SECTIONS.length}` },
       ACTIVITY_SECTIONS.map((key) =>
         h(
           'button',

@@ -451,7 +451,6 @@ main h2.section-title {
 
 /* Activity's sections as tabs: one table at a time instead of four stacked. */
 .tabs {
-  --n: 4;
   position: relative;
   display: grid;
   grid-template-columns: repeat(var(--n), 1fr);
