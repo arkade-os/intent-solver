@@ -30,6 +30,25 @@ const base = () => ({
   corridors: { [LN_SEND]: { feeBps: 10, minSats: 1_000, maxSats: 100_000 } },
 })
 
+const evmChain = (rpcUrl: string, privateKey: string) => ({
+  chainId: 8453,
+  rpcUrl,
+  htlcAddress: `0x${'1'.repeat(40)}`,
+  privateKey,
+  minConfirmations: 12,
+  minAgeSeconds: 720,
+  fastestSecondsPerBlock: 0.25,
+  slowestSecondsPerBlock: 1,
+  timelockFastestSecondsPerBlock: 0.25,
+  timelockSlowestSecondsPerBlock: 1,
+  gasLimit: '300000',
+  maxFeePerGasCeiling: '5000000000',
+  feeHeadroomSeconds: 600,
+  orderMarginSeconds: 7200,
+  quoteValiditySeconds: 60,
+  logScanRange: 5000,
+})
+
 const load = (doc: unknown, profile?: LoadOptions['profile']) =>
   loadConfig({ env: { SOLVER_CONFIG_JSON: JSON.stringify(doc) }, profile })
 
@@ -135,26 +154,7 @@ describe('exportDocument', () => {
             region: 'eu',
           },
         },
-        evm: {
-          base: {
-            chainId: 8453,
-            rpcUrl: secrets['rails.evm.base.rpcUrl'],
-            htlcAddress: `0x${'1'.repeat(40)}`,
-            privateKey: secrets['rails.evm.base.privateKey'],
-            minConfirmations: 12,
-            minAgeSeconds: 720,
-            fastestSecondsPerBlock: 0.25,
-            slowestSecondsPerBlock: 1,
-            timelockFastestSecondsPerBlock: 0.25,
-            timelockSlowestSecondsPerBlock: 1,
-            gasLimit: '300000',
-            maxFeePerGasCeiling: '5000000000',
-            feeHeadroomSeconds: 600,
-            orderMarginSeconds: 7200,
-            quoteValiditySeconds: 60,
-            logScanRange: 5000,
-          },
-        },
+        evm: { base: evmChain(secrets['rails.evm.base.rpcUrl'], secrets['rails.evm.base.privateKey']) },
       },
       assets: {
         'USDC@base': {
@@ -196,5 +196,17 @@ describe('exportDocument', () => {
       relay: { url: '<RELAY_URL>' },
     })
     expect(() => load(exported)).toThrow(/still holds .*<RAILS_ARKADE_MNEMONIC>/)
+  })
+
+  it('redacts an EVM chain the written document holds even when a profile dropped it', () => {
+    const rpcUrl = 'https://rpc.example/v2/secret-profiled-away-key'
+    const doc = { ...base(), rails: { ...base().rails, evm: { mine: evmChain(rpcUrl, '7'.repeat(64)) } } }
+    const withoutEvm: LoadOptions['profile'] = ({ rails: { evm: _evm, ...rails } = {}, ...rest }) => ({
+      ...rest,
+      rails,
+    })
+    const exported = exportDocument(load(doc, withoutEvm), {})
+    expect(JSON.stringify(exported)).not.toContain(rpcUrl)
+    expect(exported).toMatchObject({ rails: { evm: { mine: { rpcUrl: '<RAILS_EVM_MINE_RPC_URL>' } } } })
   })
 })

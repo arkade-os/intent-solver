@@ -28,7 +28,7 @@ import { assetMarketKey } from '@arkade-os/solver-core/core/assetMarketConfig.js
 import { log, messageOf } from '@arkade-os/solver-core/util/poll.js'
 import { lightningRailFor } from '../ops/rails.js'
 import { redactDocument, setAt } from '../config/fromEnv.js'
-import { BTC_FAMILY, CORRIDOR_FIELDS, corridorKnob, PATHS, SECRET_KNOBS } from '../config/knobs.js'
+import { BTC_FAMILY, CORRIDOR_FIELDS, corridorKnob, PATHS } from '../config/knobs.js'
 import { loadConfig } from '../config/load.js'
 
 export type KnobSource = 'config' | 'override'
@@ -365,7 +365,7 @@ export const exportDocument = (config: Config, overrides: Record<string, string>
         (ranged ? ". A file narrows each corridor's range to limits.maxSwapSats and the network's own range" : ''),
     )
   }
-  return redactDocument(doc, new Set([...SECRET_KNOBS].flatMap((knob) => config.configPaths.get(knob) ?? [])))
+  return redactDocument(doc)
 }
 
 /**

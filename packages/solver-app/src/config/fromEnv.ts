@@ -240,16 +240,23 @@ const placeholder = (at: readonly (string | number)[]): string =>
     .replace(/\W+/g, '_')
     .toUpperCase()}>`
 
+const SECRET_PATHS = new Set(PATHS.flatMap(([path, knob]) => (SECRET_KNOBS.has(knob) ? [path] : [])))
+const SECRET_EVM_FIELDS = new Set(
+  Object.entries(EVM_FIELDS).flatMap(([field, knob]) => (SECRET_KNOBS.has(knob) ? [field] : [])),
+)
+
 /**
  * The document with each credential as a `<PATH>` placeholder the loader refuses, so a copy cannot boot until
- * every one is filled back in. `secretPaths` places the settings SECRET_KNOBS names; a rail's own block is
- * reachable only by key name and value shape, and every URL in it counts, as an RPC URL's key can sit in its path.
+ * every one is filled back in. SECRET_KNOBS are placed by position, under any EVM chain label and whatever a
+ * profile did to the loaded copy; a rail's own block is reachable only by key name and value shape, and every
+ * URL in it counts, as an RPC URL's key can sit in its path.
  */
-export const redactDocument = (doc: unknown, secretPaths: ReadonlySet<string>): unknown => {
+export const redactDocument = (doc: unknown): unknown => {
   const rails = new Set(lightningRailNames())
   const walk = (node: unknown, at: readonly (string | number)[]): unknown => {
     const key = String(at.at(-1) ?? '')
-    const named = secretPaths.has(jsonPath(at)) || SECRET_FIELD.test(key) || /priceFeed$/i.test(key)
+    const evmSecret = at.length === 4 && at[0] === 'rails' && at[1] === 'evm' && SECRET_EVM_FIELDS.has(key)
+    const named = SECRET_PATHS.has(jsonPath(at)) || evmSecret || SECRET_FIELD.test(key) || /priceFeed$/i.test(key)
     const inRail = at[0] === 'rails' && at[1] === 'lightning' && rails.has(String(at[2]))
     const shaped =
       typeof node === 'string' && (credentialShaped(node) || (inRail && /^[a-z][a-z0-9+.-]*:\/\//i.test(node)))
