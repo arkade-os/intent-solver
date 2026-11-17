@@ -1903,12 +1903,13 @@ const feedReadout = () => {
   const path = marketDraft.pricePath || derivedPricePath(marketDraft.feedUrl)
   const reading = path ? `reading ${path}${marketDraft.pricePath ? '' : ' (from the URL)'}` : 'needs a JSON path'
   const feed = lastFeed?.key === feedKey() ? lastFeed.feed : null
-  const setPath = marketDraft.pathShown
-    ? null
-    : [
-        ' · ',
-        h('button.link', { onclick: () => ((marketDraft.pathShown = true), schedulePreview()) }, 'set a JSON path'),
-      ]
+  const setPath =
+    marketDraft.pathShown || !derivedPricePath(marketDraft.feedUrl)
+      ? null
+      : [
+          ' · ',
+          h('button.link', { onclick: () => ((marketDraft.pathShown = true), schedulePreview()) }, 'set a JSON path'),
+        ]
   if (feed?.state === 'resolved') {
     return [
       h('b', `1 ${nameOf('base')} = ${priceText(feed.mantissa, feed.scale)} ${nameOf('quote')}`),
@@ -2387,9 +2388,10 @@ const marketForm = (save = saveMarket, close = () => ((marketDraft = null), rend
   const sats = state.data.markets?.carrier?.sats ?? '?'
   const charged = carrierCharged(marketDraft.carrierMode, carrierDefaultDraft)
   const feedUrl = String(marketDraft.feedUrl ?? '').trim()
-  // Once shown it stays for this draft: hidden as its path is cleared, the row would take the caret with it.
-  if (marketDraft.pricePath !== '' || (feedUrl !== '' && !derivedPricePath(feedUrl))) marketDraft.pathShown = true
-  const showPath = marketDraft.pathShown === true
+  // A path, typed or saved, keeps its row for this draft: hidden as it is cleared, the row would take the caret.
+  // A URL alone does not: every URL being typed starts out underivable.
+  if (marketDraft.pricePath !== '' || marketDraft.typed?.has('pricePath')) marketDraft.pathShown = true
+  const showPath = marketDraft.pathShown === true || (feedUrl !== '' && !derivedPricePath(feedUrl))
   const adopted = state.view === 'pricing' ? pricingSelection?.adopted : marketDraft.adopted
   return h(
     'section.panel.market-form',

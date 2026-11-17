@@ -728,6 +728,12 @@ describe('the simple form writes the columns the server reads', () => {
     fire(labelled(view, 'BTC → USDA flat fee'), 'input', { value: '0.0000033' })
     fire(labelled(view, 'USDA → BTC flat fee'), 'input', { value: '' })
     expect(panel.marketBody(panel.draft())).toMatchObject({ sellBaseFeeFlat: '330', buyBaseFeeFlat: '0' })
+
+    const assetBase = previewHarness(RESOLVED, ASSET_BASE)
+    const reversed = assetBase.marketsView()
+    fire(labelled(reversed, 'BTC → USDA flat fee'), 'input', { value: '0.0000033' })
+    fire(labelled(reversed, 'USDA → BTC flat fee'), 'input', { value: '1.5' })
+    expect(assetBase.marketBody(assetBase.draft())).toMatchObject({ buyBaseFeeFlat: '330', sellBaseFeeFlat: '1500000' })
   })
 
   it('says who pays the carrier without a break-even claim the per-direction fees would make wrong', () => {
@@ -761,6 +767,18 @@ describe('the JSON path row', () => {
     expect(pathHidden(panel.marketsView())).toBe(false)
     fire(labelled(panel.marketsView(), 'json path'), 'input', { value: '' })
     expect(pathHidden(panel.marketsView())).toBe(false)
+  })
+
+  it('does not latch open on the first characters of a URL typed one key at a time', () => {
+    const panel = previewHarness(RESOLVED)
+    fire(labelled(panel.marketsView(), 'price feed url'), 'input', { value: 'h' })
+    expect(pathHidden(panel.marketsView())).toBe(false)
+    fire(labelled(panel.marketsView(), 'price feed url'), 'input', { value: BINANCE })
+    const view = panel.marketsView()
+    expect(pathHidden(view)).toBe(true)
+    expect(findAll(view, (node) => node.tagName === 'button' && textOf(node).includes('set a JSON path'))).toHaveLength(
+      1,
+    )
   })
 
   it('opens on request, for a path other than the one the URL derives', () => {
