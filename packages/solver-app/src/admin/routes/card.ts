@@ -91,9 +91,7 @@ export const cardOmissions = (source: CardSource): string[] => {
           (market) => market.token.address === policy.token?.address && Boolean(market[policy.direction]),
         ),
     )
-    .map(
-      (policy) => `${policy.corridor} requires the open-RFQ v2 inline card; the legacy published card stays version 0`,
-    )
+    .map((policy) => `${policy.corridor} requires the open-RFQ inline card; the legacy published card stays version 0`)
   return [...evm.omitted, ...inlineOnly, ...assetMarketsOf(source).omitted]
 }
 
