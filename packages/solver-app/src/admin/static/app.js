@@ -549,7 +549,14 @@ setTheme(preferredTheme())
 const nav = () =>
   h(
     'nav',
-    VIEWS.map(([id]) => h('button', { 'aria-current': String(state.view === id), onclick: () => go(id) }, PAGES[id])),
+    VIEWS.map(([id]) =>
+      h(
+        'button',
+        { 'aria-current': String(state.view === id), onclick: () => go(id) },
+        state.view === id ? h('i.slens', { 'aria-hidden': 'true' }) : null,
+        PAGES[id],
+      ),
+    ),
     h('span.spacer'),
     h(
       'button.theme',
@@ -1057,6 +1064,8 @@ const activityView = () => {
           counts[key] === undefined ? null : h('span.count', String(counts[key])),
         ),
       ),
+      // Kept across renders, so a new `--i` slides it by CSS transition and a poll never moves it.
+      h('i.lens', { 'aria-hidden': 'true', style: `--i: ${ACTIVITY_SECTIONS.indexOf(tab)}` }),
     ),
     h(
       'section.activity-section',

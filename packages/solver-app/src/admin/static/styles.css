@@ -61,6 +61,7 @@
   --accent: #6851ad;
   --on-accent: #fffdf8;
   --accent-ink: #d9d2ff;
+  --lens-solid: #2f2a3d;
   --logo: #ffffff;
 
   /* Glass is chrome only: never behind failed, exposed or faint text on the page. */
@@ -73,6 +74,11 @@
   --float-bg: rgba(28, 25, 33, 0.94);
   --float-shadow: 0 30px 70px -30px rgba(0, 0, 0, 0.85);
   --scrim: rgba(8, 6, 12, 0.6);
+  --track: rgba(255, 255, 255, 0.03);
+  --lens: linear-gradient(135deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.04) 50%, rgba(153, 135, 229, 0.14));
+  --lens-ring: 0 0 0 1px rgba(153, 135, 229, 0.36), 0 4px 14px rgba(0, 0, 0, 0.45);
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --ease-lens: cubic-bezier(0.2, 0.8, 0.25, 1.12);
 
   --mono: 'Geist Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', 'Segoe UI Mono', Menlo, Consolas, monospace;
   --sans: 'Geist', ui-sans-serif, system-ui, 'Segoe UI', Roboto, sans-serif;
@@ -115,6 +121,7 @@
   --accent: #381993;
   --on-accent: #fffdf8;
   --accent-ink: #381993;
+  --lens-solid: #ebe8f4;
   --logo: #381993;
 
   --glass: linear-gradient(145deg, rgba(255, 253, 248, 0.82), rgba(255, 253, 248, 0.5));
@@ -127,6 +134,9 @@
   --float-bg: rgba(255, 255, 255, 0.94);
   --float-shadow: 0 30px 70px -36px rgba(43, 17, 118, 0.45);
   --scrim: rgba(21, 18, 25, 0.32);
+  --track: rgba(255, 255, 255, 0.5);
+  --lens: linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(255, 255, 255, 0.65) 50%, rgba(56, 25, 147, 0.08));
+  --lens-ring: 0 0 0 1px rgba(56, 25, 147, 0.22), 0 3px 12px rgba(43, 17, 118, 0.12);
   color-scheme: light;
 }
 
@@ -260,6 +270,8 @@ nav {
 }
 
 nav button {
+  position: relative;
+  isolation: isolate;
   appearance: none;
   background: none;
   border: none;
@@ -280,7 +292,19 @@ nav button:hover {
 
 nav button[aria-current='true'] {
   color: var(--text);
-  background: var(--line);
+}
+
+/* Its own element, so a navigation can glide it from the old item to the new one. */
+nav .slens {
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  border: 1px solid var(--glass-edge);
+  border-radius: inherit;
+  background: var(--lens);
+  box-shadow:
+    inset 0 1px 0 var(--hi),
+    var(--lens-ring);
 }
 
 /* Pushed to the bottom of the sidebar by the shared `.spacer`: reachable, never
@@ -400,21 +424,31 @@ main h2.section-title {
 
 /* Activity's sections as tabs: one table at a time instead of four stacked. */
 .tabs {
-  display: flex;
+  --n: 4;
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(var(--n), 1fr);
   gap: 4px;
-  border-bottom: 1px solid var(--line);
-  overflow-x: auto;
-  scrollbar-width: none;
+  width: max-content;
+  max-width: 100%;
+  padding: 5px;
+  border: 1px solid var(--glass-edge);
+  border-radius: 999px;
+  background: var(--track);
+  box-shadow: var(--glass-shadow);
+  -webkit-backdrop-filter: blur(16px) saturate(1.25);
+  backdrop-filter: blur(16px) saturate(1.25);
 }
 
 .tabs button {
+  position: relative;
+  z-index: 1;
   white-space: nowrap;
   appearance: none;
   background: none;
   border: none;
-  border-bottom: 2px solid transparent;
-  margin-bottom: -1px;
-  padding: 8px 12px;
+  border-radius: 999px;
+  padding: 7px 14px;
   color: var(--text-dim);
   font: 500 13px/1.4 var(--mono);
   text-transform: uppercase;
@@ -428,13 +462,56 @@ main h2.section-title {
 
 .tabs button[aria-selected='true'] {
   color: var(--text);
-  border-bottom-color: var(--text);
 }
 
 .tabs .count {
   margin-left: 6px;
   color: var(--text-faint);
   font: 12px var(--mono);
+}
+
+/* Faint reads 3.7:1 on the dark lens. */
+.tabs button[aria-selected='true'] .count {
+  color: var(--text-dim);
+}
+
+.tabs .lens {
+  position: absolute;
+  top: 5px;
+  bottom: 5px;
+  left: 5px;
+  width: calc((100% - 10px - 4px * (var(--n) - 1)) / var(--n));
+  border: 1px solid var(--glass-edge);
+  border-radius: 999px;
+  background: var(--lens);
+  box-shadow:
+    inset 0 1px 0 var(--hi),
+    var(--lens-ring);
+  transform: translateX(calc(var(--i) * (100% + 4px)));
+  transition: transform 0.36s var(--ease-lens);
+  pointer-events: none;
+}
+
+@media (max-width: 800px) {
+  .tabs {
+    display: flex;
+    width: 100%;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .tabs button {
+    flex: 0 0 auto;
+  }
+
+  .tabs .lens {
+    display: none;
+  }
+
+  .tabs button[aria-selected='true'] {
+    background: var(--lens-solid);
+    box-shadow: var(--lens-ring);
+  }
 }
 
 /* ---- tables ------------------------------------------------------------ */
@@ -1250,16 +1327,25 @@ tr.note td:first-child {
   .dialog.detail {
     animation: none;
   }
+  .tabs .lens {
+    transition: none;
+  }
 }
 
 @media (prefers-reduced-transparency: reduce) {
   .sidebar,
   .toast,
   .menu-list,
-  .detail-head {
+  .detail-head,
+  .tabs {
     background: var(--raised);
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
+  }
+
+  .tabs .lens,
+  nav .slens {
+    background: var(--lens-solid);
   }
 
   .scrim {
@@ -1581,24 +1667,22 @@ html[data-vt]::view-transition-new(root) {
 
 .seg {
   display: inline-flex;
+  gap: 2px;
+  padding: 3px;
   border: 1px solid var(--line-strong);
-  border-radius: 4px;
-  overflow: hidden;
+  border-radius: 999px;
+  background: var(--track);
 }
 
 .seg button {
   appearance: none;
   background: none;
   border: none;
-  border-right: 1px solid var(--line-strong);
+  border-radius: 999px;
   color: var(--text-faint);
   font: 500 12.5px/1.4 var(--mono);
-  padding: 4px 10px;
+  padding: 3px 10px;
   cursor: pointer;
-}
-
-.seg button:last-child {
-  border-right: none;
 }
 
 .seg button:hover {
@@ -1607,6 +1691,9 @@ html[data-vt]::view-transition-new(root) {
 
 .seg button[aria-pressed='true'] {
   background: var(--line);
+  box-shadow:
+    inset 0 1px 0 var(--hi),
+    var(--lens-ring);
   color: var(--text);
 }
 

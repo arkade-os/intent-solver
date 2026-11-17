@@ -91,6 +91,8 @@ const PAIRS: readonly (readonly [fg: string, bg: string, where: string])[] = [
   ['accent-ink', 'ground', 'a link on the page'],
   ['accent-ink', 'raised', 'a link in a card or dialog'],
   ['on-accent', 'accent', 'the primary button label'],
+  ['text', 'lens-solid', 'the chosen view or tab without transparency'],
+  ['text-dim', 'lens-solid', "the chosen tab's count without transparency"],
 ]
 
 const AA = 4.5
