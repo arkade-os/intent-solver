@@ -109,7 +109,7 @@
 
   --text: #151219;
   --text-dim: #3d3846;
-  /* Ink at 60 percent: the brand's 56 percent caption grey is 4.2:1, under AA. */
+  /* About 63 percent ink on paper; below roughly 58 percent, faint text falls under AA. */
   --text-faint: #69646e;
 
   --exposed: #86601f;
