@@ -147,6 +147,8 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
         .filter((item) => !LIVE_KEYS.has(item.key))
         .map((item) => ({ ...item, path: services.config.configPaths?.get(item.key) ?? item.key })),
       restartEnabled: services.config.adminRestartEnabled,
+      // On each payload a BTC-shaped page reads, not only here: a page renders before this route answers.
+      btcRail: Boolean(services.ln),
       providerPubkey: services.providerPubkey,
       markets: marketCards(storedMarkets, services),
       servingDivergence: [
@@ -250,6 +252,7 @@ export const registerStatusRoutes = (app: Hono, deps: AdminDeps): void => {
     ])
 
     return c.json({
+      btcRail: Boolean(services.ln),
       arkade: {
         address: arkadeAddress.value,
         addressError: arkadeAddress.error,

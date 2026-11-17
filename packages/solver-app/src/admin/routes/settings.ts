@@ -72,6 +72,7 @@ export const registerSettingsRoutes = (app: Hono, deps: AdminDeps): void => {
     const overrides = await deps.services.adminStore.getOverrides()
     const pending = pendingKeys(deps, overrides)
     return c.json({
+      btcRail: Boolean(deps.services.ln),
       knobs: describeSettings(deps.services.config, overrides, pending),
       editable: editableKeys(),
       pendingRestart: pending,
