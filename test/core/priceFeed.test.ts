@@ -66,6 +66,26 @@ describe('reading a price', () => {
     expect(() => priceFrom(Number.NaN)).toThrow()
     expect(() => priceFrom(Number.POSITIVE_INFINITY)).toThrow()
   })
+
+  it('takes 36 digits each side of the point, and refuses a 37th on either side', () => {
+    const digits = '9'.repeat(36)
+    expect(priceFrom(`${digits}.${digits}`).scale).toBe(36)
+    expect(() => priceFrom(`1.${digits}1`)).toThrow(/at most 36 digits/)
+    expect(() => priceFrom(`${digits}1.5`)).toThrow(/at most 36 digits/)
+  })
+
+  it('quotes a megabyte feed value in its error by length, not in full', () => {
+    for (const value of ['1'.repeat(1_000_000), 'x'.repeat(1_000_000), { price: 'x'.repeat(1_000_000) }]) {
+      let message = ''
+      try {
+        priceFrom(value)
+      } catch (error) {
+        message = (error as Error).message
+      }
+      expect(message).toMatch(/\(1000\d{3} characters\)/)
+      expect(message.length).toBeLessThan(200)
+    }
+  })
 })
 
 describe('converting between assets', () => {
