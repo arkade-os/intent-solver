@@ -44,16 +44,42 @@ const contrast = (a: string, b: string): number => {
   return (hi! + 0.05) / (lo! + 0.05)
 }
 
-/** Every `--token: #hex` inside the block a selector opens. */
-const tokensIn = (selector: string): Record<string, string> => {
+const blockOf = (selector: string): string => {
   const start = css.indexOf(selector)
   if (start === -1) throw new Error(`no ${selector} block in styles.css`)
-  const block = css.slice(start, css.indexOf('}', start))
+  return css.slice(start, css.indexOf('}', start))
+}
+
+/** Every `--token: #hex` inside the block a selector opens. */
+const tokensIn = (selector: string): Record<string, string> => {
   const tokens: Record<string, string> = {}
-  for (const [, name, value] of block.matchAll(/--([a-z-]+):\s*(#[0-9a-fA-F]{6})/g)) {
+  for (const [, name, value] of blockOf(selector).matchAll(/--([a-z-]+):\s*(#[0-9a-fA-F]{6})/g)) {
     tokens[name!] = value!
   }
   return tokens
+}
+
+/** `top` laid over `bottom` at `share` (0..1), channel by channel, as the compositor blends a translucent fill. */
+const over = (top: string, share: number, bottom: string): string =>
+  '#' +
+  [1, 3, 5]
+    .map((i) => {
+      const [t, b] = [top, bottom].map((hex) => parseInt(hex.slice(i, i + 2), 16))
+      return Math.round(share * t! + (1 - share) * b!)
+        .toString(16)
+        .padStart(2, '0')
+    })
+    .join('')
+
+/**
+ * A `glass/<light>` background: `--raised` at `--glass-alpha`, the glass at its thinnest, over one of
+ * the backdrop's lights at its brightest. Blur only averages that light with dimmer ground around it.
+ */
+const colourOf = (tokens: Record<string, string>, selector: string, name: string): string => {
+  if (!name.startsWith('glass/')) return tokens[name]!
+  const alpha = blockOf(selector).match(/--glass-alpha:\s*(\d+)%/)
+  if (!alpha) throw new Error(`no --glass-alpha in ${selector}`)
+  return over(tokens['raised']!, Number(alpha[1]) / 100, tokens[name.slice('glass/'.length)]!)
 }
 
 /**
@@ -93,6 +119,18 @@ const PAIRS: readonly (readonly [fg: string, bg: string, where: string])[] = [
   ['on-accent', 'accent', 'the primary button label'],
   ['text', 'lens-solid', 'the chosen view or tab without transparency'],
   ['text-dim', 'lens-solid', "the chosen tab's count without transparency"],
+  // Amber and coral text stay on solid surfaces, so neither appears on glass.
+  ...(['glow-a', 'glow-b'] as const).flatMap((light) =>
+    (
+      [
+        ['text', 'a heading or the chosen view'],
+        ['text-dim', 'a label or a view in the navigation'],
+        ['text-faint', 'a notice or a hint'],
+        ['accent-ink', 'a link'],
+        ['focus', 'a focus ring'],
+      ] as const
+    ).map(([fg, what]) => [fg, `glass/${light}`, `${what} on glass over the backdrop's brightest light`] as const),
+  ),
 ]
 
 const AA = 4.5
@@ -104,14 +142,15 @@ describe.each([
   const tokens = tokensIn(selector)
 
   it('defines every token the console renders', () => {
-    const needed = new Set(PAIRS.flatMap(([fg, bg]) => [fg, bg]))
+    const parts = (name: string) => (name.startsWith('glass/') ? ['raised', name.slice('glass/'.length)] : [name])
+    const needed = new Set(PAIRS.flatMap(([fg, bg]) => [fg, ...parts(bg)]))
     for (const name of needed) {
       expect(tokens[name], `${theme} is missing --${name}`).toMatch(/^#[0-9a-fA-F]{6}$/)
     }
   })
 
   it.each(PAIRS)('reads at AA: --%s on --%s (%s)', (fg, bg, where) => {
-    const ratio = contrast(tokens[fg]!, tokens[bg]!)
+    const ratio = contrast(tokens[fg]!, colourOf(tokens, selector, bg))
     expect(
       ratio,
       `--${fg} on --${bg} (${where}) is ${ratio.toFixed(2)}:1 in ${theme}, under the ${AA}:1 AA floor`,
