@@ -126,9 +126,10 @@ const twoFigures = (amount) => {
 /** A new BTC-base market's limits: 0.0001–0.01 BTC each way, the asset side at the feed price (asset per BTC). */
 export const limitDefaults = (feed, assetDecimals) => {
   const digits = decimalsOf(assetDecimals)
-  if (digits === null || !/^\d+$/.test(String(feed?.mantissa ?? ''))) return null
+  const scale = decimalsOf(feed?.scale)
+  if (digits === null || scale === null || !/^\d+$/.test(String(feed?.mantissa ?? ''))) return null
   const asset = (sats) =>
-    twoFigures((sats * BigInt(feed.mantissa) * 10n ** BigInt(digits)) / (10n ** BigInt(feed.scale) * 10n ** 8n))
+    twoFigures((sats * BigInt(feed.mantissa) * 10n ** BigInt(digits)) / (10n ** BigInt(scale) * 10n ** 8n))
   const [min, max] = [asset(10_000n), asset(1_000_000n)]
   return min === 0n || max === 0n
     ? null

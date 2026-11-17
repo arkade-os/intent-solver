@@ -171,4 +171,9 @@ describe('limit defaults for a new market', () => {
   it('offers nothing when the minimum would round to zero, which would quote from one atomic unit', () => {
     expect(limitDefaults({ mantissa: '1', scale: 0 }, 2)).toBeNull()
   })
+
+  it('offers nothing for a scale past 36 decimals rather than building a huge power of ten', () => {
+    expect(limitDefaults({ mantissa: '37297200000000', scale: 10_000 }, 8)).toBeNull()
+    expect(limitDefaults({ mantissa: '37297200000000', scale: -1 }, 8)).toBeNull()
+  })
 })
