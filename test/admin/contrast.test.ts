@@ -86,7 +86,11 @@ const PAIRS: readonly (readonly [fg: string, bg: string, where: string])[] = [
   ['text', 'exposed-bg', 'the restart banner'],
   ['text-dim', 'exposed-bg', 'the values in the restart banner'],
   ['focus', 'ground', 'focus ring against the page'],
+  ['focus', 'raised', 'focus ring inside a card or dialog'],
   ['text', 'line', 'the pressed segment of a segmented control'],
+  ['accent-ink', 'ground', 'a link on the page'],
+  ['accent-ink', 'raised', 'a link in a card or dialog'],
+  ['on-accent', 'accent', 'the primary button label'],
 ]
 
 const AA = 4.5

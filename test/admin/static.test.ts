@@ -61,6 +61,10 @@ describe('contentTypeFor', () => {
     expect(contentTypeFor('/styles.css')).toContain('text/css')
   })
 
+  it('labels the console fonts as fonts', () => {
+    expect(contentTypeFor('/fonts/geist-latin-wght-normal.woff2')).toBe('font/woff2')
+  })
+
   it('falls back to a non-executable type for anything unknown', () => {
     expect(contentTypeFor('/thing.weird')).toBe('application/octet-stream')
   })
@@ -81,6 +85,17 @@ describe('readStaticFile', () => {
   it('falls back to index.html for a client route, so the client owns its own routing', async () => {
     const file = await readStaticFile('/swaps')
     expect(file?.contentType).toContain('text/html')
+  })
+
+  it('serves both fonts the stylesheet names from the nested fonts directory', async () => {
+    const css = (await readStaticFile('/styles.css'))?.body.toString() ?? ''
+    const fonts = [...css.matchAll(/url\((fonts\/[^)]+\.woff2)\)/g)].map((m) => `/${m[1]}`)
+    expect(fonts).toHaveLength(2)
+    for (const path of fonts) {
+      const file = await readStaticFile(path)
+      expect(file?.contentType, path).toBe('font/woff2')
+      expect(file?.body.subarray(0, 4).toString(), path).toBe('wOF2')
+    }
   })
 
   it('returns null for a missing asset rather than throwing', async () => {

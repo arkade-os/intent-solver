@@ -49,6 +49,7 @@ const TYPES: Record<string, string> = {
   '.mjs': 'text/javascript; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
   '.svg': 'image/svg+xml',
+  '.woff2': 'font/woff2',
 }
 
 export const contentTypeFor = (path: string): string => TYPES[extname(path).toLowerCase()] ?? 'application/octet-stream'
