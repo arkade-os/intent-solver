@@ -634,7 +634,9 @@ const overviewBalancesPanel = () => {
     { id: 'overview-balances', title: error ?? undefined },
     h('b', !b ? (error ? 'unavailable' : '…') : b.arkadeError ? 'unavailable' : sats(b.arkade?.available)),
     h('span', 'arkade available'),
-    b ? h('span.faint', ` · lightning ${b.lightningError ? 'unavailable' : sats(b.lightningSats)}`) : null,
+    b && state.overview?.btcRail !== false
+      ? h('span.faint', ` · lightning ${b.lightningError ? 'unavailable' : sats(b.lightningSats)}`)
+      : null,
   )
 }
 
@@ -667,39 +669,42 @@ const overviewView = () => {
       overviewBalancesPanel(),
     ),
     attentionPanel(o),
-    h(
-      'section.panel',
-      h('h2', 'corridors'),
-      h(
-        'table',
-        h(
-          'thead',
+    (o.servingDivergence ?? []).map((line) => h('p.basis', line)),
+    o.btcRail === false
+      ? null
+      : h(
+          'section.panel',
+          h('h2', 'corridors'),
           h(
-            'tr',
-            h('th', 'corridor'),
-            h('th', 'status'),
-            h('th.right', 'fee'),
-            h('th.right', 'range, sat'),
-            h('th.right', 'live'),
-            h('th.right', 'exposed'),
-          ),
-        ),
-        h(
-          'tbody',
-          o.corridors.map((c) =>
+            'table',
             h(
-              'tr',
-              h('td', corridorLabel(c.corridor)),
-              h('td.state', c.enabled ? 'serving' : h('span.faint', 'off')),
-              h('td.num', `${c.fee.bps} bps + ${sats(c.fee.flatSats)}`),
-              h('td.num', `${sats(c.limits.minSats)} – ${sats(c.limits.maxSats)}`),
-              h('td.num', String(c.liveCount)),
-              h('td.num', c.exposedCount > 0 ? h('span.at-risk', String(c.exposedCount)) : '0'),
+              'thead',
+              h(
+                'tr',
+                h('th', 'corridor'),
+                h('th', 'status'),
+                h('th.right', 'fee'),
+                h('th.right', 'range, sat'),
+                h('th.right', 'live'),
+                h('th.right', 'exposed'),
+              ),
+            ),
+            h(
+              'tbody',
+              o.corridors.map((c) =>
+                h(
+                  'tr',
+                  h('td', corridorLabel(c.corridor)),
+                  h('td.state', c.enabled ? 'serving' : h('span.faint', 'off')),
+                  h('td.num', `${c.fee.bps} bps + ${sats(c.fee.flatSats)}`),
+                  h('td.num', `${sats(c.limits.minSats)} – ${sats(c.limits.maxSats)}`),
+                  h('td.num', String(c.liveCount)),
+                  h('td.num', c.exposedCount > 0 ? h('span.at-risk', String(c.exposedCount)) : '0'),
+                ),
+              ),
             ),
           ),
         ),
-      ),
-    ),
     (o.markets ?? []).length > 0 ? h('h2.section-title', 'markets') : null,
     marketsPanel(o),
   )
@@ -732,6 +737,8 @@ const swapsView = () => {
         'select',
         {
           'aria-label': 'swap corridor',
+          // Hidden, not omitted: the search box beside it keeps its slot, so `morph` keeps its focus.
+          hidden: state.data.swaps?.btcRail === false,
           onchange: (e) => {
             state.filters.corridor = e.target.value
             load('swaps')
@@ -1345,6 +1352,7 @@ const walletView = () => {
   const w = state.data.wallet
   if (!w) return h('p.muted', 'loading…')
   const pool = w.arkade.pool
+  const btcRail = w.btcRail !== false
   return h(
     'div.wallet-page',
     h(
@@ -1381,35 +1389,39 @@ const walletView = () => {
           ),
         ),
       ),
-      h(
-        'section.panel',
-        h('h2', 'Lightning'),
-        h(
-          'p.wallet-number',
-          w.lightning.error ? 'Unavailable' : sats(w.lightning.balance?.availableSats),
-          w.lightning.error ? null : h('span', ' sat available'),
-        ),
-        w.lightning.error ? h('p.banner', w.lightning.error) : null,
-        h(
-          'dl.kv',
-          h('dt', 'Incoming (sat)'),
-          h('dd', w.lightning.error ? h('span.muted', '—') : sats(w.lightning.balance?.incomingSats)),
-        ),
-      ),
-      h(
-        'section.panel',
-        h('h2', 'Onchain'),
-        h(
-          'p.wallet-number',
-          w.onchain.error ? 'Unavailable' : w.onchain.feeRate,
-          w.onchain.error ? null : h('span', ' sat/vB'),
-        ),
-        h('p.muted', w.onchain.error ?? 'Estimated network fee'),
-      ),
+      btcRail
+        ? h(
+            'section.panel',
+            h('h2', 'Lightning'),
+            h(
+              'p.wallet-number',
+              w.lightning.error ? 'Unavailable' : sats(w.lightning.balance?.availableSats),
+              w.lightning.error ? null : h('span', ' sat available'),
+            ),
+            w.lightning.error ? h('p.banner', w.lightning.error) : null,
+            h(
+              'dl.kv',
+              h('dt', 'Incoming (sat)'),
+              h('dd', w.lightning.error ? h('span.muted', '—') : sats(w.lightning.balance?.incomingSats)),
+            ),
+          )
+        : null,
+      btcRail
+        ? h(
+            'section.panel',
+            h('h2', 'Onchain'),
+            h(
+              'p.wallet-number',
+              w.onchain.error ? 'Unavailable' : w.onchain.feeRate,
+              w.onchain.error ? null : h('span', ' sat/vB'),
+            ),
+            h('p.muted', w.onchain.error ?? 'Estimated network fee'),
+          )
+        : null,
     ),
     /* fund sources: the one call into the block above. */
     fundsPanel(),
-    rebalancePanel.render(h),
+    btcRail ? rebalancePanel.render(h) : null,
     h(
       'section.wallet-section',
       // The number that actually constrains throughput: funding pins the coins it
@@ -1464,7 +1476,7 @@ const walletView = () => {
 }
 
 /** Every probe with the host it reached, on the health page. */
-const backendsView = () => {
+const backendsView = (backends) => {
   return h(
     'section.panel',
     h('h2', 'probes'),
@@ -1473,7 +1485,7 @@ const backendsView = () => {
       h('thead', h('tr', h('th', ''), h('th', 'backend'), h('th', 'detail'), h('th', 'target'), h('th', 'checked'))),
       h(
         'tbody',
-        state.data.diagnostics.backends.map((backend) => {
+        backends.map((backend) => {
           const said = backend.ok ? backend.detail : backend.error
           return h(
             'tr',
@@ -2691,7 +2703,7 @@ const pricingRow = (selected, open, ...cells) =>
 const pricingTable = (overrides, marketRows) =>
   h(
     'tbody',
-    BTC_CORRIDORS.map((corridor) =>
+    (state.data.settings?.btcRail === false ? [] : BTC_CORRIDORS).map((corridor) =>
       pricingRow(
         pricingSelection?.key === corridor.key,
         () => selectPricing({ kind: 'corridor', ...corridor }),
@@ -3001,8 +3013,12 @@ const postAd = async () => {
 const healthView = () => {
   const d = state.data.diagnostics
   if (!d) return h('p.muted', 'loading…')
-  const down = d.backends.filter((backend) => !backend.ok).length
-  const short = d.corridors.filter((row) => !row.canHonourMax).length
+  // The API keeps the refused rail probes; with no BTC rail they are answers, not faults.
+  const backends =
+    d.btcRail === false ? d.backends.filter((backend) => !['lightning', 'onchain'].includes(backend.name)) : d.backends
+  const corridors = d.btcRail === false ? [] : d.corridors
+  const down = backends.filter((backend) => !backend.ok).length
+  const short = corridors.filter((row) => !row.canHonourMax).length
   const relayDown = d.relay && !d.relay.connected
   const p = d.publish
   return h(
@@ -3010,8 +3026,8 @@ const healthView = () => {
     d.overridesError ? h('p.banner', d.overridesError) : null,
     h(
       'div.figures',
-      figure('backends down', String(down), `of ${d.backends.length}`, down > 0 ? 'c-loss' : null),
-      figure('short of max', String(short), 'corridors', short > 0 ? 'c-risk' : null),
+      figure('backends down', String(down), `of ${backends.length}`, down > 0 ? 'c-loss' : null),
+      corridors.length > 0 ? figure('short of max', String(short), 'corridors', short > 0 ? 'c-risk' : null) : null,
       figure('relay', d.relay ? (relayDown ? 'down' : 'connected') : '—', null, relayDown ? 'c-loss' : null),
       // Advertising belongs on the health page: "am I publishing?" is part of
       // "is this solver healthy", and the heartbeat says when the next republish falls due.
@@ -3024,31 +3040,40 @@ const healthView = () => {
       ),
       figure('uptime', duration(d.uptimeSeconds), d.mode),
     ),
-    backendsView(),
-    h(
-      'section.panel',
-      h('h2', 'payout headroom'),
-      h(
-        'table',
-        h(
-          'thead',
-          h('tr', h('th', ''), h('th', 'corridor'), h('th', 'rail'), h('th.right', 'available'), h('th.right', 'max')),
-        ),
-        h(
-          'tbody',
-          d.corridors.map((row) =>
+    backendsView(backends),
+    corridors.length === 0
+      ? null
+      : h(
+          'section.panel',
+          h('h2', 'payout headroom'),
+          h(
+            'table',
             h(
-              'tr',
-              h('td', h(`span.dot${row.canHonourMax ? '' : '.down'}`)),
-              h('td', corridorLabel(row.corridor)),
-              h('td.faint', row.payoutRail),
-              h('td.num', row.balanceError ? h('span.sans', row.balanceError) : sats(row.availableSats)),
-              h('td.num.faint', sats(row.advertisedMaxSats)),
+              'thead',
+              h(
+                'tr',
+                h('th', ''),
+                h('th', 'corridor'),
+                h('th', 'rail'),
+                h('th.right', 'available'),
+                h('th.right', 'max'),
+              ),
+            ),
+            h(
+              'tbody',
+              corridors.map((row) =>
+                h(
+                  'tr',
+                  h('td', h(`span.dot${row.canHonourMax ? '' : '.down'}`)),
+                  h('td', corridorLabel(row.corridor)),
+                  h('td.faint', row.payoutRail),
+                  h('td.num', row.balanceError ? h('span.sans', row.balanceError) : sats(row.availableSats)),
+                  h('td.num.faint', sats(row.advertisedMaxSats)),
+                ),
+              ),
             ),
           ),
         ),
-      ),
-    ),
     state.data.discovery ? discoveryView() : null,
   )
 }
@@ -4617,7 +4642,7 @@ const reconExplanation = (data) =>
       : null,
   )
 
-const checkpointRow = (checkpoint, baselineAt) =>
+const checkpointRow = (checkpoint, baselineAt, btcRail) =>
   h(
     'tr',
     h(
@@ -4629,8 +4654,8 @@ const checkpointRow = (checkpoint, baselineAt) =>
     h('td.right', checkpoint.totalSats === null ? h('span.faint', 'not usable') : sats(checkpoint.totalSats)),
     h('td.right', reconDelta(checkpoint.deltaSats)),
     h('td.right', reconDelta(checkpoint.arkadeDeltaSats)),
-    h('td.right', reconDelta(checkpoint.lightningDeltaSats)),
-    h('td.right', reconDelta(checkpoint.onchainDeltaSats)),
+    btcRail ? h('td.right', reconDelta(checkpoint.lightningDeltaSats)) : null,
+    btcRail ? h('td.right', reconDelta(checkpoint.onchainDeltaSats)) : null,
     h(
       'td',
       checkpoint.gap
@@ -4656,6 +4681,7 @@ const checkpointTable = (data) => {
   if (failure) return h('p.banner', `Checkpoint history unavailable: ${failure}`)
   const rows = [...data.balance.checkpoints].reverse()
   const baselineAt = data.balance.checkpoints[0]?.at ?? null
+  const btcRail = data.btcRail !== false
   const table = (subset) =>
     h(
       'table',
@@ -4667,12 +4693,12 @@ const checkpointTable = (data) => {
           h('th.right', 'total sat'),
           h('th.right', 'change'),
           h('th.right', 'Arkade'),
-          h('th.right', 'Lightning'),
-          h('th.right', 'Bitcoin'),
+          btcRail ? h('th.right', 'Lightning') : null,
+          btcRail ? h('th.right', 'Bitcoin') : null,
           h('th', 'status'),
         ),
       ),
-      h('tbody', ...subset.map((checkpoint) => checkpointRow(checkpoint, baselineAt))),
+      h('tbody', ...subset.map((checkpoint) => checkpointRow(checkpoint, baselineAt, btcRail))),
     )
   if (rows.length === 0) return h('p.muted', 'No checkpoints exist for this deployment in the selected window.')
   const recent = rows.slice(0, 120)
@@ -4719,6 +4745,7 @@ const incomingTable = (data) => {
   if (failure) return h('p.banner', `Checkpoint history unavailable: ${failure}`)
   const rows = [...data.balance.incoming].reverse()
   if (rows.length === 0) return h('p.muted', 'No checkpoint increases in this view.')
+  const btcRail = data.btcRail !== false
   return h(
     'table',
     h(
@@ -4728,8 +4755,8 @@ const incomingTable = (data) => {
         h('th', 'when'),
         h('th.right', 'increase'),
         h('th.right', 'Arkade'),
-        h('th.right', 'Lightning'),
-        h('th.right', 'Bitcoin'),
+        btcRail ? h('th.right', 'Lightning') : null,
+        btcRail ? h('th.right', 'Bitcoin') : null,
         h('th', 'source'),
       ),
     ),
@@ -4741,8 +4768,8 @@ const incomingTable = (data) => {
           h('td', reconTime(row.at)),
           h('td.right', signedSats(row.amountSats)),
           h('td.right', reconDelta(row.arkadeSats)),
-          h('td.right', reconDelta(row.lightningSats)),
-          h('td.right', reconDelta(row.onchainSats)),
+          btcRail ? h('td.right', reconDelta(row.lightningSats)) : null,
+          btcRail ? h('td.right', reconDelta(row.onchainSats)) : null,
           h('td.faint', 'checkpoint increase, sender not journaled'),
         ),
       ),

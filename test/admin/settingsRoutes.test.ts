@@ -112,6 +112,16 @@ describe('GET /api/settings', () => {
     expect(body.pendingRestart).toContain('LN_SEND_FEE_BPS')
   })
 
+  it('says whether a BTC rail exists', async () => {
+    const read = async (ln: unknown) =>
+      (
+        (await (await build({}, { ln }).app.fetch(new Request('http://admin/api/settings'))).json()) as {
+          btcRail: unknown
+        }
+      ).btcRail
+    expect([await read({}), await read(null)]).toEqual([true, false])
+  })
+
   it('exposes no secrets', async () => {
     const { app } = build()
     const text = await (await app.fetch(new Request('http://admin/api/settings'))).text()
