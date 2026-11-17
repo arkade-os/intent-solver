@@ -40,7 +40,7 @@
 
 import { buildApp } from '@arkade-os/solver-transport/http/server.js'
 import { corridorSetFromDeps, readerSetFromDeps } from './ops/corridorSet.js'
-import { RFQ_COVENANT_VERSIONS } from '@arkade-os/solver-core/core/rfqCovenant.js'
+import { RFQ_CONTRACT_VERSIONS } from '@arkade-os/solver-core/core/rfqContract.js'
 import type { SendSwapService } from '@arkade-os/solver-corridors/send/orchestrator.js'
 import type { OnchainSendSwapService } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
 import type { SwapStore } from '@arkade-os/solver-corridors/db/swaps.js'
@@ -78,8 +78,8 @@ export interface WorkerDeps {
    * earns its keep when one slow swap must not delay the others.
    */
   driveQueue?: QueueLike<DriveJob>
-  /** Covenant versions this worker serves. Defaults to every version this build ships. */
-  rfqCovenantVersions?: ReadonlySet<string>
+  /** Contract versions this worker serves. Defaults to every version this build ships. */
+  rfqContractVersions?: ReadonlySet<string>
 }
 
 export interface Worker {
@@ -95,7 +95,7 @@ export const buildWorker = (deps: WorkerDeps): Worker => {
   // host used to derive for itself.
   const versionedDeps = {
     ...deps,
-    rfqCovenantVersions: deps.rfqCovenantVersions ?? new Set(RFQ_COVENANT_VERSIONS),
+    rfqContractVersions: deps.rfqContractVersions ?? new Set(RFQ_CONTRACT_VERSIONS),
   }
   const app = buildApp({
     corridors: corridorSetFromDeps(versionedDeps),

@@ -16,7 +16,7 @@
 import { z } from 'zod'
 import { WIRE_AMOUNT } from './wireAmount.js'
 import { MAX_PAIR_LENGTH } from './marketKey.js'
-import { RFQ_COVENANT_VERSION_ID } from './rfqCovenant.js'
+import { RFQ_CONTRACT_VERSION_ID } from './rfqContract.js'
 export const RFQ_ID = z
   .string()
   .length(64)
@@ -30,9 +30,9 @@ export const AMOUNT_SIDE = z.enum(['from', 'to'])
 // accepted only where it is provably lossless. @see ./wireAmount.ts
 export const RFQ_AMOUNT = WIRE_AMOUNT
 
-/** `rfq_request.covenant_versions` (§ 4.1): the covenants a client can derive, most preferred first. */
-export const RFQ_COVENANT_VERSIONS_FIELD = z
-  .array(z.string().regex(RFQ_COVENANT_VERSION_ID))
+/** `rfq_request.contract_versions` (§ 4.1): the contract versions a client can derive, most preferred first. */
+export const RFQ_CONTRACT_VERSIONS_FIELD = z
+  .array(z.string().regex(RFQ_CONTRACT_VERSION_ID))
   .min(1)
   .max(16)
   .refine((versions) => new Set(versions).size === versions.length)
@@ -131,7 +131,7 @@ export const isRfqRefusalReason = (value: string): value is RfqRefusalReason =>
 
 export const RFQ_REFUSAL_ERROR_CODE_VALUES = [
   'amount_side_unsupported',
-  'covenant_version_unsupported',
+  'contract_version_unsupported',
   'exact_out_unsupported',
   'invalid_amount',
   'invalid_payout_address',

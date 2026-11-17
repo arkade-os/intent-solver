@@ -895,7 +895,7 @@ const offersView = () => {
             h(
               'tr',
               h('th', 'state'),
-              h('th', 'covenant'),
+              h('th', 'contract'),
               h('th', 'outpoint'),
               h('th', 'holds'),
               h('th', 'pays'),
@@ -909,7 +909,7 @@ const offersView = () => {
               h(
                 'tr',
                 h('td', offer.state),
-                h('td.muted', offer.covenantVersion === null ? 'unknown' : offer.covenantVersion),
+                h('td.muted', offer.contractVersion === null ? 'unknown' : offer.contractVersion),
                 h('td.faint', { title: offer.outpoint }, shortId(offer.outpoint)),
                 h('td', offerLeg(offer.offerAssetId, offer.offerAmount)),
                 h('td', offerLeg(offer.wantAssetId, offer.wantAmount)),

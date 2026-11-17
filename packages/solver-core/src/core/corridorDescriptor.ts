@@ -1,5 +1,5 @@
 import type { RailId } from './rail.js'
-import type { RfqCovenantVersion } from './rfqCovenant.js'
+import type { RfqContractVersion } from './rfqContract.js'
 
 /**
  * What a corridor DECLARES about itself.
@@ -40,12 +40,12 @@ export interface CorridorDescriptor<State extends string = string> {
    */
   readonly envStem: string
   /**
-   * The settlement covenant this corridor quotes: the BASELINE every request
-   * naming no `covenant_versions` gets, which is what any client predating
-   * negotiation derives. Changing it breaks those clients; a newer covenant must
+   * The settlement contract this corridor quotes: the BASELINE every request
+   * naming no `contract_versions` gets, which is what any client predating
+   * negotiation derives. Changing it breaks those clients; a newer contract version must
    * be opt-in per request instead.
    */
-  readonly covenantVersion: RfqCovenantVersion
+  readonly contractVersion: RfqContractVersion
   /** Which rail's balance funds this corridor's payout — the destination leg. */
   readonly payoutRail: PayoutRail
   /**

@@ -31,10 +31,10 @@ import { heldOf, offerFillInputFrom } from './offerFill.js'
 import { fulfillOffer, type FulfillOptions } from './offerFulfill.js'
 import { liveOfferOutpoints, type OfferOutpoint } from './offerOutpoints.js'
 import {
-  OFFER_COVENANT_VERSIONS,
-  offerCovenantVersionOf,
-  type OfferCovenantVersion,
-} from '@arkade-os/solver-core/core/offerCovenant.js'
+  OFFER_CONTRACT_VERSIONS,
+  offerContractVersionOf,
+  type OfferContractVersion,
+} from '@arkade-os/solver-core/core/offerContract.js'
 
 /**
  * The recorded intent, structurally.
@@ -47,7 +47,7 @@ export interface OfferFillIntent {
   offerTxid: string
   offerVout: number
   offerPkScript: string
-  covenantVersion: OfferCovenantVersion | null
+  contractVersion: OfferContractVersion | null
   wantAssetId: string | null
   wantAmount: bigint
   offerAssetId: string | null
@@ -69,8 +69,8 @@ export interface OfferSettleDeps {
   outpointsAt?: (pkScript: string) => Promise<OfferOutpoint[]>
   /** Injected so the guards are testable without an Arkade Service. */
   fulfill?: typeof fulfillOffer
-  /** Covenant versions this deployment accepts. Defaults to every version. */
-  covenantVersions?: ReadonlySet<OfferCovenantVersion>
+  /** Contract versions this deployment accepts. Defaults to every version. */
+  contractVersions?: ReadonlySet<OfferContractVersion>
 }
 
 /** One virtual transaction from the wallet's indexer, or null. */
@@ -93,7 +93,7 @@ export const offerSettleFor = (
   const fetchTx = deps.fetchTx ?? indexerTxSource(deps.ctx)
   const outpointsAt = deps.outpointsAt ?? ((pkScript: string) => liveOfferOutpoints(deps.ctx, pkScript))
   const fulfill = deps.fulfill ?? fulfillOffer
-  const covenantVersions = deps.covenantVersions ?? new Set(OFFER_COVENANT_VERSIONS)
+  const contractVersions = deps.contractVersions ?? new Set(OFFER_CONTRACT_VERSIONS)
 
   return async (intent, options) => {
     const raw = await fetchTx(intent.offerTxid)
@@ -116,15 +116,15 @@ export const offerSettleFor = (
     if (hex.encode(found.offer.swapPkScript).toLowerCase() !== intent.offerPkScript.toLowerCase()) {
       throw new Error(`${intent.offerTxid} funds a different offer script than the intent was recorded against`)
     }
-    const covenantVersion = offerCovenantVersionOf(found.offer)
-    if (!covenantVersions.has(covenantVersion)) {
+    const contractVersion = offerContractVersionOf(found.offer)
+    if (!contractVersions.has(contractVersion)) {
       throw new Error(
-        `${intent.offerTxid} funds covenant ${covenantVersion}, which is disabled by offers.covenantVersions`,
+        `${intent.offerTxid} funds contract version ${contractVersion}, which is disabled by offers.contractVersions`,
       )
     }
-    if (intent.covenantVersion !== null && intent.covenantVersion !== covenantVersion) {
+    if (intent.contractVersion !== null && intent.contractVersion !== contractVersion) {
       throw new Error(
-        `${intent.offerTxid} funds covenant ${covenantVersion}, but the intent was priced as ${intent.covenantVersion}`,
+        `${intent.offerTxid} funds contract version ${contractVersion}, but the intent was priced as ${intent.contractVersion}`,
       )
     }
 

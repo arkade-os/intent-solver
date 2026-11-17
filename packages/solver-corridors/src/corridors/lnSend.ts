@@ -1,5 +1,5 @@
 import type { CorridorDescriptor } from '@arkade-os/solver-core/core/corridorDescriptor.js'
-import { RFQ_LIGHTNING_SEND_V2 } from '@arkade-os/solver-core/core/rfqCovenant.js'
+import { RFQ_LIGHTNING_SEND_V2 } from '@arkade-os/solver-core/core/rfqContract.js'
 import { LnSendMachine, type LnSendSwapState } from '../machines/lnSend.js'
 
 /**
@@ -9,7 +9,7 @@ import { LnSendMachine, type LnSendSwapState } from '../machines/lnSend.js'
 export const LN_SEND: CorridorDescriptor<LnSendSwapState> = {
   pair: 'arkade:BTC->lightning:BTC',
   envStem: 'LN_SEND',
-  covenantVersion: RFQ_LIGHTNING_SEND_V2,
+  contractVersion: RFQ_LIGHTNING_SEND_V2,
   payoutRail: 'lightning',
   states: {
     live: LnSendMachine.live,

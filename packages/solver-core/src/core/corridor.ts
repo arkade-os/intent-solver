@@ -12,7 +12,7 @@
 import type { CorridorDescriptor } from './corridorDescriptor.js'
 import type { PageOptions } from './page.js'
 import type { CorridorLedger, LedgerWindow } from '../analytics/economics.js'
-import { extractRfqId, RFQ_COVENANT_VERSIONS_FIELD, rfqRefusalPayload } from './rfqProtocol.js'
+import { extractRfqId, RFQ_CONTRACT_VERSIONS_FIELD, rfqRefusalPayload } from './rfqProtocol.js'
 
 /** What a corridor hands back from an RFQ. Mirrors `ingress/rfq.ts`'s outcome. */
 export interface CorridorRfqOutcome {
@@ -279,8 +279,8 @@ export interface CorridorSet extends Iterable<Corridor> {
 }
 
 export interface CorridorSetOptions {
-  /** Covenant versions this deployment serves. Absent serves every corridor's own version. */
-  readonly supportedCovenantVersions?: ReadonlySet<string>
+  /** Contract versions this deployment serves. Absent serves every corridor's own version. */
+  readonly supportedContractVersions?: ReadonlySet<string>
 }
 
 /**
@@ -311,13 +311,15 @@ export interface CorridorReaderSet extends Iterable<CorridorReader> {
 const negotiated = new WeakSet<Corridor>()
 
 export const createCorridorSet = (corridors: readonly Corridor[], options: CorridorSetOptions = {}): CorridorSet => {
-  const supported = options.supportedCovenantVersions
+  const supported = options.supportedContractVersions
   let byPair = new Map<string, Corridor>()
   const index = (list: readonly Corridor[]): void => {
     const next = new Map<string, Corridor>()
     const stems = new Map<string, string>()
     // `rebuild` replaces with corridors another set already negotiated under the newer policy.
-    for (const corridor of list.map((each) => (negotiated.has(each) ? each : negotiatingCovenant(each, supported)))) {
+    for (const corridor of list.map((each) =>
+      negotiated.has(each) ? each : negotiatingContractVersion(each, supported),
+    )) {
       const { pair, envStem } = corridor.descriptor
       if (next.has(pair)) throw new Error(`duplicate corridor pair: ${pair}`)
       const claimed = stems.get(envStem)
@@ -339,48 +341,48 @@ export const createCorridorSet = (corridors: readonly Corridor[], options: Corri
 }
 
 /**
- * Covenant negotiation (docs/rfq-protocol.md § 4.1), gating only the quote path. A request without
- * `covenant_versions` predates negotiation: it reaches the corridor untouched and its quote stays
+ * Contract version negotiation (docs/rfq-protocol.md § 4.1), gating only the quote path. A request without
+ * `contract_versions` predates negotiation: it reaches the corridor untouched and its quote stays
  * byte-identical. The field is stripped before the corridor's strict schema and echoed only if asked.
  */
-const negotiatingCovenant = (corridor: Corridor, supported: ReadonlySet<string> | undefined): Corridor => {
-  const { pair, covenantVersion: version } = corridor.descriptor
+const negotiatingContractVersion = (corridor: Corridor, supported: ReadonlySet<string> | undefined): Corridor => {
+  const { pair, contractVersion: version } = corridor.descriptor
   const served = supported === undefined || supported.has(version)
   const quote: Corridor['quote'] = async (payload, options) => {
     const rfqId = extractRfqId(payload)
-    const asked = typeof payload === 'object' && payload !== null && 'covenant_versions' in payload
+    const asked = typeof payload === 'object' && payload !== null && 'contract_versions' in payload
     if (!asked) {
       if (served) return corridor.quote(payload, options)
       return {
         kind: 'refused',
         payload: rfqRefusalPayload(rfqId, 'unsupported_pair'),
-        detail: `${pair} speaks covenant ${version}, which rfq.covenantVersions disables`,
+        detail: `${pair} speaks contract version ${version}, which rfq.contractVersions disables`,
       }
     }
-    const { covenant_versions: listed, ...rest } = payload as Record<string, unknown>
-    const parsed = RFQ_COVENANT_VERSIONS_FIELD.safeParse(listed)
+    const { contract_versions: listed, ...rest } = payload as Record<string, unknown>
+    const parsed = RFQ_CONTRACT_VERSIONS_FIELD.safeParse(listed)
     if (!parsed.success) {
       return {
         kind: 'invalid',
         payload: rfqRefusalPayload(rfqId, 'unsupported_payload'),
-        detail: 'covenant_versions is malformed',
+        detail: 'contract_versions is malformed',
       }
     }
     if (!served || !parsed.data.includes(version)) {
       return {
         kind: 'refused',
         payload: rfqRefusalPayload(rfqId, 'unsupported_payload', {
-          error_code: 'covenant_version_unsupported',
-          field: 'covenant_versions',
+          error_code: 'contract_version_unsupported',
+          field: 'contract_versions',
         }),
         detail: served
-          ? `${pair} speaks covenant ${version}, which covenant_versions does not list`
-          : `${pair} speaks covenant ${version}, which rfq.covenantVersions disables`,
+          ? `${pair} speaks contract version ${version}, which contract_versions does not list`
+          : `${pair} speaks contract version ${version}, which rfq.contractVersions disables`,
       }
     }
     const outcome = await corridor.quote(rest, options)
     return outcome.kind === 'quote'
-      ? { ...outcome, payload: { ...outcome.payload, covenant_version: version } }
+      ? { ...outcome, payload: { ...outcome.payload, contract_version: version } }
       : outcome
   }
   const wrapped = withQuote(corridor, quote)

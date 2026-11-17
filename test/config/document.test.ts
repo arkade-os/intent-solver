@@ -42,19 +42,19 @@ describe('parseDocument', () => {
     )
   })
 
-  it('accepts only the offer covenant versions the runtime knows', () => {
-    expect(() => parseDocument({ offers: { covenantVersions: ['offer-v1', 'offer-v2'] } }, [])).not.toThrow()
-    expect(() => parseDocument({ offers: { covenantVersions: ['offer-v1', 'offer-v3'] } }, [])).toThrow(
-      'offers.covenantVersions[1]: must be one of offer-v1, offer-v2',
+  it('accepts only the offer contract versions the runtime knows', () => {
+    expect(() => parseDocument({ offers: { contractVersions: ['offer-v1', 'offer-v2'] } }, [])).not.toThrow()
+    expect(() => parseDocument({ offers: { contractVersions: ['offer-v1', 'offer-v3'] } }, [])).toThrow(
+      'offers.contractVersions[1]: must be one of offer-v1, offer-v2',
     )
   })
 
-  it('accepts RFQ covenant names or content hashes', () => {
+  it('accepts RFQ contract version names or content hashes', () => {
     expect(() =>
-      parseDocument({ rfq: { covenantVersions: ['asset-swap-v2', 'sha256:' + 'ab'.repeat(32)] } }, []),
+      parseDocument({ rfq: { contractVersions: ['asset-swap-v2', 'sha256:' + 'ab'.repeat(32)] } }, []),
     ).not.toThrow()
-    expect(() => parseDocument({ rfq: { covenantVersions: ['bad version'] } }, [])).toThrow(
-      'rfq.covenantVersions[0]: must be a version name or content hash',
+    expect(() => parseDocument({ rfq: { contractVersions: ['bad version'] } }, [])).toThrow(
+      'rfq.contractVersions[0]: must be a version name or content hash',
     )
   })
 

@@ -49,8 +49,8 @@ describe('the offers screen shows a fill', () => {
     expect(offersView()).toContain('offer.wantAmount')
   })
 
-  it('names the covenant version that was priced', () => {
-    expect(offersView()).toContain('offer.covenantVersion')
+  it('names the contract version that was priced', () => {
+    expect(offersView()).toContain('offer.contractVersion')
   })
 })
 
