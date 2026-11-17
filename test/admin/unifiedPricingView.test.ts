@@ -242,6 +242,19 @@ describe('adding a market for a pair that is already stored', () => {
     expect(ui.pricingDraft.payload().markets).toMatchObject([{ quote: asset('cc'), feeBps: 25 }])
   })
 
+  it('keeps a reopened pending market when its id is retyped to another stored pair', () => {
+    const ui = harness()
+    ui.selectPricing({ kind: 'market', key: null }, ui.blankMarket())
+    Object.assign(ui.current(), { quote: asset('cc'), feeBps: '25' })
+    ui.selectPricing({ kind: 'market', key: null }, ui.blankMarket())
+    ui.current().quote = asset('cc')
+    ui.adoptSavedPair()
+    ui.current().quote = asset('aa')
+    expect(ui.adoptSavedPair()).toBe(true)
+    expect(ui.selection()).toMatchObject({ key: ui.markets[0]!.marketKey, adopted: 'saved' })
+    expect(ui.pricingDraft.payload().markets).toMatchObject([{ quote: asset('cc'), feeBps: 25 }])
+  })
+
   it('does not adopt its own staged entry when the same id arrives again', () => {
     const ui = harness()
     ui.selectPricing({ kind: 'market', key: null }, ui.blankMarket())

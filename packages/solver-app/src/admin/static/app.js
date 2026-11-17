@@ -1768,7 +1768,8 @@ const adoptSavedPair = () => {
     openMarketForm({ ...draftFrom(row), adopted: 'saved' })
     return true
   }
-  const staged = pricingSelection?.draftKey
+  // A fresh form's staged entry is its own scratch; a reopened pending market is not, and stays.
+  const staged = pricingSelection?.adopted === 'pending' ? null : pricingSelection?.draftKey
   if (staged && staged !== key) {
     pricingDraft.markets.delete(staged)
     pricingMarketForms.delete(staged)
