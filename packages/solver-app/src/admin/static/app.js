@@ -3200,9 +3200,9 @@ const pricingView = () => {
           'button.act',
           {
             title:
-              'The config file this solver booted with, console setting changes written in. Each credential comes ' +
-              'out as a <PLACEHOLDER> to fill back in. Markets, the rebalance policy and any corridor range a file ' +
-              'cannot hold stay in the console.',
+              'The config file this solver booted with, console setting changes and asset markets written in. Each ' +
+              'credential comes out as a <PLACEHOLDER> to fill back in. The rebalance policy, and any corridor range ' +
+              'a file cannot hold, stay in the console.',
             onclick: () => exportConfig(),
           },
           'Export config',
@@ -4327,9 +4327,7 @@ const exportConfig = async () => {
     state.banner =
       consoleOnly.length === 0
         ? null
-        : 'Exported, but no config file can hold ' +
-          consoleOnly.map((c) => `${c.path} ${c.console} (the file keeps ${c.file})`).join(', ') +
-          ": a file narrows each corridor's range to limits.maxSwapSats and the network's own. These stay in the console."
+        : `Exported, but these stay in the console: ${consoleOnly.map((c) => `${c.path} (${c.reason})`).join('; ')}.`
     render()
   } catch (error) {
     fail(error)

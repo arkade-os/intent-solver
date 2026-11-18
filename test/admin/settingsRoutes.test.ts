@@ -66,7 +66,11 @@ const build = (overrides: Record<string, string> = {}, over: Record<string, unkn
     bootPolicy: structuredClone(baseConfig),
     bootOverrides: {},
     replacePolicy: vi.fn(),
-    adminStore: { getOverrides: vi.fn(async () => ({ ...stored })), setOverrideWithAudit },
+    adminStore: {
+      getOverrides: vi.fn(async () => ({ ...stored })),
+      listMarkets: vi.fn(async () => []),
+      setOverrideWithAudit,
+    },
     ...over,
   } as never
   return { app: buildAdminApp({ services, startedAt: 1, mode: 'relay' }), setOverrideWithAudit }
@@ -164,7 +168,12 @@ describe('GET /api/config/export', () => {
         rails: { ...doc.rails, arkade: { ...doc.rails.arkade, mnemonic: '<RAILS_ARKADE_MNEMONIC>' } },
         corridors: { 'arkade:BTC->lightning:BTC': { enabled: true, feeBps: 25, maxSats: 100_000 } },
       },
-      consoleOnly: [{ path: 'corridors["arkade:BTC->lightning:BTC"].maxSats', console: 2_000_000, file: 100_000 }],
+      consoleOnly: [
+        {
+          path: 'corridors["arkade:BTC->lightning:BTC"].maxSats',
+          reason: expect.stringContaining('2000000 here, 100000 in the file'),
+        },
+      ],
     })
   })
 

@@ -17,6 +17,7 @@
 import { betterSqliteDriver, type SqlDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { addColumns } from '@arkade-os/solver-corridors/db/baseSwapStore.js'
 import {
+  assetMarketJson,
   assetMarketKey,
   rfqSymbolFor,
   type AssetMarketConfig,
@@ -165,6 +166,8 @@ export const MARKET_SERVING_SEED = 'market-serving-seed-v1'
 export interface ServingSeed {
   offerMarkets: readonly { a: string | null; b: string | null }[]
   tokens: readonly AssetRfqToken[]
+  /** The config document's markets: each created once, by its own marker, where no row holds its pair. */
+  markets?: readonly AssetMarketConfig[]
 }
 
 /** The one key {@link AdminStore.getLastAnnouncedBalance} uses. */
@@ -349,6 +352,7 @@ const MIGRATIONS: ReadonlyArray<readonly [string, ReadonlyArray<readonly [string
 
 export class AdminStore {
   private repaired: readonly string[] = []
+  private seeded: readonly string[] = []
 
   private constructor(
     private readonly driver: SqlDriver,
@@ -358,6 +362,11 @@ export class AdminStore {
   /** One operator-readable sentence per row the boot repair touched; empty on a healthy file. */
   get repairedServing(): readonly string[] {
     return this.repaired
+  }
+
+  /** One sentence per config-document market this boot created, or could not. */
+  get seededMarkets(): readonly string[] {
+    return this.seeded
   }
 
   /**
@@ -379,7 +388,45 @@ export class AdminStore {
     // AFTER the seed, and unconditional: a pre-upgrade row is old, not unhealthy,
     // and judging one before the seed resolves it reports a repair it overwrites.
     await store.repairServing()
+    // After the repair, so a symbol it derives for an old row is held before a document market can claim it.
+    if (seed?.markets?.length) await store.seedMarkets(seed.markets)
     return store
+  }
+
+  /**
+   * Create each document market ONCE, by its own marker: never over a row the console holds, and never again
+   * after the console deletes it. A symbol another row holds leaves it unmarked, so the next boot says so again.
+   */
+  private async seedMarkets(markets: readonly AssetMarketConfig[]): Promise<void> {
+    const notes: string[] = []
+    for (const market of markets) {
+      const key = assetMarketKey(market.base, market.quote)
+      const marker = `market-seed:${key}`
+      // Every read inside the write: another opener may have made the marker, the pair or the symbol meanwhile.
+      await this.driver.transaction(async () => {
+        if (await this.driver.get('SELECT name FROM admin_migration WHERE name = ?', [marker])) return
+        if ((await this.getMarket(key)) === null) {
+          const held = (await this.listMarkets()).find((row) => market.symbol !== null && row.symbol === market.symbol)
+          if (held) {
+            notes.push(`${key}: not created from the config document; ${held.marketKey} holds symbol ${market.symbol}`)
+            return
+          }
+          await this.putMarket(market)
+          // Without the feed: an audit row never carries key material, and a feed URL can.
+          const { feedUrl: _feed, ...audited } = assetMarketJson(market)
+          await this.recordAction({
+            action: 'market-seed',
+            target: key,
+            params: JSON.stringify(audited),
+            outcome: 'ok',
+            detail: 'created from the config document',
+          })
+          notes.push(`${key}: created from the config document`)
+        }
+        await this.driver.run('INSERT OR IGNORE INTO admin_migration (name, at) VALUES (?, ?)', [marker, this.now()])
+      })
+    }
+    this.seeded = notes
   }
 
   /**

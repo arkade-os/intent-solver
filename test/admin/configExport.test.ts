@@ -8,6 +8,15 @@ import {
   exportDocument,
   UnexportableConfig,
 } from '@arkade-os/solver-app/admin/settings.js'
+import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
+import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
+import {
+  assetMarketFrom,
+  assetMarketJson,
+  assetMarketKey,
+  rfqSymbolFor,
+  type AssetMarketConfig,
+} from '@arkade-os/solver-core/core/assetMarketConfig.js'
 
 const RAIL = 'example-rail'
 registerLightningRail(RAIL, {
@@ -99,8 +108,8 @@ describe('exportDocument', () => {
     })
     expect((document as ReturnType<typeof base>).corridors[LN_SEND]).toMatchObject({ feeBps: 25, maxSats: 100_000 })
     expect(consoleOnly).toEqual([
-      { path: `corridors["${LN_SEND}"].maxSats`, console: 2_000_000, file: 100_000 },
-      { path: 'corridors["lightning:BTC->arkade:BTC"].minSats', console: 500, file: 1_000 },
+      { path: `corridors["${LN_SEND}"].maxSats`, reason: expect.stringMatching(/^2000000 here, 100000 in the file/) },
+      { path: 'corridors["lightning:BTC->arkade:BTC"].minSats', reason: expect.stringMatching(/^500 here, 1000 in/) },
     ])
   })
 
@@ -234,5 +243,140 @@ describe('exportDocument', () => {
     expect(exported).toMatchObject({
       assets: { 'TOKEN@base': { kind: 'erc20', address, decimals: 6, priceFeed: '<ASSETS_TOKEN_BASE_PRICE_FEED>' } },
     })
+  })
+})
+
+const ASSET = `${'ab'.repeat(32)}0000`
+const brlt = (over: Record<string, unknown> = {}): AssetMarketConfig =>
+  assetMarketFrom({
+    base: null,
+    quote: ASSET,
+    baseDecimals: 8,
+    quoteDecimals: 8,
+    feedUrl: 'https://api.coinbase.com/v2/prices/BTC-BRL/spot',
+    pricePath: '/data/amount',
+    toleranceBps: 50,
+    feeBps: 5,
+    sellBase: { min: '100000000', max: '100000000000' },
+    buyBase: { min: '500', max: '100000000' },
+    symbol: 'BRLT',
+    carrierMode: 'priced',
+    ...over,
+  })
+
+const fresh = (markets: readonly AssetMarketConfig[] = [], driver = betterSqliteDriver(':memory:')) =>
+  AdminStore.open(driver, () => 1_000, { offerMarkets: [], tokens: [], markets })
+
+describe('markets in the export', () => {
+  it('writes each console market as the markets API speaks it, and a fresh store boots to the same', async () => {
+    const { document } = exportDocument(load(base()), {}, [brlt()])
+    expect((document as { markets: unknown[] }).markets).toEqual([assetMarketJson(brlt())])
+    expect(document).toMatchObject({
+      markets: [{ feeBps: 5, pricePath: '/data/amount', carrierMode: 'priced', symbol: 'BRLT', quote: ASSET }],
+    })
+    const store = await fresh(load(withMnemonic(document)).documentMarkets)
+    expect((await store.listMarkets()).map(assetMarketJson)).toEqual([assetMarketJson(brlt())])
+  })
+
+  it('leaves out, naming why, a market the loader would refuse', () => {
+    const bad = brlt({ feedUrl: 'ftp://feed.example/price' })
+    const { document, consoleOnly } = exportDocument(load(base()), {}, [bad])
+    expect(document).not.toHaveProperty('markets')
+    expect(consoleOnly).toEqual([
+      { path: `market ${assetMarketKey(null, ASSET)}`, reason: expect.stringContaining('http or https') },
+    ])
+  })
+
+  it('holds back a credential in a market feed, but not a plain query string', () => {
+    const feedOf = (feedUrl: string) =>
+      (
+        exportDocument(load(base()), {}, [brlt({ feedUrl, pricePath: '/p' })]).document as {
+          markets: [{ feedUrl: string }]
+        }
+      ).markets[0].feedUrl
+    for (const feed of [
+      'https://feed.example/price?apikey=secret-feed-key',
+      'https://feed.example/price?access_key=secret-feed-key',
+      'https://feed.example/price?api-key=secret-feed-key',
+      'https://:secret-feed-key@feed.example/price',
+    ]) {
+      expect(feedOf(feed)).toBe('<MARKETS_0_FEED_URL>')
+    }
+    expect(feedOf('https://feed.example/price?ids=bitcoin&vs=brl')).toBe(
+      'https://feed.example/price?ids=bitcoin&vs=brl',
+    )
+  })
+
+  it('names a market it leaves out without quoting a credential its feed carries', () => {
+    const bad = brlt({ feedUrl: 'https://feed.example/x?apikey=secret-omit-key', pricePath: '' })
+    const { consoleOnly } = exportDocument(load(base()), {}, [bad])
+    expect(consoleOnly[0]?.reason).toContain('<feed URL>')
+    expect(JSON.stringify(consoleOnly)).not.toContain('secret-omit-key')
+  })
+
+  it('refuses a document market without quoting a credential its feed carries', () => {
+    const feedUrl = 'https://feed.example:port/price?apikey=secret-load-key'
+    const refusal = (() => {
+      try {
+        load({ ...base(), markets: [{ ...assetMarketJson(brlt()), feedUrl }] })
+      } catch (error) {
+        return String(error)
+      }
+      return 'loaded'
+    })()
+    expect(refusal).toMatch(/markets\[0\]: .*<feed URL>/)
+    expect(refusal).not.toContain('secret-load-key')
+  })
+
+  it('refuses a document market by its index, and a repeated pair', () => {
+    const entry = assetMarketJson(brlt())
+    expect(() => load({ ...base(), markets: [{ ...entry, feedUrl: 'ftp://x' }] })).toThrow(
+      /markets\[0\]: .*http or https/,
+    )
+    expect(() => load({ ...base(), markets: [entry, entry] })).toThrow(/markets\[1\]: repeats the market/)
+  })
+})
+
+describe('document markets at boot', () => {
+  it('creates each once: never over a console row, never again after a delete', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    const first = await fresh([brlt()], driver)
+    expect(first.seededMarkets).toEqual([`${assetMarketKey(null, ASSET)}: created from the config document`])
+    expect((await first.listMarkets())[0]?.feeBps).toBe(5)
+    await first.putMarket(brlt({ feeBps: 9 }))
+    expect((await (await fresh([brlt()], driver)).listMarkets())[0]?.feeBps).toBe(9)
+    await first.deleteMarket(assetMarketKey(null, ASSET))
+    expect(await (await fresh([brlt()], driver)).listMarkets()).toEqual([])
+  })
+
+  it('records its creation without the feed', async () => {
+    const store = await fresh([brlt({ feedUrl: 'https://feed.example/p?apikey=secret-audit-key', pricePath: '/p' })])
+    const [created] = await store.listActions()
+    expect(created).toMatchObject({ action: 'market-seed', target: assetMarketKey(null, ASSET) })
+    expect(created?.params).not.toContain('secret-audit-key')
+  })
+
+  it('lets the boot repair give an old row its symbol before a document market can claim it', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    const old = `${'2'.repeat(64)}0000`
+    await (await fresh([], driver)).putMarket(brlt({ quote: old, symbol: null }))
+    const reopened = await fresh([brlt({ symbol: rfqSymbolFor(old) })], driver)
+    expect(await reopened.getMarket(assetMarketKey(null, old))).toMatchObject({
+      symbol: rfqSymbolFor(old),
+      servesRfq: true,
+    })
+    expect(reopened.seededMarkets).toEqual([
+      `${assetMarketKey(null, ASSET)}: not created from the config document; ${assetMarketKey(null, old)} holds symbol ${rfqSymbolFor(old)}`,
+    ])
+  })
+
+  it('leaves one whose symbol another row holds, saying so each boot', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    const other = `${'1'.repeat(64)}0000`
+    const store = await fresh([], driver)
+    await store.putMarket(brlt({ quote: other }))
+    const held = `${assetMarketKey(null, ASSET)}: not created from the config document; ${assetMarketKey(null, other)} holds symbol BRLT`
+    expect((await fresh([brlt()], driver)).seededMarkets).toEqual([held])
+    expect((await fresh([brlt()], driver)).seededMarkets).toEqual([held])
   })
 })

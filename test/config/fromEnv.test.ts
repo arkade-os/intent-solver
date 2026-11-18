@@ -136,6 +136,7 @@ const withoutDocumentFields = ({
   configPaths: _paths,
   lightningRailBlock: _block,
   configDocument: _document,
+  documentMarkets: _markets,
   ...rest
 }: Config) => rest
 

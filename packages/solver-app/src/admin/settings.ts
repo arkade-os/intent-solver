@@ -24,7 +24,14 @@ import type { Config } from '../config.js'
 import { CORRIDORS, FREE, type Corridor, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { descriptorFor } from '@arkade-os/solver-corridors/corridors/index.js'
 import { MAX_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/send.js'
-import { assetMarketKey } from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import {
+  assetMarketFrom,
+  assetMarketJson,
+  assetMarketKey,
+  validateAssetMarket,
+  withoutFeedCredential,
+  type AssetMarketConfig,
+} from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { log, messageOf } from '@arkade-os/solver-core/util/poll.js'
 import { lightningRailFor } from '../ops/rails.js'
 import { redactDocument, setAt } from '../config/fromEnv.js'
@@ -326,22 +333,24 @@ const DOCUMENT_PATHS: ReadonlyMap<string, readonly string[]> = new Map<string, r
   ),
 ])
 
-/** The document would not boot to what the console runs, for a reason other than a range no file can hold. */
+/** The document would not boot to what the console runs, for a reason other than one the export names. */
 export class UnexportableConfig extends Error {}
-
-type KnobValue = ReturnType<typeof editableKnobValues>[string]
 
 export interface ConfigExport {
   document: unknown
-  /** Console values outside the range a file may give a corridor: they stay in the console. */
-  consoleOnly: { path: string; console: KnobValue; file: KnobValue }[]
+  /** What stays in the console, each with why: a corridor range no file can hold, a market the loader refuses. */
+  consoleOnly: { path: string; reason: string }[]
 }
 
 /**
- * The document this solver booted from with the stored overrides written in, credentials as placeholders.
- * Only a value an override moves is written, so the file stays the operator's own.
+ * The document this solver booted from with the stored overrides and the console's markets written in,
+ * credentials as placeholders. Only a value an override moves is written, so the file stays the operator's own.
  */
-export const exportDocument = (config: Config, overrides: Record<string, string>): ConfigExport => {
+export const exportDocument = (
+  config: Config,
+  overrides: Record<string, string>,
+  markets: readonly AssetMarketConfig[] = [],
+): ConfigExport => {
   const booted = editableKnobValues(config)
   const live = editableKnobValues(applyOverrides(config, overrides))
   // The loader narrows a corridor's range into `limits` and the console does not, so no file holds one outside.
@@ -359,6 +368,21 @@ export const exportDocument = (config: Config, overrides: Record<string, string>
     }
     setAt(doc, at, live[key])
   }
+  const leftOut: ConfigExport['consoleOnly'] = []
+  const written: unknown[] = []
+  for (const market of markets) {
+    const entry = assetMarketJson(market)
+    try {
+      validateAssetMarket(assetMarketFrom(entry), { allowPrivateFeedHost: true })
+      written.push(entry)
+    } catch (error) {
+      leftOut.push({
+        path: `market ${assetMarketKey(market.base, market.quote)}`,
+        reason: withoutFeedCredential(messageOf(error), market.feedUrl),
+      })
+    }
+  }
+  if (written.length > 0 || doc.markets !== undefined) doc.markets = written
   const cannot = 'a config file cannot hold what this console runs'
   let reloaded: ReturnType<typeof editableKnobValues>
   try {
@@ -372,11 +396,13 @@ export const exportDocument = (config: Config, overrides: Record<string, string>
     const each = lost.map((key) => `${path(key)} is ${live[key]} here but would load as ${reloaded[key]}`)
     throw new UnexportableConfig(`${cannot}: ${each.join('; ')}`)
   }
-  return {
-    document: redactDocument(doc),
-    // editableKnobValues fills every editable key, so neither lookup can be undefined.
-    consoleOnly: moved.filter(outside).map((key) => ({ path: path(key), console: live[key]!, file: reloaded[key]! })),
-  }
+  const narrowed = moved.filter(outside).map((key) => ({
+    path: path(key),
+    reason:
+      `${live[key]} here, ${reloaded[key]} in the file: a file narrows each corridor's range to ` +
+      "limits.maxSwapSats and the network's own",
+  }))
+  return { document: redactDocument(doc), consoleOnly: [...narrowed, ...leftOut] }
 }
 
 /**

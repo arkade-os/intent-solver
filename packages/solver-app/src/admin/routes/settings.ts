@@ -88,7 +88,7 @@ export const registerSettingsRoutes = (app: Hono, deps: AdminDeps): void => {
       return c.json({ error: 'no_document', message: 'this solver was not started from a config document' }, 409)
     }
     try {
-      return c.json(exportDocument(config, await adminStore.getOverrides()))
+      return c.json(exportDocument(config, await adminStore.getOverrides(), await adminStore.listMarkets()))
     } catch (error) {
       if (error instanceof UnexportableConfig) return c.json({ error: 'unexportable', message: error.message }, 409)
       throw error

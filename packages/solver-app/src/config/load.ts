@@ -3,6 +3,14 @@
  * `SOLVER_CONFIG` (a file) or carried whole by `SOLVER_CONFIG_JSON`.
  */
 import { readFileSync } from 'node:fs'
+import {
+  assetMarketFrom,
+  assetMarketKey,
+  validateAssetMarket,
+  withoutFeedCredential,
+  type AssetMarketBody,
+  type AssetMarketConfig,
+} from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { log, messageOf } from '@arkade-os/solver-core/util/poll.js'
 import { configFromKnobs, sentryOptionsFromKnobs, type Config, type Knobs } from '../config.js'
 import { lightningRailFor, lightningRailNames } from '../ops/rails.js'
@@ -139,6 +147,29 @@ export const assertNoLegacyEnv = (env: NodeJS.ProcessEnv): void => {
   if (ignored.length > 0) log(`ignoring legacy ${ignored.join('/')}; set http.host/http.port in the config`)
 }
 
+/** Checked as the console checks a stored row, plus the store's own refusals of a repeated pair or symbol. */
+const marketsOf = (entries: readonly unknown[]): AssetMarketConfig[] => {
+  const keys = new Set<string>()
+  const symbols = new Set<string>()
+  return entries.map((entry, index) => {
+    try {
+      const market = assetMarketFrom(entry as AssetMarketBody)
+      validateAssetMarket(market, { allowPrivateFeedHost: true })
+      const key = assetMarketKey(market.base, market.quote)
+      if (keys.has(key)) throw new Error(`repeats the market ${key}`)
+      if (market.symbol !== null && symbols.has(market.symbol)) throw new Error(`repeats the symbol ${market.symbol}`)
+      keys.add(key)
+      if (market.symbol !== null) symbols.add(market.symbol)
+      return market
+    } catch (error) {
+      const feed = (entry as AssetMarketBody).feedUrl
+      throw new Error(
+        `markets[${index}]: ${withoutFeedCredential(messageOf(error), typeof feed === 'string' ? feed.trim() : '')}`,
+      )
+    }
+  })
+}
+
 export const loadConfig = (opts: LoadOptions = {}): Config => {
   const env = opts.env ?? process.env
   const raw = readDocument(env)
@@ -151,8 +182,15 @@ export const loadConfig = (opts: LoadOptions = {}): Config => {
   const profile = opts.profile ?? registeredProfile
   const doc = profile ? parseDocument(profile(parsed), lightningRailNames()) : parsed
   const { knobs, pathOf, railBlock } = documentToKnobs(doc)
+  const documentMarkets = marketsOf(doc.markets ?? [])
   try {
-    return { ...configFromKnobs(knobs), configPaths: pathOf, lightningRailBlock: railBlock, configDocument: raw }
+    return {
+      ...configFromKnobs(knobs),
+      configPaths: pathOf,
+      lightningRailBlock: railBlock,
+      configDocument: raw,
+      documentMarkets,
+    }
   } catch (error) {
     throw new Error(renameKnobs(messageOf(error), pathOf, knobs))
   }
