@@ -127,6 +127,11 @@ const PAIRS: readonly (readonly [fg: string, bg: string, where: string])[] = [
       ] as const
     ).map(([fg, what]) => [fg, `glass/${light}`, `${what} on glass over the backdrop's brightest light`] as const),
   ),
+  // Page titles and section headings sit on the backdrop itself, read here at each light's brightest.
+  ['text', 'glow-a', 'a page title on the backdrop'],
+  ['text', 'glow-b', 'a page title on the backdrop'],
+  ['text-dim', 'glow-a', 'a section heading or control label on the backdrop'],
+  ['text-dim', 'glow-b', 'a section heading or control label on the backdrop'],
 ]
 
 const AA = 4.5

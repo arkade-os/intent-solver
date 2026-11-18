@@ -183,7 +183,7 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* A faint, still tint from two corners. No text sits on it directly, only on glass or on a solid surface. */
+/* A faint, still tint from two corners. Only titles sit on it, in colours contrast.test.ts holds against it. */
 body::before {
   content: '';
   position: fixed;
@@ -209,10 +209,9 @@ pre,
 }
 
 /* ---- glass groups, solid holds the data ------------------------------- */
-/* Tables, figures, fields and the swap pane are solid; everything else that carries text is glass. */
+/* Tables, figures, fields and the swap pane are solid; page titles sit on the backdrop; the rest is glass. */
 
 .sidebar,
-.page-head,
 .panel,
 .tabs,
 .seg,
@@ -220,7 +219,6 @@ pre,
 .wallet-section,
 main > p:not(.banner),
 main > div > .toolbar,
-main h2.section-title,
 .pricing-page > .toolbar,
 .pricing-page > details,
 .pricing-changes > details,
@@ -567,18 +565,13 @@ main {
 }
 
 .page-head {
-  position: sticky;
-  top: 12px;
-  z-index: 20;
-  margin: 0 0 18px;
-  padding: 14px 22px;
-  border-radius: 20px;
+  margin: 0 0 16px;
 }
 
 .page-head h1 {
   margin: 0;
   font-family: var(--display);
-  font-size: 30px;
+  font-size: 28px;
   font-weight: 500;
   line-height: 1.15;
   letter-spacing: -0.035em;
@@ -598,9 +591,6 @@ main h2 {
 }
 
 main h2.section-title {
-  width: fit-content;
-  padding: 4px 14px;
-  border-radius: 999px;
   color: var(--text-dim);
   font-size: 13px;
 }
@@ -1625,13 +1615,11 @@ tr.note td:first-child {
   }
 
   .page-head {
-    top: 8px;
-    padding: 10px 16px;
-    border-radius: 18px;
+    margin-bottom: 12px;
   }
 
   .page-head h1 {
-    font-size: 23px;
+    font-size: 22px;
   }
 
   .panel,
