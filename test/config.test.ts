@@ -98,6 +98,7 @@ const CONFIG_KEYS = [
   'COVCLAIMD_URL',
   'SWAP_NETWORK',
   'MAX_EXPOSED_SATS',
+  'MAX_SWAP_SATS',
   'SWEEP_CONCURRENCY',
   'LOCKUP_TIMEOUT_SECONDS',
   'NOSTR_AD_PUBLISH',
@@ -669,28 +670,23 @@ describe('loadConfig — EVM corridors', () => {
     expect(corridors.every((c) => c.enabled)).toBe(true)
   })
 
-  it('inherits the NARROWED house limits, not the raw environment', () => {
-    // The subtle one. `limits` here is already the result of `resolveLimits`,
-    // which refuses to widen — so a per-token knob inherits a bound an override
-    // may have tightened rather than whatever the environment originally said.
+  it('inherits the resolved house limits, MAX_SWAP_SATS included, where a token sets none', () => {
     process.env.EVM_TOKENS = `USDC:${USDC}:6`
     process.env.EVM_USDC_PRICE_FEED = 'http://pricefeed/btc-usdc'
     process.env.EVM_USDC_PRICE_PATH = '/btc/usdc'
+    process.env.MAX_SWAP_SATS = '7000000'
     const config = configFromKnobs(process.env)
-    for (const corridor of config.evmCorridors) {
-      expect(corridor.limits.maxSats).toBeLessThanOrEqual(config.limits.maxSats)
-      expect(corridor.limits.minSats).toBeGreaterThanOrEqual(config.limits.minSats)
-    }
+    for (const corridor of config.evmCorridors) expect(corridor.limits).toEqual(config.limits)
+    expect(config.limits.maxSats).toBe(7_000_000)
   })
 
-  it('refuses at startup when a token knob would widen the house bound', () => {
-    // Loud at startup, where an operator is watching, rather than quietly
-    // quoting a swap the deployment-wide bound should have refused.
+  it('lets a token knob set a bound past the house range', () => {
     process.env.EVM_TOKENS = `USDC:${USDC}:6`
     process.env.EVM_USDC_PRICE_FEED = 'http://pricefeed/btc-usdc'
     process.env.EVM_USDC_PRICE_PATH = '/btc/usdc'
-    process.env.EVM_SEND_USDC_MAX_SATS = String(Number(configFromKnobs(process.env).limits.maxSats) + 1)
-    expect(() => configFromKnobs(process.env)).toThrow(/may not exceed/)
+    const house = configFromKnobs(process.env).limits.maxSats
+    process.env.EVM_SEND_USDC_MAX_SATS = String(house + 1)
+    expect(configFromKnobs(process.env).evmCorridors[0]!.limits.maxSats).toBe(house + 1)
   })
 
   it('refuses at startup a token with no price feed', () => {

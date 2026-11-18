@@ -13,23 +13,12 @@ export interface Limits {
   maxSats: number
 }
 
-/**
- * Resolve the limits for a network. An override may only ever NARROW the range —
- * widening it would silently raise the amount at risk.
- */
 export const resolveLimits = (network: SwapNetwork, override?: Partial<Limits>): Limits =>
-  narrow(NETWORKS[network].limits, override, network)
+  withBounds(NETWORKS[network].limits, override, network)
 
-/**
- * Apply an override in the narrowing direction only.
- *
- * Separate from {@link resolveLimits} so narrowing can LAYER (network default, then
- * `MAX_SWAP_SATS`, then a per-corridor knob). Each step only reduces risk, so the
- * order cannot change the safety of the outcome.
- */
-export const narrow = (base: Limits, override?: Partial<Limits>, label = 'limits'): Limits => {
-  // `??` does not catch NaN, and `Math.min(1000, NaN)` is NaN -- which compares false
-  // against every amount, silently removing the cap this module exists to enforce.
+/** Raises or lowers; what caps the money at risk is `limits.maxExposedSats`, checked at every corridor's admission. */
+export const withBounds = (base: Limits, override?: Partial<Limits>, label = 'limits'): Limits => {
+  // `??` does not catch NaN, and NaN compares false against every amount, silently removing the bound.
   // `MAX_SWAP_SATS="1e3x"` is enough to trigger it.
   for (const [name, value] of Object.entries(override ?? {})) {
     if (value !== undefined && (!Number.isFinite(value) || value <= 0)) {
@@ -37,13 +26,40 @@ export const narrow = (base: Limits, override?: Partial<Limits>, label = 'limits
     }
   }
 
-  const minSats = Math.max(base.minSats, override?.minSats ?? base.minSats)
-  const maxSats = Math.min(base.maxSats, override?.maxSats ?? base.maxSats)
+  const minSats = override?.minSats ?? base.minSats
+  const maxSats = override?.maxSats ?? base.maxSats
 
   if (minSats > maxSats) {
     throw new Error(`limits for ${label} are empty: minSats ${minSats} exceeds maxSats ${maxSats}`)
   }
   return { minSats, maxSats }
+}
+
+const clamp = (outer: Limits, inner: Limits): Limits => ({
+  minSats: Math.max(outer.minSats, inner.minSats),
+  maxSats: Math.min(outer.maxSats, inner.maxSats),
+})
+
+/** Bounds an older release clamped and that now apply as set; `corridor` null is the deployment's own range. */
+export const clampedBefore = <K extends string>(
+  network: SwapNetwork,
+  deployment: Limits,
+  corridors: Readonly<Record<K, Limits>>,
+): { corridor: K | null; field: 'minSats' | 'maxSats'; now: number; was: number }[] => {
+  const before = clamp(NETWORKS[network].limits, deployment)
+  const ranges: [K | null, Limits, Limits][] = [
+    [null, deployment, before],
+    ...(Object.entries(corridors) as [K, Limits][]).map(([corridor, now]): [K, Limits, Limits] => [
+      corridor,
+      now,
+      clamp(before, now),
+    ]),
+  ]
+  return ranges.flatMap(([corridor, now, was]) =>
+    (['minSats', 'maxSats'] as const)
+      .filter((field) => now[field] !== was[field])
+      .map((field) => ({ corridor, field, now: now[field], was: was[field] })),
+  )
 }
 
 /**

@@ -10,7 +10,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { base64 } from '@scure/base'
-import { narrow, resolveLimits, type Limits } from '@arkade-os/solver-core/core/limits.js'
+import { resolveLimits, withBounds, type Limits } from '@arkade-os/solver-core/core/limits.js'
 import { DEFAULT_LOCKUP_TIMEOUT, MAX_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/send.js'
 import { MAX_BIP68_BLOCKS, MAX_BIP68_SECONDS, relativeDelayFrom } from '@arkade-os/solver-core/core/timelocks.js'
 import { corridorEnabledFrom } from '@arkade-os/solver-core/core/corridorEnabled.js'
@@ -180,12 +180,11 @@ export interface Config {
   /** Boot anyway when undrained onchain-receive rows (a corridor #292 removed) remain; see services.ts. */
   allowUndrainedOnchainReceive: boolean
   /**
-   * Per-corridor amount range, each already narrowed by `limits`.
+   * Per-corridor amount range: `limits`, with each bound the corridor sets in its place.
    *
    * A corridor's costs are its own: an onchain leg pays miner fees a Lightning
    * leg does not, and an operator with thin onchain liquidity wants that
-   * corridor capped tighter without shrinking the other three. Every entry is
-   * `limits` or narrower — see {@link narrow}.
+   * corridor capped tighter without shrinking the other three.
    */
   corridorLimits: Record<Corridor, Limits>
   /**
@@ -672,12 +671,6 @@ const lnBackendFromEnv = (env: Knobs, servesBtc: boolean): string | null => {
 /**
  * A per-corridor amount range for each of the three corridors.
  *
- * Layered rather than independent: each corridor narrows the range `limits`
- * already produced, so a corridor knob can only ever reduce what
- * `MAX_SWAP_SATS` and the network default already allowed. An operator cannot
- * widen one corridor past the deployment-wide cap by reaching for a
- * more-specific knob, which is the failure this ordering exists to prevent.
- *
  * Absent knobs mean "same as everything else", so a deployment that never sets
  * one behaves exactly as it did before per-corridor ranges existed.
  */
@@ -692,7 +685,7 @@ const corridorLimitsFromEnv = (env: Knobs, base: Limits): Record<Corridor, Limit
       }
       return value
     }
-    return [pair, narrow(base, { minSats: bound('MIN_SATS'), maxSats: bound('MAX_SATS') }, stem)] as const
+    return [pair, withBounds(base, { minSats: bound('MIN_SATS'), maxSats: bound('MAX_SATS') }, stem)] as const
   })
   return Object.fromEntries(entries) as Record<Corridor, Limits>
 }
@@ -1066,8 +1059,6 @@ export const configFromKnobs = (env: Knobs): Config => {
   return {
     network: raw,
     profile,
-    // resolveLimits refuses to widen, so an override here can only ever make the
-    // amount at risk smaller.
     limits,
     corridorLimits,
     corridorFees: corridorFeesFromEnv(env),
@@ -1075,8 +1066,6 @@ export const configFromKnobs = (env: Knobs): Config => {
     onchainFeeRateRefreshMs,
     onchainFeeRateStaleMs,
     corridorEnabled,
-    // Reads the ALREADY-NARROWED house limits, so a per-token knob inherits a
-    // bound an override may have tightened rather than the raw environment's.
     evmCorridors: evmCorridorPolicies(parseEvmTokens(env.EVM_TOKENS), limits, (name) => env[name]),
     // Loaded here rather than at first quote so a token whose price cannot be
     // resolved stops the deployment instead of advertising a pair it will then

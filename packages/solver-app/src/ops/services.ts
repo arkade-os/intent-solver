@@ -56,6 +56,7 @@ import { probeTimelockClock } from '@arkade-os/solver-rails-evm/evm/timelockCloc
 import { assertEvmClaimTraceSupport } from '@arkade-os/solver-rails-evm/evm/claimTraceProbe.js'
 import { createEvmBroadcaster, nonceSourceFor } from '@arkade-os/solver-rails-evm/evm/broadcast.js'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
+import { clampedBefore } from '@arkade-os/solver-core/core/limits.js'
 import { addressFromPrivateKey } from '@arkade-os/solver-rails-evm/evm/transaction.js'
 import { EvmSendSwapService } from '@arkade-os/solver-corridors-evm/send/evmOrchestrator.js'
 import { EvmReceiveSwapService } from '@arkade-os/solver-corridors-evm/receive/evmOrchestrator.js'
@@ -540,6 +541,12 @@ export const createServices = async (
   })
   for (const line of adminStore.seededMarkets) log(`market — ${line}`)
   for (const line of adminStore.repairedServing) log(`market serving repaired — ${line}`)
+  for (const { corridor, field, now, was } of clampedBefore(config.network, config.limits, config.corridorLimits)) {
+    const range = corridor === null ? 'the deployment (limits.maxSwapSats)' : corridor
+    log(
+      `limits — ${range} ${field === 'maxSats' ? 'max' : 'min'} is ${now} sats; releases before this clamped it to ${was}`,
+    )
+  }
   // Empty sinks make `post` a no-op, so a deployment that configures nothing
   // gets today's behaviour exactly: no timer, no network call, no failure.
   const notifySinks = sinksFrom(config.notify, globalThis.fetch as never)
@@ -704,7 +711,7 @@ export const createServices = async (
     service.shouldSkipTick = (id) => tickErrors.shouldSkip(id)
   }
   /**
-   * What this process will ACTUALLY quote: the environment, narrowed by any
+   * What this process will ACTUALLY quote: the environment, with any
    * overrides the console has stored.
    *
    * Read once, here, and never again — the services below are handed their
@@ -712,15 +719,7 @@ export const createServices = async (
    * settings change needs a restart to take effect.
    *
    * `config` stays the ENVIRONMENT's values and is what `Services.config`
-   * carries. The distinction is load-bearing: `validateOverride` uses it as
-   * the ceiling an override may not widen past, so if it were the already
-   * narrowed policy an operator could only ever ratchet limits downward and
-   * could never restore what the environment actually allows.
-   *
-   * `applyOverrides` is pure and can only narrow limits and the exposure cap,
-   * cannot enable a corridor the environment disabled, and bounds fees to the
-   * same range `config.ts` validates — so this can lower the amount at risk
-   * but never raise it above what the deployment already permitted.
+   * carries.
    */
   const bootOverrides = await adminStore.getOverrides()
   const policy = applyOverrides(config, bootOverrides)

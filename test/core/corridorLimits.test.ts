@@ -1,13 +1,6 @@
 /**
  * The layering rule for per-corridor amount ranges.
  *
- * Three layers narrow in sequence — network default, then `MAX_SWAP_SATS`,
- * then the corridor's own knob — and the whole safety argument rests on every
- * one of them being able to narrow only. If a more-specific knob could widen,
- * an operator could raise the amount at risk on one corridor past the
- * deployment-wide cap by reaching for the knob that looks more precise, which
- * is exactly the mistake a per-corridor override invites.
- *
  * Driven through `loadConfig` rather than the pure helper because the layering
  * is what is being tested, and only `loadConfig` applies all three layers.
  */
@@ -79,13 +72,21 @@ describe('corridorLimits', () => {
     expect(config.corridorLimits['lightning:BTC->arkade:BTC'].minSats).toBe(config.limits.minSats)
   })
 
-  it('REFUSES to widen past the deployment cap — the whole point of the ordering', () => {
+  it('lets a corridor set a range past the deployment cap and the network default, as the console can', () => {
     process.env.MAX_SWAP_SATS = '10000'
-    process.env.LN_SEND_MAX_SATS = '900000' // asking for more than the deployment allows
+    process.env.LN_SEND_MAX_SATS = '9000000'
+    process.env.LN_RECEIVE_MIN_SATS = '100'
     const config = configFromKnobs(process.env)
     expect(config.limits.maxSats).toBe(10000)
-    // Clamped to the cap, not honoured.
-    expect(config.corridorLimits['arkade:BTC->lightning:BTC'].maxSats).toBe(10000)
+    expect(config.corridorLimits['arkade:BTC->lightning:BTC'].maxSats).toBe(9_000_000)
+    expect(config.corridorLimits['lightning:BTC->arkade:BTC'].minSats).toBe(100)
+  })
+
+  it('lets MAX_SWAP_SATS raise the deployment past the network default, for every corridor that sets none', () => {
+    process.env.MAX_SWAP_SATS = '5000000'
+    const config = configFromKnobs(process.env)
+    expect(config.limits.maxSats).toBe(5_000_000)
+    for (const corridor of CORRIDORS) expect(config.corridorLimits[corridor].maxSats).toBe(5_000_000)
   })
 
   it('refuses a corridor floor above its own ceiling instead of quoting an empty range', () => {
