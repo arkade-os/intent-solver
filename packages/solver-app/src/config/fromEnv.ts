@@ -256,7 +256,13 @@ export const redactDocument = (doc: unknown): unknown => {
   const walk = (node: unknown, at: readonly (string | number)[]): unknown => {
     const key = String(at.at(-1) ?? '')
     const evmSecret = at.length === 4 && at[0] === 'rails' && at[1] === 'evm' && SECRET_EVM_FIELDS.has(key)
-    const named = SECRET_PATHS.has(jsonPath(at)) || evmSecret || SECRET_FIELD.test(key) || /priceFeed$/i.test(key)
+    // A record's key is a name the operator chose (an asset, corridor, chain or rail), not a field to judge.
+    const recordKey =
+      at.length === 2
+        ? at[0] === 'assets' || at[0] === 'corridors'
+        : at.length === 3 && at[0] === 'rails' && (at[1] === 'evm' || at[1] === 'lightning')
+    const secretName = !recordKey && (SECRET_FIELD.test(key) || /priceFeed$/i.test(key))
+    const named = SECRET_PATHS.has(jsonPath(at)) || evmSecret || secretName
     const inRail = at[0] === 'rails' && at[1] === 'lightning' && rails.has(String(at[2]))
     const shaped =
       typeof node === 'string' && (credentialShaped(node) || (inRail && /^[a-z][a-z0-9+.-]*:\/\//i.test(node)))

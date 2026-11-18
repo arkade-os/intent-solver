@@ -209,4 +209,21 @@ describe('exportDocument', () => {
     expect(JSON.stringify(exported)).not.toContain(rpcUrl)
     expect(exported).toMatchObject({ rails: { evm: { mine: { rpcUrl: '<RAILS_EVM_MINE_RPC_URL>' } } } })
   })
+
+  it('keeps an asset whose name holds a secret word, redacting only its credential fields', () => {
+    const feed = 'https://feed.example/v1/secret-token-feed-key/price'
+    const address = `0x${'3'.repeat(40)}`
+    const doc = {
+      ...base(),
+      rails: { ...base().rails, evm: { base: evmChain('https://rpc.example/', '7'.repeat(64)) } },
+      assets: {
+        'TOKEN@base': { kind: 'erc20', chain: 'base', address, decimals: 6, priceFeed: feed, pricePath: '/p' },
+      },
+    }
+    const exported = exportDocument(load(doc), {})
+    expect(JSON.stringify(exported)).not.toContain(feed)
+    expect(exported).toMatchObject({
+      assets: { 'TOKEN@base': { kind: 'erc20', address, decimals: 6, priceFeed: '<ASSETS_TOKEN_BASE_PRICE_FEED>' } },
+    })
+  })
 })
