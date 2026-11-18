@@ -1859,12 +1859,47 @@ html[data-vt='view'] nav .slens {
   max-width: 110ch;
 }
 
-/* The headline figures, as tiles. Tabular so the digits line up between refreshes. */
+/* The headline figures, as tiles. Tabular so the digits line up between refreshes. Rows are even: the column
+   count divides the tile count where it can, and a short last row stretches across. */
 .figures {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  --cols: 4;
+  display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   margin-bottom: 16px;
+}
+
+.figures > * {
+  flex: 1 1 calc((100% - (var(--cols) - 1) * 12px) / var(--cols) - 0.5px);
+  min-width: 0;
+}
+
+.figures:has(> :nth-child(3):last-child),
+.figures:has(> :nth-child(6):last-child) {
+  --cols: 3;
+}
+
+.figures:has(> :nth-child(5):last-child) {
+  --cols: 5;
+}
+
+@media (max-width: 1100px) {
+  .figures {
+    --cols: 2;
+  }
+
+  .figures:has(> :nth-child(5):last-child) {
+    --cols: 3;
+  }
+}
+
+@media (max-width: 760px) {
+  .figures,
+  .figures:has(> :nth-child(3):last-child),
+  .figures:has(> :nth-child(5):last-child),
+  .figures:has(> :nth-child(6):last-child) {
+    --cols: 2;
+  }
 }
 
 .figure {
