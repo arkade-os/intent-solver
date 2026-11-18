@@ -611,7 +611,7 @@ main h2.section-title {
   flex: 1;
 }
 
-@media (max-width: 810px) {
+@media (max-width: 560px), (min-width: 761px) and (max-width: 810px) {
   .toolbar > .spacer:has(+ .muted) {
     flex-basis: 100%;
   }
