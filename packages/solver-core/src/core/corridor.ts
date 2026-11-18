@@ -9,6 +9,11 @@
  * capabilities, and an absent capability means a DOCUMENTED degradation rather
  * than a guess. A corridor that cannot answer honestly must not pretend.
  */
+import {
+  RFQ_CONTRACT_VERSION_KEY,
+  RFQ_CONTRACT_VERSION_UNSUPPORTED,
+  RFQ_CONTRACT_VERSIONS_KEY,
+} from '@arkade-os/swap/rfq-contract'
 import type { CorridorDescriptor } from './corridorDescriptor.js'
 import type { PageOptions } from './page.js'
 import type { CorridorLedger, LedgerWindow } from '../analytics/economics.js'
@@ -355,7 +360,7 @@ const negotiatingContractVersion = (corridor: Corridor, supported: ReadonlySet<s
   const baselineServed = servedVersions.includes(baseline)
   const quote: Corridor['quote'] = async (payload, options) => {
     const rfqId = extractRfqId(payload)
-    const asked = typeof payload === 'object' && payload !== null && 'contract_versions' in payload
+    const asked = typeof payload === 'object' && payload !== null && RFQ_CONTRACT_VERSIONS_KEY in payload
     if (!asked) {
       if (baselineServed) return corridor.quote(payload, options)
       return {
@@ -364,13 +369,13 @@ const negotiatingContractVersion = (corridor: Corridor, supported: ReadonlySet<s
         detail: `${pair} speaks contract version ${baseline}, which rfq.contractVersions disables`,
       }
     }
-    const { contract_versions: listed, ...rest } = payload as Record<string, unknown>
+    const { [RFQ_CONTRACT_VERSIONS_KEY]: listed, ...rest } = payload as Record<string, unknown>
     const parsed = RFQ_CONTRACT_VERSIONS_FIELD.safeParse(listed)
     if (!parsed.success) {
       return {
         kind: 'invalid',
         payload: rfqRefusalPayload(rfqId, 'unsupported_payload'),
-        detail: 'contract_versions is malformed',
+        detail: `${RFQ_CONTRACT_VERSIONS_KEY} is malformed`,
       }
     }
     // The client's most-preferred version this corridor serves — its order is the preference.
@@ -379,15 +384,15 @@ const negotiatingContractVersion = (corridor: Corridor, supported: ReadonlySet<s
       return {
         kind: 'refused',
         payload: rfqRefusalPayload(rfqId, 'unsupported_payload', {
-          error_code: 'contract_version_unsupported',
-          field: 'contract_versions',
+          error_code: RFQ_CONTRACT_VERSION_UNSUPPORTED,
+          field: RFQ_CONTRACT_VERSIONS_KEY,
         }),
-        detail: `${pair} serves ${servedVersions.join(', ') || 'no contract version'}; contract_versions names none of them`,
+        detail: `${pair} serves ${servedVersions.join(', ') || 'no contract version'}; ${RFQ_CONTRACT_VERSIONS_KEY} names none of them`,
       }
     }
     const outcome = await corridor.quote(rest, { ...options, contractVersion: chosen })
     return outcome.kind === 'quote'
-      ? { ...outcome, payload: { ...outcome.payload, contract_version: chosen } }
+      ? { ...outcome, payload: { ...outcome.payload, [RFQ_CONTRACT_VERSION_KEY]: chosen } }
       : outcome
   }
   const wrapped = withQuote(corridor, quote)

@@ -1,7 +1,7 @@
 packages:
   - 'packages/*'
 
-# WIP: ts-sdk PR #1232 (9234e4e50) packed, until @arkade-os/swap ships it. Drop with vendor/ on the bump.
+# Preview build until @arkade-os/swap publishes the RFQ contract entry point.
 overrides:
-  '@arkade-os/swap': 'file:vendor/arkade-os-swap-0.1.7.tgz'
+  '@arkade-os/swap': 'file:vendor/arkade-os-swap-0.1.7-rfq-contract.tgz'
   '@arkade-os/sdk': 'file:vendor/arkade-os-sdk-0.5.7.tgz'

@@ -5,7 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  '@arkade-os/swap': file:vendor/arkade-os-swap-0.1.7.tgz
+  '@arkade-os/swap': file:vendor/arkade-os-swap-0.1.7-rfq-contract.tgz
   '@arkade-os/sdk': file:vendor/arkade-os-sdk-0.5.7.tgz
 
 importers:
@@ -86,8 +86,8 @@ importers:
         specifier: 0.3.0
         version: 0.3.0
       '@arkade-os/swap':
-        specifier: file:vendor/arkade-os-swap-0.1.7.tgz
-        version: file:vendor/arkade-os-swap-0.1.7.tgz(nostr-tools@2.24.1(typescript@5.9.3))
+        specifier: file:vendor/arkade-os-swap-0.1.7-rfq-contract.tgz
+        version: file:vendor/arkade-os-swap-0.1.7-rfq-contract.tgz(nostr-tools@2.24.1(typescript@5.9.3))
       '@foundry-rs/anvil':
         specifier: 1.7.1
         version: 1.7.1
@@ -155,8 +155,8 @@ importers:
         specifier: workspace:*
         version: link:../solver-transport
       '@arkade-os/swap':
-        specifier: file:../../vendor/arkade-os-swap-0.1.7.tgz
-        version: file:vendor/arkade-os-swap-0.1.7.tgz(nostr-tools@2.24.1(typescript@5.9.3))
+        specifier: file:../../vendor/arkade-os-swap-0.1.7-rfq-contract.tgz
+        version: file:vendor/arkade-os-swap-0.1.7-rfq-contract.tgz(nostr-tools@2.24.1(typescript@5.9.3))
       '@hono/node-server':
         specifier: ^2.1.0
         version: 2.1.0(hono@4.13.0)
@@ -191,8 +191,8 @@ importers:
         specifier: workspace:*
         version: link:../solver-core
       '@arkade-os/swap':
-        specifier: file:../../vendor/arkade-os-swap-0.1.7.tgz
-        version: file:vendor/arkade-os-swap-0.1.7.tgz(nostr-tools@2.24.1(typescript@5.9.3))
+        specifier: file:../../vendor/arkade-os-swap-0.1.7-rfq-contract.tgz
+        version: file:vendor/arkade-os-swap-0.1.7-rfq-contract.tgz(nostr-tools@2.24.1(typescript@5.9.3))
       '@noble/hashes':
         specifier: ^2.0.0
         version: 2.2.0
@@ -212,6 +212,9 @@ importers:
 
   packages/solver-core:
     dependencies:
+      '@arkade-os/swap':
+        specifier: file:../../vendor/arkade-os-swap-0.1.7-rfq-contract.tgz
+        version: file:vendor/arkade-os-swap-0.1.7-rfq-contract.tgz(nostr-tools@2.24.1(typescript@5.9.3))
       '@noble/curves':
         specifier: ^2.2.0
         version: 2.2.0
@@ -246,8 +249,8 @@ importers:
         specifier: workspace:*
         version: link:../solver-rails
       '@arkade-os/swap':
-        specifier: file:../../vendor/arkade-os-swap-0.1.7.tgz
-        version: file:vendor/arkade-os-swap-0.1.7.tgz(nostr-tools@2.24.1(typescript@5.9.3))
+        specifier: file:../../vendor/arkade-os-swap-0.1.7-rfq-contract.tgz
+        version: file:vendor/arkade-os-swap-0.1.7-rfq-contract.tgz(nostr-tools@2.24.1(typescript@5.9.3))
       '@noble/hashes':
         specifier: ^2.0.0
         version: 2.2.0
@@ -444,8 +447,8 @@ packages:
     resolution: {integrity: sha512-FMAhWG3vZrKIlCP1U8E5iAgB6O1wc6O1CMk+HlQ4xUf066p/S8PuRgmHtkHcL1YrGsdWhKfP/SSFwgLIbGTQjg==}
     engines: {node: '>=20.19'}
 
-  '@arkade-os/swap@file:vendor/arkade-os-swap-0.1.7.tgz':
-    resolution: {integrity: sha512-h5lrVKrdX56FNU6AIGlGX91W4Z+88g2maPx7Y0QZkec5cbyeBkFfk1SRFYNKZKwHqyRgD8c2QCogVRmY0niF4Q==, tarball: file:vendor/arkade-os-swap-0.1.7.tgz}
+  '@arkade-os/swap@file:vendor/arkade-os-swap-0.1.7-rfq-contract.tgz':
+    resolution: {integrity: sha512-gP96H6Nuobg1Y8MU+yZzgHr1eruLqPoFo4Yauqmwd6neQiPbeVI0M7riAg7thzljUFLqvP8rCZew13aptoeHkw==, tarball: file:vendor/arkade-os-swap-0.1.7-rfq-contract.tgz}
     version: 0.1.7
     engines: {node: '>=22.13.0'}
     peerDependencies:
@@ -1735,7 +1738,7 @@ snapshots:
       '@noble/curves': 2.4.0
       '@noble/hashes': 2.4.0
 
-  '@arkade-os/swap@file:vendor/arkade-os-swap-0.1.7.tgz(nostr-tools@2.24.1(typescript@5.9.3))':
+  '@arkade-os/swap@file:vendor/arkade-os-swap-0.1.7-rfq-contract.tgz(nostr-tools@2.24.1(typescript@5.9.3))':
     dependencies:
       '@arkade-os/sdk': file:vendor/arkade-os-sdk-0.5.7.tgz
       '@arkade-os/solver-discovery': 0.3.0

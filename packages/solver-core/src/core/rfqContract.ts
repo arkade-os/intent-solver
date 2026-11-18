@@ -7,13 +7,12 @@
  * content hash of its contract, program or compiled artifact later without a
  * schema or storage migration.
  */
+import { ASSET_SWAP_V2 as RFQ_ASSET_SWAP_V2, ASSET_SWAP_V3 as RFQ_ASSET_SWAP_V3 } from '@arkade-os/swap/rfq-contract'
+
+export { RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_V3 }
 export const RFQ_LIGHTNING_SEND_V2 = 'lightning-send-v2'
 export const RFQ_LIGHTNING_RECEIVE_V2 = 'lightning-receive-v2'
 export const RFQ_ONCHAIN_SEND_V2 = 'onchain-send-v2'
-export const RFQ_ASSET_SWAP_V2 = 'asset-swap-v2'
-// ts-sdk #1147's arkadec program; fixes v2's pinned payout-leaf index. Served
-// alongside v2 but never the baseline — a v2 client names no version.
-export const RFQ_ASSET_SWAP_V3 = 'asset-swap-v3'
 export const RFQ_EVM_SEND_V1 = 'evm-send-v1'
 export const RFQ_EVM_RECEIVE_V1 = 'evm-receive-v1'
 

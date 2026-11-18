@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { execFileSync } from 'node:child_process'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -203,12 +204,26 @@ describe('the descriptor modules', () => {
     expect(offenders.sort()).toEqual([])
   })
 
-  it('the RFQ version constants stay a dependency-free leaf', () => {
+  it('the RFQ version constants only load the dependency-free swap entry point', () => {
     const source = readFileSync(
       fileURLToPath(new URL('../../packages/solver-core/src/core/rfqContract.ts', import.meta.url)),
       'utf8',
     )
-    expect(source).not.toMatch(/^\s*import\b/m)
+    const entryPoint = '@arkade-os/swap/rfq-contract'
+    expect(valueImports(source)).toEqual([entryPoint])
+
+    const entryUrl = execFileSync(
+      process.execPath,
+      ['--input-type=module', '--eval', 'console.log(import.meta.resolve(process.argv[1]))', entryPoint],
+      { cwd: new URL('../../packages/solver-core/', import.meta.url), encoding: 'utf8' },
+    ).trim()
+    const modules = new Set([entryUrl])
+    for (const file of modules) {
+      for (const specifier of valueImports(readFileSync(new URL(file), 'utf8'))) {
+        expect(specifier, file).toMatch(/^\.\//)
+        modules.add(new URL(specifier, file).href)
+      }
+    }
   })
 
   it('reach only the dependency-free helper through the state machines', () => {
