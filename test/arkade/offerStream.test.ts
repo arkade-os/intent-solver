@@ -4,7 +4,13 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { getEventListeners } from 'node:events'
-import { EventSourceUnavailableError, type SubscriptionEvent, type SubscriptionHeartbeat } from '@arkade-os/sdk'
+import {
+  EventSourceUnavailableError,
+  configureEventSource,
+  type EventSourceLike,
+  type SubscriptionEvent,
+  type SubscriptionHeartbeat,
+} from '@arkade-os/sdk'
 import {
   streamOfferTxs,
   OFFER_PACKET_FILTER,
@@ -120,9 +126,12 @@ describe('streamOfferTxs', () => {
       }
       close() {}
     }
-    vi.stubGlobal('EventSource', FakeEventSource)
+    // The SDK prefers its fetch-based SSE over the global, so the fake goes in through its own hook.
+    configureEventSource((u) => new FakeEventSource(u) as unknown as EventSourceLike)
     const signal = AbortSignal.timeout(2_000)
-    const got = await collect(streamOfferTxs({ arkdUrl: `${url}/`, signal }), 1)
+    const got = await collect(streamOfferTxs({ arkdUrl: `${url}/`, signal }), 1).finally(() =>
+      configureEventSource(undefined),
+    )
     expect(got).toEqual([{ txid: 'a', tx: 'tx-a' }])
     const opened0 = new URL(opened[0]!)
     expect(`${opened0.origin}${opened0.pathname}`).toBe(`${url}/v1/indexer/subscription`)

@@ -185,6 +185,27 @@ describe('quote', () => {
     })
   })
 
+  it('passes the negotiated contract version through to the derivation', async () => {
+    const seen: (string | undefined)[] = []
+    const { service } = await harness({
+      deriveOffer: (_terms, contractVersion) => {
+        seen.push(contractVersion)
+        return { pkScript: OFFER_SCRIPT, address: 'ark1qoffer' }
+      },
+    })
+    await service.quote(request({ contractVersion: 'asset-swap-v3' }))
+    expect(seen[0]).toBe('asset-swap-v3')
+  })
+
+  it.each([
+    ['the negotiated version', { contractVersion: 'asset-swap-v3' }, 'asset-swap-v3'],
+    ['NULL for a request that named none', {}, null],
+  ])('persists %s and reads it back', async (_label, over, stored) => {
+    const { service, store } = await harness()
+    await service.quote(request(over))
+    expect((await store.findByRfqId(RFQ_ID))?.contractVersion).toBe(stored)
+  })
+
   it.each([
     ['a pair on another corridor', { pair: 'arkade:BTC->lightning:BTC' }],
     [

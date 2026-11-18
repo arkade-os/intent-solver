@@ -209,8 +209,6 @@ const derivation = (): OfferDerivation => ({
   exitDelay: offerExitDelay(arkade.ctx.advertisedExitDelay),
 })
 
-const deriveOffer = (terms: OfferTerms): { pkScript: string; address: string } => offerScriptFrom(derivation())(terms)
-
 const termsOf = (row: AssetRfqSwapRow): OfferTerms => ({
   wantAmount: row.toAmount,
   wantAssetId: row.toAssetId,
@@ -292,7 +290,7 @@ const harness = async (over: Partial<AssetRfqMarket> = {}): Promise<Harness> => 
     solverPubkey: makerPublicKey,
     quoteValiditySeconds: 600,
     dustSats: arkade.ctx.dustSats,
-    deriveOffer,
+    deriveOffer: offerScriptFrom(derivation()),
     depositAt,
     balance,
     fetchPrice: createPriceFeed(),
@@ -367,6 +365,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
         expect(funded.depositTxid).toBe(fundingTxid)
 
         const filled = await driveTo(tickAll, store, id, 'filled')
+        expect(filled.contractVersion).toBe('asset-swap-v3')
         expect(filled.fillTxid).toMatch(/^[0-9a-f]{64}$/)
         expect(await depositSpent(filled.offerPkScript)).toBe('spent')
 

@@ -32,6 +32,8 @@ export interface CorridorRfqOutcome {
  */
 export interface QuoteOptions {
   requesterKey?: string
+  /** The contract version the host negotiated for this quote; absent derives the corridor's baseline. */
+  contractVersion?: string
 }
 
 /**
@@ -346,17 +348,20 @@ export const createCorridorSet = (corridors: readonly Corridor[], options: Corri
  * byte-identical. The field is stripped before the corridor's strict schema and echoed only if asked.
  */
 const negotiatingContractVersion = (corridor: Corridor, supported: ReadonlySet<string> | undefined): Corridor => {
-  const { pair, contractVersion: version } = corridor.descriptor
-  const served = supported === undefined || supported.has(version)
+  const { pair, contractVersion: baseline } = corridor.descriptor
+  // What this corridor can build (baseline alone unless it declares more), kept to what the deployment serves.
+  const buildable = corridor.descriptor.contractVersions ?? [baseline]
+  const servedVersions = buildable.filter((v) => supported === undefined || supported.has(v))
+  const baselineServed = servedVersions.includes(baseline)
   const quote: Corridor['quote'] = async (payload, options) => {
     const rfqId = extractRfqId(payload)
     const asked = typeof payload === 'object' && payload !== null && 'contract_versions' in payload
     if (!asked) {
-      if (served) return corridor.quote(payload, options)
+      if (baselineServed) return corridor.quote(payload, options)
       return {
         kind: 'refused',
         payload: rfqRefusalPayload(rfqId, 'unsupported_pair'),
-        detail: `${pair} speaks contract version ${version}, which rfq.contractVersions disables`,
+        detail: `${pair} speaks contract version ${baseline}, which rfq.contractVersions disables`,
       }
     }
     const { contract_versions: listed, ...rest } = payload as Record<string, unknown>
@@ -368,21 +373,21 @@ const negotiatingContractVersion = (corridor: Corridor, supported: ReadonlySet<s
         detail: 'contract_versions is malformed',
       }
     }
-    if (!served || !parsed.data.includes(version)) {
+    // The client's most-preferred version this corridor serves — its order is the preference.
+    const chosen = parsed.data.find((v) => servedVersions.includes(v))
+    if (chosen === undefined) {
       return {
         kind: 'refused',
         payload: rfqRefusalPayload(rfqId, 'unsupported_payload', {
           error_code: 'contract_version_unsupported',
           field: 'contract_versions',
         }),
-        detail: served
-          ? `${pair} speaks contract version ${version}, which contract_versions does not list`
-          : `${pair} speaks contract version ${version}, which rfq.contractVersions disables`,
+        detail: `${pair} serves ${servedVersions.join(', ') || 'no contract version'}; contract_versions names none of them`,
       }
     }
-    const outcome = await corridor.quote(rest, options)
+    const outcome = await corridor.quote(rest, { ...options, contractVersion: chosen })
     return outcome.kind === 'quote'
-      ? { ...outcome, payload: { ...outcome.payload, contract_version: version } }
+      ? { ...outcome, payload: { ...outcome.payload, contract_version: chosen } }
       : outcome
   }
   const wrapped = withQuote(corridor, quote)

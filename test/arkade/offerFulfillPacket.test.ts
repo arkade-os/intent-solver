@@ -29,21 +29,24 @@ const state = vi.hoisted(() => ({
 vi.mock('@arkade-os/sdk', async (importOriginal) => {
   const mod = await importOriginal<typeof import('@arkade-os/sdk')>()
   const SERVER = hex.decode('4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa')
+  // The SDK's `fillOffer` builds `RestOperatorProvider`; older SDKs named it `RestArkProvider`.
+  class OperatorProvider {
+    async getInfo() {
+      return {
+        signerPubkey: `02${hex.encode(SERVER)}`,
+        checkpointTapscript: hex.encode(
+          mod.CSVMultisigTapscript.encode({
+            timelock: { type: 'blocks', value: 10n },
+            pubkeys: [SERVER],
+          }).script,
+        ),
+      }
+    }
+  }
   return {
     ...mod,
-    RestArkProvider: class {
-      async getInfo() {
-        return {
-          signerPubkey: `02${hex.encode(SERVER)}`,
-          checkpointTapscript: hex.encode(
-            mod.CSVMultisigTapscript.encode({
-              timelock: { type: 'blocks', value: 10n },
-              pubkeys: [SERVER],
-            }).script,
-          ),
-        }
-      }
-    },
+    RestArkProvider: OperatorProvider,
+    RestOperatorProvider: OperatorProvider,
     RestIndexerProvider: class {
       async getVtxos() {
         return { vtxos: state.vtxos }
