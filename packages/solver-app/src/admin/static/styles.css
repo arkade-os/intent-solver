@@ -526,25 +526,30 @@ nav .more {
   }
 }
 
-/* Amber, not red: config waiting to be applied is not a fault. */
+/* Amber, not red: config waiting to be applied is not a fault. A line of the status, under the figures. */
 .restart-banner {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px 16px;
-  margin: 12px 28px 0;
+  gap: 6px 10px;
   border: 1px solid var(--exposed);
-  border-radius: 16px;
+  border-radius: 12px;
   background: var(--exposed-bg);
   color: var(--text);
-  padding: 9px 10px 9px 18px;
-  font-size: 13px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.45;
   overflow-wrap: anywhere;
 }
 
 .restart-banner .mono {
   color: var(--text-dim);
+}
+
+.restart-banner .act {
+  min-height: 26px;
+  padding: 3px 9px;
+  font-size: 11.5px;
 }
 
 .restart-slot,
@@ -1616,10 +1621,6 @@ tr.note td:first-child {
 @media (max-width: 760px) {
   main {
     padding-bottom: calc(88px + env(safe-area-inset-bottom));
-  }
-
-  .restart-banner {
-    margin: 10px 8px 0;
   }
 
   .page-head {

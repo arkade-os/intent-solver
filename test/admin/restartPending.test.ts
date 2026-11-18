@@ -392,9 +392,10 @@ describe('the console renders it', () => {
     expect(appSource).toContain("d.overrideTitle ?? 'This is not the action the last check supports.'")
   })
 
-  it('still renders above every panel, not only the overview', () => {
+  it('still renders beside every panel, in the status sidebar, not only on the overview', () => {
     const render = appSource.slice(appSource.indexOf('const render ='), appSource.indexOf('/* ---- live updates'))
-    expect(render).toMatch(/h\('div\.content', restartBanner\(\)/)
+    expect(render).toMatch(/const restart = restartBanner\(\)/)
+    expect(render).toMatch(/h\('aside\.sidebar', statusBar\(\), restart, nav\(\)\)/)
   })
 
   it('puts what is in flight in front of the operator before they confirm', () => {
