@@ -611,6 +611,12 @@ main h2.section-title {
   flex: 1;
 }
 
+@media (max-width: 810px) {
+  .toolbar > .spacer:has(+ .muted) {
+    flex-basis: 100%;
+  }
+}
+
 /* A page's leading controls (Activity's tabs, the P&L and reconciliation window) share the title's row when
    they fit and wrap under it when they do not. Their wrapper steps aside so they can join main's row. */
 main:has(> .activity, > div > .toolbar:first-child) {
