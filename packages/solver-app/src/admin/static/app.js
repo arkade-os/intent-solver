@@ -5704,7 +5704,7 @@ const render = () => {
     )
   }
   main.appendChild((BODIES[state.view] ?? overviewView)())
-  // The restart banner sits with the status, and always takes a slot for the same reason as `messages`.
+  // The restart banner always takes a slot, for the same reason as `messages`.
   const restart = restartBanner() ?? h('div.restart-slot')
   const sidebar = h('aside.sidebar', statusBar(), restart, nav())
   morphChildren(root, h('div', sidebar, h('div.content', main), detailDialog(), confirmDialog()))

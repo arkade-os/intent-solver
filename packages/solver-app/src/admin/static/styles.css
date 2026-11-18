@@ -523,7 +523,7 @@ nav .more {
   }
 }
 
-/* Amber, not red: config waiting to be applied is not a fault. A line of the status, under the figures. */
+/* Amber, not red: config waiting to be applied is not a fault. */
 .restart-banner {
   display: flex;
   flex-wrap: wrap;
