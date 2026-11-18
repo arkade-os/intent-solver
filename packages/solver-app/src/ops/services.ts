@@ -34,7 +34,7 @@ import { covenantCosignerKey } from './cosigner.js'
 import { RestEmulatorProvider } from '@arkade-os/sdk'
 import { hex } from '@scure/base'
 import { Address, OutScript } from '@scure/btc-signer'
-import { corridorSetFromDeps, readerSetFromDeps } from './corridorSet.js'
+import { corridorSetFromDeps, readerSetFromDeps, servedContractVersions } from './corridorSet.js'
 import type { Config } from '../config.js'
 import type { PricingStrategy } from '@arkade-os/solver-core/core/pricing.js'
 import { onchainCorridorPricing, onchainFeeRateSampler } from './onchainPricing.js'
@@ -888,6 +888,7 @@ export const createServices = async (
         chargesDeliveredCarrier: policy.offerChargesDeliveredCarrier,
         minFillAmount: policy.offerMinFillAmount,
         maxFillAmount: policy.offerMaxFillAmount,
+        contractVersions: new Set(policy.offerContractVersions),
         // AVAILABLE, never total, and read fresh per decision. @see offerInventory.ts
         balance: () => arkade.wallet.getBalance(),
         outputsAt: (offerPkScript) => offerOutputsAt(arkade, offerPkScript),
@@ -897,7 +898,11 @@ export const createServices = async (
         serverPubkey: arkade.wallet.arkServerPublicKey,
         // THE SPEND. Wired here because this is where the wallet and the
         // emulator meet; every guard on it lives in `arkade/offerSettle.ts`.
-        settle: offerSettleFor({ ctx: arkade, emulatorUrl: config.emulatorUrl }),
+        settle: offerSettleFor({
+          ctx: arkade,
+          emulatorUrl: config.emulatorUrl,
+          contractVersions: new Set(policy.offerContractVersions),
+        }),
         approvalGate: gateFor('arkade offer fill'),
         onError: (id, error) => log(`offer ${id} failed:`, error instanceof Error ? error.message : String(error)),
         // Not a failure either: nothing was submitted, so the row waits a sweep.
@@ -1500,6 +1505,7 @@ export const createServices = async (
       evmCorridors: livePolicy.evmCorridors,
       assetRfqService,
       assetRfqStore,
+      rfqContractVersions: servedContractVersions(livePolicy.rfqContractVersions, extraCorridors),
       railUp: rail?.probe ? () => railWatch?.up() ?? false : undefined,
     }
     return {

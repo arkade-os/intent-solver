@@ -16,6 +16,7 @@ import type { CorridorDescriptor } from '@arkade-os/solver-...'
 const descriptor: CorridorDescriptor = {
   pair: 'arkade:BTC->example:BTC', // the RFQ pair, and the registry key
   envStem: 'EXAMPLE', // `EXAMPLE_MAX_SATS`; the pair is not a legal shell identifier
+  contractVersion: 'example-v1', // the settlement contract this corridor quotes
   payoutRail: 'arkade', // which rail's balance funds the payout
   states: {
     live: ['open'], // non-terminal
@@ -34,6 +35,13 @@ not at dispatch — a duplicate pair would let one corridor shadow another's quo
 path, and a duplicate stem would make `<STEM>_ENABLED=false` dark a corridor the
 operator did not name.
 
+`contractVersion` is what a client gets when its request names no
+`contract_versions` (`docs/rfq-protocol.md` § 4.1), so every client already
+deriving your contract depends on it: ship a changed contract under a new
+identifier rather than editing this one. An injected corridor is served by
+default; once an operator sets `rfq.contractVersions`, its identifier must be
+listed there.
+
 ## The interface
 
 Required:
@@ -45,7 +53,7 @@ Required:
 | `statusFor(rfqId)`         | your row as an `rfq_status` payload, or `null` if you do not hold it         |
 | `tick(id)`                 | drive one swap one step                                                      |
 | `tickAll()`                | drive every live swap; returns how many moved                                |
-| `park(id, reason)`         | take one row out of the sweep; returns the state it landed in               |
+| `park(id, reason)`         | take one row out of the sweep; returns the state it landed in                |
 | `findRecoverable()`        | rows whose funds are still at a script                                       |
 | `committedSats()`          | sats this corridor currently has at risk                                     |
 | `page(options)`            | rows for the console, as `CorridorSwapView`                                  |

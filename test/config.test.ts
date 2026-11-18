@@ -115,6 +115,8 @@ const CONFIG_KEYS = [
   'OFFER_MARKETS',
   'OFFER_MIN_FILL_AMOUNT',
   'OFFER_MAX_FILL_AMOUNT',
+  'OFFER_CONTRACT_VERSIONS',
+  'RFQ_CONTRACT_VERSIONS',
   // Same reason again: a leaked `ASSET_MARKETS` gives every later test an
   // atomic-class corridor it never asked for, and one that then demands a
   // console market row those tests do not write.
@@ -957,6 +959,53 @@ describe('OFFER_MARKETS', () => {
     process.env.OFFER_MAX_FILL_AMOUNT = '1000'
     expect(() => configFromKnobs(process.env)).toThrow(/OFFER_MAX_FILL_AMOUNT/)
   })
+
+  it('accepts both contract versions by default, including for a deployment serving no offers', () => {
+    expect(configFromKnobs(process.env).offerContractVersions).toEqual(['offer-v1', 'offer-v2'])
+  })
+
+  it('reads the contract versions the operator enables', () => {
+    process.env.OFFER_CONTRACT_VERSIONS = 'offer-v2'
+    expect(configFromKnobs(process.env).offerContractVersions).toEqual(['offer-v2'])
+  })
+
+  it('reads a blank list as unset, like every other knob', () => {
+    process.env.OFFER_CONTRACT_VERSIONS = ' '
+    expect(configFromKnobs(process.env).offerContractVersions).toEqual(['offer-v1', 'offer-v2'])
+  })
+
+  it.each(['offer-v1,offer-v3', 'offer-v2,offer-v2', '1,2', 'offer-v1,'])(
+    'refuses the contract version list %j',
+    (value) => {
+      process.env.OFFER_CONTRACT_VERSIONS = value
+      expect(() => configFromKnobs(process.env)).toThrow(/OFFER_CONTRACT_VERSIONS/)
+    },
+  )
+})
+
+describe('RFQ_CONTRACT_VERSIONS', () => {
+  it.each([undefined, ' '])('leaves %j unset, so the build defaults and injected corridors apply', (value) => {
+    if (value !== undefined) process.env.RFQ_CONTRACT_VERSIONS = value
+    expect(configFromKnobs(process.env).rfqContractVersions).toBeNull()
+  })
+
+  it('reads the RFQ contract versions the operator enables', () => {
+    process.env.RFQ_CONTRACT_VERSIONS = 'asset-swap-v2,evm-send-v1'
+    expect(configFromKnobs(process.env).rfqContractVersions).toEqual(['asset-swap-v2', 'evm-send-v1'])
+  })
+
+  it('accepts a custom method name or content hash', () => {
+    process.env.RFQ_CONTRACT_VERSIONS = 'my-method-v9,sha256:' + 'ab'.repeat(32)
+    expect(configFromKnobs(process.env).rfqContractVersions).toEqual(['my-method-v9', 'sha256:' + 'ab'.repeat(32)])
+  })
+
+  it.each(['bad version', 'asset-swap-v2,asset-swap-v2', 'asset-swap-v2,,evm-send-v1'])(
+    'refuses the RFQ contract version list %j',
+    (value) => {
+      process.env.RFQ_CONTRACT_VERSIONS = value
+      expect(() => configFromKnobs(process.env)).toThrow(/RFQ_CONTRACT_VERSIONS/)
+    },
+  )
 })
 
 /**

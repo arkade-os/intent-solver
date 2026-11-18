@@ -103,14 +103,14 @@ a `Corridor` whose only interesting member is `quote`.
 
 Every item below is stated in a docstring and enforced nowhere.
 
-| Obligation                                                                         | Where it is stated              | What silently happens                                                            |
-| ---------------------------------------------------------------------------------- | ------------------------------- | -------------------------------------------------------------------------------- |
-| `exposed` is a subset of `live`                                                     | `corridorDescriptor.ts:47`      | Checked at `registry.test.ts:103` — but only over the three built-in descriptors |
-| `payoutRail` names a rail that exists                                                | `corridorDescriptor.ts:19-29`   | Console reads UNKNOWN forever (`rail.ts:69`); no boot-time complaint             |
-| `liveLockups` present whenever the corridor HOLDS lockups                            | `corridor.ts:118-135`           | Renewal protection and the recovery path are lost for every one of them          |
-| `statusFor` answers `null` — never a refusal — for an id it does not hold            | `corridor.ts:100-103`           | Ends the fall-through and hides a live swap belonging to the NEXT corridor       |
-| `tickAll` honours the skip guard, the backoff and per-row isolation                  | `corridor.ts:172-186`           | A failing backend is hammered; one row's throw ends the sweep                    |
-| `registerLightningRail` runs before `loadConfig`                                     | `rails.ts:29-31`                | `rails.lightning.backend` refuses a rail registered later — the registry is read once |
+| Obligation                                                                | Where it is stated            | What silently happens                                                                 |
+| ------------------------------------------------------------------------- | ----------------------------- | ------------------------------------------------------------------------------------- |
+| `exposed` is a subset of `live`                                           | `corridorDescriptor.ts:47`    | Checked at `registry.test.ts:103` — but only over the three built-in descriptors      |
+| `payoutRail` names a rail that exists                                     | `corridorDescriptor.ts:19-29` | Console reads UNKNOWN forever (`rail.ts:69`); no boot-time complaint                  |
+| `liveLockups` present whenever the corridor HOLDS lockups                 | `corridor.ts:118-135`         | Renewal protection and the recovery path are lost for every one of them               |
+| `statusFor` answers `null` — never a refusal — for an id it does not hold | `corridor.ts:100-103`         | Ends the fall-through and hides a live swap belonging to the NEXT corridor            |
+| `tickAll` honours the skip guard, the backoff and per-row isolation       | `corridor.ts:172-186`         | A failing backend is hammered; one row's throw ends the sweep                         |
+| `registerLightningRail` runs before `loadConfig`                          | `rails.ts:29-31`              | `rails.lightning.backend` refuses a rail registered later — the registry is read once |
 
 One of these is worse than unchecked. `building-a-corridor.md:129-130` tells an
 author to use the SHARED `AdmissionControl` "or your corridor is uncapped while
@@ -218,7 +218,7 @@ hand-built app has no console.
   is not exported at all. Two different types, one name.
   `Record<Corridor, number>` written against the exported one fails with
   `TS2344: Type 'Corridor' does not satisfy the constraint 'string | number |
-  symbol'`. Writing the three pair strings as literal keys works, which makes this
+symbol'`. Writing the three pair strings as literal keys works, which makes this
   a discoverability trap rather than a wall.
 
 `ArkadeWalletConfig`, `Fee`, `LndConfig`, `EvmCorridorPolicy` and `EvmMarket` are
@@ -299,7 +299,7 @@ SDK must never run the CLI.
 ## What this deliberately does NOT propose
 
 - **A corridor builder / DSL.** Registration is `createServices(config, {
-  corridors: [x] })`. Wrapping that adds a layer whose only content is the
+corridors: [x] })`. Wrapping that adds a layer whose only content is the
   argument you already had.
 - **A `defineSolver({ … })` / app builder.** `Config` is already a literal and
   `createServices` already takes it as a parameter; a builder over that would
