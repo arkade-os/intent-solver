@@ -552,12 +552,12 @@ describe('ReceiveSwapService.quote', () => {
       }
     }
 
-    const withLn = (port: ConstructorParameters<typeof ReceiveSwapService>[0]['ln']) =>
+    const withLn = (port: ConstructorParameters<typeof ReceiveSwapService>[0]['ln'], ops = arkade.ops) =>
       new ReceiveSwapService({
         acceptUnilateralGap: false,
         store,
         ln: port,
-        arkade: arkade.ops,
+        arkade: ops,
         covclaimd: covclaimd.client,
         limits: LIMITS,
         maxExposedSats: 1_000_000,
@@ -566,6 +566,13 @@ describe('ReceiveSwapService.quote', () => {
         now: clock,
         fee: FEE,
       })
+
+    it('refuses payout_below_dust, before minting, when the held-back reserve takes the payout under the floor', async () => {
+      const wrapping = wrappingLn(() => 6)
+      const outcome = await withLn(wrapping.port, { ...arkade.ops, minOutputSats: 4_900 }).quote(quoteRequest())
+      expect(outcome).toEqual({ accepted: false, reason: 'payout_below_dust' })
+      expect(wrapping.calls).toEqual(['probe:5000', 'probe:4994'])
+    })
 
     it('exact-in on a WRAPPING backend: the invoice asks exactly the requested give', async () => {
       const wrapping = wrappingLn(() => 6)
@@ -691,6 +698,27 @@ describe('ReceiveSwapService.quote', () => {
       })
       const outcome = await greedy.quote(quoteRequest({ amountSats: 150 }))
       expect(outcome).toEqual({ accepted: false, reason: 'fee_consumes_swap' })
+    })
+
+    it('refuses payout_below_dust, before minting, a payout under the smallest lockup arkd funds', async () => {
+      const mint = vi.fn(ln.createHoldInvoice.bind(ln))
+      const floored = new ReceiveSwapService({
+        acceptUnilateralGap: false,
+        store,
+        ln: { createHoldInvoice: mint, getHoldState: ln.getHoldState.bind(ln), settleHold: ln.settleHold.bind(ln) },
+        arkade: { ...arkade.ops, minOutputSats: 330 },
+        limits: { minSats: 100, maxSats: 1_000_000 },
+        maxExposedSats: 1_000_000,
+        totalCommitted: () => store.committedSats(),
+        admission: new AdmissionControl(),
+        now: clock,
+      })
+      for (const amountSide of ['from', 'to'] as const) {
+        const outcome = await floored.quote(quoteRequest({ amountSats: 329, amountSide }))
+        expect(outcome).toEqual({ accepted: false, reason: 'payout_below_dust' })
+      }
+      expect(mint).not.toHaveBeenCalled()
+      expect((await floored.quote(quoteRequest({ amountSats: 330 }))).accepted).toBe(true)
     })
 
     it('charges nothing when the fee is free, exactly as before it existed', async () => {

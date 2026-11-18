@@ -166,23 +166,18 @@ describe('GET /api/config/export', () => {
       document: {
         ...doc,
         rails: { ...doc.rails, arkade: { ...doc.rails.arkade, mnemonic: '<RAILS_ARKADE_MNEMONIC>' } },
-        corridors: { 'arkade:BTC->lightning:BTC': { enabled: true, feeBps: 25, maxSats: 100_000 } },
+        corridors: { 'arkade:BTC->lightning:BTC': { enabled: true, feeBps: 25, maxSats: 2_000_000 } },
       },
-      consoleOnly: [
-        {
-          path: 'corridors["arkade:BTC->lightning:BTC"].maxSats',
-          reason: expect.stringContaining('2000000 here, 100000 in the file'),
-        },
-      ],
+      consoleOnly: [],
     })
   })
 
-  it('refuses, saying why, when the file would not load beside what it can hold', async () => {
-    const response = await exported({ LN_SEND_MIN_SATS: '500000', LN_SEND_MAX_SATS: '2000000' })
+  it('refuses, saying why, when the booted document no longer loads', async () => {
+    const response = await exported({}, { ...loadConfig(inline(doc)), configDocument: { ...doc, network: 'nowhere' } })
     expect(response.status).toBe(409)
     expect(await response.json()).toMatchObject({
       error: 'unexportable',
-      message: expect.stringMatching(/cannot hold what this console runs: .*empty/),
+      message: expect.stringMatching(/cannot hold what this console runs: .*network/),
     })
   })
 

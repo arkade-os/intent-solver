@@ -100,23 +100,31 @@ describe('exportDocument', () => {
     expect(reloaded.lnBackend).toBe(config.lnBackend)
   })
 
-  it('leaves a corridor range no file can hold in the console, naming it, and exports the rest', () => {
-    const { document, consoleOnly } = exportDocument(load(base()), {
-      LN_SEND_MAX_SATS: '2000000',
-      LN_RECEIVE_MIN_SATS: '500',
-      LN_SEND_FEE_BPS: '25',
-    })
-    expect((document as ReturnType<typeof base>).corridors[LN_SEND]).toMatchObject({ feeBps: 25, maxSats: 100_000 })
-    expect(consoleOnly).toEqual([
-      { path: `corridors["${LN_SEND}"].maxSats`, reason: expect.stringMatching(/^2000000 here, 100000 in the file/) },
-      { path: 'corridors["lightning:BTC->arkade:BTC"].minSats', reason: expect.stringMatching(/^500 here, 1000 in/) },
-    ])
+  it('writes a corridor range past the network default, which the file now holds', () => {
+    const config = load(base())
+    const overrides = { LN_SEND_MAX_SATS: '2000000', LN_RECEIVE_MIN_SATS: '500', LN_SEND_FEE_BPS: '25' }
+    const { document, consoleOnly } = exportDocument(config, overrides)
+    expect((document as ReturnType<typeof base>).corridors[LN_SEND]).toMatchObject({ feeBps: 25, maxSats: 2_000_000 })
+    expect(consoleOnly).toEqual([])
+    expect(editableKnobValues(load(withMnemonic(document)))).toEqual(
+      editableKnobValues(applyOverrides(config, overrides)),
+    )
   })
 
-  it('refuses, with the loader’s reason, a range that would not load beside what a file can hold', () => {
-    const exporting = () => exportDocument(load(base()), { LN_SEND_MIN_SATS: '500000', LN_SEND_MAX_SATS: '2000000' })
+  it('refuses, naming each, a setting the file would load differently', () => {
+    const profile: LoadOptions['profile'] = (doc) => ({
+      ...doc,
+      corridors: { ...doc.corridors, [LN_SEND]: { ...doc.corridors?.[LN_SEND], feeBps: 77 } },
+    })
+    const exporting = () => exportDocument(load(base(), profile), {})
     expect(exporting).toThrow(UnexportableConfig)
-    expect(exporting).toThrow(/cannot hold what this console runs: .*empty/)
+    expect(exporting).toThrow(`corridors["${LN_SEND}"].feeBps is 77 here but would load as 10`)
+  })
+
+  it('refuses, with the loader’s reason, a document it cannot load', () => {
+    const config = { ...load(base()), configDocument: { ...base(), network: 'nowhere' } }
+    expect(() => exportDocument(config, {})).toThrow(UnexportableConfig)
+    expect(() => exportDocument(config, {})).toThrow(/cannot hold what this console runs: .*network/)
   })
 
   it('writes nothing an override does not move', () => {

@@ -115,15 +115,18 @@ describe('evmCorridorPolicies', () => {
     expect(policies[0]!.fee.bps).toBe(0)
   })
 
-  it('refuses a corridor knob that would WIDEN the deployment bound', () => {
-    // One token's config must not be able to raise the house limit — that bound
-    // exists to set the blast radius for the whole deployment.
-    expect(() => evmCorridorPolicies(tokens, BASE, env({ EVM_SEND_USDC_MAX_SATS: '2000000' }))).toThrow(
-      /may not exceed/,
+  it('lets a corridor knob set a bound past the deployment range, as a BTC corridor can', () => {
+    const policies = evmCorridorPolicies(
+      tokens,
+      BASE,
+      env({ EVM_SEND_USDC_MAX_SATS: '2000000', EVM_RECEIVE_USDC_MIN_SATS: '500' }),
     )
-    expect(() => evmCorridorPolicies(tokens, BASE, env({ EVM_RECEIVE_USDC_MIN_SATS: '500' }))).toThrow(
-      /may not be below/,
-    )
+    expect(policies[0]!.limits.maxSats).toBe(2_000_000)
+    expect(policies[1]!.limits.minSats).toBe(500)
+  })
+
+  it('refuses a corridor range left empty', () => {
+    expect(() => evmCorridorPolicies(tokens, BASE, env({ EVM_SEND_USDC_MIN_SATS: '2000000' }))).toThrow(/empty/)
   })
 
   it('switches one direction off without touching the other', () => {

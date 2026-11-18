@@ -3228,8 +3228,7 @@ const pricingView = () => {
           {
             title:
               'The config file this solver booted with, console setting changes and asset markets written in. Each ' +
-              'credential comes out as a <PLACEHOLDER> to fill back in. The rebalance policy, and any corridor range ' +
-              'a file cannot hold, stay in the console.',
+              'credential comes out as a <PLACEHOLDER> to fill back in. The rebalance policy stays in the console.',
             onclick: () => exportConfig(),
           },
           'Export config',

@@ -56,6 +56,7 @@ import { probeTimelockClock } from '@arkade-os/solver-rails-evm/evm/timelockCloc
 import { assertEvmClaimTraceSupport } from '@arkade-os/solver-rails-evm/evm/claimTraceProbe.js'
 import { createEvmBroadcaster, nonceSourceFor } from '@arkade-os/solver-rails-evm/evm/broadcast.js'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
+import { clampedBefore } from '@arkade-os/solver-core/core/limits.js'
 import { addressFromPrivateKey } from '@arkade-os/solver-rails-evm/evm/transaction.js'
 import { EvmSendSwapService } from '@arkade-os/solver-corridors-evm/send/evmOrchestrator.js'
 import { EvmReceiveSwapService } from '@arkade-os/solver-corridors-evm/receive/evmOrchestrator.js'
@@ -149,13 +150,12 @@ export interface Services {
   /**
    * The ENVIRONMENT's configuration, exactly as `loadConfig()` read it.
    *
-   * Deliberately not the effective policy — see {@link Services.policy}. This
-   * is the ceiling `validateOverride` measures against, so an override can
-   * always be relaxed back toward what the environment permits.
+   * Deliberately not the effective policy — see {@link Services.policy}. An
+   * override is reverted to it, and may not enable a corridor it disables.
    */
   config: Config
   /**
-   * What this process actually quotes: {@link Services.config} narrowed by the
+   * What this process actually quotes: {@link Services.config} with the
    * console's stored overrides. {@link Services.replacePolicy} moves this.
    *
    * The services were constructed from these values and nothing re-reads them,
@@ -703,27 +703,27 @@ export const createServices = async (
     service.onTickSuccess = (id) => tickErrors.clear(id)
     service.shouldSkipTick = (id) => tickErrors.shouldSkip(id)
   }
-  /**
-   * What this process will ACTUALLY quote: the environment, narrowed by any
-   * overrides the console has stored.
-   *
-   * Read once, here, and never again — the services below are handed their
-   * policy at construction and nothing re-reads it, which is exactly why a
-   * settings change needs a restart to take effect.
-   *
-   * `config` stays the ENVIRONMENT's values and is what `Services.config`
-   * carries. The distinction is load-bearing: `validateOverride` uses it as
-   * the ceiling an override may not widen past, so if it were the already
-   * narrowed policy an operator could only ever ratchet limits downward and
-   * could never restore what the environment actually allows.
-   *
-   * `applyOverrides` is pure and can only narrow limits and the exposure cap,
-   * cannot enable a corridor the environment disabled, and bounds fees to the
-   * same range `config.ts` validates — so this can lower the amount at risk
-   * but never raise it above what the deployment already permitted.
-   */
   const bootOverrides = await adminStore.getOverrides()
   const policy = applyOverrides(config, bootOverrides)
+  const rangesOf = (of: Config) => ({
+    ...of.corridorLimits,
+    ...Object.fromEntries(of.evmCorridors.map((evm) => [evm.corridor, evm.limits])),
+  })
+  const liveRanges = rangesOf(policy)
+  const unclamped = clampedBefore(config.network, config.limits, rangesOf(config))
+  for (const { corridor, field, now, was } of unclamped) {
+    const [bound, before] = field === 'maxSats' ? ['max', 'at most'] : ['min', 'at least']
+    const live = (corridor === null ? policy.limits : liveRanges[corridor]!)[field]
+    log(
+      `limits — the config sets ${corridor ?? 'the deployment (limits.maxSwapSats)'} ${bound} to ${now} sats; releases before this allowed ${before} ${was}` +
+        (live === now ? '' : `; a console override makes it ${live}`),
+    )
+  }
+  if (unclamped.length > 0) {
+    log(
+      `limits — admission caps the total in flight at ${policy.maxExposedSats} sats (limits.maxExposedSats or its console override; unset, 3 × the deployment max)`,
+    )
+  }
 
   const assetThresholds = new Map<string, bigint>(
     config.assetRfqTokens.flatMap((token) =>

@@ -13,14 +13,12 @@ import type { Limits } from './limits.js'
 const TESTNET_LIMITS: Limits = { minSats: 1_000, maxSats: 1_000_000 }
 
 /**
- * Mainnet is capped below the test networks on purpose: this service moves real value
- * there. `MAX_SWAP_SATS` / `LN_SEND_MAX_SATS` can narrow a deployment below this,
- * never widen past it.
+ * Mainnet's default sits below the test networks' on purpose: a deployment that sets none moves little real value.
  */
 const BITCOIN_LIMITS: Limits = { minSats: 500, maxSats: 50_000 }
 
 export interface NetworkProfile {
-  /** Amount range this network permits. */
+  /** The amount range a deployment that sets none runs with. */
   limits: Limits
   /** This network in the uppercase spelling a backend SDK asks for. No caller here; a downstream fork that vendors this repo reads it. */
   backendNetwork: 'MAINNET' | 'SIGNET' | 'REGTEST'

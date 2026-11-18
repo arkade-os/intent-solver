@@ -1,13 +1,7 @@
 /**
  * Runtime settings overrides, layered onto the environment.
  *
- * THE CONSOLE LAYER IS NOT NARROW-ONLY, by deliberate decision. `narrow()` still
- * governs the ENV layers, but an override set here REPLACES the environment's bound in
- * either direction, including upward, and `MAX_EXPOSED_SATS` may be raised as well as
- * lowered.
- *
- * That drops the property the layering was built on — each step only ever reducing the
- * amount at risk — so the environment is a starting point rather than a ceiling. The
+ * An override REPLACES the environment's bound in either direction, `MAX_EXPOSED_SATS` included. The
  * admin API has NO AUTHENTICATION of its own (see `server.ts`; a reverse proxy is
  * expected to supply it), so anything that can reach the admin port can raise this
  * solver's per-swap and total exposure caps. `adminHost` and that proxy stand in front
@@ -290,11 +284,6 @@ export const applyOverrides = (config: Config, overrides: Record<string, string>
       continue
     }
     if (suffix === 'MIN_SATS' || suffix === 'MAX_SATS') {
-      // Assigned, not narrowed. This used to route through `narrow()`, whose
-      // Math.min/Math.max would have clamped a widening value straight back to
-      // the environment's — leaving an override that validated, persisted, and
-      // then did nothing. Dropping the refusal in `validateOverride` without
-      // dropping this would have been exactly that silent no-op.
       const current = corridorLimits[corridor]
       corridorLimits[corridor] =
         suffix === 'MIN_SATS' ? { ...current, minSats: Number(raw) } : { ...current, maxSats: Number(raw) }
@@ -303,9 +292,7 @@ export const applyOverrides = (config: Config, overrides: Record<string, string>
     if (suffix === 'ENABLED') corridorEnabled[corridor] = raw === 'true'
   }
 
-  // `narrow()` made a crossed range impossible; assignment does not. Both
-  // bounds are known here and nowhere earlier, so this is where the pair is
-  // checked. An empty range is not a safety problem — a corridor that admits
+  // An empty range is not a safety problem — a corridor that admits
   // no amount quotes nothing — but it is a silent one, so fall back to the
   // environment's range rather than leave the corridor dark.
   for (const corridor of CORRIDORS) {
@@ -338,7 +325,7 @@ export class UnexportableConfig extends Error {}
 
 export interface ConfigExport {
   document: unknown
-  /** What stays in the console, each with why: a corridor range no file can hold, a market the loader refuses. */
+  /** What stays in the console, each with why: a market the loader would refuse. */
   consoleOnly: { path: string; reason: string }[]
 }
 
@@ -353,13 +340,8 @@ export const exportDocument = (
 ): ConfigExport => {
   const booted = editableKnobValues(config)
   const live = editableKnobValues(applyOverrides(config, overrides))
-  // The loader narrows a corridor's range into `limits` and the console does not, so no file holds one outside.
-  const outside = (key: string): boolean =>
-    /_M(IN|AX)_SATS$/.test(key) &&
-    (Number(live[key]) < config.limits.minSats || Number(live[key]) > config.limits.maxSats)
-  const moved = editableKeys().filter((key) => live[key] !== booted[key])
   const doc = structuredClone(config.configDocument) as Record<string, unknown>
-  for (const key of moved.filter((key) => !outside(key))) {
+  for (const key of editableKeys().filter((key) => live[key] !== booted[key])) {
     const at = DOCUMENT_PATHS.get(key)
     if (!at) continue // left unwritten, so the reload check below refuses the export by name
     // A corridor block's presence alone turns it on (`enabled ?? true`), so a block written to says which.
@@ -390,19 +372,14 @@ export const exportDocument = (
   } catch (error) {
     throw new UnexportableConfig(`${cannot}: ${messageOf(error)}`)
   }
-  const path = (key: string): string => config.configPaths.get(key) ?? key
-  const lost = editableKeys().filter((key) => !outside(key) && reloaded[key] !== live[key])
+  const lost = editableKeys().filter((key) => reloaded[key] !== live[key])
   if (lost.length > 0) {
-    const each = lost.map((key) => `${path(key)} is ${live[key]} here but would load as ${reloaded[key]}`)
+    const each = lost.map(
+      (key) => `${config.configPaths.get(key) ?? key} is ${live[key]} here but would load as ${reloaded[key]}`,
+    )
     throw new UnexportableConfig(`${cannot}: ${each.join('; ')}`)
   }
-  const narrowed = moved.filter(outside).map((key) => ({
-    path: path(key),
-    reason:
-      `${live[key]} here, ${reloaded[key]} in the file: a file narrows each corridor's range to ` +
-      "limits.maxSwapSats and the network's own",
-  }))
-  return { document: redactDocument(doc), consoleOnly: [...narrowed, ...leftOut] }
+  return { document: redactDocument(doc), consoleOnly: leftOut }
 }
 
 /**
