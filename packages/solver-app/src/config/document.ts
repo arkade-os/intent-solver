@@ -79,6 +79,33 @@ const asset = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('arkade'), assetId: str, approvalThreshold: decimal.optional() }).strict(),
 ])
 
+const atomicBounds = z.object({ min: decimal, max: decimal }).strict().nullable()
+
+/** One console market, in the shape the markets API speaks. */
+const market = section({
+  base: str.nullable(),
+  quote: str.nullable(),
+  baseDecimals: num,
+  quoteDecimals: num,
+  feedUrl: str,
+  pricePath: str,
+  toleranceBps: num,
+  feeBps: num,
+  sellBaseFeeFlat: decimal,
+  buyBaseFeeFlat: decimal,
+  sellBaseFeeBps: num.nullable(),
+  buyBaseFeeBps: num.nullable(),
+  sellBase: atomicBounds,
+  buyBase: atomicBounds,
+  enabled: bool,
+  symbol: str.nullable(),
+  servesOffer: bool,
+  servesRfq: bool,
+  rfqSellBase: bool,
+  rfqBuyBase: bool,
+  carrierMode: z.enum(['inherit', 'off', 'priced']),
+})
+
 const corridorTerms = section({
   enabled: bool,
   minSats: num,
@@ -114,6 +141,7 @@ const buildSchema = (railNames: readonly string[]) =>
       }),
     }),
     assets: z.record(str, asset),
+    markets: z.array(market),
     limits: section({ maxSwapSats: num, maxExposedSats: num, approvalThresholdSats: num }),
     corridors: z.record(str, corridorTerms),
     offers: section({

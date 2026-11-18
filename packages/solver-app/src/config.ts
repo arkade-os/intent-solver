@@ -15,6 +15,7 @@ import { DEFAULT_LOCKUP_TIMEOUT, MAX_LOCKUP_TIMEOUT } from '@arkade-os/solver-co
 import { MAX_BIP68_BLOCKS, MAX_BIP68_SECONDS, relativeDelayFrom } from '@arkade-os/solver-core/core/timelocks.js'
 import { corridorEnabledFrom } from '@arkade-os/solver-core/core/corridorEnabled.js'
 import { FREE, type Corridor, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
+import type { AssetMarketConfig } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { ALL_DESCRIPTORS } from '@arkade-os/solver-corridors/corridors/index.js'
 import {
   evmCorridorPolicies,
@@ -464,6 +465,8 @@ export interface Config {
   lightningRailBlock: unknown | null
   /** The document as the operator wrote it, before any profile; absent when none was read. */
   configDocument?: unknown
+  /** The document's `markets`, each created once in the console's store when no row holds its pair. */
+  documentMarkets?: readonly AssetMarketConfig[]
   /**
    * Whether this solver advertises itself on Nostr (kind 38859).
    *

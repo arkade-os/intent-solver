@@ -536,7 +536,9 @@ export const createServices = async (
     // `config`, not `policy`: neither field is override-able, and `policy` is not resolved until below this.
     offerMarkets: config.offerMarkets,
     tokens: config.assetRfqTokens,
+    markets: config.documentMarkets,
   })
+  for (const line of adminStore.seededMarkets) log(`market — ${line}`)
   for (const line of adminStore.repairedServing) log(`market serving repaired — ${line}`)
   // Empty sinks make `post` a no-op, so a deployment that configures nothing
   // gets today's behaviour exactly: no timer, no network call, no failure.

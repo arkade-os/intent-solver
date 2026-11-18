@@ -191,13 +191,17 @@ describe('exporting the config', () => {
 
   it('names, beside the saved file, each console value no file can hold', async () => {
     const state: Record<string, unknown> = {}
-    const consoleOnly = [{ path: 'corridors["arkade:BTC->lightning:BTC"].maxSats', console: 2_000_000, file: 50_000 }]
+    const consoleOnly = [
+      { path: 'corridors["arkade:BTC->lightning:BTC"].maxSats', reason: '2000000 here, 50000 in the file' },
+    ]
     await ui(
       state,
       vi.fn(async () => ({ document: {}, consoleOnly })),
     ).exportConfig()
     expect(clicked.at(-1)!.attrs.download).toBe('solver-config.json')
-    expect(state.banner).toContain('corridors["arkade:BTC->lightning:BTC"].maxSats 2000000 (the file keeps 50000)')
+    expect(state.banner).toBe(
+      'Exported, but these stay in the console: corridors["arkade:BTC->lightning:BTC"].maxSats (2000000 here, 50000 in the file).',
+    )
   })
 
   it('puts a refusal in the banner rather than in a file', async () => {

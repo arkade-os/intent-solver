@@ -403,12 +403,13 @@ and limits, and which directions each asset market serves. The document is the
 baseline that state starts from, and the console's **Revert to config file**
 puts it back — the whole console, or one market — after showing every change.
 **Export config** goes the other way: it downloads the document this solver
-booted from with the console's setting overrides written in, each credential
-replaced by a `<PLACEHOLDER>` the loader refuses until it is filled back in.
-Market serving and the rebalance policy have no place in the document and stay
-in the console. So does a corridor range outside `limits.maxSwapSats` and the
-network's own range, which only the console can widen past; the export names
-each one it leaves out.
+booted from with the console's setting overrides and its asset markets
+(`markets`) written in, each credential replaced by a `<PLACEHOLDER>` the loader
+refuses until it is filled back in. A setting left at its default is not
+written, since the default reproduces it. The rebalance policy has no place in
+the document and stays in the console. So does a corridor range outside
+`limits.maxSwapSats` and the network's own range, which only the console can
+widen past; the export names each one it leaves out.
 
 ### Config — required
 
@@ -582,13 +583,14 @@ the input refuses `pricing_unavailable`. For a BTC/asset market, set the fee on
 the BTC input direction to the carrier dust the solver spends when it delivers
 the asset; the opposite direction can remain zero.
 
-| Setting                            | Notes                                                                                                                                                                                                                                                                                                                                                                                                         |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `assets.<label>.kind`              | `"arkade"` for an Arkade asset. The label is the market's symbol, uppercased: `USDA`. A 68-hex asset id makes an unreadable name, which is why the asset is labelled at all                                                                                                                                                                                                                                   |
-| `assets.<label>.assetId`           | the 68-hex Arkade asset id                                                                                                                                                                                                                                                                                                                                                                                    |
-| `assets.<label>.approvalThreshold` | the large-swap approval threshold for payouts in this asset, in its ATOMIC units as a decimal string. Unset carries no gate for this asset, as an unset `limits.approvalThresholdSats` carries none for BTC; `"0"` gates every swap of it. Startup logs any served asset without one. Config-only on purpose: the console is where a swap gets approved, so it must not also be where the threshold is raised |
-| `offers.carrierPricing`            | `true` nets the dust carrier an Arkade asset rides on out of whichever side of an RFQ quote supplies it — returned inside `to_amount` when the client fronted it, charged against the input when this solver delivers it — and publishes it as the quote's `carrier_sats`. Default `false`, so a running deployment's quoted prices do not move on upgrade                                                    |
-| `offers.quoteValiditySeconds`      | how long an asset quote binds. Default 30, floor 5, ceiling 900. Short on purpose — every pair here is cross-asset by construction, so the solver is short the market for the whole window and the window IS the exposure. § 5 puts cross-asset windows "on the order of ~30 seconds"                                                                                                                         |
+| Setting                            | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `assets.<label>.kind`              | `"arkade"` for an Arkade asset. The label is the market's symbol, uppercased: `USDA`. A 68-hex asset id makes an unreadable name, which is why the asset is labelled at all                                                                                                                                                                                                                                                                         |
+| `assets.<label>.assetId`           | the 68-hex Arkade asset id                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `assets.<label>.approvalThreshold` | the large-swap approval threshold for payouts in this asset, in its ATOMIC units as a decimal string. Unset carries no gate for this asset, as an unset `limits.approvalThresholdSats` carries none for BTC; `"0"` gates every swap of it. Startup logs any served asset without one. Config-only on purpose: the console is where a swap gets approved, so it must not also be where the threshold is raised                                       |
+| `offers.carrierPricing`            | `true` nets the dust carrier an Arkade asset rides on out of whichever side of an RFQ quote supplies it — returned inside `to_amount` when the client fronted it, charged against the input when this solver delivers it — and publishes it as the quote's `carrier_sats`. Default `false`, so a running deployment's quoted prices do not move on upgrade                                                                                          |
+| `offers.quoteValiditySeconds`      | how long an asset quote binds. Default 30, floor 5, ceiling 900. Short on purpose — every pair here is cross-asset by construction, so the solver is short the market for the whole window and the window IS the exposure. § 5 puts cross-asset windows "on the order of ~30 seconds"                                                                                                                                                               |
+| `markets`                          | console market rows, each in the shape the markets API speaks (`base`, `quote`, decimals, `feedUrl`, `pricePath`, fees, bounds, serving, `carrierMode`); **Export config** writes the live rows here. Each is checked at boot as the console checks a row, then **created once**, by pair, where no row holds it: never over a console row, never again after the console deletes it. A created market that is `enabled` quotes from its first boot |
 
 ### Config — `rails.lightning.backend: "lnd"` only
 
@@ -618,11 +620,11 @@ the asset; the opposite direction can remain zero.
 These configure the test harness and scripts, not the solver, and stay
 environment variables.
 
-| Var                                                 | Default            | Used by                                                                                                                                                        |
-| --------------------------------------------------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PAYEE_MNEMONIC`                                    | none               | `cli invoice` on a non-`fake` backend — stands in for an arbitrary Lightning recipient                                                                         |
+| Var                                                 | Default            | Used by                                                                                                                                                           |
+| --------------------------------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PAYEE_MNEMONIC`                                    | none               | `cli invoice` on a non-`fake` backend — stands in for an arbitrary Lightning recipient                                                                            |
 | `E2E_ENV_FILE`                                      | `.env.regtest.lnd` | `test/e2e` and the regtest scripts, which still read their settings from this env file. Note its `WALLET_DB_PATH` is a **different wallet** from `.env.regtest`'s |
-| `MOCK_RELAY_PORT`, `PROBE_WAIT_MS`, `SOLVER_PUBKEY` | —                  | `scripts/mock-relay.mjs`, `scripts/probe-relay.mjs`                                                                                                            |
+| `MOCK_RELAY_PORT`, `PROBE_WAIT_MS`, `SOLVER_PUBKEY` | —                  | `scripts/mock-relay.mjs`, `scripts/probe-relay.mjs`                                                                                                               |
 
 ### Amounts (`packages/solver-core/src/core/networks.ts`, `packages/solver-core/src/core/limits.ts`)
 
