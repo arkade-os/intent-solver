@@ -319,8 +319,9 @@ describe('markets in the export', () => {
     'https://feed.example/x?apikey=secret-omit-key',
     'https://user:secret"omit-key@feed.example/x',
     'https://feed.example/x?apikey=secret\\omit-key',
+    '  https://feed.example/x?apikey=secret-omit-key  ',
   ])('names a market it leaves out without quoting a credential its feed carries: %s', (feedUrl) => {
-    const { consoleOnly } = exportDocument(load(base()), {}, [brlt({ feedUrl, pricePath: '' })])
+    const { consoleOnly } = exportDocument(load(base()), {}, [{ ...brlt({ pricePath: '' }), feedUrl }])
     expect(consoleOnly[0]?.reason).toContain('<feed URL>')
     expect(JSON.stringify(consoleOnly)).not.toContain('omit-key')
   })

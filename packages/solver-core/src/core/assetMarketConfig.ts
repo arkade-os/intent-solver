@@ -465,9 +465,11 @@ export const feedCredential = (feedUrl: string): boolean => {
 
 /** A message that may quote `feedUrl`, with the URL taken out when it carries a credential. */
 export const withoutFeedCredential = (message: string, feedUrl: string): string => {
-  if (feedUrl === '' || !feedCredential(feedUrl)) return message
-  // Errors quote a feed through JSON.stringify, which escapes a quote or backslash the raw URL holds.
-  const forms = [JSON.stringify(feedUrl).slice(1, -1), feedUrl]
+  if (feedUrl.trim() === '' || !feedCredential(feedUrl.trim())) return message
+  // Errors quote a feed trimmed, and through JSON.stringify, which escapes a quote or backslash the URL holds.
+  const forms = [...new Set([feedUrl, feedUrl.trim()])]
+    .flatMap((url) => [JSON.stringify(url).slice(1, -1), url])
+    .sort((a, b) => b.length - a.length)
   return forms.reduce((text, form) => text.split(form).join('<feed URL>'), message)
 }
 
