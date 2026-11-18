@@ -91,11 +91,9 @@ export interface ArkadeOps {
 }
 
 /**
- * Both halves or neither: covclaimd declines a taptree-less output at debug
- * level, before reading the packet, and that reads as a swap that never settled.
+ * The packet and covenant tree travel together so a claimer can reconstruct the spend.
  */
 export interface ClaimPacketStamp {
-  /** covclaimd's three-TLV `ClaimPacket` body, as an Arkade extension packet. */
   packet: Uint8Array
   /** `VtxoScript.encode()` form, for `PSBT_OUT_TAP_TREE`. */
   tapTree: Uint8Array

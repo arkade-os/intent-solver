@@ -2,12 +2,6 @@
  * E2E — `lightning:BTC->arkade:BTC` (receive), against a live regtest stack and
  * REAL LIGHTNING.
  *
- * This corridor has NO CLI command and NO RFQ ingress routing, so there is
- * nothing to shell out to: the test constructs `ReceiveSwapService` against
- * real adapters and drives `quote`/`tick` — the same thing `packages/solver-app/src/cli.ts`'s
- * self-test commands do internally, minus the CLI. That is a genuine exercise
- * of the money path and does not depend on wiring that does not exist yet.
- *
  * WHY THIS IS THE HIGHEST-VALUE TEST IN THE SET. The solver never learns `P`
  * from anyone here — it reads it back out of the Arkade transaction that
  * claimed the lockup (`findClaimPreimage`, `src/arkade/wallet.ts`). That read
@@ -33,29 +27,6 @@
  *     the solver actually got paid, and no fake can establish it: a fake can
  *     only report what the test told it.
  *
- * THE CLIENT CLAIMS, NOT COVCLAIMD. The covenant's `receiver` is the client
- * (`receiveCovenantRowFor` maps `receiverPubkey: row.payoutPubkey`), so the
- * client can spend the collaborative claim leaf itself — `preimage + receiver
- * + arkade server`, no CSV, no unilateral exit. That is what
- * `support/clientClaim.ts` does here.
- *
- * covclaimd is supported and OPTIONAL, and is not used by this test so that the
- * CLIENT-claims path is exercised deterministically rather than racing a daemon
- * that would also claim. The solver's watch path is indifferent to who spent the
- * lockup, so the same `findClaimPreimage` code runs either way.
- *
- * That it CAN claim is covered separately, by `covclaimdClaim.e2e.test.ts`.
- * Older builds could not — `v0.0.1-rc.1` accepted a reveal and then silently
- * pushed nothing, because the funding output carried no taptree and the check
- * that needed one logged at no level — which is why this header used to say
- * covclaimd could not claim this covenant at all.
- *
- * ROLES. The test plays client and solver both. As client it generates `P`,
- * seals it (`support/claimPacket.ts` — the one piece of client code that
- * exists nowhere in `src/`, by design), supplies its own Arkade payout
- * address and key, and claims. As solver it quotes, funds its OWN Arkade
- * lockup, and settles the hold once `P` is public.
- *
  * THE FIRST TEST IS AN ADAPTER-CONTRACT REGRESSION, and it used to fail. The
  * shipped `getHoldState` returned the BOLT11 validity window (600s) where the
  * port asks for the held HTLC's settle deadline, so `evaluateReceiveFunding`
@@ -69,7 +40,6 @@
  *   - arkade-regtest up: arkd (ARKADE_OPERATOR_URL), emulator (EMULATOR_URL), and
  *     BOTH LND nodes with their channel active:
  *       docker exec lnd lncli --network=regtest listchannels
- *     No covclaimd needed by any test in this file.
  *   - `.env.regtest.lnd` (or E2E_ENV_FILE) with WALLET_MNEMONIC / ARKADE_OPERATOR_URL /
  *     EMULATOR_URL / LND_SOCKET / LND_CERT_PATH / LND_MACAROON_PATH
  *   - the Arkade wallet funded AND SETTLED (`scripts/regtest-fund.mjs`) — on
@@ -77,24 +47,31 @@
  *   - the counterparty node able to pay {@link AMOUNT_SATS} — it starts with
  *     ~500k of local balance in the channel
  *
- * Run: `pnpm test:e2e`   (never runs in CI — `pnpm test` excludes `test/e2e`)
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
-import { secp256k1 } from '@noble/curves/secp256k1.js'
-import { sha256 } from '@noble/hashes/sha2.js'
-import { hex } from '@scure/base'
+import { randomBytes } from 'node:crypto'
+import { Extension, Transaction } from '@arkade-os/sdk'
+import { appendArkadeScript, CLAIM_PACKET_TYPE } from '@arkade-os/swap'
+import { base64, hex } from '@scure/base'
 import { ReceiveSwapStore, type ReceiveSwapRow } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
 import { receiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive/arkadeOps.js'
-import { DEFAULT_HOLD_INVOICE_WINDOW, ReceiveSwapService } from '@arkade-os/solver-corridors/receive/orchestrator.js'
-import type { CovclaimdClient } from '@arkade-os/solver-corridors/receive/covclaimd.js'
+import {
+  DEFAULT_HOLD_INVOICE_WINDOW,
+  receiveCovenantRowFor,
+  ReceiveSwapService,
+} from '@arkade-os/solver-corridors/receive/orchestrator.js'
+import { covenantScriptFromRow } from '@arkade-os/solver-corridors/send/arkadeOps.js'
+import { respondToLightningReceiveRfqRequest } from '@arkade-os/solver-corridors/corridors/rfq.js'
+import { RFQ_PAIR_RECEIVE } from '@arkade-os/solver-corridors/wire/lightningReceivePayloads.js'
 import { evaluateReceiveFunding, MIN_SETTLE_WINDOW } from '@arkade-os/solver-core/core/receive.js'
 import type { Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { amountSatsOf } from '@arkade-os/solver-core/invoice/decode.js'
 import { HOUR } from '@arkade-os/solver-core/core/timelocks.js'
 import { nowSeconds, poll } from '@arkade-os/solver-core/util/poll.js'
-import { newSealedPreimage } from './support/claimPacket.js'
+import { newPreimage } from './support/preimage.js'
+import claimPacketVector from '../receive/fixtures/delegateeReceiveTerms.json' with { type: 'json' }
 import { clientClaimLockup } from './support/clientClaim.js'
 import {
   cancelSolverHold,
@@ -145,14 +122,12 @@ let dir: string
 /** Payments left running by a test, stopped in `afterAll` so no fork is held open. */
 const payers: CounterpartyPayment[] = []
 
-/** Build a service over the shared store, with an injectable clock, fee and optional covclaimd. */
-const serviceWith = (covclaimd: CovclaimdClient | null, now?: () => number, fee?: Fee): ReceiveSwapService =>
+const serviceWith = (now?: () => number, fee?: Fee): ReceiveSwapService =>
   new ReceiveSwapService({
     acceptUnilateralGap: false,
     store,
     ln,
     arkade: arkadeOps,
-    covclaimd,
     limits: arkade.limits,
     maxExposedSats: arkade.maxExposedSats,
     totalCommitted: () => store.committedSats(),
@@ -219,7 +194,7 @@ describe('e2e lightning:BTC->arkade:BTC (receive)', () => {
       // A hold invoice on the solver's own node, minted exactly as the
       // orchestrator mints one. Nobody will ever hold the preimage of this
       // hash, which is fine: the hold is cancelled below, never settled.
-      const paymentHash = hex.encode(sha256(secp256k1.utils.randomSecretKey()))
+      const { paymentHash } = newPreimage()
       const hold = await ln.createHoldInvoice({
         amountSats: AMOUNT_SATS,
         paymentHash,
@@ -273,14 +248,12 @@ describe('e2e lightning:BTC->arkade:BTC (receive)', () => {
   )
 
   it(
-    'is paid for real, holds the HTLC, funds its own lockup, and settles with the P it read off the claim',
+    'funds with the client packet from its RFQ and settles the HTLC with the preimage from the claim',
     async () => {
       await requireStack('lightning:BTC->arkade:BTC happy path', ['arkd', 'emulator', 'lnd', 'ln-counterparty'])
       await assertArkadeSpendable(arkade, AMOUNT_SATS)
 
-      // No covclaimd: the CLIENT claims. See this file's header for why that
-      // is the path under test rather than an alternative to it.
-      const service = serviceWith(null)
+      const service = serviceWith()
 
       // Two clocks over ONE store, the same idiom the refund test below uses —
       // here to make ELAPSED TIME BETWEEN QUOTE AND FUNDING deterministic
@@ -290,30 +263,37 @@ describe('e2e lightning:BTC->arkade:BTC (receive)', () => {
       // transition used to recompute `refund_locktime` against the newer clock,
       // so the covenant no longer re-derived the funded pkScript and the
       // client's own claim below could not match it.
-      const quoting = serviceWith(null, () => nowSeconds() - QUOTE_LAG)
+      const quoting = serviceWith(() => nowSeconds() - QUOTE_LAG)
 
-      // CLIENT: choose P, seal it (the packet still travels, so the solver can
-      // hand it to a covclaimd whenever one can claim), and nominate the payout.
-      const sealed = newSealedPreimage(hex.encode(secp256k1.getPublicKey(secp256k1.utils.randomSecretKey(), true)))
-      const payoutAddress = await arkade.ctx.wallet.getAddress()
-      const payoutPubkey = hex.encode(await arkade.ctx.identity.xOnlyPublicKey())
-
-      const outcome = await quoting.quote({
-        paymentHash: sealed.paymentHash,
-        amountSats: AMOUNT_SATS,
-        payoutAddress,
-        payoutPubkey,
-        claimPacket: sealed.packet,
+      const secret = newPreimage()
+      const rfqId = randomBytes(32).toString('hex')
+      const outcome = await respondToLightningReceiveRfqRequest(quoting, {
+        v: 1,
+        type: 'rfq_request',
+        rfq_id: rfqId,
+        pair: RFQ_PAIR_RECEIVE,
+        amount: AMOUNT_SATS,
+        amount_side: 'to',
+        profile: {
+          payment_hash: secret.paymentHash,
+          payout_address: await arkade.ctx.wallet.getAddress(),
+          payout_pubkey: hex.encode(await arkade.ctx.identity.xOnlyPublicKey()),
+          // This fixture tests transport; the client claims with the fresh preimage.
+          claim_packet: claimPacketVector.packet,
+        },
       })
-      if (!outcome.accepted) throw new Error(`solver refused the quote: ${outcome.reason}`)
-      const swap = outcome.swap
+      if (outcome.kind !== 'quote') throw new Error('solver refused the quote: ' + outcome.detail)
+      const swap = await store.findByRfqId(rfqId)
+      if (!swap) throw new Error('receive quote was not stored')
+      expect(swap.claimPacket).toBe(claimPacketVector.packet)
+      expect(outcome.payload.profile).toMatchObject({ invoice: swap.invoice })
       expect(swap.invoice).toContain(arkade.profile.invoicePrefix)
 
       // THE PAYER: a second, independent Lightning node pays the hold invoice
       // for real. Not awaited — `payinvoice` blocks for as long as the HTLC is
       // held, which is the whole rest of this test.
       payFromCounterpartyNode(swap.invoice)
-      const held = await awaitHeld(sealed.paymentHash)
+      const held = await awaitHeld(secret.paymentHash)
 
       // GENUINELY HELD, NOT SETTLED. The sats are hanging in a real channel:
       // committed by the payer, collectable only with P, and P does not exist
@@ -328,15 +308,27 @@ describe('e2e lightning:BTC->arkade:BTC (receive)', () => {
       const funded = await driveUntil(service, swap.id, new Set(['funded', ...TERMINAL]))
       expect(funded.state).toBe('funded')
       expect(funded.arkadeLockupTxid).toBeTruthy()
-      // Nothing revealed — there is no covclaimd in this run.
-      expect(funded.revealedAt).toBeNull()
+      const rawFundingTx = await poll(
+        async () => {
+          const { txs } = await arkade.ctx.wallet.indexerProvider.getVirtualTxs([funded.arkadeLockupTxid!])
+          return txs[0] ?? null
+        },
+        { attempts: 20, intervalMs: 500, whenExhausted: 'funding transaction never appeared in the indexer' },
+      )
+      const fundingTx = Transaction.fromPSBT(base64.decode(rawFundingTx))
+      const packet = Extension.fromTx(fundingTx).getPacketByType(CLAIM_PACKET_TYPE)
+      if (!packet) throw new Error('missing claim packet on the funding transaction')
+      const covenant = covenantScriptFromRow(receiveCovenantRowFor(funded))
+      const arkadeScript = covenant.nonInteractiveClaimArkadeScript
+      if (!arkadeScript) throw new Error('missing non-interactive claim script')
+      expect(packet.serialize()).toEqual(appendArkadeScript(base64.decode(claimPacketVector.packet), arkadeScript))
 
       // ...and the payer is STILL waiting, through the whole Arkade funding.
       // This is the exposure window the corridor is designed around: the
       // solver has now paid out on Arkade and still holds only an unsettled
       // HTLC.
-      expect((await solverInvoice(sealed.paymentHash)).state).toBe('ACCEPTED')
-      expect((await counterpartyPayment(sealed.paymentHash))?.status).toBe('IN_FLIGHT')
+      expect((await solverInvoice(secret.paymentHash)).state).toBe('ACCEPTED')
+      expect((await counterpartyPayment(secret.paymentHash))?.status).toBe('IN_FLIGHT')
 
       // CLIENT: claim the lockup through the collaborative claim leaf,
       // deriving the covenant independently and refusing a mismatch.
@@ -358,7 +350,7 @@ describe('e2e lightning:BTC->arkade:BTC (receive)', () => {
           pkScript: funded.pkScript,
           nonInteractiveParameters: funded.nonInteractiveParameters ?? false,
         },
-        sealed.preimage,
+        secret.preimage,
       )
       expect(claimTxid).toBeTruthy()
 
@@ -371,19 +363,19 @@ describe('e2e lightning:BTC->arkade:BTC (receive)', () => {
       // client generated and never disclosed. That is the ConditionWitness
       // toPSBT()/fromPSBT() round trip, proven against a live node rather than
       // a synthetic fixture.
-      expect(settled.preimage).toBe(hex.encode(sealed.preimage))
+      expect(settled.preimage).toBe(hex.encode(secret.preimage))
 
       // AND THE SOLVER ACTUALLY GOT PAID. Its own node settled the HTLC with
       // that P...
-      const collected = await solverInvoice(sealed.paymentHash)
+      const collected = await solverInvoice(secret.paymentHash)
       expect(collected.state).toBe('SETTLED')
-      expect(collected.r_preimage).toBe(hex.encode(sealed.preimage))
+      expect(collected.r_preimage).toBe(hex.encode(secret.preimage))
 
       // ...and THE PAYER'S node — a separate process this test cannot write to
       // except by being paid — agrees the sats left it, for that same P. This
       // is the assertion the file's old fake payer could not make at all.
-      const payment = await awaitPaymentStatus(sealed.paymentHash, 'SUCCEEDED')
-      expect(payment.payment_preimage).toBe(hex.encode(sealed.preimage))
+      const payment = await awaitPaymentStatus(secret.paymentHash, 'SUCCEEDED')
+      expect(payment.payment_preimage).toBe(hex.encode(secret.preimage))
       expect(Number(payment.value_sat)).toBe(AMOUNT_SATS)
     },
     SWAP_TIMEOUT_MS,
@@ -395,34 +387,22 @@ describe('e2e lightning:BTC->arkade:BTC (receive)', () => {
       await requireStack('lightning:BTC->arkade:BTC refund', ['arkd', 'emulator', 'lnd', 'ln-counterparty'])
       await assertArkadeSpendable(arkade, AMOUNT_SATS)
 
-      // covclaimd is deliberately a no-op that accepts the packet and never
-      // pushes a claim — precisely the situation this path exists for, and it
-      // makes the test deterministic instead of racing a real daemon that
-      // might claim. It also means this test needs no covclaimd at all.
-      const neverClaims: CovclaimdClient = {
-        getPubKeys: async () => ({ covclaimdPubKey: '', emulatorPubKey: arkade.emulator.pubkey }),
-        reveal: async () => {},
-      }
-
       // Two clocks over ONE store. The quoting service runs BACKDATED, so the
       // refund deadline it derives (`now + MAX_REFUND_HORIZON`, 2h) lands 3h in
       // the PAST — the same "already matured" trick `cli test-refund` uses, and
       // the same 3h figure, so the covenant's locktime clears median-time-past
       // (which lags wall clock by ~1h) on the first try. The driving service
       // then runs on the real clock and sees a deadline long gone.
-      const backdated = serviceWith(neverClaims, () => nowSeconds() - 5 * HOUR)
-      const present = serviceWith(neverClaims)
+      const backdated = serviceWith(() => nowSeconds() - 5 * HOUR)
+      const present = serviceWith()
 
-      // A throwaway recipient key: the packet is never decrypted by anyone on
-      // this path, but sealing it still has to be a real ECIES operation.
-      const nobody = hex.encode(secp256k1.getPublicKey(secp256k1.utils.randomSecretKey(), true))
-      const sealed = newSealedPreimage(nobody)
+      const secret = newPreimage()
       const outcome = await backdated.quote({
-        paymentHash: sealed.paymentHash,
+        paymentHash: secret.paymentHash,
         amountSats: AMOUNT_SATS,
         payoutAddress: await arkade.ctx.wallet.getAddress(),
         payoutPubkey: hex.encode(await arkade.ctx.identity.xOnlyPublicKey()),
-        claimPacket: sealed.packet,
+        claimPacket: null,
       })
       if (!outcome.accepted) throw new Error(`solver refused the quote: ${outcome.reason}`)
       const swap = outcome.swap
@@ -431,7 +411,7 @@ describe('e2e lightning:BTC->arkade:BTC (receive)', () => {
       // Paid for real, and held for real — the solver's capital goes out
       // against an HTLC it can only ever collect by learning P.
       payFromCounterpartyNode(swap.invoice)
-      await awaitHeld(sealed.paymentHash)
+      await awaitHeld(secret.paymentHash)
 
       // Backdated clock: arms and funds, and stops at `funded` because from
       // where it stands the deadline has not passed.
@@ -453,13 +433,13 @@ describe('e2e lightning:BTC->arkade:BTC (receive)', () => {
       // here by the harness standing in for the network at `E`, see
       // `cancelSolverHold` — and the payer's own node records the payment as
       // FAILED rather than quietly succeeding.
-      expect((await solverInvoice(sealed.paymentHash)).settled).toBe(false)
-      await cancelSolverHold(sealed.paymentHash)
-      const payment = await awaitPaymentStatus(sealed.paymentHash, 'FAILED')
+      expect((await solverInvoice(secret.paymentHash)).settled).toBe(false)
+      await cancelSolverHold(secret.paymentHash)
+      const payment = await awaitPaymentStatus(secret.paymentHash, 'FAILED')
       expect(payment.payment_preimage).toMatch(/^0*$/)
 
       // And the solver collected nothing on this swap.
-      const abandoned = await solverInvoice(sealed.paymentHash)
+      const abandoned = await solverInvoice(secret.paymentHash)
       expect(abandoned.state).toBe('CANCELED')
       expect(abandoned.settled).toBe(false)
     },
@@ -475,17 +455,17 @@ describe('e2e lightning:BTC->arkade:BTC (receive)', () => {
       await requireStack('lightning:BTC->arkade:BTC exact-out', ['arkd', 'emulator', 'lnd', 'ln-counterparty'])
       await assertArkadeSpendable(arkade, PRICED_SWAP_SATS)
 
-      const service = serviceWith(null, undefined, PRICED_FEE)
-      const quoting = serviceWith(null, () => nowSeconds() - QUOTE_LAG, PRICED_FEE)
+      const service = serviceWith(undefined, PRICED_FEE)
+      const quoting = serviceWith(() => nowSeconds() - QUOTE_LAG, PRICED_FEE)
 
-      const sealed = newSealedPreimage(hex.encode(secp256k1.getPublicKey(secp256k1.utils.randomSecretKey(), true)))
+      const secret = newPreimage()
       const outcome = await quoting.quote({
-        paymentHash: sealed.paymentHash,
+        paymentHash: secret.paymentHash,
         amountSats: PRICED_SWAP_SATS,
         amountSide: 'to',
         payoutAddress: await arkade.ctx.wallet.getAddress(),
         payoutPubkey: hex.encode(await arkade.ctx.identity.xOnlyPublicKey()),
-        claimPacket: sealed.packet,
+        claimPacket: null,
       })
       if (!outcome.accepted) throw new Error(`solver refused the quote: ${outcome.reason}`)
       const swap = outcome.swap
@@ -496,7 +476,7 @@ describe('e2e lightning:BTC->arkade:BTC (receive)', () => {
       expect(amountSatsOf(swap.invoice)).toBe(EXACT_OUT_INVOICE_SATS)
 
       payFromCounterpartyNode(swap.invoice)
-      const held = await awaitHeld(sealed.paymentHash)
+      const held = await awaitHeld(secret.paymentHash)
       expect(Number(held.amt_paid_sat)).toBe(EXACT_OUT_INVOICE_SATS)
 
       const funded = await driveUntil(service, swap.id, new Set(['funded', ...TERMINAL]))
@@ -521,14 +501,14 @@ describe('e2e lightning:BTC->arkade:BTC (receive)', () => {
           pkScript: funded.pkScript,
           nonInteractiveParameters: funded.nonInteractiveParameters ?? false,
         },
-        sealed.preimage,
+        secret.preimage,
       )
       expect(claimTxid).toBeTruthy()
 
       const settled = await driveUntil(service, swap.id, new Set(['settled', ...TERMINAL]))
       expect(settled.state).toBe('settled')
 
-      const payment = await awaitPaymentStatus(sealed.paymentHash, 'SUCCEEDED')
+      const payment = await awaitPaymentStatus(secret.paymentHash, 'SUCCEEDED')
       expect(Number(payment.value_sat)).toBe(EXACT_OUT_INVOICE_SATS)
     },
     SWAP_TIMEOUT_MS,
@@ -539,14 +519,14 @@ describe('e2e lightning:BTC->arkade:BTC (receive)', () => {
     async () => {
       await requireStack('lightning:BTC->arkade:BTC exact-in', ['arkd', 'emulator', 'lnd'])
 
-      const sealed = newSealedPreimage(hex.encode(secp256k1.getPublicKey(secp256k1.utils.randomSecretKey(), true)))
-      const outcome = await serviceWith(null, undefined, PRICED_FEE).quote({
-        paymentHash: sealed.paymentHash,
+      const secret = newPreimage()
+      const outcome = await serviceWith(undefined, PRICED_FEE).quote({
+        paymentHash: secret.paymentHash,
         amountSats: PRICED_SWAP_SATS,
         amountSide: 'from',
         payoutAddress: await arkade.ctx.wallet.getAddress(),
         payoutPubkey: hex.encode(await arkade.ctx.identity.xOnlyPublicKey()),
-        claimPacket: sealed.packet,
+        claimPacket: null,
       })
       if (!outcome.accepted) throw new Error(`solver refused the quote: ${outcome.reason}`)
       const swap = outcome.swap
@@ -555,7 +535,7 @@ describe('e2e lightning:BTC->arkade:BTC (receive)', () => {
       expect(amountSatsOf(swap.invoice)).toBe(PRICED_SWAP_SATS)
 
       // Stops at the mint: nobody pays this one, so no capital leaves the float.
-      await cancelSolverHold(sealed.paymentHash)
+      await cancelSolverHold(secret.paymentHash)
     },
     SWAP_TIMEOUT_MS,
   )

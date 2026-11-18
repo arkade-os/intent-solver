@@ -387,10 +387,13 @@ scripts/e2e-relay-receive.sh
 Quote only, deliberately: paying the invoice, funding the lockup and claiming
 with `P` are already covered by `test/e2e/receiveLightning*.e2e.test.ts` against
 the orchestrator, and the leg those cannot reach is the one that arrives off the
-wire. It needs the `nostr` profile and covclaimd (:7271) but no LND — the
-default `.env.regtest` runs `LN_BACKEND=fake`, whose hold-invoice half is a full
-`LightningBackend`. `ENV_FILE=.env.regtest.lnd` drives the same leg against a
-real LND; both are verified.
+wire. Use the `nostr` profile. The default `.env.regtest` uses the fake Lightning
+backend. `ENV_FILE=.env.regtest.lnd` exercises the same flow against LND.
+
+To send a prebuilt packet with `examples/receive-quote-relay.mjs`, provide its
+base64 body in `CLAIM_PACKET` and the matching hex payment hash in
+`PAYMENT_HASH`. If the packet binds a payout, use the same Arkade address in
+both the packet and the example's wallet.
 
 - Clients address offers to the provider's x-only pubkey (logged at startup).
   The payloads on the wire are byte-for-byte the HTTP bodies, so a client is
@@ -1564,11 +1567,6 @@ hard way. The numbers below are the smallest legal values, not arbitrary ones.
   therefore brings the stack up perfectly happily and only fails once funds are
   actually settled. Non-regtest equivalent: `DEFAULT_MIN_BATCH_EXPIRY_SECONDS =
 86400`.
-- **`COVCLAIMD_IMAGE` must be set explicitly, and at `v0.0.1-rc.5` or above.**
-  `regtest.mjs` silently drops covclaimd from the stack when it is unset — no
-  error, the container simply is not there. Setting it is not enough on its own:
-  compose still defaults to `rc.4`, which cannot claim against the `v0.0.7`
-  emulator the same stack brings up. See § covclaimd for why.
 
 Three more things that cost time if forgotten:
 
@@ -1617,7 +1615,6 @@ git clone https://github.com/arklabsHQ/arkade-regtest && cd arkade-regtest
 ARKD_VTXO_TREE_EXPIRY=6144 ARKD_UNILATERAL_EXIT_DELAY=512 \
 ARKD_PUBLIC_UNILATERAL_EXIT_DELAY=512 ARKD_BOARDING_EXIT_DELAY=2048 \
 ARKD_CHECKPOINT_EXIT_DELAY=1536 \
-COVCLAIMD_IMAGE=ghcr.io/arkade-os/covclaimd:v0.0.1-rc.5 \
 node regtest.mjs start --clean
 
 # 2. this repo
@@ -1676,7 +1673,6 @@ git clone https://github.com/arklabsHQ/arkade-regtest && cd arkade-regtest
 ARKD_VTXO_TREE_EXPIRY=6144 ARKD_UNILATERAL_EXIT_DELAY=512 \
 ARKD_PUBLIC_UNILATERAL_EXIT_DELAY=512 ARKD_BOARDING_EXIT_DELAY=2048 \
 ARKD_CHECKPOINT_EXIT_DELAY=1536 \
-COVCLAIMD_IMAGE=ghcr.io/arkade-os/covclaimd:v0.0.1-rc.5 \
 node regtest.mjs start --clean
 
 # 2. extract boltz-lnd's TLS cert and macaroon
@@ -1792,10 +1788,8 @@ just brought a stack up.
 **One job per GROUP**, listed in `.github/e2e-groups.json`. A group is the set of
 corridors that can share one stack configuration, and the splits are forced by
 that stack rather than chosen for speed: only the `asset` group mints an asset,
-because an asset coin changes what every later sats-only selection can spend;
-only `receive-lightning` runs covclaimd, which would otherwise sweep lockups a
-send test meant to claim itself; the Lightning and onchain legs need `boltz`,
-whose setup is the only thing that funds `boltz-lnd` and opens its channel.
+because an asset coin changes what every later sats-only selection can spend.
+The Lightning and onchain legs use `boltz` to fund `boltz-lnd` and open its channel.
 `test/ci/e2eGroups.test.ts` — inside the unit suite, which IS a merge gate —
 fails if any `test/e2e/*.e2e.test.ts` is in no group or in two, so a new corridor
 cannot quietly run nowhere. After each leg, `scripts/e2e-report.mjs` prints the
@@ -1808,20 +1802,14 @@ exits 0 for both.
 | `sendOnchain.e2e.test.ts`      | `arkade:BTC->onchain:BTC`   | arkd, emulator, LND, esplora |
 | `receiveLightning.e2e.test.ts` | `lightning:BTC->arkade:BTC` | arkd, emulator               |
 
-No covclaimd is required by any of them: on the receive corridor the CLIENT
-claims the Arkade lockup itself, through the covenant's collaborative claim
-leaf. covclaimd stays supported and optional (`ReceiveServiceDeps.covclaimd`); it
-CAN claim this covenant as of `v0.0.1-rc.5`, which `covclaimdClaim.e2e.test.ts`
-covers separately — see "covclaimd" below.
+The Lightning receive tests use the client's collaborative claim leaf. The
+solver observes the claim witness to settle the held payment.
 
 - **Environment** comes from `E2E_ENV_FILE` (default `.env.regtest.lnd`, the
   superset carrying both the Arkade wallet and the LND credentials), loaded by
   `test/e2e/support/preflight.ts` so `pnpm test:e2e` stays one command.
   Anything already exported wins, so a one-off override still works.
-  `COVCLAIMD_URL` (default `http://localhost:7271`) and `ESPLORA_URL` (default
-  `http://localhost:3000/api`) carry e2e defaults here. A deployed solver reads
-  covclaimd from `rails.arkade.covclaimdUrl` instead, and refuses to start with
-  `COVCLAIMD_URL` still exported — see § covclaimd before you set either.
+  `ESPLORA_URL` defaults to `http://localhost:3000/api`.
 - **A missing dependency FAILS, it never skips.** A suite that runs this rarely
   and skips quietly is a suite that rots into one that cannot pass at all. The
   preflight probes every dependency and prints the whole stack as a table,
@@ -1840,129 +1828,25 @@ covers separately — see "covclaimd" below.
 - **Swap stores go to a temp directory**, never the configured `SWAP_DB_PATH`,
   so a run leaves no rows in an operator's own database. The Arkade wallet
   database (`WALLET_DB_PATH`) is used as configured — it is the wallet.
-- **The receive corridors are the highest-value tests here.** They are the only
-  place the solver learns `P` by reading it back out of a real covclaimd claim
-  (`findClaimPreimage`), which rests on Ark's `ConditionWitness` PSBT field
-  surviving a `toPSBT()`/`fromPSBT()` round trip at the pinned SDK version —
-  covered nowhere else except by synthetic PSBT fixtures.
-- **The client's ECIES claim packet** (`test/e2e/support/claimPacket.ts`) is
-  the one piece of CLIENT code with no counterpart in `src/`, and deliberately
-  so: the solver must not be able to decrypt it. It is transcribed from
-  `docs/environment.md` § "covclaimd wire protocol" and is the most likely
-  thing to be wrong on a first covclaimd run; a bad packet shows up as a
-  non-2xx from `reveal()` or a claim that never lands, and the fix is confined
-  to that file.
+- **Lightning receive verifies preimage recovery** (`findClaimPreimage`) from
+  a real claim witness. This depends on Arkade's `ConditionWitness` PSBT field
+  surviving a `toPSBT()`/`fromPSBT()` round trip at the pinned SDK version.
 
-### covclaimd
+### Upgrading Lightning receive
 
-Optional, and unwired unless `rails.arkade.covclaimdUrl` names one — but the reason has an
-expiry date on it now, so read the version before repeating the old conclusion.
+Remove `rails.arkade.covclaimdUrl` from the solver's JSON config before upgrading.
+It is now an unknown key. Remove `COVCLAIMD_URL` from old environment files.
 
-**What was observed (regtest, 2026-08-07).** Against a live
-`ghcr.io/arkade-os/covclaimd:v0.0.1-rc.1`, `POST /v1/reveal` returned **200**
-for a correctly-sealed packet against our `ScriptV2` taptree — and then no
-claim was ever pushed: the lockup was still unspent minutes later, with nothing
-in the container's logs. Silent, not a rejection, which is what made it
-untrustworthy rather than merely broken.
+For offline receive, direct a Lightning receive RFQ with `profile.claim_packet`
+to the solver. The client seals the packet to its chosen claim service, which
+reads it from the Arkade funding transaction. The solver keeps watching the
+lockup for a claim and settles the hold when it sees a valid preimage.
 
-**What that turned out to be.** Two independent defects, both since fixed
-upstream, neither present in the release the commands above now pin:
-
-- covclaimd builds exactly one leaf of our taptree — `nonInteractiveClaim` —
-  and matches it by closure. Its condition script was the v1 form
-  (`HASH160 <h> EQUAL`) while `ScriptV2` uses
-  `SIZE 32 EQUALVERIFY HASH160 <h> EQUAL`, so the closure never matched. Fixed
-  in `fc22a73` ("harden condition closure"), shipped in **`v0.0.1-rc.3`**,
-  which is v2-only — it no longer accepts the v1 condition at all.
-- A separate taptree-binding fix landed in `v0.0.1-rc.2`. `rc.1` predates both.
-
-The Go leaf in `rc.3` has been checked byte-for-byte against the TypeScript
-`VHTLC.ScriptV2` `nonInteractiveClaim` script, and a real eight-leaf v2 taptree
-drives correctly through covclaimd's own closure-matching path. Note that
-covclaimd's own e2e only ever builds a ONE-leaf taptree, so that path had no
-upstream coverage.
-
-**Still eight-leaf only.** The `nonInteractiveClaim` leaf script itself is
-unaffected by the (opt-in) timelocked non-interactive refund leaf — it is a
-different leaf entirely — but the MERKLE PATH covclaimd has to construct
-changes shape with a ninth leaf in the tree, and that has not been separately
-verified. An operator running covclaimd against a lockup that also carries
-the timelocked non-interactive refund leaf is on unverified ground until this
-note says otherwise.
-
-**Required operator action: leave covclaimd unwired.** There is no safe middle
-setting to pick here, and nothing in the code enforces it: `createServices`
-wires covclaimd whenever `rails.arkade.covclaimdUrl` is set
-(`packages/solver-app/src/ops/services.ts`), so leaving it unwired means
-leaving that setting unset. Every quote path now writes
-`nonInteractiveParameters: true` unconditionally — all six `insertQuote` call
-sites, with no config gate and no per-swap opt-out — so wiring covclaimd would
-put it against a nine-leaf tree on EVERY newly funded lockup, not on some
-unlucky subset. The failure would not announce itself at signing time: the
-control block gets built from a merkle path that no longer matches, and the
-witness is rejected only once the spend reaches the chain. Nothing in this repo
-gates that either — `assertScriptMatchesRow` guards the solver's own
-derivation, not covclaimd's independent service.
-
-Leaving it unwired costs nothing, which is why it was already unset before this
-leaf existed: no corridor requires covclaimd (above — on the receive corridor
-the CLIENT claims its own lockup through the collaborative claim leaf). Rows
-quoted before the leaf shipped keep the eight-leaf shape and stay claimable, so
-it is only newly funded lockups that move out of covclaimd's reach.
-
-**What has now been shown (regtest, 2026-09-09).** `v0.0.1-rc.5` claims a
-solver-built lockup end to end, with the client offline. That is
-`test/e2e/covclaimdClaim.e2e.test.ts`: the solver funds, reveals, and then
-nobody in the test claims — the preimage never leaves the test process — and the
-lockup is spent anyway, with the solver recovering `P` off that witness and
-settling a real held HTLC with it.
-
-**`rc.5` is a floor, not a preference — `rc.4` cannot claim here at all.**
-Emulator `v0.0.7` made the `PrevArkTx` PSBT field mandatory on every ark-tx
-input (`prevOutFetcherForArkTx` walks all of them and errors on the first
-missing one; `v0.0.6` only walked the fields that were present). rc.4's claim
-carries none, and `arkade-regtest`'s `.env.defaults` pins the emulator at
-`v0.0.7`, so the pairing its compose default gives you — emulator `v0.0.7` plus
-covclaimd `rc.4` — can never settle. covclaimd `rc.5` attaches the field.
-
-Nothing about that reaches the caller. The emulator logs `failed to process
-transaction: failed to create prevout fetcher: missing prevout tx for input 0`
-and returns a bare internal status; covclaimd logs `reveal claim failed, keeping
-registration for retry ... rpc error: code = Internal desc = internal error` and
-retries forever. The solver sees only a lockup nobody spends, so the swap sits
-in `funded` until whatever is watching it gives up. **Diagnose this pair from
-`docker logs emulator` and `docker logs covclaimd`, never from the status code.**
-A/B on one stack, changing only the image: rc.4 timed out at 302s, rc.5 passed
-in 3.8s.
-
-Attributing the claim to covclaimd needed a control, because **the daemon logs
-nothing for request handling** — even a rejected `POST /v1/reveal` leaves no
-line — so a silent log proves nothing either way. The control: seal the packet
-to a key covclaimd does not hold and change nothing else. It then fails the
-reveal outright (`400 ... aead open: cipher: message authentication failed`) and
-the swap never reaches `funded`. So the daemon really is opening the packet, and
-the spend really is its own.
-
-Two things worth knowing before wiring it in anger. covclaimd builds the CEL
-subscription filter correctly — it contains the committed pubkey TLV,
-`hasPacket(tx.extension, 4) && tx.extension[4].contains('030021<pubkey>')` — but
-on this stack it logs `no arkd subscription client is configured; falling back
-to the unfiltered tx stream`, so the selectivity is not actually active. And the
-fallback below remains a legitimate deployment choice, not a workaround.
-
-The fallback is simply that the CLIENT claims, the way `boltz-swap` does.
-Nothing in the solver's watch path changes: `whenFunded` / `whenAwaitingClaim`
-observe a spend and recover `P` through `findClaimPreimage` regardless of who
-spent it. Configuring a covclaimd re-enables the reveal; leaving it unset means
-the solver waits for the client, which costs only the client's need to be
-online.
-
-The client's ECIES sealing is in `test/e2e/support/claimPacket.ts`. The one
-detail the wire docs underdetermine: **the ECDH shared secret is the 32-byte X
-coordinate**, not the 33-byte compressed point (RFC 5903 §9, which is what
-covclaimd's Go `ecdhX()` implements). `@noble/curves` returns the compressed
-point by default, so the natural transcription derives a well-formed but wrong
-key and fails only at covclaimd's AEAD tag check.
+If a lockup was already funded without the packet extension, upgrading cannot
+add a packet to that transaction. A service that already received a reveal
+can still claim. Otherwise the client should claim with its preimage and
+receiver key before the refund deadline. An unclaimed lockup follows the
+existing refund path at the deadline.
 
 ### What has actually been run
 

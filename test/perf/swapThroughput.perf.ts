@@ -107,7 +107,7 @@ import { randomBytes } from 'node:crypto'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { ArkAddress } from '@arkade-os/sdk'
-import { schnorr, secp256k1 } from '@noble/curves/secp256k1.js'
+import { schnorr } from '@noble/curves/secp256k1.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { hex } from '@scure/base'
 import { Address, OutScript, SigHash, p2tr } from '@scure/btc-signer'
@@ -129,7 +129,7 @@ import { OnchainSendSwapService } from '@arkade-os/solver-corridors/send/onchain
 import { SendSwapService } from '@arkade-os/solver-corridors/send/orchestrator.js'
 import { poll } from '@arkade-os/solver-core/util/poll.js'
 import { mineBlocks } from '../e2e/support/chain.js'
-import { newSealedPreimage } from '../e2e/support/claimPacket.js'
+import { newPreimage } from '../e2e/support/preimage.js'
 import { clientClaimLockup } from '../e2e/support/clientClaim.js'
 import { cancelSolverHold, counterpartyInvoice, payFromCounterparty } from '../e2e/support/counterparty.js'
 import type { CounterpartyPayment } from '../e2e/support/counterparty.js'
@@ -288,17 +288,6 @@ const sendInvoices = new Map<number, { invoice: string; paymentHash: string }>()
 const payers: CounterpartyPayment[] = []
 /** Hold invoices this run minted, so a failed receive swap's HTLC is failed back rather than stranded. */
 const mintedHolds = new Set<string>()
-
-/**
- * A throwaway recipient for the client's sealed preimage packet.
- *
- * No covclaimd claims anything here — the CLIENT claims, as both receive
- * corridor e2e tests do and for the reason they document (covclaimd:v0.0.1-rc.1
- * accepts the reveal and then silently never claims this covenant). The packet
- * still has to be a real ECIES operation against a real point, so one is
- * generated and discarded.
- */
-const nobody = (): string => hex.encode(secp256k1.getPublicKey(secp256k1.utils.randomSecretKey(), true))
 
 /** An ephemeral raw key standing in for a client's own onchain wallet. */
 const rawSigner = (privateKey: Uint8Array): OnchainSigner => ({
@@ -552,26 +541,26 @@ const runLightningSend = async (wallet: FleetWallet): Promise<SwapTiming> => {
 const runLightningReceive = async (wallet: FleetWallet): Promise<SwapTiming> => {
   const timeline = new Timeline('lightning:BTC->arkade:BTC', wallet.index)
   try {
-    const sealed = newSealedPreimage(nobody())
+    const { paymentHash, preimage } = newPreimage()
     const outcome = await timeline.phase('quote', () =>
       receiveService.quote({
-        paymentHash: sealed.paymentHash,
+        paymentHash,
         amountSats: AMOUNT_SATS,
         payoutAddress: wallet.address,
         payoutPubkey: wallet.pubkey,
-        claimPacket: sealed.packet,
+        claimPacket: null,
       }),
     )
     if (!outcome.accepted) throw new Error(`solver refused the quote: ${outcome.reason}`)
     const swap = outcome.swap
-    mintedHolds.add(sealed.paymentHash)
+    mintedHolds.add(paymentHash)
     const label = `ln-receive ${swap.id}`
 
     // Not awaited: `payinvoice` blocks for as long as the HTLC is held, which is
     // the whole rest of this swap.
     payers.push(payFromCounterparty(swap.invoice))
 
-    await timeline.phase('htlc_arrives', () => awaitHtlcHeld(sealed.paymentHash, label))
+    await timeline.phase('htlc_arrives', () => awaitHtlcHeld(paymentHash, label))
     // `quoted -> armed -> funded` in ONE phase, because one `tick` does all of
     // it: `whenArmed` re-reads the hold, funds the solver's own Arkade lockup,
     // and waits for that output at the indexer before it returns. THIS IS THE
@@ -602,7 +591,7 @@ const runLightningReceive = async (wallet: FleetWallet): Promise<SwapTiming> => 
           pkScript: funded.pkScript,
           nonInteractiveParameters: funded.nonInteractiveParameters ?? false,
         },
-        sealed.preimage,
+        preimage,
       ),
     )
 
@@ -614,10 +603,10 @@ const runLightningReceive = async (wallet: FleetWallet): Promise<SwapTiming> => 
     expectState(settled, 'settled', label)
     // The proof no fake can make: the preimage the solver recovered from a real
     // Arkade claim witness is the one the client never disclosed.
-    if (settled.preimage !== hex.encode(sealed.preimage)) {
+    if (settled.preimage !== hex.encode(preimage)) {
       throw new Error(`${label}: solver settled with a preimage that is not the client's`)
     }
-    mintedHolds.delete(sealed.paymentHash)
+    mintedHolds.delete(paymentHash)
     return timeline.succeeded()
   } catch (error) {
     return timeline.failed(error)
@@ -722,21 +711,21 @@ const runOnchainSend = async (wallet: FleetWallet): Promise<SwapTiming> => {
 const runSelfPayment = async (wallet: FleetWallet): Promise<SwapTiming> => {
   const timeline = new Timeline('self-payment', wallet.index)
   try {
-    const sealed = newSealedPreimage(nobody())
+    const { paymentHash, preimage } = newPreimage()
     const receiveQuote = await timeline.phase('quote_receive', () =>
       receiveService.quote({
-        paymentHash: sealed.paymentHash,
+        paymentHash,
         amountSats: AMOUNT_SATS,
         payoutAddress: wallet.address,
         payoutPubkey: wallet.pubkey,
-        claimPacket: sealed.packet,
+        claimPacket: null,
       }),
     )
     if (!receiveQuote.accepted) throw new Error(`solver refused the receive quote: ${receiveQuote.reason}`)
     const receiveRow = receiveQuote.swap
     // Registered for teardown even though the coupling cancels it below: a run
     // that dies between the two quotes still leaves a live hold behind.
-    mintedHolds.add(sealed.paymentHash)
+    mintedHolds.add(paymentHash)
     const label = `self-payment ${receiveRow.id}`
 
     // The quote that used to be refused `quote_conflict`. Timed on its own
@@ -781,7 +770,7 @@ const runSelfPayment = async (wallet: FleetWallet): Promise<SwapTiming> => {
           pkScript: paidOut.pkScript,
           nonInteractiveParameters: paidOut.nonInteractiveParameters ?? false,
         },
-        sealed.preimage,
+        preimage,
       ),
     )
 
@@ -791,7 +780,7 @@ const runSelfPayment = async (wallet: FleetWallet): Promise<SwapTiming> => {
       driveUntil(sendService, sendRow.id, ['claimed', 'refused', 'stuck'], label),
     )
     expectState(collected, 'claimed', label)
-    if (collected.preimage !== hex.encode(sealed.preimage)) {
+    if (collected.preimage !== hex.encode(preimage)) {
       throw new Error(`${label}: solver collected with a preimage that is not the client's`)
     }
 
@@ -923,7 +912,6 @@ describe('perf — parallel swaps across all three corridors', () => {
       store: receiveStore,
       ln,
       arkade: await receiveArkadeOpsFromContext(arkade.ctx, arkade.emulator),
-      covclaimd: null,
       limits: arkade.limits,
       maxExposedSats: arkade.maxExposedSats,
       totalCommitted: () => receiveStore.committedSats(),

@@ -25,10 +25,7 @@
  *   no separate profile field repeats it.
  * - `solver_refund_pk_script` is the one covenant parameter nothing else on
  *   the wire determines: the solver's own choice of where ITS refund lands,
- *   needed by anyone reconstructing the full eight-leaf tree (covclaimd
- *   verifies via the `taptree` bytes the solver sends it directly in
- *   `reveal()`, not via this field — this field is for a client or auditor
- *   who wants to derive `lockup_address` independently).
+ *   needed by anyone reconstructing the full eight-leaf tree.
  */
 
 import { z } from 'zod'
@@ -56,14 +53,8 @@ const XONLY_HEX = z
  * RFQ request for the receive profile. Strict per the spec: unknown fields
  * anywhere are `unsupported_payload`.
  *
- * `claim_packet` is the client's preimage, ECIES-sealed to covclaimd
- * (`ephPub(33) || nonce(12) || ciphertext`, base64 — docs/rfq-protocol.md
- * §7.1.2) — opaque to this schema and to the solver; it is validated only by
- * shape (a bounded base64-ish string), never decoded here.
- *
- * OPTIONAL: a client with no covclaimd has nothing to seal to, and omits it
- * rather than sealing to a key nobody holds — it claims the lockup itself with
- * its `receiver` key. `.min(1)` keeps `""` refused, so omission means absent.
+ * `claim_packet` optionally carries the client's base64-encoded sealed packet
+ * into the funding transaction. Omission lets the client claim with its receiver key.
  */
 export const LightningReceiveRfqRequest = z
   .object({
@@ -107,9 +98,6 @@ export const lightningReceiveRfqQuotePayload = (
   profile: {
     payment_hash: row.paymentHash,
     invoice: row.invoice,
-    // Compare-only, same trust tier as every other leg's lockup_address: the
-    // solver's own derivation of the funding contract, for a client (or
-    // covclaimd) that wants to check it against its own reconstruction.
     lockup_address: row.lockupAddress,
     solver_refund_pk_script: row.solverRefundPkScript,
   },
@@ -127,7 +115,7 @@ const EXPIRY_REASONS = /^(invoice expired|hold lapsed|settle window too short)/
  * this leg's maker/taker roles are INVERTED from the send legs': the CLIENT's
  * own committed action (holding the invoice) is what "funded" describes here
  * — `armed` — while the SOLVER's own action (broadcasting its Arkade lockup,
- * then covclaimd's autonomous claim) is what "filling"/"filled" describe —
+ * then observing its claim) is what "filling"/"filled" describe —
  * `funded`/`claimed` on this row. See this file's own top comment and
  * `src/arkade/covenant.ts`'s role-inversion note for the same inversion
  * playing out in the covenant's `receiver`/`client` roles.
@@ -144,11 +132,6 @@ export const lightningReceiveRfqStateFromRow = (row: ReceiveSwapRow): RfqState =
       return 'filled'
     case 'settled':
       return 'settled'
-    // The client never claimed (or covclaimd never landed one) before
-    // refund_locktime, so the solver is reclaiming its OWN Arkade lockup —
-    // same in-progress-broadcast shape `funded` already reports as 'filling',
-    // just on the failure path. Mirrors onchainRfqStateFromRow's identical
-    // choice for `refunding_onchain`.
     case 'refunding':
       return 'filling'
     case 'refunded':

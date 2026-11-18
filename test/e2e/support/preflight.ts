@@ -27,7 +27,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { connect } from 'node:net'
 
 /** Every external process an e2e corridor can depend on. */
-export type Dependency = 'arkd' | 'emulator' | 'esplora' | 'covclaimd' | 'lnd' | 'ln-counterparty'
+export type Dependency = 'arkd' | 'emulator' | 'esplora' | 'lnd' | 'ln-counterparty'
 
 export interface ProbeResult {
   dependency: Dependency
@@ -69,9 +69,6 @@ export const loadE2eEnv = (): void => {
   envLoaded = true
   loadEnvFile(process.env.E2E_ENV_FILE ?? '.env.regtest.lnd')
 }
-
-/** covclaimd's base URL. No `packages/solver-app/src/config.ts` knob exists for it — the receive legs are not wired into the CLI yet. */
-export const covclaimdUrl = (): string => process.env.COVCLAIMD_URL ?? 'http://localhost:7271'
 
 /** The stack's Esplora-compatible chain index (arkade-regtest's mempool proxy). */
 export const esploraUrl = (): string => process.env.ESPLORA_URL ?? 'http://localhost:3000/api'
@@ -174,7 +171,6 @@ export const probeStack = async (): Promise<ProbeResult[]> => {
     probeHttp('arkd', `${operatorUrl.replace(/\/$/, '')}/v1/info`),
     probeHttp('emulator', `${emulatorUrl.replace(/\/$/, '')}/v1/info`),
     probeHttp('esplora', `${esploraUrl().replace(/\/$/, '')}/blocks/tip/height`),
-    probeHttp('covclaimd', `${covclaimdUrl().replace(/\/$/, '')}/v1/preimage/covclaimd-pubkey`),
     probeTcp('lnd', process.env.LND_SOCKET ?? 'localhost:10010'),
     probeCounterparty(),
   ])

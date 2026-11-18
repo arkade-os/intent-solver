@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import { base64 } from '@scure/base'
 import { claimPacketShape } from '@arkade-os/swap'
+import { claimPacketStamp } from '@arkade-os/solver-corridors/receive/claimPacket.js'
+import type { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import vector from './fixtures/delegateeReceiveTerms.json' with { type: 'json' }
 
 /** `ephPub(33) || nonce(12) || AES-GCM of a 32-byte preimage (48)` — the shape `sealClaimPacket` emits. */
 const sealedCiphertext = (): Uint8Array => Uint8Array.from({ length: 93 }, (_, i) => i & 0xff)
@@ -34,7 +37,7 @@ describe('claimPacketShape', () => {
     expect(claimPacketShape(base64.encode(sealedCiphertext()))).toEqual({ kind: 'ciphertext' })
   })
 
-  it('reads covclaimd’s TLV body as a packet, and recovers the covclaimd it names', () => {
+  it('reads the packet and recovers the recipient key', () => {
     const shape = claimPacketShape(base64.encode(fullPacket()))
     expect(shape.kind).toBe('packet')
     if (shape.kind !== 'packet') return
@@ -45,7 +48,7 @@ describe('claimPacketShape', () => {
     expect(fullPacket().length).toBeGreaterThan(93)
   })
 
-  it('keeps a two-TLV shape with no pubkey on the legacy reveal path', () => {
+  it('does not classify a two-TLV shape with no recipient key as a packet', () => {
     const twoTlv = concat(tlv(0x01, sealedCiphertext()), tlv(0x02, ARKADE_SCRIPT))
     expect(claimPacketShape(base64.encode(twoTlv))).toEqual({ kind: 'ciphertext' })
   })
@@ -80,5 +83,22 @@ describe('claimPacketShape', () => {
     ['a value that is not base64 at all', 'not base64 !!'],
   ])('falls back to the ciphertext path for %s', (_name, input) => {
     expect(claimPacketShape(input)).toEqual({ kind: 'ciphertext' })
+  })
+})
+
+describe('claimPacketStamp', () => {
+  const tapTree = Uint8Array.of(1, 2, 3)
+  const script = { nonInteractiveClaimArkadeScript: ARKADE_SCRIPT, encode: () => tapTree } as CovenantSwapScript
+
+  it('keeps extended sealed terms and optional predicates byte-for-byte', () => {
+    const body = concat(base64.decode(vector.packet), tlv(4, Uint8Array.of(0x51)))
+    const packet = concat(body, tlv(2, ARKADE_SCRIPT))
+    expect(claimPacketStamp(base64.encode(body), script)).toEqual({ packet, tapTree })
+    expect(claimPacketStamp(base64.encode(packet), script)).toEqual({ packet, tapTree })
+  })
+
+  it('does not stamp an extended packet with a truncated TLV', () => {
+    const body = concat(base64.decode(vector.packet), Uint8Array.of(4, 0, 2, 0x51))
+    expect(claimPacketStamp(base64.encode(body), script)).toBeUndefined()
   })
 })

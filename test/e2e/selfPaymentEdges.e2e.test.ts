@@ -12,7 +12,7 @@
 
 import { beforeAll, afterAll, describe, expect, it } from 'vitest'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
-import { schnorr, secp256k1 } from '@noble/curves/secp256k1.js'
+import { schnorr } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
 import { ReceiveSwapStore, type ReceiveSwapRow } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
 import { SwapStore } from '@arkade-os/solver-corridors/db/swaps.js'
@@ -24,7 +24,7 @@ import { findClaimPreimage, findLockupOutpoints } from '@arkade-os/solver-arkade
 import { MIN_CLAIM_WINDOW } from '@arkade-os/solver-core/core/send.js'
 import { HOUR, rawDelaySeconds } from '@arkade-os/solver-core/core/timelocks.js'
 import { nowSeconds, poll } from '@arkade-os/solver-core/util/poll.js'
-import { newSealedPreimage } from './support/claimPacket.js'
+import { newPreimage } from './support/preimage.js'
 import { payFromCounterparty, solverInvoice, type CounterpartyPayment } from './support/counterparty.js'
 import { requireStack } from './support/preflight.js'
 import {
@@ -52,9 +52,6 @@ let receiveOps: Awaited<ReturnType<typeof receiveArkadeOpsFromContext>>
 let sendOps: Awaited<ReturnType<typeof arkadeOpsFromContext>>
 let dir: string
 const payers: CounterpartyPayment[] = []
-
-/** A throwaway ECIES recipient: the packet travels but nobody opens it here. */
-const nobodyKey = (): string => hex.encode(secp256k1.getPublicKey(secp256k1.utils.randomSecretKey(), true))
 
 const receiveWith = (now?: () => number): ReceiveSwapService =>
   new ReceiveSwapService({
@@ -89,16 +86,16 @@ const sendWith = (): SendSwapService =>
   })
 
 const quoteReceive = async (service: ReceiveSwapService) => {
-  const sealed = newSealedPreimage(nobodyKey())
+  const secret = newPreimage()
   const outcome = await service.quote({
-    paymentHash: sealed.paymentHash,
+    paymentHash: secret.paymentHash,
     amountSats: AMOUNT_SATS,
     payoutAddress: await arkade.ctx.wallet.getAddress(),
     payoutPubkey: hex.encode(await arkade.ctx.identity.xOnlyPublicKey()),
-    claimPacket: sealed.packet,
+    claimPacket: null,
   })
   if (!outcome.accepted) throw new Error(`receive quote refused: ${outcome.reason}`)
-  return { sealed, swap: outcome.swap }
+  return { secret, swap: outcome.swap }
 }
 
 const driveReceive = (service: ReceiveSwapService, id: string, until: ReadonlySet<string>): Promise<ReceiveSwapRow> =>
@@ -187,7 +184,7 @@ describe('e2e self-payment refresh — edges and failure spine', () => {
       // funded against a send lockup while an htlc it owes a settle on is also
       // live would be paying twice on one preimage.
       const receive = receiveWith()
-      const { sealed, swap } = await quoteReceive(receive)
+      const { secret, swap } = await quoteReceive(receive)
       const sendQuote = await sendWith().quote(swap.invoice, await arkade.ctx.wallet.getAddress(), {
         clientRefundPubkey: CLIENT_REFUND_PUBKEY,
       })
@@ -197,7 +194,7 @@ describe('e2e self-payment refresh — edges and failure spine', () => {
       payers.push(payer)
       await poll(
         async () => {
-          const invoice = await solverInvoice(sealed.paymentHash)
+          const invoice = await solverInvoice(secret.paymentHash)
           return invoice.state === 'ACCEPTED' ? invoice : null
         },
         { attempts: 60, intervalMs: 1000, whenExhausted: 'htlc never armed' },

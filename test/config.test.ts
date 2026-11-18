@@ -95,7 +95,6 @@ const CONFIG_KEYS = [
   'WALLET_MNEMONIC',
   'ARKADE_OPERATOR_URL',
   'EMULATOR_URL',
-  'COVCLAIMD_URL',
   'SWAP_NETWORK',
   'MAX_EXPOSED_SATS',
   'MAX_SWAP_SATS',
@@ -220,57 +219,6 @@ describe('loadConfig — LN_BACKEND', () => {
   it('carries the network the Arkade server must report from the profile', () => {
     process.env.SWAP_NETWORK = 'bitcoin'
     expect(configFromKnobs(process.env).arkade.expectedArkdNetwork).toBe('bitcoin')
-  })
-})
-
-/**
- * Gated on mainnet, not on loopback alone: a regtest stack reaches covclaimd
- * over a container network, where http is the only option there is.
- */
-describe('loadConfig — COVCLAIMD_URL', () => {
-  it('is undefined when unset — the client claims its own lockup', () => {
-    expect(configFromKnobs(process.env).covclaimdUrl).toBeUndefined()
-  })
-
-  it('accepts https on mainnet', () => {
-    process.env.SWAP_NETWORK = 'bitcoin'
-    process.env.COVCLAIMD_URL = 'https://covclaimd.example.com'
-    expect(configFromKnobs(process.env).covclaimdUrl).toBe('https://covclaimd.example.com')
-  })
-
-  it('accepts http to loopback on mainnet — nothing reaches a wire', () => {
-    process.env.SWAP_NETWORK = 'bitcoin'
-    for (const url of ['http://localhost:7271', 'http://127.0.0.1:7271', 'http://[::1]:7271']) {
-      process.env.COVCLAIMD_URL = url
-      expect(configFromKnobs(process.env).covclaimdUrl).toBe(url)
-    }
-  })
-
-  it('refuses http to a remote host on mainnet — a suppressed reveal strands the lockup', () => {
-    process.env.SWAP_NETWORK = 'bitcoin'
-    process.env.COVCLAIMD_URL = 'http://covclaimd.example.com'
-    expect(() => configFromKnobs(process.env)).toThrow(/COVCLAIMD_URL must use https on mainnet/)
-  })
-
-  it('accepts http to a container host off mainnet — the regtest stack has no TLS', () => {
-    process.env.COVCLAIMD_URL = 'http://covclaimd:7071'
-    expect(configFromKnobs(process.env).covclaimdUrl).toBe('http://covclaimd:7071')
-  })
-
-  it('refuses a value that is not a URL rather than failing at the first reveal', () => {
-    process.env.COVCLAIMD_URL = 'not-a-url'
-    expect(() => configFromKnobs(process.env)).toThrow(/COVCLAIMD_URL must be an absolute URL/)
-  })
-
-  it('refuses a host that merely starts with 127. — it is a name, not the loopback range', () => {
-    process.env.SWAP_NETWORK = 'bitcoin'
-    process.env.COVCLAIMD_URL = 'http://127.evil.com'
-    expect(() => configFromKnobs(process.env)).toThrow(/COVCLAIMD_URL must use https on mainnet/)
-  })
-
-  it('refuses a scheme that is neither http nor https, on any network', () => {
-    process.env.COVCLAIMD_URL = 'ftp://covclaimd.example.com'
-    expect(() => configFromKnobs(process.env)).toThrow(/COVCLAIMD_URL must be http or https/)
   })
 })
 

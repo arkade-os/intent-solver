@@ -12,7 +12,7 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { hex } from '@scure/base'
 import { createArkadeContext, deriveNostrIdentity } from '../packages/solver-app/dist/index.js'
 import { configFromKnobs } from '../packages/solver-app/dist/config.js'
-import { buildReceiveRequest, claimReceived, sealToCovclaimd } from './lib/receive-client.mjs'
+import { buildReceiveRequest, claimReceived } from './lib/receive-client.mjs'
 import { newRfqId, nostrRelayTransport } from './lib/swap-client.mjs'
 
 const [relayUrl, solverPubkey, amountArg] = process.argv.slice(2)
@@ -29,12 +29,6 @@ let transport
 // One try/finally around everything after the wallet is open: every exit,
 // refusal or crash, must reach the close, or the WAL goes uncheckpointed.
 try {
-  // covclaimd's key is read LIVE: it generates its own.
-  const covclaimdUrl = process.env.COVCLAIMD_URL ?? 'http://localhost:7271'
-  const covclaimdPubKey = await fetch(`${covclaimdUrl}/v1/preimage/covclaimd-pubkey`)
-    .then((r) => /** @type {Promise<{ covclaimd_pub_key: string }>} */ (r.json()))
-    .then((body) => body.covclaimd_pub_key)
-
   const preimage = randomBytes(32)
   const payoutAddress = await arkade.wallet.getAddress()
   const payoutPubkey = hex.encode(await arkade.identity.xOnlyPublicKey())
@@ -51,7 +45,6 @@ try {
       paymentHash: hex.encode(sha256(preimage)),
       payoutAddress,
       payoutPubkey,
-      claimPacket: sealToCovclaimd(preimage, covclaimdPubKey),
     }),
   )
   console.log(`quote: pay ${quote.from_amount} sats, receive ${quote.to_amount} on Arkade`)

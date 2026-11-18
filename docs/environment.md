@@ -30,36 +30,6 @@ The vendored one is a build of the still-open upstream PR `arkade-os/ts-sdk#613`
 (`feat/nic`). The receive leg therefore depends on unmerged upstream code, and
 that is a decision to make deliberately rather than discover later.
 
-## covclaimd wire protocol
-
-Recovered from the vendored build rather than invented.
-
-`GET /v1/preimage/covclaimd-pubkey` → `{ covclaimd_pub_key, emulator_pub_key }`
-(both hex).
-
-`POST /v1/reveal`:
-
-```json
-{
-  "swap_address": "<arkade address>",
-  "packet": {
-    "ciphertext": "<base64>",
-    "arkade_script": "<base64>"
-  },
-  "taptree": "<hex>"
-}
-```
-
-The preimage is ECIES-encrypted to covclaimd's key, never sent in the clear:
-ephemeral secp256k1 key, ECDH, HKDF-SHA256 with info `covclaimd/preimage/v1` and
-the ephemeral public key as salt, then AES-GCM with that same key as additional
-data. Wire layout is `ephPub(33) || nonce(12) || ciphertext`.
-
-This is what keeps the provider out of the preimage's path: the client encrypts
-to covclaimd directly, and the provider only ever sees the preimage once it
-appears in a claim witness — which cannot exist until the funding output has been
-spent to the user's script.
-
 ## Sandbox notes
 
 - The local stack's block explorer (mempool backend) refuses to boot without

@@ -1,7 +1,4 @@
 /**
- * The CLIENT claiming the Arkade lockup itself — the fallback both receive
- * corridors depend on when covclaimd is not driving the claim.
- *
  * A TEST FIXTURE, not a template — `examples/lib/receive-client.mjs` is the
  * reference client. That one holds a real quote and checks the funded amount
  * against `to_amount` before it signs; this one cannot, because every caller

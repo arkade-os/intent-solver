@@ -115,7 +115,6 @@ import { createOfferRefusalTail, type OfferRefusalRecorder } from '../admin/offe
 import { createRfqRefusalTail, type RfqRefusalRecorder } from '../admin/rfqRefusals.js'
 import { ReceiveSwapService } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import { driveCoupledPeers } from '@arkade-os/solver-corridors/coupledHandoff.js'
-import { createCovclaimdClient } from '@arkade-os/solver-corridors/receive/covclaimd.js'
 import { receiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive/arkadeOps.js'
 import { json, log, messageOf, nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { watchRail, type RailWatch } from './railWatch.js'
@@ -1207,13 +1206,6 @@ export const createServices = async (
   // emulator info as the send legs' — the difference between the two is which
   // covenant role the solver plays (funder here, receiver there), which the
   // ops factories encode, not a second wallet.
-  //
-  // Wired when the deployment names a covclaimd (COVCLAIMD_URL). The receive legs
-  // reveal each funded lockup's sealed claim packet to it so offline clients get
-  // claimed; unset keeps the client-claims-its-own-lockup default, which costs
-  // only the client being online. See both orchestrators' `covclaimd` docs, and
-  // `docs/runbook.md` § covclaimd for which release is safe to point this at.
-  const covclaimd = config.covclaimdUrl ? createCovclaimdClient(config.covclaimdUrl) : undefined
   // Hoisted rather than built inline, because the EVM receive leg below needs
   // the SAME ops. Two calls would derive two identical objects from the same
   // context, which works and gives the corridors two places to drift apart.
@@ -1241,7 +1233,6 @@ export const createServices = async (
         maxExposedSats: policy.maxExposedSats,
         totalCommitted,
         admission,
-        covclaimd,
         // The send store leaves this list on exactly the same condition, and
         // for the same reason, as `receiveStore` leaves the send corridor's:
         // with coupling on, a live send row on our hash is the coupled leg,

@@ -2,26 +2,13 @@
 //
 //   RELAY_PROTOCOL=nostr node --experimental-eventsource --env-file=.env.regtest.client \
 //     examples/receive-quote-relay.mjs ws://localhost:7777 <solverPubkey> [amountSats]
-//
-// QUOTE ONLY, and the name says so. What happens after — paying the hold
-// invoice, the solver funding the lockup, the client claiming with `P` — is
-// covered end to end by `test/e2e/receiveLightning*.e2e.test.ts`, which drives
-// the orchestrator directly. The one thing those cannot cover is the thing this
-// does: that a receive `rfq_request` reaches the corridor THROUGH A RELAY and
-// comes back as a real quote. Both receive pairs got their ingress arm in the
-// four-corridor wiring; before this, nothing exercised it over the wire.
-//
-// The client generates `P`, keeps it, and sends only `H = sha256(P)` plus `P`
-// sealed to covclaimd. The solver never sees `P` until it appears in a claim
-// witness, which is the whole point of the corridor — see the README's "The
-// preimage is not ours to hold".
+
 import { randomBytes } from 'node:crypto'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { hex } from '@scure/base'
 import { createArkadeContext, deriveNostrIdentity } from '../packages/solver-app/dist/index.js'
 import { configFromKnobs } from '../packages/solver-app/dist/config.js'
-// Sealing and the request shape live in the library, so the two cannot drift.
-import { buildReceiveRequest, sealToCovclaimd } from './lib/receive-client.mjs'
+import { buildReceiveRequest } from './lib/receive-client.mjs'
 import { newRfqId, nostrRelayTransport } from './lib/swap-client.mjs'
 
 const [relayUrl, solverPubkey, amountArg] = process.argv.slice(2)
@@ -30,37 +17,32 @@ if (!relayUrl || !solverPubkey) {
   process.exit(1)
 }
 const amountSats = Number(amountArg ?? 5000)
+const claimPacket = process.env.CLAIM_PACKET
+const paymentHash = process.env.PAYMENT_HASH
+if (claimPacket !== undefined && !paymentHash) {
+  console.error('CLAIM_PACKET requires its matching PAYMENT_HASH')
+  process.exit(1)
+}
+const requestHash = paymentHash ?? hex.encode(sha256(randomBytes(32)))
 
 const config = configFromKnobs(process.env)
 const arkade = await createArkadeContext(config.arkade)
 
 let transport
 
-// Inside the try, all of it: a throw in the covclaimd fetch or in the sealing
-// used to run above the finally below and leave `arkade` open.
 try {
-  // covclaimd's key is read LIVE, never hardcoded: it generates its own.
-  const covclaimdUrl = process.env.COVCLAIMD_URL ?? 'http://localhost:7271'
-  const covclaimdPubKey = await fetch(`${covclaimdUrl}/v1/preimage/covclaimd-pubkey`)
-    .then((r) => /** @type {Promise<{ covclaimd_pub_key: string }>} */ (r.json()))
-    .then((body) => body.covclaimd_pub_key)
-
-  const preimage = randomBytes(32)
-  const paymentHash = hex.encode(sha256(preimage))
-  const claimPacket = sealToCovclaimd(preimage, covclaimdPubKey)
-
   transport = nostrRelayTransport(relayUrl, {
     solverPubkey,
     secretKey: deriveNostrIdentity(config.arkade.mnemonic, config.arkade.isMainnet).secretKey,
   })
 
   const rfqId = newRfqId()
-  console.log(`asking for ${amountSats} sats over ${relayUrl}, payment hash ${paymentHash}`)
+  console.log(`asking for ${amountSats} sats over ${relayUrl}, payment hash ${requestHash}`)
   const quote = await transport.requestQuote(
     buildReceiveRequest({
       rfqId,
       amountSats,
-      paymentHash,
+      paymentHash: requestHash,
       payoutAddress: await arkade.wallet.getAddress(),
       payoutPubkey: hex.encode(await arkade.identity.xOnlyPublicKey()),
       claimPacket,

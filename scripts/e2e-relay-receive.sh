@@ -4,8 +4,7 @@
 #   real Nostr relay  ⇄  provider (`cli relay`)          — provider is outbound-only
 #   real Nostr relay  ⇄  client   (receive-quote-relay)  — client is outbound-only
 #
-#   1. client generates P, keeps it, seals it to covclaimd, publishes an
-#      rfq_request for lightning:BTC->arkade:BTC carrying only H = sha256(P)
+#   1. client publishes a lightning:BTC->arkade:BTC request with a payment hash
 #   2. provider's relay ingress routes it to the Lightning-receive corridor
 #   3. provider mints a hold invoice on H, derives the lockup, quotes back
 #   4. client reads a real quote off the relay
@@ -23,7 +22,7 @@
 #
 # Prerequisites (see docs/runbook.md § "Replicating end to end on regtest"):
 #   - the arkade-regtest stack up WITH its `nostr` profile (strfry :7777),
-#     plus arkd :7070 and covclaimd :7271
+#     plus arkd :7070
 #   - pnpm build has run
 #   - two wallets: .env.regtest (provider) and .env.regtest.client (client).
 #     The provider needs no balance here — quoting spends nothing.

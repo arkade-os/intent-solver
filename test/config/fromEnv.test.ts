@@ -46,7 +46,6 @@ const FULL_ENV: Record<string, string> = {
   EMULATOR_URL: 'http://localhost:7073',
   ARK_ESPLORA_URL: 'http://localhost:3000/api',
   ARK_UNILATERAL_EXIT_DELAY: '260096',
-  COVCLAIMD_URL: 'http://localhost:7080',
   POOL_AUTO_MINT: 'true',
   CONTRACT_RETENTION_DAYS: '14',
   LN_BACKEND: 'lnd',

@@ -51,7 +51,6 @@ describe('ReceiveSwapStore', () => {
     expect(row.arkadeLockupTxid).toBeNull()
     expect(row.invoiceWalletFingerprint).toBeNull()
     expect(row.invoiceBackendName).toBeNull()
-    expect(row.revealedAt).toBeNull()
   })
 
   it('persists the invoice wallet identity', async () => {
@@ -182,8 +181,8 @@ describe('ReceiveSwapStore', () => {
     await store.insertQuote(baseQuote)
     await expect(store.patch('swap-1', { state: 'settled' })).rejects.toThrow(/may not set/)
     await expect(store.patch('swap-1', { preimage: 'aa' })).rejects.toThrow(/may not set/)
-    await store.patch('swap-1', { revealed_at: now })
-    expect((await store.get('swap-1')).revealedAt).toBe(now)
+    await store.patch('swap-1', { settle_attempted_at: now })
+    expect((await store.get('swap-1')).settleAttemptedAt).toBe(now)
   })
 
   it('transition() is a compare-and-swap: only one caller wins a race', async () => {

@@ -439,7 +439,7 @@ const candidateWitnessItems = (tx: InstanceType<typeof Transaction>, inputIndex:
 }
 
 /**
- * The preimage from whichever transaction claimed one of `outpoints` (covclaimd's claim),
+ * The preimage from whichever transaction claimed one of `outpoints`,
  * verified against `paymentHashHex` — a matching witness SHAPE is not proof. Null means
  * nothing provable yet. `spentBy` names the CHECKPOINT tx, whose input carries the claim
  * leaf's witness; so does the Arkade tx spending it at vout 0, from submit, before any finalize.

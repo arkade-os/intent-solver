@@ -1,4 +1,9 @@
-import { appendArkadeScript, claimPacketShape as canonicalClaimPacketShape } from '@arkade-os/swap'
+import {
+  appendArkadeScript,
+  claimPacketShape as canonicalClaimPacketShape,
+  SEALED_CIPHERTEXT_LENGTH,
+} from '@arkade-os/swap'
+import { base64 } from '@scure/base'
 import type { ClaimPacketStamp } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 import type { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 
@@ -21,6 +26,34 @@ export const claimPacketShape = (b64: string): ClaimPacketShape => {
   return { ...packet, ...(covclaimdPubkey ? { covclaimdPubKey: covclaimdPubkey } : {}) }
 }
 
+// The pinned swap codec only recognizes ciphertext wrapping a bare preimage.
+const extendedPacket = (packet: string): { body: Uint8Array; needsArkadeScript: boolean } | undefined => {
+  let body: Uint8Array
+  try {
+    body = base64.decode(packet)
+  } catch {
+    return undefined
+  }
+  let ciphertextLength = 0
+  let hasRecipient = false
+  let needsArkadeScript = true
+  for (let offset = 0; offset < body.length;) {
+    if (body.length - offset < 3) return undefined
+    const type = body[offset]!
+    const length = (body[offset + 1]! << 8) | body[offset + 2]!
+    offset += 3 + length
+    if (offset > body.length) return undefined
+    if (type === 1) ciphertextLength = length
+    if (type === 2) needsArkadeScript = false
+    if (type === 3) {
+      if (length !== 33) return undefined
+      hasRecipient = true
+    }
+  }
+  if (ciphertextLength <= SEALED_CIPHERTEXT_LENGTH || !hasRecipient) return undefined
+  return { body, needsArkadeScript }
+}
+
 /** Derived rather than stored: `claim_packet` never changes. */
 export const claimPacketStamp = (
   claimPacket: string | null,
@@ -28,13 +61,10 @@ export const claimPacketStamp = (
 ): ClaimPacketStamp | undefined => {
   if (claimPacket === null) return undefined
   const shape = canonicalClaimPacketShape(claimPacket)
-  if (shape.kind !== 'packet') return undefined
-  // Without `0x03` no covclaimd's filter selects the tx, so stamping would
-  // strand it AND turn off the reveal that could still have settled it.
-  if (!shape.covclaimdPubkey) return undefined
+  const packet = shape.kind === 'packet' && shape.covclaimdPubkey ? shape : extendedPacket(claimPacket)
+  if (!packet) return undefined
+  if (!packet.needsArkadeScript) return { packet: packet.body, tapTree: script.encode() }
   const arkadeScript = script.nonInteractiveClaimArkadeScript
-  if (!shape.needsArkadeScript) return { packet: shape.body, tapTree: script.encode() }
-  // No leaf to derive from: fall back to the reveal, whose guard reports it.
   if (!arkadeScript) return undefined
-  return { packet: appendArkadeScript(shape.body, arkadeScript), tapTree: script.encode() }
+  return { packet: appendArkadeScript(packet.body, arkadeScript), tapTree: script.encode() }
 }

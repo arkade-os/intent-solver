@@ -12,7 +12,6 @@
     ],
     "mintAsset": true,
     "lnd": false,
-    "covclaimdImage": "",
     "evmChain": false,
     "arkdTimelocks": "seconds"
   },
@@ -23,7 +22,6 @@
     "files": ["vtxoLifecycle.e2e.test.ts", "blockTimelocks.e2e.test.ts"],
     "mintAsset": false,
     "lnd": false,
-    "covclaimdImage": "",
     "evmChain": false,
     "arkdTimelocks": "blocks"
   },
@@ -34,7 +32,6 @@
     "files": ["sweptSendRefund.e2e.test.ts", "sweptSendClaim.e2e.test.ts"],
     "mintAsset": false,
     "lnd": false,
-    "covclaimdImage": "",
     "evmChain": false,
     "arkdTimelocks": "blocks"
   },
@@ -45,7 +42,6 @@
     "files": ["unrolledSendClaim.e2e.test.ts"],
     "mintAsset": false,
     "lnd": false,
-    "covclaimdImage": "",
     "evmChain": false,
     "arkdTimelocks": "blocks"
   },
@@ -56,7 +52,6 @@
     "files": ["poolConsolidation.e2e.test.ts"],
     "mintAsset": false,
     "lnd": false,
-    "covclaimdImage": "",
     "evmChain": false,
     "arkdTimelocks": "seconds"
   },
@@ -72,18 +67,16 @@
     ],
     "mintAsset": false,
     "lnd": true,
-    "covclaimdImage": "",
     "evmChain": false,
     "arkdTimelocks": "seconds"
   },
   {
     "name": "receive-lightning",
-    "why": "The one group that also needs covclaimd: covclaimdClaim proves the daemon claims a lockup nobody in the test ever claims, and receiveLightningEdges has a reveal test that requires it. Separate from send-lightning because covclaimd watches arkd's tx stream and sweeps preimage-gated lockups, which the send legs do not want happening under them.",
-    "profiles": "emulator,covclaimd,boltz",
-    "files": ["receiveLightning.e2e.test.ts", "receiveLightningEdges.e2e.test.ts", "covclaimdClaim.e2e.test.ts"],
+    "why": "Runs the Lightning receive corridor on its own channel and Arkade float, including the held-HTLC settlement and refund paths.",
+    "profiles": "emulator,boltz",
+    "files": ["receiveLightning.e2e.test.ts", "receiveLightningEdges.e2e.test.ts"],
     "mintAsset": false,
     "lnd": true,
-    "covclaimdImage": "ghcr.io/arkade-os/covclaimd:v0.0.1-rc.5",
     "evmChain": false,
     "arkdTimelocks": "seconds"
   },
@@ -99,7 +92,6 @@
     ],
     "mintAsset": false,
     "lnd": true,
-    "covclaimdImage": "",
     "evmChain": false,
     "arkdTimelocks": "seconds"
   },
@@ -110,7 +102,6 @@
     "files": ["selfPayment.e2e.test.ts", "selfPaymentEdges.e2e.test.ts"],
     "mintAsset": false,
     "lnd": true,
-    "covclaimdImage": "",
     "evmChain": false,
     "arkdTimelocks": "seconds"
   },
@@ -129,7 +120,6 @@
     ],
     "mintAsset": false,
     "lnd": false,
-    "covclaimdImage": "",
     "evmChain": true,
     "arkdTimelocks": "seconds"
   }
