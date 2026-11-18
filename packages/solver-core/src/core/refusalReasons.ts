@@ -191,7 +191,7 @@ export const REFUSAL_EXPLANATIONS: Record<RefusalReason, RefusalExplanation> = {
   },
   payout_below_dust: {
     meaning:
-      'After fees the payout would be below the dust threshold of the onchain or Arkade output it lands in, so it could not be funded or spent.',
+      'After fees the payout would be below the smallest output its destination accepts — onchain dust, or Arkade’s dust and minimum VTXO amount — so it could not be funded or spent.',
     whatToDo:
       'Nothing. Raise the corridor minimum if you want to refuse these earlier, with a clearer answer to the client.',
   },

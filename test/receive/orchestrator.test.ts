@@ -571,7 +571,7 @@ describe('ReceiveSwapService.quote', () => {
       const wrapping = wrappingLn(() => 6)
       const outcome = await withLn(wrapping.port, { ...arkade.ops, minOutputSats: 4_900 }).quote(quoteRequest())
       expect(outcome).toEqual({ accepted: false, reason: 'payout_below_dust' })
-      expect(wrapping.calls.filter((call) => call.startsWith('mint'))).toEqual([])
+      expect(wrapping.calls).toEqual(['probe:5000', 'probe:4994'])
     })
 
     it('exact-in on a WRAPPING backend: the invoice asks exactly the requested give', async () => {

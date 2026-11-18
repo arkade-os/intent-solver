@@ -118,7 +118,6 @@ export interface ReceiveArkadeOps {
   delays: UnilateralDelays
   /** bech32 prefix for Arkade addresses. */
   hrp: string
-  /** The smallest lockup arkd lets the solver fund: the larger of dust and `vtxoMinAmount`. Absent, unchecked. */
   minOutputSats?: number
   findLockups(pkScriptHex: string): Promise<FundedOutput[]>
   /**

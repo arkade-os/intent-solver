@@ -705,14 +705,18 @@ export const createServices = async (
   }
   const bootOverrides = await adminStore.getOverrides()
   const policy = applyOverrides(config, bootOverrides)
-  const unclamped = clampedBefore(config.network, config.limits, {
-    ...config.corridorLimits,
-    ...Object.fromEntries(config.evmCorridors.map((evm) => [evm.corridor, evm.limits])),
+  const rangesOf = (of: Config) => ({
+    ...of.corridorLimits,
+    ...Object.fromEntries(of.evmCorridors.map((evm) => [evm.corridor, evm.limits])),
   })
+  const liveRanges = rangesOf(policy)
+  const unclamped = clampedBefore(config.network, config.limits, rangesOf(config))
   for (const { corridor, field, now, was } of unclamped) {
     const [bound, before] = field === 'maxSats' ? ['max', 'at most'] : ['min', 'at least']
+    const live = (corridor === null ? policy.limits : liveRanges[corridor]!)[field]
     log(
-      `limits — ${corridor ?? 'the deployment (limits.maxSwapSats)'} ${bound} is ${now} sats; releases before this allowed ${before} ${was}`,
+      `limits — the config sets ${corridor ?? 'the deployment (limits.maxSwapSats)'} ${bound} to ${now} sats; releases before this allowed ${before} ${was}` +
+        (live === now ? '' : `; a console override makes it ${live}`),
     )
   }
   if (unclamped.length > 0) {
