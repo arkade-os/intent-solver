@@ -1619,8 +1619,9 @@ tr.note td:first-child {
 }
 
 @media (max-width: 760px) {
+  /* Room for the dock (46px, 8px above the edge) and a clear gap, so the last card ends above it. */
   main {
-    padding-bottom: calc(88px + env(safe-area-inset-bottom));
+    padding-bottom: calc(100px + env(safe-area-inset-bottom));
   }
 
   .page-head {
@@ -2687,6 +2688,11 @@ input.amount {
     border: 1px solid var(--line);
     border-radius: 16px;
     background: var(--raised);
+  }
+
+  /* No drop shadow: a panel's scrollbox would clip it into a hard edge under the last card. */
+  table:not(.dialog table) {
+    box-shadow: none;
   }
 
   tbody tr {
