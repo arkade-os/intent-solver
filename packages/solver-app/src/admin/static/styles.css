@@ -885,6 +885,7 @@ td.num {
 
 .phase-exposed {
   color: var(--exposed);
+  border-color: var(--exposed);
   border-color: color-mix(in srgb, var(--exposed) 50%, transparent);
   background: var(--exposed-bg);
   font-weight: 600;
@@ -892,6 +893,7 @@ td.num {
 
 .phase-failed:not(.quiet) {
   color: var(--failed);
+  border-color: var(--failed);
   border-color: color-mix(in srgb, var(--failed) 50%, transparent);
   background: var(--failed-bg);
   font-weight: 600;
