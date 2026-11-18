@@ -178,15 +178,15 @@ describe('where the buttons live', () => {
 })
 
 describe('exporting the config', () => {
-  it('saves the document the server answers as solver-config.json, with nothing to say', async () => {
-    const state: Record<string, unknown> = {}
+  it('saves the document the server answers as solver-config.json, clearing an earlier failure', async () => {
+    const state: Record<string, unknown> = { banner: 'this solver was not started from a config document' }
     const api = vi.fn(async () => ({ document: { network: 'regtest' }, consoleOnly: [] }))
     await ui(state, api).exportConfig()
     expect(api).toHaveBeenCalledWith('/api/config/export')
     const link = clicked.at(-1)!
     expect(link).toMatchObject({ spec: 'a', attrs: { download: 'solver-config.json' } })
     expect(await resolveObjectURL(String(link.attrs.href))!.text()).toBe('{\n  "network": "regtest"\n}\n')
-    expect(state.banner).toBeUndefined()
+    expect(state.banner).toBeNull()
   })
 
   it('names, beside the saved file, each console value no file can hold', async () => {

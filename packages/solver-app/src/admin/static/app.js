@@ -4324,11 +4324,12 @@ const exportConfig = async () => {
     const href = URL.createObjectURL(new Blob([`${JSON.stringify(doc, null, 2)}\n`], { type: 'application/json' }))
     h('a', { href, download: 'solver-config.json' }).click()
     setTimeout(() => URL.revokeObjectURL(href), 60_000)
-    if (consoleOnly.length === 0) return
     state.banner =
-      'Exported, but no config file can hold ' +
-      consoleOnly.map((c) => `${c.path} ${c.console} (the file keeps ${c.file})`).join(', ') +
-      ": a file narrows each corridor's range to limits.maxSwapSats and the network's own. These stay in the console."
+      consoleOnly.length === 0
+        ? null
+        : 'Exported, but no config file can hold ' +
+          consoleOnly.map((c) => `${c.path} ${c.console} (the file keeps ${c.file})`).join(', ') +
+          ": a file narrows each corridor's range to limits.maxSwapSats and the network's own. These stay in the console."
     render()
   } catch (error) {
     fail(error)

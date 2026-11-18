@@ -374,6 +374,7 @@ export const exportDocument = (config: Config, overrides: Record<string, string>
   }
   return {
     document: redactDocument(doc),
+    // editableKnobValues fills every editable key, so neither lookup can be undefined.
     consoleOnly: moved.filter(outside).map((key) => ({ path: path(key), console: live[key]!, file: reloaded[key]! })),
   }
 }
