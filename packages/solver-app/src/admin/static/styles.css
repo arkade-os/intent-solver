@@ -218,7 +218,6 @@ pre,
 .activity-section,
 .wallet-section,
 main > p:not(.banner),
-main > div > .toolbar,
 .pricing-page > .toolbar,
 .pricing-page > details,
 .pricing-changes > details,
@@ -603,7 +602,6 @@ main h2.section-title {
   margin-bottom: 12px;
 }
 
-main > div > .toolbar,
 .pricing-page > .toolbar {
   padding: 8px 10px 8px 16px;
   border-radius: 18px;
@@ -611,6 +609,48 @@ main > div > .toolbar,
 
 .spacer {
   flex: 1;
+}
+
+/* A page's leading controls (Activity's tabs, the P&L and reconciliation window) share the title's row when
+   they fit and wrap under it when they do not. Their wrapper steps aside so they can join main's row. */
+main:has(> .activity, > div > .toolbar:first-child) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  column-gap: 20px;
+}
+
+main > .activity,
+main > div:has(> .toolbar:first-child) {
+  display: contents;
+}
+
+main:has(> .activity, > div > .toolbar:first-child) > *,
+main > .activity > *,
+main > div:has(> .toolbar:first-child) > * {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+
+main:has(> .activity, > div > .toolbar:first-child) > .page-head,
+main > .activity > .tabs,
+main > div > .toolbar:first-child {
+  flex: 0 1 auto;
+  margin-bottom: 14px;
+}
+
+main > .page-head {
+  order: -2;
+}
+
+main > .activity > .tabs,
+main > div > .toolbar:first-child {
+  order: -1;
+}
+
+main > .activity > .activity-section {
+  margin-top: 0;
 }
 
 .activity-section {
