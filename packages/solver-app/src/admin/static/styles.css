@@ -66,8 +66,8 @@
 
   /* The backdrop's two lights at their brightest. Glass lays --raised over them, --glass-alpha where it is
      thinnest, and contrast.test.ts holds every glass text colour against that blend. */
-  --glow-a: #2f1774;
-  --glow-b: #342a52;
+  --glow-a: #1a1232;
+  --glow-b: #1c1828;
   --glass-alpha: 60%;
   --glass: linear-gradient(
     145deg,
@@ -133,8 +133,8 @@
   --lens-solid: #ebe8f4;
   --logo: #381993;
 
-  --glow-a: #d9d2ff;
-  --glow-b: #d6cfe2;
+  --glow-a: #ece7f8;
+  --glow-b: #f2efef;
   --glass-alpha: 74%;
   --glass: linear-gradient(
     145deg,
@@ -183,24 +183,16 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* The lit backdrop. No text sits on it directly, only on glass or on a solid surface. */
+/* A faint, still tint from two corners. No text sits on it directly, only on glass or on a solid surface. */
 body::before {
   content: '';
   position: fixed;
   z-index: -1;
-  inset: -10%;
+  inset: 0;
   pointer-events: none;
   background:
-    radial-gradient(ellipse at 90% 4%, var(--glow-a), transparent 50%),
-    radial-gradient(ellipse at 4% 96%, var(--glow-b), transparent 52%),
-    radial-gradient(ellipse at 50% 50%, color-mix(in srgb, var(--glow-b) 50%, transparent), transparent 62%);
-  animation: glow-drift 72s ease-in-out infinite;
-}
-
-@keyframes glow-drift {
-  50% {
-    transform: translate3d(-3%, 2%, 0) scale(1.06);
-  }
+    radial-gradient(ellipse 60% 45% at 100% 0%, var(--glow-a), transparent),
+    radial-gradient(ellipse 50% 40% at 0% 100%, var(--glow-b), transparent);
 }
 
 /* Mono like every brand link, but never uppercased: these carry ids an operator matches against logs. */
@@ -1589,9 +1581,6 @@ tr.note td:first-child {
   }
   .tabs .lens {
     transition: none;
-  }
-  body::before {
-    animation: none;
   }
 }
 
