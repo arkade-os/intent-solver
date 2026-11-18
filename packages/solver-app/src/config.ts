@@ -462,6 +462,8 @@ export interface Config {
   configPaths: ReadonlyMap<string, string>
   /** A registered rail's own block of the document, for that rail to validate. */
   lightningRailBlock: unknown | null
+  /** The document as the operator wrote it, before any profile; absent when none was read. */
+  configDocument?: unknown
   /**
    * Whether this solver advertises itself on Nostr (kind 38859).
    *

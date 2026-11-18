@@ -132,7 +132,12 @@ const MINIMAL_ENV = {
   LN_BACKEND: 'fake',
 }
 
-const withoutDocumentFields = ({ configPaths: _paths, lightningRailBlock: _block, ...rest }: Config) => rest
+const withoutDocumentFields = ({
+  configPaths: _paths,
+  lightningRailBlock: _block,
+  configDocument: _document,
+  ...rest
+}: Config) => rest
 
 const loadedFrom = (doc: unknown) => loadConfig({ env: { SOLVER_CONFIG_JSON: JSON.stringify(doc) } })
 

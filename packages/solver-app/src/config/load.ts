@@ -152,7 +152,7 @@ export const loadConfig = (opts: LoadOptions = {}): Config => {
   const doc = profile ? parseDocument(profile(parsed), lightningRailNames()) : parsed
   const { knobs, pathOf, railBlock } = documentToKnobs(doc)
   try {
-    return { ...configFromKnobs(knobs), configPaths: pathOf, lightningRailBlock: railBlock }
+    return { ...configFromKnobs(knobs), configPaths: pathOf, lightningRailBlock: railBlock, configDocument: raw }
   } catch (error) {
     throw new Error(renameKnobs(messageOf(error), pathOf, knobs))
   }

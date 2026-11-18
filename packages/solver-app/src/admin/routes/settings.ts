@@ -38,8 +38,10 @@ import {
   validateOverride,
   editableKeys,
   applyOverrides,
+  exportDocument,
   pendingRestartKeys,
   LIVE_KEYS,
+  UnexportableConfig,
 } from '../settings.js'
 import { settingsDrift } from '../drift.js'
 import type { AdminDeps } from '../server.js'
@@ -78,6 +80,19 @@ export const registerSettingsRoutes = (app: Hono, deps: AdminDeps): void => {
       pendingRestart: pending,
       restartNotice: RESTART_NOTICE,
     })
+  })
+
+  app.get('/api/config/export', async (c) => {
+    const { config, adminStore } = deps.services
+    if (!config.configDocument) {
+      return c.json({ error: 'no_document', message: 'this solver was not started from a config document' }, 409)
+    }
+    try {
+      return c.json(exportDocument(config, await adminStore.getOverrides()))
+    } catch (error) {
+      if (error instanceof UnexportableConfig) return c.json({ error: 'unexportable', message: error.message }, 409)
+      throw error
+    }
   })
 
   app.patch('/api/settings', async (c) => {

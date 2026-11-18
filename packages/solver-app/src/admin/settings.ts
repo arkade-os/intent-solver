@@ -25,8 +25,11 @@ import { CORRIDORS, FREE, type Corridor, type Fee } from '@arkade-os/solver-core
 import { descriptorFor } from '@arkade-os/solver-corridors/corridors/index.js'
 import { MAX_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/send.js'
 import { assetMarketKey } from '@arkade-os/solver-core/core/assetMarketConfig.js'
-import { log } from '@arkade-os/solver-core/util/poll.js'
+import { log, messageOf } from '@arkade-os/solver-core/util/poll.js'
 import { lightningRailFor } from '../ops/rails.js'
+import { redactDocument, setAt } from '../config/fromEnv.js'
+import { BTC_FAMILY, CORRIDOR_FIELDS, corridorKnob, PATHS } from '../config/knobs.js'
+import { loadConfig } from '../config/load.js'
 
 export type KnobSource = 'config' | 'override'
 
@@ -311,6 +314,68 @@ export const applyOverrides = (config: Config, overrides: Record<string, string>
     maxExposedSats,
     lockupTimeoutSeconds,
     assetCarrierPricing,
+  }
+}
+
+const DOCUMENT_PATHS: ReadonlyMap<string, readonly string[]> = new Map<string, readonly string[]>([
+  ...PATHS.map(([path, knob]) => [knob, path.split('.')] as const),
+  ...CORRIDORS.flatMap((corridor) =>
+    CORRIDOR_FIELDS[BTC_FAMILY[corridor]!].map(
+      (field) => [corridorKnob(stemOf(corridor), field), ['corridors', corridor, field]] as const,
+    ),
+  ),
+])
+
+/** The document would not boot to what the console runs, for a reason other than a range no file can hold. */
+export class UnexportableConfig extends Error {}
+
+type KnobValue = ReturnType<typeof editableKnobValues>[string]
+
+export interface ConfigExport {
+  document: unknown
+  /** Console values outside the range a file may give a corridor: they stay in the console. */
+  consoleOnly: { path: string; console: KnobValue; file: KnobValue }[]
+}
+
+/**
+ * The document this solver booted from with the stored overrides written in, credentials as placeholders.
+ * Only a value an override moves is written, so the file stays the operator's own.
+ */
+export const exportDocument = (config: Config, overrides: Record<string, string>): ConfigExport => {
+  const booted = editableKnobValues(config)
+  const live = editableKnobValues(applyOverrides(config, overrides))
+  // The loader narrows a corridor's range into `limits` and the console does not, so no file holds one outside.
+  const outside = (key: string): boolean =>
+    /_M(IN|AX)_SATS$/.test(key) &&
+    (Number(live[key]) < config.limits.minSats || Number(live[key]) > config.limits.maxSats)
+  const moved = editableKeys().filter((key) => live[key] !== booted[key])
+  const doc = structuredClone(config.configDocument) as Record<string, unknown>
+  for (const key of moved.filter((key) => !outside(key))) {
+    const at = DOCUMENT_PATHS.get(key)
+    if (!at) continue // left unwritten, so the reload check below refuses the export by name
+    // A corridor block's presence alone turns it on (`enabled ?? true`), so a block written to says which.
+    if (at[0] === 'corridors') {
+      setAt(doc, ['corridors', at[1]!, 'enabled'], live[`${stemOf(at[1] as Corridor)}_ENABLED`])
+    }
+    setAt(doc, at, live[key])
+  }
+  const cannot = 'a config file cannot hold what this console runs'
+  let reloaded: ReturnType<typeof editableKnobValues>
+  try {
+    reloaded = editableKnobValues(loadConfig({ env: { SOLVER_CONFIG_JSON: JSON.stringify(doc) } }))
+  } catch (error) {
+    throw new UnexportableConfig(`${cannot}: ${messageOf(error)}`)
+  }
+  const path = (key: string): string => config.configPaths.get(key) ?? key
+  const lost = editableKeys().filter((key) => !outside(key) && reloaded[key] !== live[key])
+  if (lost.length > 0) {
+    const each = lost.map((key) => `${path(key)} is ${live[key]} here but would load as ${reloaded[key]}`)
+    throw new UnexportableConfig(`${cannot}: ${each.join('; ')}`)
+  }
+  return {
+    document: redactDocument(doc),
+    // editableKnobValues fills every editable key, so neither lookup can be undefined.
+    consoleOnly: moved.filter(outside).map((key) => ({ path: path(key), console: live[key]!, file: reloaded[key]! })),
   }
 }
 
