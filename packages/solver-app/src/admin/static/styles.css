@@ -2655,7 +2655,15 @@ input.amount {
     align-content: start;
   }
 
-  /* A tip opens across its form and a menu towards the page, never past the screen's edge. */
+  /* A phone's menu opens towards the page, never past the screen's edge. */
+  .menu-list {
+    right: 0;
+    left: auto;
+  }
+}
+
+@media (max-width: 1100px) {
+  /* A tip opens across its form, never past the screen's edge. */
   .form-grid {
     position: relative;
   }
@@ -2672,13 +2680,6 @@ input.amount {
     margin-top: 6px;
   }
 
-  .menu-list {
-    right: 0;
-    left: auto;
-  }
-}
-
-@media (max-width: 1100px) {
   table,
   tbody,
   tr,
