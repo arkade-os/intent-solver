@@ -2659,7 +2659,9 @@ input.amount {
     display: block;
   }
 
-  thead {
+  /* With its head hidden, a table without rows is an empty outline: nothing to show. */
+  thead,
+  table:not(:has(tbody tr)) {
     display: none;
   }
 
