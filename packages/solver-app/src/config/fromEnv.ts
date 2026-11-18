@@ -240,6 +240,11 @@ const placeholder = (at: readonly (string | number)[]): string =>
     .replace(/\W+/g, '_')
     .toUpperCase()}>`
 
+const feedCredential = (value: string): boolean => {
+  const url = URL.parse(value)
+  return url !== null && (url.username !== '' || [...url.searchParams.keys()].some((name) => SECRET_FIELD.test(name)))
+}
+
 const SECRET_PATHS = new Set(PATHS.flatMap(([path, knob]) => (SECRET_KNOBS.has(knob) ? [path] : [])))
 const SECRET_EVM_FIELDS = new Set(
   Object.entries(EVM_FIELDS).flatMap(([field, knob]) => (SECRET_KNOBS.has(knob) ? [field] : [])),
@@ -264,8 +269,11 @@ export const redactDocument = (doc: unknown): unknown => {
     const secretName = !recordKey && (SECRET_FIELD.test(key) || /priceFeed$/i.test(key))
     const named = SECRET_PATHS.has(jsonPath(at)) || evmSecret || secretName
     const inRail = at[0] === 'rails' && at[1] === 'lightning' && rails.has(String(at[2]))
+    // The console shows a market's feed in clear, so only a credential in it is held back, not any query string.
+    const marketFeed = at.length === 3 && at[0] === 'markets' && key === 'feedUrl'
     const shaped =
-      typeof node === 'string' && (credentialShaped(node) || (inRail && /^[a-z][a-z0-9+.-]*:\/\//i.test(node)))
+      typeof node === 'string' &&
+      (marketFeed ? feedCredential(node) : credentialShaped(node) || (inRail && /^[a-z][a-z0-9+.-]*:\/\//i.test(node)))
     if ((named && node !== null) || shaped) return placeholder(at)
     if (Array.isArray(node)) return node.map((item, index) => walk(item, [...at, index]))
     if (node === null || typeof node !== 'object') return node
