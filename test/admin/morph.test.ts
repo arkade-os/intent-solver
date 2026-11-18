@@ -202,12 +202,12 @@ describe('morph', () => {
     expect(root.childNodes[0]!.nodeName).toBe('TABLE')
   })
 
-  it('labels each body cell from its column past a spanning cell, and a repaint keeps the cells and labels', () => {
+  it('labels each body cell from its column past a spanning cell, and a repaint keeps the cells and follows renamed or cleared headings', () => {
     const { h, morphChildren } = load()
-    const table = () =>
+    const table = (amount = 'amount, sat', age = 'age') =>
       h(
         'table',
-        h('thead', h('tr', h('th', 'phase'), h('th', ''), h('th', 'amount, sat'), h('th', 'age'))),
+        h('thead', h('tr', h('th', 'phase'), h('th', ''), h('th', amount), h('th', age))),
         h(
           'tbody',
           h('tr', h('td', 'open'), h('td', 'dot'), h('td', '42'), h('td', '3m')),
@@ -223,6 +223,9 @@ describe('morph', () => {
     morphChildren(root, h('div', table()))
     cells(root).forEach((cell, i) => expect(cell).toBe(kept[i]))
     expect(labels(root)).toEqual(['phase', null, 'amount, sat', 'age', 'phase', null, 'age'])
+    morphChildren(root, h('div', table('amount', '')))
+    cells(root).forEach((cell, i) => expect(cell).toBe(kept[i]))
+    expect(labels(root)).toEqual(['phase', null, 'amount', null, 'phase', null, null])
   })
 })
 

@@ -70,12 +70,21 @@ const over = (top: string, share: number, bottom: string): string =>
     })
     .join('')
 
-/** `glass/<light>`: `--raised` at `--glass-alpha` (glass at its thinnest) over that light at its brightest. */
+/** `glass/<light>`: `--raised` at the thinner of `--glass`'s two stops over that light at its brightest. */
 const colourOf = (tokens: Record<string, string>, selector: string, name: string): string => {
   if (!name.startsWith('glass/')) return tokens[name]!
-  const alpha = blockOf(selector).match(/--glass-alpha:\s*(\d+)%/)
-  if (!alpha) throw new Error(`no --glass-alpha in ${selector}`)
-  return over(tokens['raised']!, Number(alpha[1]) / 100, tokens[name.slice('glass/'.length)]!)
+  const block = blockOf(selector)
+  const alpha = block.match(/--glass-alpha:\s*(\d+(?:\.\d+)?)%/)?.[1]
+  const gradient = block.match(/--glass:\s*linear-gradient\(([\s\S]*?)\);/)?.[1]
+  if (!gradient) throw new Error(`no --glass gradient in ${selector}`)
+  const shares = [...gradient.matchAll(/var\(--raised\)\s+(var\(--glass-alpha\)|\d+(?:\.\d+)?%)/g)].map(([, stop]) => {
+    const percent = Number(stop === 'var(--glass-alpha)' ? alpha : stop!.slice(0, -1))
+    if (!(percent >= 0 && percent <= 100))
+      throw new Error(`--glass stop ${stop} in ${selector} is not a share from 0 to 100%`)
+    return percent / 100
+  })
+  if (shares.length !== 2) throw new Error(`expected two --glass stops in ${selector}, found ${shares.length}`)
+  return over(tokens['raised']!, Math.min(...shares), tokens[name.slice('glass/'.length)]!)
 }
 
 /**
