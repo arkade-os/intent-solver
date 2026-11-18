@@ -29,6 +29,7 @@ import {
   assetMarketJson,
   assetMarketKey,
   validateAssetMarket,
+  withoutFeedCredential,
   type AssetMarketConfig,
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { log, messageOf } from '@arkade-os/solver-core/util/poll.js'
@@ -375,7 +376,10 @@ export const exportDocument = (
       validateAssetMarket(assetMarketFrom(entry), { allowPrivateFeedHost: true })
       written.push(entry)
     } catch (error) {
-      leftOut.push({ path: `market ${assetMarketKey(market.base, market.quote)}`, reason: messageOf(error) })
+      leftOut.push({
+        path: `market ${assetMarketKey(market.base, market.quote)}`,
+        reason: withoutFeedCredential(messageOf(error), market.feedUrl),
+      })
     }
   }
   if (written.length > 0 || doc.markets !== undefined) doc.markets = written

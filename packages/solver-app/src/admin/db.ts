@@ -385,11 +385,11 @@ export class AdminStore {
     // MUST stay: the symbol index names a column the ALTER loop adds, so SCHEMA cannot carry it.
     await store.driver.exec(MIGRATED_SCHEMA)
     if (seed) await store.seedServing(seed)
-    // After the serving seed, so a document market keeps the serving it was exported with.
-    if (seed?.markets?.length) await store.seedMarkets(seed.markets)
     // AFTER the seed, and unconditional: a pre-upgrade row is old, not unhealthy,
     // and judging one before the seed resolves it reports a repair it overwrites.
     await store.repairServing()
+    // After the repair, so a symbol it derives for an old row is held before a document market can claim it.
+    if (seed?.markets?.length) await store.seedMarkets(seed.markets)
     return store
   }
 
@@ -402,28 +402,28 @@ export class AdminStore {
     for (const market of markets) {
       const key = assetMarketKey(market.base, market.quote)
       const marker = `market-seed:${key}`
-      if (await this.driver.get('SELECT name FROM admin_migration WHERE name = ?', [marker])) continue
-      const held =
-        (await this.getMarket(key)) === null && market.symbol !== null
-          ? (await this.listMarkets()).find((row) => row.symbol === market.symbol)
-          : undefined
-      if (held) {
-        notes.push(`${key}: not created from the config document; ${held.marketKey} holds symbol ${market.symbol}`)
-        continue
-      }
+      // Every read inside the write: another opener may have made the marker, the pair or the symbol meanwhile.
       await this.driver.transaction(async () => {
+        if (await this.driver.get('SELECT name FROM admin_migration WHERE name = ?', [marker])) return
         if ((await this.getMarket(key)) === null) {
+          const held = (await this.listMarkets()).find((row) => market.symbol !== null && row.symbol === market.symbol)
+          if (held) {
+            notes.push(`${key}: not created from the config document; ${held.marketKey} holds symbol ${market.symbol}`)
+            return
+          }
           await this.putMarket(market)
+          // Without the feed: an audit row never carries key material, and a feed URL can.
+          const { feedUrl: _feed, ...audited } = assetMarketJson(market)
           await this.recordAction({
             action: 'market-seed',
             target: key,
-            params: JSON.stringify(assetMarketJson(market)),
+            params: JSON.stringify(audited),
             outcome: 'ok',
             detail: 'created from the config document',
           })
           notes.push(`${key}: created from the config document`)
         }
-        await this.driver.run('INSERT INTO admin_migration (name, at) VALUES (?, ?)', [marker, this.now()])
+        await this.driver.run('INSERT OR IGNORE INTO admin_migration (name, at) VALUES (?, ?)', [marker, this.now()])
       })
     }
     this.seeded = notes

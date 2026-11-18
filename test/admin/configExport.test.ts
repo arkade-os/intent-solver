@@ -14,6 +14,7 @@ import {
   assetMarketFrom,
   assetMarketJson,
   assetMarketKey,
+  rfqSymbolFor,
   type AssetMarketConfig,
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 
@@ -293,10 +294,38 @@ describe('markets in the export', () => {
           markets: [{ feedUrl: string }]
         }
       ).markets[0].feedUrl
-    expect(feedOf('https://feed.example/price?apikey=secret-feed-key')).toBe('<MARKETS_0_FEED_URL>')
+    for (const feed of [
+      'https://feed.example/price?apikey=secret-feed-key',
+      'https://feed.example/price?access_key=secret-feed-key',
+      'https://feed.example/price?api-key=secret-feed-key',
+      'https://:secret-feed-key@feed.example/price',
+    ]) {
+      expect(feedOf(feed)).toBe('<MARKETS_0_FEED_URL>')
+    }
     expect(feedOf('https://feed.example/price?ids=bitcoin&vs=brl')).toBe(
       'https://feed.example/price?ids=bitcoin&vs=brl',
     )
+  })
+
+  it('names a market it leaves out without quoting a credential its feed carries', () => {
+    const bad = brlt({ feedUrl: 'https://feed.example/x?apikey=secret-omit-key', pricePath: '' })
+    const { consoleOnly } = exportDocument(load(base()), {}, [bad])
+    expect(consoleOnly[0]?.reason).toContain('<feed URL>')
+    expect(JSON.stringify(consoleOnly)).not.toContain('secret-omit-key')
+  })
+
+  it('refuses a document market without quoting a credential its feed carries', () => {
+    const feedUrl = 'https://feed.example:port/price?apikey=secret-load-key'
+    const refusal = (() => {
+      try {
+        load({ ...base(), markets: [{ ...assetMarketJson(brlt()), feedUrl }] })
+      } catch (error) {
+        return String(error)
+      }
+      return 'loaded'
+    })()
+    expect(refusal).toMatch(/markets\[0\]: .*<feed URL>/)
+    expect(refusal).not.toContain('secret-load-key')
   })
 
   it('refuses a document market by its index, and a repeated pair', () => {
@@ -318,6 +347,27 @@ describe('document markets at boot', () => {
     expect((await (await fresh([brlt()], driver)).listMarkets())[0]?.feeBps).toBe(9)
     await first.deleteMarket(assetMarketKey(null, ASSET))
     expect(await (await fresh([brlt()], driver)).listMarkets()).toEqual([])
+  })
+
+  it('records its creation without the feed', async () => {
+    const store = await fresh([brlt({ feedUrl: 'https://feed.example/p?apikey=secret-audit-key', pricePath: '/p' })])
+    const [created] = await store.listActions()
+    expect(created).toMatchObject({ action: 'market-seed', target: assetMarketKey(null, ASSET) })
+    expect(created?.params).not.toContain('secret-audit-key')
+  })
+
+  it('lets the boot repair give an old row its symbol before a document market can claim it', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    const old = `${'2'.repeat(64)}0000`
+    await (await fresh([], driver)).putMarket(brlt({ quote: old, symbol: null }))
+    const reopened = await fresh([brlt({ symbol: rfqSymbolFor(old) })], driver)
+    expect(await reopened.getMarket(assetMarketKey(null, old))).toMatchObject({
+      symbol: rfqSymbolFor(old),
+      servesRfq: true,
+    })
+    expect(reopened.seededMarkets).toEqual([
+      `${assetMarketKey(null, ASSET)}: not created from the config document; ${assetMarketKey(null, old)} holds symbol ${rfqSymbolFor(old)}`,
+    ])
   })
 
   it('leaves one whose symbol another row holds, saying so each boot', async () => {

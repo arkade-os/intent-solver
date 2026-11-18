@@ -7,6 +7,7 @@ import {
   assetMarketFrom,
   assetMarketKey,
   validateAssetMarket,
+  withoutFeedCredential,
   type AssetMarketBody,
   type AssetMarketConfig,
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
@@ -161,7 +162,10 @@ const marketsOf = (entries: readonly unknown[]): AssetMarketConfig[] => {
       if (market.symbol !== null) symbols.add(market.symbol)
       return market
     } catch (error) {
-      throw new Error(`markets[${index}]: ${messageOf(error)}`)
+      const feed = (entry as AssetMarketBody).feedUrl
+      throw new Error(
+        `markets[${index}]: ${withoutFeedCredential(messageOf(error), typeof feed === 'string' ? feed.trim() : '')}`,
+      )
     }
   })
 }

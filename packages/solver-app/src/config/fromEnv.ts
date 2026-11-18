@@ -8,6 +8,7 @@ import { z } from 'zod'
 import { ALL_DESCRIPTORS } from '@arkade-os/solver-corridors/corridors/index.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { resolveDbLayout } from '@arkade-os/solver-corridors/db/layout.js'
+import { feedCredential } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { parseEvmTokens } from '@arkade-os/solver-core/core/evmCorridorConfig.js'
 import { messageOf } from '@arkade-os/solver-core/util/poll.js'
 import { swapDbPath } from '../config.js'
@@ -239,11 +240,6 @@ const placeholder = (at: readonly (string | number)[]): string =>
     .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
     .replace(/\W+/g, '_')
     .toUpperCase()}>`
-
-const feedCredential = (value: string): boolean => {
-  const url = URL.parse(value)
-  return url !== null && (url.username !== '' || [...url.searchParams.keys()].some((name) => SECRET_FIELD.test(name)))
-}
 
 const SECRET_PATHS = new Set(PATHS.flatMap(([path, knob]) => (SECRET_KNOBS.has(knob) ? [path] : [])))
 const SECRET_EVM_FIELDS = new Set(

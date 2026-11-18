@@ -451,6 +451,22 @@ export const assetMarketFrom = (body: AssetMarketBody): AssetMarketConfig => ({
   enabled: body.enabled === undefined ? true : body.enabled === true,
 })
 
+// Wider than the sentry SECRET_KEY on purpose: price APIs name their key access_key, api-key or plain key.
+const FEED_SECRET = /key|token|secret|auth|pass|sign|credential|session/i
+
+/** Whether a feed URL carries a credential: userinfo, or a query parameter named like one. */
+export const feedCredential = (feedUrl: string): boolean => {
+  const url = URL.parse(feedUrl)
+  if (url === null) return /@|[?&][^=&#]*(key|token|secret|auth|pass|sign|credential|session)/i.test(feedUrl)
+  return (
+    url.username !== '' || url.password !== '' || [...url.searchParams.keys()].some((name) => FEED_SECRET.test(name))
+  )
+}
+
+/** A message that may quote `feedUrl`, with the URL taken out when it carries a credential. */
+export const withoutFeedCredential = (message: string, feedUrl: string): string =>
+  feedUrl !== '' && feedCredential(feedUrl) ? message.split(feedUrl).join('<feed URL>') : message
+
 /** The inverse of {@link assetMarketFrom}. */
 export const assetMarketJson = (market: AssetMarketConfig) => ({
   base: market.base,
