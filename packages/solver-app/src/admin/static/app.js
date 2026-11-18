@@ -3201,7 +3201,8 @@ const pricingView = () => {
           {
             title:
               'The config file this solver booted with, console setting changes written in. Each credential comes ' +
-              'out as a <PLACEHOLDER> to fill back in. Markets and the rebalance policy stay in the console.',
+              'out as a <PLACEHOLDER> to fill back in. Markets, the rebalance policy and any corridor range a file ' +
+              'cannot hold stay in the console.',
             onclick: () => exportConfig(),
           },
           'Export config',
@@ -4319,10 +4320,16 @@ const revertButton = (scope, label) => {
 /** Read through `api`, not a download link: a failed export must reach the banner, never a file named like a config. */
 const exportConfig = async () => {
   try {
-    const doc = await api('/api/config/export')
+    const { document: doc, consoleOnly } = await api('/api/config/export')
     const href = URL.createObjectURL(new Blob([`${JSON.stringify(doc, null, 2)}\n`], { type: 'application/json' }))
     h('a', { href, download: 'solver-config.json' }).click()
     setTimeout(() => URL.revokeObjectURL(href), 60_000)
+    if (consoleOnly.length === 0) return
+    state.banner =
+      'Exported, but no config file can hold ' +
+      consoleOnly.map((c) => `${c.path} ${c.console} (the file keeps ${c.file})`).join(', ') +
+      ": a file narrows each corridor's range to limits.maxSwapSats and the network's own. These stay in the console."
+    render()
   } catch (error) {
     fail(error)
   }

@@ -405,9 +405,10 @@ puts it back — the whole console, or one market — after showing every change
 **Export config** goes the other way: it downloads the document this solver
 booted from with the console's setting overrides written in, each credential
 replaced by a `<PLACEHOLDER>` the loader refuses until it is filled back in.
-It refuses instead, naming the setting, when the console runs a corridor range
-wider than a file can hold. Market serving and the rebalance policy have no
-place in the document and stay in the console.
+Market serving and the rebalance policy have no place in the document and stay
+in the console. So does a corridor range outside `limits.maxSwapSats` and the
+network's own range, which only the console can widen past; the export names
+each one it leaves out.
 
 ### Config — required
 

@@ -148,29 +148,32 @@ describe('GET /api/config/export', () => {
       arkade: { mnemonic: 'secret words never real', operatorUrl: 'http://arkade.test', emulatorUrl: 'http://e.test' },
       lightning: { backend: 'fake' },
     },
-    corridors: { 'arkade:BTC->lightning:BTC': { feeBps: 10 } },
+    corridors: { 'arkade:BTC->lightning:BTC': { feeBps: 10, maxSats: 100_000 } },
   }
   const exported = (overrides: Record<string, string>, config: unknown = loadConfig(inline(doc))) =>
     build(overrides, { config }).app.fetch(new Request('http://admin/api/config/export'))
 
   it('answers the booted document with the stored overrides in, and no credential', async () => {
-    const response = await exported({ LN_SEND_FEE_BPS: '25' })
+    const response = await exported({ LN_SEND_FEE_BPS: '25', LN_SEND_MAX_SATS: '2000000' })
     expect(response.status).toBe(200)
     const text = await response.text()
     expect(text).not.toContain('secret words never real')
     expect(JSON.parse(text)).toEqual({
-      ...doc,
-      rails: { ...doc.rails, arkade: { ...doc.rails.arkade, mnemonic: '<RAILS_ARKADE_MNEMONIC>' } },
-      corridors: { 'arkade:BTC->lightning:BTC': { enabled: true, feeBps: 25 } },
+      document: {
+        ...doc,
+        rails: { ...doc.rails, arkade: { ...doc.rails.arkade, mnemonic: '<RAILS_ARKADE_MNEMONIC>' } },
+        corridors: { 'arkade:BTC->lightning:BTC': { enabled: true, feeBps: 25, maxSats: 100_000 } },
+      },
+      consoleOnly: [{ path: 'corridors["arkade:BTC->lightning:BTC"].maxSats', console: 2_000_000, file: 100_000 }],
     })
   })
 
-  it('refuses, saying why, when a file could not hold what the console runs', async () => {
-    const response = await exported({ LN_SEND_MAX_SATS: '2000000' })
+  it('refuses, saying why, when the file would not load beside what it can hold', async () => {
+    const response = await exported({ LN_SEND_MIN_SATS: '500000', LN_SEND_MAX_SATS: '2000000' })
     expect(response.status).toBe(409)
     expect(await response.json()).toMatchObject({
       error: 'unexportable',
-      message: expect.stringContaining('maxSats is 2000000 here but would load as 1000000'),
+      message: expect.stringMatching(/cannot hold what this console runs: .*empty/),
     })
   })
 

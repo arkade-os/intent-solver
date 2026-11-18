@@ -52,12 +52,14 @@ const evmChain = (rpcUrl: string, privateKey: string) => ({
 const load = (doc: unknown, profile?: LoadOptions['profile']) =>
   loadConfig({ env: { SOLVER_CONFIG_JSON: JSON.stringify(doc) }, profile })
 
+const documentOf = (...args: Parameters<typeof exportDocument>) => exportDocument(...args).document
+
 const withMnemonic = (exported: unknown): unknown =>
   JSON.parse(JSON.stringify(exported).replace('"<RAILS_ARKADE_MNEMONIC>"', JSON.stringify(MNEMONIC)))
 
 describe('exportDocument', () => {
   it('writes each stored override where the document holds it, as the type the document takes', () => {
-    const exported = exportDocument(load(base()), { LN_SEND_FEE_BPS: '25', MAX_EXPOSED_SATS: '500000' }) as ReturnType<
+    const exported = documentOf(load(base()), { LN_SEND_FEE_BPS: '25', MAX_EXPOSED_SATS: '500000' }) as ReturnType<
       typeof base
     > & { limits: { maxExposedSats: number } }
     expect(exported.corridors[LN_SEND]).toEqual({ feeBps: 25, minSats: 1_000, maxSats: 100_000, enabled: true })
@@ -75,7 +77,7 @@ describe('exportDocument', () => {
       LOCKUP_TIMEOUT_SECONDS: '900',
       ASSET_CARRIER_PRICING: 'true',
     }
-    const reloaded = load(withMnemonic(exportDocument(config, overrides)))
+    const reloaded = load(withMnemonic(documentOf(config, overrides)))
     expect(editableKnobValues(reloaded)).toEqual(editableKnobValues(applyOverrides(config, overrides)))
     expect(reloaded.corridorEnabled[ONCHAIN_SEND]).toBe(false)
   })
@@ -84,25 +86,32 @@ describe('exportDocument', () => {
     const { lightning: _none, ...rails } = base().rails
     const config = load({ network: 'regtest', rails })
     const overrides = { LN_SEND_FEE_BPS: '25', LOCKUP_TIMEOUT_SECONDS: '900', ASSET_CARRIER_PRICING: 'true' }
-    const reloaded = load(withMnemonic(exportDocument(config, overrides)))
+    const reloaded = load(withMnemonic(documentOf(config, overrides)))
     expect(editableKnobValues(reloaded)).toEqual(editableKnobValues(applyOverrides(config, overrides)))
     expect(reloaded.lnBackend).toBe(config.lnBackend)
   })
 
-  it('refuses a corridor range the console widened past what a file can hold', () => {
-    const exporting = () => exportDocument(load(base()), { LN_SEND_MAX_SATS: '2000000', LN_SEND_FEE_BPS: '25' })
-    expect(exporting).toThrow(UnexportableConfig)
-    expect(exporting).toThrow(`corridors["${LN_SEND}"].maxSats is 2000000 here but would load as 1000000`)
+  it('leaves a corridor range no file can hold in the console, naming it, and exports the rest', () => {
+    const { document, consoleOnly } = exportDocument(load(base()), {
+      LN_SEND_MAX_SATS: '2000000',
+      LN_RECEIVE_MIN_SATS: '500',
+      LN_SEND_FEE_BPS: '25',
+    })
+    expect((document as ReturnType<typeof base>).corridors[LN_SEND]).toMatchObject({ feeBps: 25, maxSats: 100_000 })
+    expect(consoleOnly).toEqual([
+      { path: `corridors["${LN_SEND}"].maxSats`, console: 2_000_000, file: 100_000 },
+      { path: 'corridors["lightning:BTC->arkade:BTC"].minSats', console: 500, file: 1_000 },
+    ])
   })
 
-  it('refuses, with the loader’s reason, a range a file would not load at all', () => {
-    const exporting = () => exportDocument(load(base()), { LN_SEND_MIN_SATS: '1500000', LN_SEND_MAX_SATS: '2000000' })
+  it('refuses, with the loader’s reason, a range that would not load beside what a file can hold', () => {
+    const exporting = () => exportDocument(load(base()), { LN_SEND_MIN_SATS: '500000', LN_SEND_MAX_SATS: '2000000' })
     expect(exporting).toThrow(UnexportableConfig)
     expect(exporting).toThrow(/cannot hold what this console runs: .*empty/)
   })
 
   it('writes nothing an override does not move', () => {
-    const exported = exportDocument(load(base()), {
+    const exported = documentOf(load(base()), {
       LN_SEND_FEE_BPS: '10',
       LN_RECEIVE_FEE_BPS: 'not a number',
       REBALANCE_POLICY: '{"enabled":true}',
@@ -121,7 +130,7 @@ describe('exportDocument', () => {
       if (doc.name !== undefined) throw new Error('the profile names the solver itself')
       return { ...doc, name: 'from-profile' }
     }
-    const exported = withMnemonic(exportDocument(load(base(), profile), { LN_SEND_FEE_BPS: '25' }))
+    const exported = withMnemonic(documentOf(load(base(), profile), { LN_SEND_FEE_BPS: '25' }))
     expect(exported).not.toHaveProperty('name')
     expect(load(exported, profile).corridorFees[LN_SEND].bps).toBe(25)
   })
@@ -174,7 +183,7 @@ describe('exportDocument', () => {
       sentry: { dsn: secrets['sentry.dsn'] },
       relay: { url: secrets['relay.url'] },
     }
-    const exported = exportDocument(load(doc), {})
+    const exported = documentOf(load(doc), {})
     const text = JSON.stringify(exported)
     for (const value of [MNEMONIC, ...Object.values(secrets), '987654321']) expect(text).not.toContain(value)
     expect(exported).toMatchObject({
@@ -205,7 +214,7 @@ describe('exportDocument', () => {
       ...rest,
       rails,
     })
-    const exported = exportDocument(load(doc, withoutEvm), {})
+    const exported = documentOf(load(doc, withoutEvm), {})
     expect(JSON.stringify(exported)).not.toContain(rpcUrl)
     expect(exported).toMatchObject({ rails: { evm: { mine: { rpcUrl: '<RAILS_EVM_MINE_RPC_URL>' } } } })
   })
@@ -220,7 +229,7 @@ describe('exportDocument', () => {
         'TOKEN@base': { kind: 'erc20', chain: 'base', address, decimals: 6, priceFeed: feed, pricePath: '/p' },
       },
     }
-    const exported = exportDocument(load(doc), {})
+    const exported = documentOf(load(doc), {})
     expect(JSON.stringify(exported)).not.toContain(feed)
     expect(exported).toMatchObject({
       assets: { 'TOKEN@base': { kind: 'erc20', address, decimals: 6, priceFeed: '<ASSETS_TOKEN_BASE_PRICE_FEED>' } },
