@@ -213,6 +213,7 @@ export const RFQ_REFUSAL_REASONS: Record<string, RfqRefusalReason> = {
   // accidental right answer is indistinguishable from a missing entry at the
   // moment someone changes the fallback.
   invalid_payout_address: 'unsupported_payload',
+  invalid_claim_packet: 'unsupported_payload',
   unsupported_payload: 'unsupported_payload',
   invoice_expired: 'invoice_expired',
   invoice_expires_too_soon: 'invoice_expired',

@@ -218,7 +218,7 @@ const quoteRequest = (over: Partial<Parameters<ReceiveSwapService['quote']>[0]> 
   amountSats: 5_000,
   payoutAddress: CLIENT_PAYOUT_ADDRESS,
   payoutPubkey: clientPayoutPubkey,
-  claimPacket: 'ZWFsZWQtY2lwaGVydGV4dA==',
+  claimPacket: null,
   ...over,
 })
 
@@ -1263,17 +1263,32 @@ describe('ReceiveSwapService.tick — funding with a claim packet', () => {
   )
 
   it.each([
+    ['bare ciphertext', new Uint8Array(93)],
     ['carrying an arkade script', Uint8Array.from([...CIPHERTEXT_TLV, ...tlvBytes(0x02, [0x51, 0x52])])],
     ['carrying nothing else', Uint8Array.from(CIPHERTEXT_TLV)],
-  ])('funds without stamping a packet with no recipient, %s', async (_name, noPubkey) => {
+  ])('refuses an unstampable claim packet before issuing an invoice, %s', async (_name, noPubkey) => {
     const outcome = await service.quote(quoteRequest({ claimPacket: base64.encode(noPubkey) }))
+    expect(outcome).toEqual({ accepted: false, reason: 'invalid_claim_packet' })
+    await expect(ln.getHoldState(paymentHash)).rejects.toThrow()
+    await expect(store.findLiveByPaymentHash(paymentHash)).resolves.toBeNull()
+  })
+
+  it('still settles a legacy quote with unstamped ciphertext through a client claim', async () => {
+    const outcome = await service.quote(quoteRequest())
     if (!outcome.accepted) throw new Error('expected acceptance')
+    await driver.run('UPDATE receive_swap SET claim_packet = ? WHERE id = ?', [
+      base64.encode(new Uint8Array(93)),
+      outcome.swap.id,
+    ])
     ln.armHold(paymentHash, now + 4 * 3600)
 
-    const row = await service.tick(outcome.swap.id)
-
-    expect(row.state).toBe('funded')
+    const funded = await service.tick(outcome.swap.id)
+    expect(funded.state).toBe('funded')
     expect(arkade.state.fundCalls[0]?.stamp).toBeUndefined()
+
+    arkade.state.outputs = []
+    arkade.state.claimPreimage = P
+    await expect(service.tick(funded.id)).resolves.toMatchObject({ state: 'settled' })
   })
 
   it('completes a client packet with the arkade script the covenant commits to', async () => {

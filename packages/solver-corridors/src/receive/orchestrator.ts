@@ -280,6 +280,7 @@ export type QuoteRefusal =
   | 'fee_consumes_swap'
   | 'payout_below_dust'
   | 'invalid_payout_address'
+  | 'invalid_claim_packet'
   | 'duplicate_swap'
   | 'provider_at_capacity'
   /**
@@ -471,6 +472,9 @@ export class ReceiveSwapService {
           senderPkScript: hex.decode(arkade.solverRefundPkScript),
         },
       })
+      if (request.claimPacket !== null && !claimPacketStamp(request.claimPacket, script)) {
+        return { accepted: false, reason: 'invalid_claim_packet' }
+      }
 
       // `E` is chosen here, not merely inspected at funding time. The final CLTV
       // delta is the one part of the htlc's deadline that is ours to set, and it

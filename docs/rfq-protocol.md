@@ -1118,8 +1118,9 @@ The client is paid over Lightning and the sats land on Arkade
   matching the funded covenant's `taggedHash("ArkScriptHash", script)`
   commitment. Funding carries the resulting bytes as Arkade extension packet
   type `0x04` and the lockup's tapleaf set on its `PSBT_OUT_TAP_TREE`.
-  Additional TLVs are preserved. Bare ciphertext lacks the framing required
-  for the funding extension.
+  Additional TLVs are preserved. If the solver cannot attach the supplied
+  packet, such as bare ciphertext or malformed TLV, it returns
+  `unsupported_payload` before issuing an invoice.
 
 - **quote.profile**: `payment_hash` (echo), the hold `invoice` on `H` (its
   expiry SHOULD equal `valid_until`), `lockup_address` (compare-only — the
@@ -1821,6 +1822,7 @@ The reference implementation's internal refusal names map onto the closed set
 | `zero_amount_invoice`        | `unsupported_payload` |
 | `invalid_refund_address`     | `unsupported_payload` |
 | `invalid_payout_address`     | `unsupported_payload` |
+| `invalid_claim_packet`       | `unsupported_payload` |
 | `unsupported_payload`        | `unsupported_payload` |
 | `invoice_expired`            | `invoice_expired`     |
 | `invoice_expires_too_soon`   | `invoice_expired`     |

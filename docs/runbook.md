@@ -1842,6 +1842,10 @@ to the solver. The client seals the packet to its chosen claim service, which
 reads it from the Arkade funding transaction. The solver keeps watching the
 lockup for a claim and settles the hold when it sees a valid preimage.
 
+A new RFQ carrying bare ciphertext or a malformed packet is refused before
+an invoice is issued. Send a framed claim packet or omit `profile.claim_packet`
+and use a collaborative claim.
+
 If a lockup was already funded without the packet extension, upgrading cannot
 add a packet to that transaction. A service that already received a reveal
 can still claim. Otherwise the client should claim with its preimage and
