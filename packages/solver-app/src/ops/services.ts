@@ -150,13 +150,12 @@ export interface Services {
   /**
    * The ENVIRONMENT's configuration, exactly as `loadConfig()` read it.
    *
-   * Deliberately not the effective policy — see {@link Services.policy}. This
-   * is the ceiling `validateOverride` measures against, so an override can
-   * always be relaxed back toward what the environment permits.
+   * Deliberately not the effective policy — see {@link Services.policy}. An
+   * override is reverted to it, and may not enable a corridor it disables.
    */
   config: Config
   /**
-   * What this process actually quotes: {@link Services.config} narrowed by the
+   * What this process actually quotes: {@link Services.config} with the
    * console's stored overrides. {@link Services.replacePolicy} moves this.
    *
    * The services were constructed from these values and nothing re-reads them,
@@ -541,18 +540,6 @@ export const createServices = async (
   })
   for (const line of adminStore.seededMarkets) log(`market — ${line}`)
   for (const line of adminStore.repairedServing) log(`market serving repaired — ${line}`)
-  const unclamped = clampedBefore(config.network, config.limits, config.corridorLimits)
-  for (const { corridor, field, now, was } of unclamped) {
-    const range = corridor === null ? 'the deployment (limits.maxSwapSats)' : corridor
-    log(
-      `limits — ${range} ${field === 'maxSats' ? 'max' : 'min'} is ${now} sats; releases before this clamped it to ${was}`,
-    )
-  }
-  if (unclamped.length > 0) {
-    log(
-      `limits — the total in flight is capped at ${config.maxExposedSats} sats (limits.maxExposedSats; 3 × the deployment max when unset)`,
-    )
-  }
   // Empty sinks make `post` a no-op, so a deployment that configures nothing
   // gets today's behaviour exactly: no timer, no network call, no failure.
   const notifySinks = sinksFrom(config.notify, globalThis.fetch as never)
@@ -716,19 +703,23 @@ export const createServices = async (
     service.onTickSuccess = (id) => tickErrors.clear(id)
     service.shouldSkipTick = (id) => tickErrors.shouldSkip(id)
   }
-  /**
-   * What this process will ACTUALLY quote: the environment, with any
-   * overrides the console has stored.
-   *
-   * Read once, here, and never again — the services below are handed their
-   * policy at construction and nothing re-reads it, which is exactly why a
-   * settings change needs a restart to take effect.
-   *
-   * `config` stays the ENVIRONMENT's values and is what `Services.config`
-   * carries.
-   */
   const bootOverrides = await adminStore.getOverrides()
   const policy = applyOverrides(config, bootOverrides)
+  const unclamped = clampedBefore(config.network, config.limits, {
+    ...config.corridorLimits,
+    ...Object.fromEntries(config.evmCorridors.map((evm) => [evm.corridor, evm.limits])),
+  })
+  for (const { corridor, field, now, was } of unclamped) {
+    const [bound, before] = field === 'maxSats' ? ['max', 'at most'] : ['min', 'at least']
+    log(
+      `limits — ${corridor ?? 'the deployment (limits.maxSwapSats)'} ${bound} is ${now} sats; releases before this allowed ${before} ${was}`,
+    )
+  }
+  if (unclamped.length > 0) {
+    log(
+      `limits — admission caps the total in flight at ${policy.maxExposedSats} sats (limits.maxExposedSats or its console override; unset, 3 × the deployment max)`,
+    )
+  }
 
   const assetThresholds = new Map<string, bigint>(
     config.assetRfqTokens.flatMap((token) =>

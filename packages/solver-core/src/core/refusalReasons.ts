@@ -190,7 +190,8 @@ export const REFUSAL_EXPLANATIONS: Record<RefusalReason, RefusalExplanation> = {
     whatToDo: 'Expected at small amounts. If it is blocking real traffic, lower the corridor fee or raise its minimum.',
   },
   payout_below_dust: {
-    meaning: 'After fees the onchain payout would be below the dust threshold, so it could not be spent.',
+    meaning:
+      'After fees the payout would be below the dust threshold of the onchain or Arkade output it lands in, so it could not be funded or spent.',
     whatToDo:
       'Nothing. Raise the corridor minimum if you want to refuse these earlier, with a clearer answer to the client.',
   },

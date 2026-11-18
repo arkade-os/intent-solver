@@ -40,7 +40,7 @@ const clamp = (outer: Limits, inner: Limits): Limits => ({
   maxSats: Math.min(outer.maxSats, inner.maxSats),
 })
 
-/** Bounds an older release clamped and that now apply as set; `corridor` null is the deployment's own range. */
+/** Bounds past what an older release allowed, which now apply as set; `corridor` null is the deployment's own range. */
 export const clampedBefore = <K extends string>(
   network: SwapNetwork,
   deployment: Limits,

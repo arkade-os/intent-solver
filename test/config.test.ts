@@ -676,8 +676,11 @@ describe('loadConfig — EVM corridors', () => {
     process.env.EVM_USDC_PRICE_PATH = '/btc/usdc'
     process.env.MAX_SWAP_SATS = '7000000'
     const config = configFromKnobs(process.env)
-    for (const corridor of config.evmCorridors) expect(corridor.limits).toEqual(config.limits)
-    expect(config.limits.maxSats).toBe(7_000_000)
+    const house = { minSats: config.limits.minSats, maxSats: 7_000_000 }
+    expect(config.evmCorridors.map((c) => [c.direction, c.limits])).toEqual([
+      ['send', house],
+      ['receive', house],
+    ])
   })
 
   it('lets a token knob set a bound past the house range', () => {

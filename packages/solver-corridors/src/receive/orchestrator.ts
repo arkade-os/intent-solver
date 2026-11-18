@@ -300,6 +300,7 @@ export type QuoteRefusal =
   | 'rate_limited'
   | 'amount_out_of_range'
   | 'fee_consumes_swap'
+  | 'payout_below_dust'
   | 'invalid_payout_address'
   | 'duplicate_swap'
   | 'provider_at_capacity'
@@ -405,6 +406,7 @@ export class ReceiveSwapService {
     if (request.amountSide !== 'to' && payoutSats <= 0) {
       return { accepted: false, reason: 'fee_consumes_swap' }
     }
+    if (payoutSats < (arkade.minOutputSats ?? 0)) return { accepted: false, reason: 'payout_below_dust' }
 
     let payoutPkScript: Uint8Array
     try {
@@ -551,6 +553,7 @@ export class ReceiveSwapService {
         }
         payoutSats = this.pricing.payoutFor({ pair: RFQ_PAIR_RECEIVE, giveSats: holdSats })
         if (payoutSats <= 0) return { accepted: false, reason: 'fee_consumes_swap' }
+        if (payoutSats < (arkade.minOutputSats ?? 0)) return { accepted: false, reason: 'payout_below_dust' }
       }
       const held = await mint(holdSats)
       if (request.amountSide !== 'to' && held.payableSats !== giveSats) {

@@ -292,8 +292,7 @@ export const applyOverrides = (config: Config, overrides: Record<string, string>
     if (suffix === 'ENABLED') corridorEnabled[corridor] = raw === 'true'
   }
 
-  // Both bounds are known here and nowhere earlier, so this is where the pair is
-  // checked. An empty range is not a safety problem — a corridor that admits
+  // An empty range is not a safety problem — a corridor that admits
   // no amount quotes nothing — but it is a silent one, so fall back to the
   // environment's range rather than leave the corridor dark.
   for (const corridor of CORRIDORS) {
