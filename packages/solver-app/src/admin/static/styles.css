@@ -64,9 +64,18 @@
   --lens-solid: #2f2a3d;
   --logo: #ffffff;
 
-  /* Glass is chrome only: never behind failed, exposed or faint text on the page. */
-  --glass: linear-gradient(145deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
-  --glass-glow: radial-gradient(130% 55% at 0% 0%, rgba(104, 81, 173, 0.18), transparent 70%);
+  /* The backdrop's two lights at their brightest. Glass lays --raised over them, --glass-alpha where it is
+     thinnest, and contrast.test.ts holds every glass text colour against that blend. */
+  --glow-a: #1a1232;
+  --glow-b: #1c1828;
+  --glass-alpha: 60%;
+  --glass: linear-gradient(
+    145deg,
+    color-mix(in srgb, var(--raised) 82%, transparent),
+    color-mix(in srgb, var(--raised) var(--glass-alpha), transparent)
+  );
+  --glass-blur: blur(18px) saturate(1.3);
+  --noise: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .035 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
   --glass-edge: rgba(255, 255, 255, 0.08);
   --glass-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.06), inset 0 -1px 0 rgba(0, 0, 0, 0.3), 0 24px 60px -30px rgba(0, 0, 0, 0.75);
@@ -75,7 +84,6 @@
   --float-shadow: 0 30px 70px -30px rgba(0, 0, 0, 0.85);
   --scrim: rgba(8, 6, 12, 0.6);
   --solid-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03), 0 20px 44px -30px rgba(0, 0, 0, 0.85);
-  --track: rgba(255, 255, 255, 0.03);
   --lens: linear-gradient(135deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.04) 50%, rgba(153, 135, 229, 0.14));
   --lens-ring: 0 0 0 1px rgba(153, 135, 229, 0.36), 0 4px 14px rgba(0, 0, 0, 0.45);
   --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
@@ -125,8 +133,16 @@
   --lens-solid: #ebe8f4;
   --logo: #381993;
 
-  --glass: linear-gradient(145deg, rgba(255, 253, 248, 0.82), rgba(255, 253, 248, 0.5));
-  --glass-glow: radial-gradient(130% 55% at 0% 0%, rgba(217, 210, 255, 0.4), transparent 70%);
+  --glow-a: #ece7f8;
+  --glow-b: #f2efef;
+  --glass-alpha: 74%;
+  --glass: linear-gradient(
+    145deg,
+    color-mix(in srgb, var(--raised) 92%, transparent),
+    color-mix(in srgb, var(--raised) var(--glass-alpha), transparent)
+  );
+  --glass-blur: blur(18px) saturate(1.4);
+  --noise: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .08 0 0 0 0 .07 0 0 0 0 .1 0 0 0 .05 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
   --glass-edge: rgba(21, 18, 25, 0.08);
   --glass-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.95), inset 0 -1px 0 rgba(21, 18, 25, 0.05),
@@ -136,22 +152,47 @@
   --float-shadow: 0 30px 70px -36px rgba(43, 17, 118, 0.45);
   --scrim: rgba(21, 18, 25, 0.32);
   --solid-shadow: 0 2px 5px rgba(21, 18, 25, 0.05);
-  --track: rgba(255, 255, 255, 0.5);
   --lens: linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(255, 255, 255, 0.65) 50%, rgba(56, 25, 147, 0.08));
   --lens-ring: 0 0 0 1px rgba(56, 25, 147, 0.22), 0 3px 12px rgba(43, 17, 118, 0.12);
   color-scheme: light;
+}
+
+/* Without color-mix (Safari before 16.2) the glass tint would drop out and leave text on the backdrop. */
+@supports not (color: color-mix(in srgb, red 50%, blue)) {
+  :root,
+  [data-theme='light'] {
+    --glass: var(--raised);
+  }
 }
 
 * {
   box-sizing: border-box;
 }
 
-body {
-  margin: 0;
+html {
   background: var(--ground);
+}
+
+body {
+  min-height: 100dvh;
+  margin: 0;
+  isolation: isolate;
+  background: var(--ground) var(--noise);
   color: var(--text);
   font: 14px/1.5 var(--sans);
   -webkit-font-smoothing: antialiased;
+}
+
+/* A faint, still tint from two corners. Only titles, section headings and control labels sit on it, in colours contrast.test.ts holds against it. */
+body::before {
+  content: '';
+  position: fixed;
+  z-index: -1;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse 60% 45% at 100% 0%, var(--glow-a), transparent),
+    radial-gradient(ellipse 50% 40% at 0% 100%, var(--glow-b), transparent);
 }
 
 /* Mono like every brand link, but never uppercased: these carry ids an operator matches against logs. */
@@ -165,6 +206,36 @@ code,
 pre,
 .mono {
   font-family: var(--mono);
+}
+
+/* ---- glass groups, solid holds the data ------------------------------- */
+/* Tables, figures, fields and the swap pane are solid; page titles sit on the backdrop; the rest is glass. */
+
+.sidebar,
+.panel,
+.tabs,
+.seg,
+.activity-section,
+.wallet-section,
+main > p:not(.banner),
+.pricing-page > .toolbar,
+.pricing-page > details,
+.pricing-changes > details,
+.pricing-apply {
+  border: 1px solid var(--glass-edge);
+  background: var(--glass);
+  box-shadow: var(--glass-shadow);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+}
+
+/* Glass inside glass reads as fog: a card nested in a section is solid. */
+.wallet-section .panel {
+  border-color: var(--line);
+  background: var(--raised);
+  box-shadow: var(--solid-shadow);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
 
 /* ---- shell: a sidebar with status and navigation, the page beside it -- */
@@ -188,12 +259,7 @@ pre,
   gap: 18px;
   margin: 12px 0 12px 12px;
   padding: 18px 12px;
-  border: 1px solid var(--glass-edge);
   border-radius: 24px;
-  background: var(--glass-glow), var(--glass);
-  box-shadow: var(--glass-shadow);
-  -webkit-backdrop-filter: blur(18px) saturate(1.3);
-  backdrop-filter: blur(18px) saturate(1.3);
 }
 
 .content {
@@ -336,9 +402,9 @@ nav .more {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  /* No backdrop filter here: it would make the sidebar the containing block of the fixed dock. */
+  /* No backdrop filter on the sidebar: it would become the containing block of the fixed dock. Its own layer blurs. */
   .sidebar {
-    position: static;
+    position: relative;
     height: auto;
     gap: 10px;
     margin: 8px 8px 0;
@@ -348,9 +414,37 @@ nav .more {
     backdrop-filter: none;
   }
 
+  .sidebar::before {
+    content: '';
+    position: absolute;
+    z-index: -1;
+    inset: 0;
+    border-radius: inherit;
+    -webkit-backdrop-filter: var(--glass-blur);
+    backdrop-filter: var(--glass-blur);
+  }
+
+  /* The name and uptime share a line, then the meter, then the figures and flags flow together. */
   .status {
-    padding-bottom: 0;
+    flex-flow: row wrap;
+    align-items: center;
+    gap: 6px 8px;
+    padding: 0 2px;
     border-bottom: none;
+  }
+
+  .status .brand {
+    flex: 1 1 auto;
+    order: -2;
+  }
+
+  .status > p.faint:last-child {
+    order: -1;
+  }
+
+  .status .bar {
+    flex-basis: 100%;
+    margin: 2px 0;
   }
 
   nav {
@@ -434,17 +528,25 @@ nav .more {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px 16px;
-  border-bottom: 1px solid var(--exposed);
+  gap: 6px 10px;
+  border: 1px solid var(--exposed);
+  border-radius: 12px;
   background: var(--exposed-bg);
   color: var(--text);
-  padding: 8px 24px;
-  font-size: 13px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .restart-banner .mono {
   color: var(--text-dim);
+}
+
+.restart-banner .act {
+  min-height: 26px;
+  padding: 3px 9px;
+  font-size: 11.5px;
 }
 
 .restart-slot,
@@ -462,16 +564,22 @@ main {
 }
 
 .page-head {
-  margin: 0 0 20px;
+  margin: 0 0 16px;
 }
 
 .page-head h1 {
   margin: 0;
   font-family: var(--display);
-  font-size: 26px;
+  font-size: 28px;
   font-weight: 500;
-  line-height: 1.2;
-  letter-spacing: -0.03em;
+  line-height: 1.15;
+  letter-spacing: -0.035em;
+}
+
+main > p:not(.banner) {
+  width: fit-content;
+  padding: 10px 16px;
+  border-radius: 16px;
 }
 
 main h2 {
@@ -494,13 +602,68 @@ main h2.section-title {
   margin-bottom: 12px;
 }
 
+.pricing-page > .toolbar {
+  padding: 8px 10px 8px 16px;
+  border-radius: 18px;
+}
+
 .spacer {
   flex: 1;
 }
 
-.activity-section {
-  padding: 16px 0;
+@media (max-width: 560px), (min-width: 761px) and (max-width: 810px) {
+  .toolbar > .spacer:has(+ .muted) {
+    flex-basis: 100%;
+  }
+}
+
+/* A page's leading controls (Activity's tabs, the P&L and reconciliation window) share the title's row when
+   they fit and wrap under it when they do not. Their wrapper steps aside so they can join main's row. */
+main:has(> .activity, > div > .toolbar:first-child) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  column-gap: 20px;
+}
+
+main > .activity,
+main > div:has(> .toolbar:first-child) {
+  display: contents;
+}
+
+main:has(> .activity, > div > .toolbar:first-child) > *,
+main > .activity > *,
+main > div:has(> .toolbar:first-child) > * {
+  flex: 1 1 100%;
   min-width: 0;
+}
+
+main:has(> .activity, > div > .toolbar:first-child) > .page-head,
+main > .activity > .tabs,
+main > div > .toolbar:first-child {
+  flex: 0 1 auto;
+  margin-bottom: 14px;
+}
+
+main > .page-head {
+  order: -2;
+}
+
+main > .activity > .tabs,
+main > div > .toolbar:first-child {
+  order: -1;
+}
+
+main > .activity > .activity-section {
+  margin-top: 0;
+}
+
+.activity-section {
+  min-width: 0;
+  margin-top: 14px;
+  padding: 16px 10px;
+  border-radius: 24px;
 }
 
 .activity-content {
@@ -520,12 +683,7 @@ main h2.section-title {
   width: max-content;
   max-width: 100%;
   padding: 5px;
-  border: 1px solid var(--glass-edge);
   border-radius: 999px;
-  background: var(--track);
-  box-shadow: var(--glass-shadow);
-  -webkit-backdrop-filter: blur(16px) saturate(1.25);
-  backdrop-filter: blur(16px) saturate(1.25);
 }
 
 .tabs button {
@@ -580,25 +738,21 @@ main h2.section-title {
   pointer-events: none;
 }
 
+/* Equal columns, so every tab fits and the lens still slides: a long label wraps instead of scrolling. */
 @media (max-width: 800px) {
   .tabs {
-    display: flex;
     width: 100%;
-    overflow-x: auto;
-    scrollbar-width: none;
   }
 
   .tabs button {
-    flex: 0 0 auto;
+    padding: 7px 4px;
+    font-size: 11.5px;
+    line-height: 1.25;
+    white-space: normal;
   }
 
-  .tabs .lens {
-    display: none;
-  }
-
-  .tabs button[aria-selected='true'] {
-    background: var(--lens-solid);
-    box-shadow: var(--lens-ring);
+  .tabs .count {
+    margin-left: 4px;
   }
 }
 
@@ -606,11 +760,20 @@ main h2.section-title {
 /* Dense on purpose. An operator scanning for the one bad row wants as many
    rows on screen as will fit, not generous padding. Cells are data, so mono. */
 
+/* Separate, not collapsed, so the table's own rounded surface holds. */
 table {
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
   font: 13px/1.45 var(--mono);
   font-variant-numeric: tabular-nums;
+}
+
+table:not(.dialog table) {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--raised);
+  box-shadow: var(--solid-shadow);
 }
 
 th {
@@ -620,23 +783,30 @@ th {
   letter-spacing: 0.04em;
   color: var(--text-dim);
   border-bottom: 1px solid var(--line-strong);
-  padding: 8px 10px;
+  padding: 10px;
   white-space: nowrap;
 }
 
 td {
   border-bottom: 1px solid var(--line);
-  padding: 7px 10px;
+  padding: 8px 10px;
   white-space: nowrap;
+}
+
+table:not(.dialog table) tbody tr:last-child td {
+  border-bottom: none;
+}
+
+tbody tr:last-child td:first-child {
+  border-bottom-left-radius: 13px;
+}
+
+tbody tr:last-child td:last-child {
+  border-bottom-right-radius: 13px;
 }
 
 /* Hover takes the other surface, never a third colour no contrast pair covers. */
 tbody tr:hover {
-  background: var(--raised);
-}
-
-.panel tbody tr:hover,
-.dialog tbody tr:hover {
   background: var(--ground);
 }
 
@@ -646,7 +816,11 @@ tbody tr.clickable {
 
 /* The pricing row whose editor is open. */
 tbody tr.selected {
-  background: var(--raised);
+  background: var(--ground);
+}
+
+tbody tr.selected td:first-child {
+  box-shadow: inset 3px 0 0 var(--accent);
 }
 
 .figure .bar {
@@ -685,13 +859,17 @@ td.num {
 /* ---- phase, the only coloured thing ------------------------------------ */
 
 .phase {
-  display: inline-block;
-  padding: 0 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 22px;
+  padding: 0 9px;
   border: 1px solid var(--line-strong);
   border-radius: 999px;
   color: var(--text-dim);
-  font: 500 12px/1.6 var(--sans);
+  font: 500 12px/1.2 var(--sans);
   white-space: nowrap;
+  vertical-align: middle;
 }
 
 /* Finished rows are the bulk of every table and need no box drawn round them. */
@@ -708,6 +886,7 @@ td.num {
 .phase-exposed {
   color: var(--exposed);
   border-color: var(--exposed);
+  border-color: color-mix(in srgb, var(--exposed) 50%, transparent);
   background: var(--exposed-bg);
   font-weight: 600;
 }
@@ -715,7 +894,20 @@ td.num {
 .phase-failed:not(.quiet) {
   color: var(--failed);
   border-color: var(--failed);
+  border-color: color-mix(in srgb, var(--failed) 50%, transparent);
   background: var(--failed-bg);
+  font-weight: 600;
+}
+
+/* A dot on the two risk states, so the colour is never the only sign. */
+.phase-exposed::before,
+.phase-failed:not(.quiet)::before {
+  content: '';
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
 }
 
 /* The corridor's own word, secondary to the phase beside it. */
@@ -742,16 +934,22 @@ td.num {
 .panel {
   min-width: 0;
   overflow-x: auto;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--raised);
-  box-shadow: var(--solid-shadow);
-  padding: 14px 16px;
+  border-radius: 22px;
+  padding: 18px 20px;
 }
 
-/* A help bubble has to escape its panel. */
+:not(.panels, .split) > .panel + .panel {
+  margin-top: 14px;
+}
+
+/* A help bubble has to escape its panel, and rise over the next one: glass makes each a stacking context. */
 .panel:has(.tip) {
   overflow: visible;
+}
+
+.panel:has(.tip:is(:hover, :focus-within)) {
+  position: relative;
+  z-index: 3;
 }
 
 .discovery {
@@ -769,9 +967,10 @@ td.num {
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  margin: 0 0 10px;
-  font-size: 14px;
+  margin: 0 0 12px;
+  font-size: 15px;
   font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 .panel p {
@@ -906,6 +1105,9 @@ button.act.primary:not(.armed) {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--on-accent);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.2),
+    0 10px 22px -12px var(--accent);
 }
 
 button.act.armed.primary {
@@ -987,8 +1189,11 @@ details.menu > summary::after {
   text-transform: uppercase;
 }
 
+/* Coral text keeps its own ground: on glass it would fall under AA in light mode. */
 button.link.danger {
   color: var(--failed);
+  background: var(--failed-bg);
+  border-radius: 4px;
 }
 
 label.check {
@@ -1274,6 +1479,7 @@ details.raw {
   border-radius: var(--radius);
   padding: 10px 12px;
   margin: 0 0 12px;
+  overflow-wrap: anywhere;
 }
 
 /* A standing fact about a list, kept to one quiet line rather than a box to read past. */
@@ -1422,6 +1628,12 @@ tr.note td:first-child {
 }
 
 @media (prefers-reduced-transparency: reduce) {
+  :root,
+  [data-theme='light'] {
+    --glass: var(--raised);
+    --glass-blur: none;
+  }
+
   .sidebar,
   .toast,
   .menu-list,
@@ -1445,8 +1657,24 @@ tr.note td:first-child {
 }
 
 @media (max-width: 760px) {
+  /* Room for the dock (46px, 8px above the edge) and a clear gap, so the last card ends above it. */
   main {
-    padding-bottom: calc(88px + env(safe-area-inset-bottom));
+    padding-bottom: calc(100px + env(safe-area-inset-bottom));
+  }
+
+  .page-head {
+    margin-bottom: 12px;
+  }
+
+  .page-head h1 {
+    font-size: 22px;
+  }
+
+  .panel,
+  .activity-section,
+  .wallet-section {
+    padding: 14px;
+    border-radius: 20px;
   }
 
   .scrim,
@@ -1631,32 +1859,77 @@ html[data-vt='view'] nav .slens {
 /* The caveat under every total. Not a footnote — it decides what the number means. */
 .basis {
   border-left: 3px solid var(--exposed);
-  padding: 4px 0 4px 12px;
+  border-radius: 4px 14px 14px 4px;
+  padding: 10px 16px;
   margin: 0 0 16px;
+  background: var(--raised);
   color: var(--text-dim);
   max-width: 110ch;
 }
 
-/* The headline figures, as tiles. Tabular so the digits line up between refreshes. */
+.panel + .basis {
+  margin-top: 16px;
+}
+
+/* The headline figures, as tiles. Tabular so the digits line up between refreshes. Rows are even: the column
+   count divides the tile count where it can, and a short last row stretches across. */
 .figures {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  --cols: 4;
+  display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   margin-bottom: 16px;
 }
 
+.figures > * {
+  flex: 1 1 calc((100% - (var(--cols) - 1) * 12px) / var(--cols) - 0.5px);
+  min-width: 0;
+}
+
+.figures:has(> :nth-child(3):last-child),
+.figures:has(> :nth-child(6):last-child) {
+  --cols: 3;
+}
+
+.figures:has(> :nth-child(5):last-child) {
+  --cols: 5;
+}
+
+@media (max-width: 1100px) {
+  .figures {
+    --cols: 2;
+  }
+
+  .figures:has(> :nth-child(5):last-child) {
+    --cols: 3;
+  }
+}
+
+@media (max-width: 760px) {
+  .figures,
+  .figures:has(> :nth-child(3):last-child),
+  .figures:has(> :nth-child(5):last-child),
+  .figures:has(> :nth-child(6):last-child) {
+    --cols: 2;
+  }
+}
+
 .figure {
   border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border-radius: 18px;
   background: var(--raised);
-  box-shadow: var(--solid-shadow);
-  padding: 12px 14px;
+  box-shadow:
+    inset 0 1px 0 var(--hi),
+    var(--solid-shadow);
+  padding: 14px 16px;
 }
 
 .figure b {
   display: block;
-  font: 600 22px/1.25 var(--mono);
+  margin-bottom: 2px;
+  font: 600 24px/1.25 var(--mono);
   font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
 }
 
 .figure b.c-loss {
@@ -1842,9 +2115,7 @@ html[data-vt='view'] nav .slens {
   display: inline-flex;
   gap: 2px;
   padding: 3px;
-  border: 1px solid var(--line-strong);
   border-radius: 999px;
-  background: var(--track);
 }
 
 .seg button {
@@ -1882,8 +2153,9 @@ html[data-vt='view'] nav .slens {
   justify-content: space-between;
   align-items: center;
   gap: 1rem;
-  padding: 12px 0;
-  border-block: 1px solid var(--line-strong);
+  margin-bottom: 14px;
+  padding: 10px 12px 10px 18px;
+  border-radius: 18px;
 }
 
 .pricing-apply p {
@@ -1915,6 +2187,13 @@ html[data-vt='view'] nav .slens {
 
 .pricing-page details {
   padding: 10px 0;
+}
+
+.pricing-page > details,
+.pricing-changes > details {
+  margin-top: 14px;
+  padding: 14px 18px;
+  border-radius: 22px;
 }
 
 .market-form .form-grid {
@@ -1987,23 +2266,8 @@ input.amount {
   border-top: 1px solid var(--line);
 }
 
-@media (max-width: 700px) {
-  main {
-    padding-inline: 12px;
-  }
-
-  .pricing-page .split {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .pricing-page .panel {
-    min-width: 0;
-  }
-
-  .pricing-page .sticky {
-    overflow-x: auto;
-  }
-
+/* Three columns need about 560px of panel, which a sidebar layout below 900px does not have. */
+@media (max-width: 900px) {
   .pricing-page .form-grid {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
   }
@@ -2019,6 +2283,24 @@ input.amount {
 
   .pricing-page .form-grid .span2 {
     grid-column: 2 / -1;
+  }
+}
+
+@media (max-width: 700px) {
+  main {
+    padding-inline: 12px;
+  }
+
+  .pricing-page .split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .pricing-page .panel {
+    min-width: 0;
+  }
+
+  .pricing-page .sticky {
+    overflow-x: auto;
   }
 
   .pricing-apply {
@@ -2102,9 +2384,9 @@ input.amount {
 
 .wallet-section {
   min-width: 0;
-  margin-top: 28px;
-  padding-top: 24px;
-  border-top: 1px solid var(--line-strong);
+  margin-top: 18px;
+  padding: 20px 22px;
+  border-radius: 24px;
 }
 
 .wallet-section > p {
@@ -2427,5 +2709,198 @@ input.amount {
 
   .wallet-page .panels {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ---- narrow screens: every table is a list of cards ---------------------- */
+/* `labelCells` in app.js gives each body cell its column's heading as `data-label`. A table with no
+   head is key over value. Up to 1100px: beside the sidebar a table gets a phone's width. */
+
+@media (max-width: 760px) {
+  #root {
+    align-content: start;
+  }
+
+  /* A phone's menu spans its action row, so no lead button's width can push it past the drawer's edge. */
+  .decision .row {
+    position: relative;
+  }
+
+  .decision details.menu {
+    position: static;
+  }
+
+  .menu-list {
+    right: 0;
+    left: 0;
+  }
+}
+
+@media (max-width: 1100px) {
+  /* A tip opens across its form, never past the screen's edge. */
+  .form-grid {
+    position: relative;
+  }
+
+  .tip {
+    position: static;
+  }
+
+  .tip .bubble {
+    top: auto;
+    right: 0;
+    left: 0;
+    width: auto;
+    margin-top: 6px;
+  }
+
+  table,
+  tbody,
+  tr,
+  td {
+    display: block;
+  }
+
+  /* Out of sight but still read: a screen reader keeps the column names the cards draw as labels. */
+  thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  /* A table without rows is an empty outline: nothing to show. */
+  table:not(:has(tbody tr)) {
+    display: none;
+  }
+
+  table {
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: var(--raised);
+  }
+
+  /* No drop shadow: a panel's scrollbox would clip it into a hard edge under the last card. */
+  table:not(.dialog table) {
+    box-shadow: none;
+  }
+
+  tbody tr {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 10px 16px;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  tbody tr:last-child {
+    border-bottom: none;
+  }
+
+  td,
+  td.num,
+  td.right {
+    min-width: 0;
+    width: auto;
+    padding: 0;
+    border: none;
+    text-align: start;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 2px;
+    color: var(--text-dim);
+    font: 500 10.5px/1.4 var(--mono);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  /* The first cell names the card. A cell with no heading (the actions, a message across columns) takes a row. */
+  td:first-child,
+  td:not([data-label]) {
+    grid-column: 1 / -1;
+  }
+
+  td:first-child {
+    font-size: 14px;
+  }
+
+  td:first-child::before,
+  td:empty {
+    display: none;
+  }
+
+  /* A status dot names nothing: it moves to the corner and the cell after it names the card. */
+  tr:has(> td:first-child > .dot:only-child) {
+    position: relative;
+  }
+
+  td:first-child:has(> .dot:only-child) {
+    position: absolute;
+    top: 14px;
+    right: 14px;
+  }
+
+  td:first-child:has(> .dot:only-child) + td {
+    grid-column: 1 / -1;
+    font-size: 14px;
+  }
+
+  td:first-child:has(> .dot:only-child) + td::before {
+    display: none;
+  }
+
+  /* A phone has no hover to read the rest, so a clipped value gets three lines instead of one. */
+  .clip {
+    display: -webkit-box;
+    max-width: 100%;
+    white-space: normal;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+  }
+
+  table:not(:has(> thead)) tr {
+    display: block;
+    padding: 10px 14px;
+  }
+
+  table:not(:has(> thead)) td:first-child {
+    margin-bottom: 2px;
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+
+  table:not(:has(> thead)) td + td {
+    display: inline;
+    margin-inline-end: 0.6em;
+  }
+
+  /* Row marks move from the first cell to the card. */
+  tr.note {
+    border-left: 3px solid var(--line-strong);
+  }
+
+  tr.note td:first-child,
+  tbody tr.selected td:first-child {
+    border-left: none;
+    box-shadow: none;
+  }
+
+  tbody tr.selected {
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+
+  .ladder tr.loss {
+    background: var(--exposed-bg);
+  }
+
+  .ladder tr.loss td {
+    background: none;
   }
 }

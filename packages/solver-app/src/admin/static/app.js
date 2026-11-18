@@ -71,7 +71,31 @@ const h = (spec, ...rest) => {
     node.appendChild(child instanceof Node ? child : document.createTextNode(String(child)))
   }
   children.forEach(append)
+  if (tag === 'table') labelCells(node)
   return node
+}
+
+/** A phone shows each row as a card labelled from its header; built into the new tree, as `morph` drops the rest. */
+const labelCells = (table) => {
+  if (!table) return
+  const rows = (node) => [...(node?.childNodes ?? [])].filter((child) => child.nodeName === 'TR')
+  const head = rows([...table.childNodes].find((child) => child.nodeName === 'THEAD'))[0]
+  if (!head) return
+  const text = (node) => (node.nodeType === 3 ? node.nodeValue : [...node.childNodes].map(text).join(''))
+  const span = (cell) => Number(cell.getAttribute('colspan')) || 1
+  const cells = (row) => [...row.childNodes].filter((node) => node.nodeType === 1)
+  const columns = cells(head).flatMap((cell) => Array(span(cell)).fill(text(cell).trim()))
+  for (const body of table.childNodes) {
+    if (body.nodeName !== 'TBODY') continue
+    for (const row of rows(body)) {
+      let column = 0
+      for (const cell of cells(row)) {
+        // A cell across columns is a message for the row, not one column's value.
+        if (span(cell) === 1 && columns[column]) cell.setAttribute('data-label', columns[column])
+        column += span(cell)
+      }
+    }
+  }
 }
 
 /** A cleared node is repainted later through a held reference, so `morph` must adopt it, not patch a twin. */
@@ -3149,6 +3173,7 @@ const paintPricingTable = () => {
   const next = pricingTable(pricingOverrides(), pricingRows())
   clear(pricingTableNode)
   while (next.firstChild) pricingTableNode.appendChild(next.firstChild)
+  labelCells(pricingTableNode.parentNode)
 }
 
 const pricingView = () => {
@@ -5710,8 +5735,9 @@ const render = () => {
   }
   main.appendChild((BODIES[state.view] ?? overviewView)())
   // The restart banner always takes a slot, for the same reason as `messages`.
-  const content = h('div.content', restartBanner() ?? h('div.restart-slot'), main)
-  morphChildren(root, h('div', h('aside.sidebar', statusBar(), nav()), content, detailDialog(), confirmDialog()))
+  const restart = restartBanner() ?? h('div.restart-slot')
+  const sidebar = h('aside.sidebar', statusBar(), restart, nav())
+  morphChildren(root, h('div', sidebar, h('div.content', main), detailDialog(), confirmDialog()))
   armExpiryTick()
 }
 
