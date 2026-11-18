@@ -307,15 +307,21 @@ describe('markets in the export', () => {
     )
   })
 
-  it('names a market it leaves out without quoting a credential its feed carries', () => {
-    const bad = brlt({ feedUrl: 'https://feed.example/x?apikey=secret-omit-key', pricePath: '' })
-    const { consoleOnly } = exportDocument(load(base()), {}, [bad])
+  it.each([
+    'https://feed.example/x?apikey=secret-omit-key',
+    'https://user:secret"omit-key@feed.example/x',
+    'https://feed.example/x?apikey=secret\\omit-key',
+  ])('names a market it leaves out without quoting a credential its feed carries: %s', (feedUrl) => {
+    const { consoleOnly } = exportDocument(load(base()), {}, [brlt({ feedUrl, pricePath: '' })])
     expect(consoleOnly[0]?.reason).toContain('<feed URL>')
-    expect(JSON.stringify(consoleOnly)).not.toContain('secret-omit-key')
+    expect(JSON.stringify(consoleOnly)).not.toContain('omit-key')
   })
 
-  it('refuses a document market without quoting a credential its feed carries', () => {
-    const feedUrl = 'https://feed.example:port/price?apikey=secret-load-key'
+  it.each([
+    'https://feed.example:port/price?apikey=secret-load-key',
+    'https://feed.example:port/price?apikey=secret"load-key',
+    'https://feed.example:port/price?apikey=secret\\load-key',
+  ])('refuses a document market without quoting a credential its feed carries: %s', (feedUrl) => {
     const refusal = (() => {
       try {
         load({ ...base(), markets: [{ ...assetMarketJson(brlt()), feedUrl }] })
@@ -325,7 +331,7 @@ describe('markets in the export', () => {
       return 'loaded'
     })()
     expect(refusal).toMatch(/markets\[0\]: .*<feed URL>/)
-    expect(refusal).not.toContain('secret-load-key')
+    expect(refusal).not.toContain('load-key')
   })
 
   it('refuses a document market by its index, and a repeated pair', () => {
