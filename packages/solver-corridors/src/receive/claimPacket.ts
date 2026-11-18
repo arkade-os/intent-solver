@@ -26,7 +26,8 @@ export const claimPacketShape = (b64: string): ClaimPacketShape => {
   return { ...packet, ...(covclaimdPubkey ? { covclaimdPubKey: covclaimdPubkey } : {}) }
 }
 
-// The pinned swap codec only recognizes ciphertext wrapping a bare preimage.
+// The pinned swap codec accepts exactly 93 ciphertext bytes in a framed packet.
+// The fallback handles longer sealed terms without changing their TLVs.
 const extendedPacket = (packet: string): { body: Uint8Array; needsArkadeScript: boolean } | undefined => {
   let body: Uint8Array
   try {

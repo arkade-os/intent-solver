@@ -1841,6 +1841,8 @@ For offline receive, direct a Lightning receive RFQ with `profile.claim_packet`
 to the solver. The client seals the packet to its chosen claim service, which
 reads it from the Arkade funding transaction. The solver keeps watching the
 lockup for a claim and settles the hold when it sees a valid preimage.
+The solver's regtest suite verifies packet transport and collaborative
+settlement. Non-interactive claim execution depends on the chosen service.
 
 A new RFQ carrying bare ciphertext or a malformed packet is refused before
 an invoice is issued. Send a framed claim packet or omit `profile.claim_packet`

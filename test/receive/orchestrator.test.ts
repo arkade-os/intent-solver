@@ -7,6 +7,7 @@ import { schnorr } from '@noble/curves/secp256k1.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { base64, hex } from '@scure/base'
 import { ArkAddress } from '@arkade-os/sdk'
+import { appendArkadeScript } from '@arkade-os/swap'
 import {
   EMPTY_LOCKUP_GRACE,
   REFUND_CENSORSHIP_GRACE,
@@ -1292,18 +1293,25 @@ describe('ReceiveSwapService.tick — funding with a claim packet', () => {
   })
 
   it('completes a client packet with the arkade script the covenant commits to', async () => {
-    const outcome = await service.quote(quoteRequest({ claimPacket: base64.encode(clientPacket()) }))
+    const body = clientPacket()
+    const claimPacket = base64.encode(body)
+    const outcome = await service.quote(quoteRequest({ claimPacket }))
+    expect(outcome.accepted).toBe(true)
     if (!outcome.accepted) throw new Error('expected acceptance')
+    const stored = await store.get(outcome.swap.id)
+    expect(stored.claimPacket).toBe(claimPacket)
+    const covenant = covenantScriptFromRow(receiveCovenantRowFor(stored))
+    const arkadeScript = covenant.nonInteractiveClaimArkadeScript
+    if (!arkadeScript) throw new Error('expected noninteractive claim script')
     ln.armHold(paymentHash, now + 4 * 3600)
 
     const row = await service.tick(outcome.swap.id)
 
     expect(row.state).toBe('funded')
-    const stamped = arkade.state.fundCalls[0]?.stamp?.packet
-    if (!stamped) throw new Error('expected a stamp')
-    // The client's bytes ride through untouched, with 0x02 appended after them.
-    expect(stamped.subarray(0, clientPacket().length)).toEqual(clientPacket())
-    expect(stamped[clientPacket().length]).toBe(0x02)
+    expect(arkade.state.fundCalls[0]?.stamp).toEqual({
+      packet: appendArkadeScript(body, arkadeScript),
+      tapTree: covenant.encode(),
+    })
   })
 
   it('adopts an existing funding output without broadcasting again', async () => {

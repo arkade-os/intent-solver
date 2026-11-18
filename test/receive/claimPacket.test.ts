@@ -90,6 +90,15 @@ describe('claimPacketStamp', () => {
   const tapTree = Uint8Array.of(1, 2, 3)
   const script = { nonInteractiveClaimArkadeScript: ARKADE_SCRIPT, encode: () => tapTree } as CovenantSwapScript
 
+  it.each([
+    [92, false],
+    [93, true],
+    [94, true],
+  ])('classifies framed ciphertext of %i bytes as stampable = %s', (length, stampable) => {
+    const body = concat(tlv(1, new Uint8Array(length)), tlv(3, PUBKEY))
+    expect(Boolean(claimPacketStamp(base64.encode(body), script))).toBe(stampable)
+  })
+
   it('keeps extended sealed terms and optional predicates byte-for-byte', () => {
     const body = concat(base64.decode(vector.packet), tlv(4, Uint8Array.of(0x51)))
     const packet = concat(body, tlv(2, ARKADE_SCRIPT))
