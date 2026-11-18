@@ -11,8 +11,8 @@
  *
  *   - what it advertises differs per corridor. `corridorLimits` is what the
  *     RFQ path actually quotes against, and in production the corridors really
- *     do diverge. The global `limits.maxSats` is only the outer bound each
- *     corridor was narrowed from, so measuring against it reports a corridor
+ *     do diverge. The global `limits.maxSats` is only the default a corridor's
+ *     own bounds replace, so measuring against it reports a corridor
  *     as short when it is fine.
  *   - what funds it differs per corridor too. The solver pays out on the
  *     corridor's DESTINATION leg, so an Arkade->Lightning swap is funded by

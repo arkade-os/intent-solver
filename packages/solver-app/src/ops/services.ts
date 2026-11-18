@@ -541,10 +541,16 @@ export const createServices = async (
   })
   for (const line of adminStore.seededMarkets) log(`market — ${line}`)
   for (const line of adminStore.repairedServing) log(`market serving repaired — ${line}`)
-  for (const { corridor, field, now, was } of clampedBefore(config.network, config.limits, config.corridorLimits)) {
+  const unclamped = clampedBefore(config.network, config.limits, config.corridorLimits)
+  for (const { corridor, field, now, was } of unclamped) {
     const range = corridor === null ? 'the deployment (limits.maxSwapSats)' : corridor
     log(
       `limits — ${range} ${field === 'maxSats' ? 'max' : 'min'} is ${now} sats; releases before this clamped it to ${was}`,
+    )
+  }
+  if (unclamped.length > 0) {
+    log(
+      `limits — the total in flight is capped at ${config.maxExposedSats} sats (limits.maxExposedSats; 3 × the deployment max when unset)`,
     )
   }
   // Empty sinks make `post` a no-op, so a deployment that configures nothing

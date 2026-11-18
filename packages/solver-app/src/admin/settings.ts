@@ -1,9 +1,11 @@
 /**
  * Runtime settings overrides, layered onto the environment.
  *
- * An override REPLACES the environment's bound in either direction, `MAX_EXPOSED_SATS` included.
- * The admin API has NO AUTHENTICATION of its own (`server.ts`; a reverse proxy supplies it), so
- * anything that reaches the admin port can raise the per-swap and total exposure caps.
+ * An override REPLACES the environment's bound in either direction, `MAX_EXPOSED_SATS` included. The
+ * admin API has NO AUTHENTICATION of its own (see `server.ts`; a reverse proxy is
+ * expected to supply it), so anything that can reach the admin port can raise this
+ * solver's per-swap and total exposure caps. `adminHost` and that proxy stand in front
+ * of it.
  *
  * Fees are free in both directions — a pricing question, not a safety one — and still
  * move inside the bounds `src/config.ts` validates.

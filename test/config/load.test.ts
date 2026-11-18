@@ -10,6 +10,7 @@ import {
   NoConfigDocument,
 } from '@arkade-os/solver-app/config/load.js'
 import type { SolverDocument } from '@arkade-os/solver-app/config/document.js'
+import { registerLightningRail } from '@arkade-os/solver-app/ops/rails.js'
 
 const minimalDoc = {
   network: 'regtest',
@@ -48,6 +49,29 @@ const tempFile = (content: string): string => {
   writeFileSync(path, content)
   return path
 }
+
+describe('loadConfig — amount bounds', () => {
+  registerLightningRail('unbuilt-rail', {
+    create: async () => {
+      throw new Error('never built here')
+    },
+  })
+
+  it('applies a mainnet range past the network default in either direction, the default total cap with it', () => {
+    const config = loadConfig({
+      env: inline({
+        ...minimalDoc,
+        network: 'bitcoin',
+        rails: { ...minimalDoc.rails, lightning: { backend: 'unbuilt-rail' } },
+        limits: { maxSwapSats: 2_000_000 },
+        corridors: { 'lightning:BTC->arkade:BTC': { minSats: 100 } },
+      }),
+    })
+    expect(config.limits).toEqual({ minSats: 500, maxSats: 2_000_000 })
+    expect(config.corridorLimits['lightning:BTC->arkade:BTC']).toEqual({ minSats: 100, maxSats: 2_000_000 })
+    expect(config.maxExposedSats).toBe(6_000_000)
+  })
+})
 
 describe('loadConfig — where the document comes from', () => {
   it('refuses both sources', () => {
