@@ -2200,23 +2200,8 @@ input.amount {
   border-top: 1px solid var(--line);
 }
 
-@media (max-width: 700px) {
-  main {
-    padding-inline: 12px;
-  }
-
-  .pricing-page .split {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .pricing-page .panel {
-    min-width: 0;
-  }
-
-  .pricing-page .sticky {
-    overflow-x: auto;
-  }
-
+/* Three columns need about 560px of panel, which a sidebar layout below 900px does not have. */
+@media (max-width: 900px) {
   .pricing-page .form-grid {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
   }
@@ -2232,6 +2217,24 @@ input.amount {
 
   .pricing-page .form-grid .span2 {
     grid-column: 2 / -1;
+  }
+}
+
+@media (max-width: 700px) {
+  main {
+    padding-inline: 12px;
+  }
+
+  .pricing-page .split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .pricing-page .panel {
+    min-width: 0;
+  }
+
+  .pricing-page .sticky {
+    overflow-x: auto;
   }
 
   .pricing-apply {
@@ -2643,15 +2646,39 @@ input.amount {
   }
 }
 
-/* ---- phones: every table is a list of cards ----------------------------- */
+/* ---- narrow screens: every table is a list of cards ---------------------- */
 /* `labelCells` in app.js gives each body cell its column's heading as `data-label`. A table with no
-   head is key over value. */
+   head is key over value. Up to 1100px: beside the sidebar a table gets a phone's width. */
 
 @media (max-width: 760px) {
   #root {
     align-content: start;
   }
 
+  /* A tip opens across its form and a menu towards the page, never past the screen's edge. */
+  .form-grid {
+    position: relative;
+  }
+
+  .tip {
+    position: static;
+  }
+
+  .tip .bubble {
+    top: auto;
+    right: 0;
+    left: 0;
+    width: auto;
+    margin-top: 6px;
+  }
+
+  .menu-list {
+    right: 0;
+    left: auto;
+  }
+}
+
+@media (max-width: 1100px) {
   table,
   tbody,
   tr,
@@ -2673,7 +2700,7 @@ input.amount {
 
   tbody tr {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
     gap: 10px 16px;
     padding: 12px 14px;
     border-bottom: 1px solid var(--line);
@@ -2786,27 +2813,5 @@ input.amount {
 
   .ladder tr.loss td {
     background: none;
-  }
-
-  /* A tip opens across its form and a menu towards the page, never past the screen's edge. */
-  .form-grid {
-    position: relative;
-  }
-
-  .tip {
-    position: static;
-  }
-
-  .tip .bubble {
-    top: auto;
-    right: 0;
-    left: 0;
-    width: auto;
-    margin-top: 6px;
-  }
-
-  .menu-list {
-    right: 0;
-    left: auto;
   }
 }
