@@ -550,6 +550,7 @@ nav .more {
 }
 
 .restart-slot,
+.wallet-assets-slot,
 .messages:empty,
 .result:empty,
 .dialog-error:empty {

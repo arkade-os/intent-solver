@@ -39,18 +39,21 @@ const balance = {
 }
 const markets = [market(A), market(B), market(C, false)]
 
-const { assetHoldings, walletAssetsPanel } = new Function(
+const { assetHoldings, walletAssetsPanel, walletAssets } = new Function(
   'h',
   'legNode',
   'legName',
-  `${block}; return { assetHoldings, walletAssetsPanel }`,
+  'state',
+  `${block}; return { assetHoldings, walletAssetsPanel, walletAssets }`,
 )(
   h,
   (leg: string) => h('legNode', leg),
   (leg: string) => h('legName', leg),
+  { overview: { markets } },
 ) as {
   assetHoldings: (b: unknown, m: unknown) => { assetId: string; available: string; markets: { key: string }[] }[]
   walletAssetsPanel: (b: unknown, m: unknown) => Node | null
+  walletAssets: (w: unknown) => Node
 }
 
 const rowOf = (panel: Node | null, assetId: string): Node =>
@@ -88,12 +91,19 @@ describe('the wallet shows its assets without opening anything', () => {
     expect(details).toContain("h('dt', 'Address')")
     expect(details).toContain("h('dt', 'Balance details')")
     expect(details).not.toMatch(/asset/i)
-    expect(wallet).toContain('walletAssetsPanel(w.arkade.balance, state.overview?.markets)')
+    expect(wallet).toContain('walletAssets(w)')
   })
 
-  it('repaints the wallet when the markets it names land after its balance', () => {
+  it('leaves a hidden slot when there is nothing to list, so the panel can arrive in place', () => {
+    expect(walletAssets({ arkade: { balance } }).spec).toBe('section.panel.wallet-assets')
+    expect(walletAssets({ arkade: { balance: { assets: [] } } }).spec).toBe('section.panel.wallet-assets')
+    expect(walletAssets({ arkade: { balanceError: 'down', balance: null } }).spec).toBe('div.wallet-assets-slot')
+  })
+
+  it('fills that slot in place when the markets land after the balance, without re-rendering the page', () => {
     const paint = source.slice(source.indexOf('const paintStatus'), source.indexOf('const render ='))
-    expect(paint).toContain("state.view === 'wallet'")
+    expect(paint).toContain("if (state.view === 'overview') return render()")
+    expect(paint).toContain('morph(assets, walletAssets(state.data.wallet))')
   })
 })
 

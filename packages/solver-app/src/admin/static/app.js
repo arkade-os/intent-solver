@@ -338,6 +338,11 @@ const walletAssetsPanel = (balance, markets) => {
   )
 }
 
+/** Always a node, so `paintStatus` can fill it in place when the markets land after the wallet. */
+const walletAssets = (wallet) =>
+  (wallet.arkade.balanceError ? null : walletAssetsPanel(wallet.arkade.balance, state.overview?.markets)) ??
+  h('div.wallet-assets-slot')
+
 /* ---- end assets block --------------------------------------------------- */
 
 /** Corridor label short enough for a table cell. */
@@ -1590,7 +1595,7 @@ const walletView = () => {
           )
         : null,
       /* assets: begin */
-      w.arkade.balanceError ? null : walletAssetsPanel(w.arkade.balance, state.overview?.markets),
+      walletAssets(w),
       /* assets: end */
     ),
     /* fund sources: the one call into the block above. */
@@ -5762,13 +5767,14 @@ const restartBanner = () => {
 }
 
 const paintStatus = () => {
-  // The wallet's asset panel lists the overview's markets, so it repaints when they land.
-  if (state.view === 'overview' || state.view === 'wallet') return render()
+  if (state.view === 'overview') return render()
   const root = document.getElementById('root')
   const status = root.querySelector('.status')
   if (status) morph(status, statusBar())
   const slot = root.querySelector('.restart-banner, .restart-slot')
   if (slot) morph(slot, restartBanner() ?? h('div.restart-slot'))
+  const assets = root.querySelector('.wallet-assets, .wallet-assets-slot')
+  if (assets && state.data.wallet) morph(assets, walletAssets(state.data.wallet))
 }
 
 const render = () => {
