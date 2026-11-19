@@ -25,6 +25,7 @@ import { base64, hex } from '@scure/base'
 import { offerSettleFor, type OfferFillIntent } from '@arkade-os/solver-arkade/arkade/offerSettle.js'
 import type { OfferOutpoint } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
 import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { OfferNotSubmittedError } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { OFFER_CONTRACT_V1, OFFER_CONTRACT_V2 } from '@arkade-os/solver-core/core/offerContract.js'
 
 const USD = '41bcbb06921a0e9f6fe4f1b003b878cbb43d9ca3f6d14cab7940090458765a390000'
@@ -256,6 +257,15 @@ describe('offerSettleFor — it refuses before it spends', () => {
     const { settle, fulfill } = build(raw, { outpointsAt: async () => [] })
     await expect(settle(intentFor(published, raw))).rejects.toThrow(/no longer live/)
     expect(fulfill).not.toHaveBeenCalled()
+  })
+
+  it('types the liveness refusal as unsubmitted, so a lost race is retried not parked', async () => {
+    const { settle } = build(raw, { outpointsAt: async () => [] })
+    const error = await settle(intentFor(published, raw)).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(error).toBeInstanceOf(OfferNotSubmittedError)
   })
 
   it('when a SATS deposit has already been spent', async () => {

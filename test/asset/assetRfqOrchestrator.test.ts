@@ -1059,3 +1059,89 @@ describe('a fill arkd rejected as already spent', () => {
     expect((await store.get('swap-1')).state).toBe('stuck')
   })
 })
+
+/** Both remaining timings sit above the submission, so the row walks back and
+ * § 9's gate ends it from its OWN fresh read. */
+describe('a lost race caught before the submission', () => {
+  const INCIDENT_DEPOSIT = '7da3508518eb5fec43370d26fb85e2fe105796f1869d183e16a38dbe41e05730:0'
+
+  const fundedThen = async (settle: AssetRfqDeps['settle'], laterDeposits: (ObservedDeposit | null)[]) => {
+    let reads = 0
+    const built = await harness({
+      depositAt: async () => {
+        const seen = reads === 0 ? deposit() : (laterDeposits[reads - 1] ?? null)
+        reads += 1
+        return seen
+      },
+      settle,
+    })
+    await built.service.quote(request())
+    await built.service.tick('swap-1')
+    return built
+  }
+
+  it('walks back the adapter liveness refusal, then finishes refused on the next tick', async () => {
+    const { service, store } = await fundedThen(async () => {
+      throw new OfferNotSubmittedError(
+        `${INCIDENT_DEPOSIT} is no longer live at ${OFFER_SCRIPT}; nothing was submitted`,
+      )
+    }, [deposit(), null])
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).state).toBe('funded')
+
+    await service.tick('swap-1')
+    const row = await store.get('swap-1')
+    expect(row.state).toBe('refused')
+    expect(row.failureReason).toMatch(/deposit_short/)
+    expect(row.fillTxid).toBeNull()
+  })
+
+  it('walks back the SDK pre-send refusal from under the latch, then finishes refused', async () => {
+    const { service, store } = await fundedThen(
+      async (_row, options) => {
+        await options?.markSubmitting?.()
+        throw new OfferSubmitRejectedError('the deposit was not spendable when the fill was built', [], false)
+      },
+      [deposit(), null],
+    )
+    await service.tick('swap-1')
+    expect(await store.get('swap-1')).toMatchObject({ state: 'funded', fillPhase: null })
+
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).state).toBe('refused')
+  })
+
+  it('fills instead when the deposit was only briefly unreadable', async () => {
+    let blipped = false
+    const { service, store } = await fundedThen(
+      async (row, options) => {
+        if (!blipped) {
+          blipped = true
+          throw new OfferNotSubmittedError(`${INCIDENT_DEPOSIT} is no longer live; nothing was submitted`)
+        }
+        await options?.markSubmitting?.()
+        return `fa${row.id.length}`.padEnd(64, 'b')
+      },
+      [deposit(), deposit()],
+    )
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).state).toBe('filled')
+  })
+
+  it('ends refused with the neutral reason when arkd named the incident outpoint', async () => {
+    const { service, store } = await fundedThen(
+      async (_row, options) => {
+        await options?.markSubmitting?.()
+        throw new OfferSubmitRejectedError(
+          `arkd refused the fill: ${INCIDENT_DEPOSIT} already spent`,
+          [INCIDENT_DEPOSIT],
+          true,
+        )
+      },
+      [deposit()],
+    )
+    await service.tick('swap-1')
+    expect(await store.get('swap-1')).toMatchObject({ state: 'refused', failureReason: DEPOSIT_SPENT_REASON })
+  })
+})

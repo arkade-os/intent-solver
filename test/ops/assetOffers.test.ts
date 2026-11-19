@@ -1253,3 +1253,70 @@ describe('an offer an RFQ negotiation already holds', () => {
     await rfq.close()
   })
 })
+
+/** Both remaining timings rejoin the deferral budget: this loop has no
+ * action-time deposit gate, and `lost` here cannot be undone. */
+describe('tickAll on a lost race caught before the submission', () => {
+  const INCIDENT_DEPOSIT = '7da3508518eb5fec43370d26fb85e2fe105796f1869d183e16a38dbe41e05730:0'
+
+  const throwing = async (error: () => Error, latch = false) => {
+    const errors: { id: string; error: unknown }[] = []
+    const deferred: { id: string; error: unknown }[] = []
+    const settle = vi.fn(async (_row: unknown, options?: { markSubmitting?: () => Promise<boolean> }) => {
+      if (latch) await options?.markSubmitting?.()
+      throw error()
+    })
+    const built = await build({
+      settle: settle as unknown as AssetOfferDeps['settle'],
+      onError: (id, e) => void errors.push({ id, error: e }),
+      onDeferred: (id, e) => void deferred.push({ id, error: e }),
+    })
+    await built.service.consider(found)
+    return { ...built, settle, errors, deferred }
+  }
+
+  it('defers the adapter liveness refusal instead of parking it stuck', async () => {
+    const { store, service, deferred, errors } = await throwing(
+      () => new OfferNotSubmittedError(`${INCIDENT_DEPOSIT} is no longer live at ${SCRIPT_HEX}; nothing was submitted`),
+    )
+    expect(await service.tickAll()).toBe(0)
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'fillable', failureReason: null })
+    expect(deferred).toHaveLength(1)
+    expect(errors).toEqual([])
+  })
+
+  it('defers the SDK pre-send refusal from under the latch', async () => {
+    const { store, service, deferred } = await throwing(
+      () => new OfferSubmitRejectedError('the deposit was not spendable when the fill was built', [], false),
+      true,
+    )
+    expect(await service.tickAll()).toBe(0)
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'fillable', fillPhase: null })
+    expect(deferred).toHaveLength(1)
+  })
+
+  it('still ends lost — not stuck — when arkd named the incident outpoint as spent', async () => {
+    const { store, service, errors } = await throwing(
+      () =>
+        new OfferSubmitRejectedError(
+          `arkd refused the fill: ${INCIDENT_DEPOSIT} already spent`,
+          [INCIDENT_DEPOSIT],
+          true,
+        ),
+      true,
+    )
+    expect(await service.tickAll()).toBe(0)
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'lost', failureReason: DEPOSIT_SPENT_REASON })
+    expect(errors).toEqual([])
+  })
+
+  it('exhausts the budget into stuck, since absence from a list never proves the deposit gone', async () => {
+    const { store, service } = await throwing(
+      () => new OfferNotSubmittedError(`${INCIDENT_DEPOSIT} is no longer live; nothing was submitted`),
+    )
+    for (let sweep = 0; sweep < MAX_FILL_DEFERRALS; sweep += 1) await service.tickAll()
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'fillable' })
+    await service.tickAll()
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'stuck' })
+  })
+})

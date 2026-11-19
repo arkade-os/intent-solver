@@ -25,7 +25,14 @@
  *   because this is the function that spends.
  */
 import { selectVirtualCoins, selectCoinsWithAsset, type ExtendedVirtualCoin } from '@arkade-os/sdk'
-import { ASSET_CARRIER_SATS, encodeOffer, fillOffer, type FillFunding, type Offer } from '@arkade-os/swap/protocol'
+import {
+  ASSET_CARRIER_SATS,
+  encodeOffer,
+  fillOffer,
+  NoSpendableDepositError,
+  type FillFunding,
+  type Offer,
+} from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
 import { type ArkadeContext } from './wallet.js'
 import { outpointKey } from './lockupFunding.js'
@@ -38,10 +45,11 @@ export { ASSET_CARRIER_SATS }
 
 /**
  * A fill refusal that provably submitted nothing, so a caller holding the row in
- * `filling` may walk it back. Raised ONLY at the two coin-selection refusals
- * below, both above `fillOffer` — the call that builds AND submits. The other
- * guards here stay plain on purpose: they mean the row disagrees with the chain,
- * which needs a human. @see FundNotSubmittedError, the same boundary on receive.
+ * `filling` may walk it back. Raised only ABOVE `fillOffer` — the call that
+ * builds AND submits — at the two coin-selection refusals below and at each
+ * settle adapter's deposit-liveness guard. The other guards stay plain on
+ * purpose: they mean the row disagrees with the chain, which needs a human.
+ * @see FundNotSubmittedError, the same boundary on receive.
  */
 export class OfferNotSubmittedError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
@@ -50,9 +58,10 @@ export class OfferNotSubmittedError extends Error {
   }
 }
 
-/** arkd refused the submission over spent outpoints, so nothing was sent. NOT a subclass of
- * {@link OfferNotSubmittedError}: it is raised below the latch, where that error's walk-back
- * no-ops, so the callers' existing arms would catch it and stick the row. */
+/** A fill that provably reached no chain from BELOW the latch — arkd refusing it, or the SDK
+ * refusing to build it. `depositSpent` is the stronger claim on top: arkd NAMED the deposit as
+ * already spent. NOT a subclass of {@link OfferNotSubmittedError}, whose walk-back no-ops here,
+ * so the callers' existing arms would catch it and stick the row. */
 export class OfferSubmitRejectedError extends Error {
   constructor(
     message: string,
@@ -235,6 +244,17 @@ export const fulfillOffer = async (
       // rebuilt from the offer's, and a mismatch fails loudly against
       // `swapPkScript` rather than silently.
     }).catch((error: unknown) => {
+      // `resolveDeposit`, inside `fillOffer` nine lines above its only `send()`: nothing was
+      // built, let alone sent. `depositSpent` stays FALSE — absence from a coin list is not
+      // arkd proving a spend, so only the action-time gate may end the row on it.
+      if (error instanceof NoSpendableDepositError) {
+        throw new OfferSubmitRejectedError(
+          `the deposit ${outpointKey(deposit.txid, deposit.vout)} was not spendable when the fill was built; nothing was submitted`,
+          [],
+          false,
+          { cause: error },
+        )
+      }
       const spent = spentOutpointsIn(error)
       // Rethrown as it was: unclassified keeps meaning "outcome unknown".
       if (spent === null) throw error

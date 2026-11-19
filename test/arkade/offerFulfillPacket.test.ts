@@ -333,6 +333,8 @@ describe('the asset packet fulfillOffer submits', () => {
 })
 
 /** The bodies are arkd's own shape, `vtxo_outpoints` included. @see outpointsIn */
+const SUBMIT_PREFIX = 'Failed to submit tx to emulator: '
+
 describe('a submission arkd refused as already spent', () => {
   const refusalBody = (outpoints: string[], over: Record<string, unknown> = {}) =>
     JSON.stringify({
@@ -375,6 +377,63 @@ describe('a submission arkd refused as already spent', () => {
     state.vtxos = [coin]
     return { txid: coin.txid, vout: coin.vout, value: coin.value }
   }
+
+  /** Row d13acd93's stored `failure_reason`, byte for byte; its deposit reads
+   * `isSpent: true, spentBy: 76ff78fd…` at the public indexer. */
+  const INCIDENT_BODY =
+    'Failed to submit tx to emulator: {"code":3,"message":"VTXO_ALREADY_SPENT (6): vtxo(s) already spent","details":[{"@type":"type.googleapis.com/ark.v1.ErrorDetails","code":6,"name":"VTXO_ALREADY_SPENT","message":"VTXO_ALREADY_SPENT (6): vtxo(s) already spent","metadata":{"vtxo_outpoint":"7da3508518eb5fec43370d26fb85e2fe105796f1869d183e16a38dbe41e05730:0","vtxo_outpoints":"[7da3508518eb5fec43370d26fb85e2fe105796f1869d183e16a38dbe41e05730:0]"}}]}'
+  const INCIDENT_DEPOSIT = '7da3508518eb5fec43370d26fb85e2fe105796f1869d183e16a38dbe41e05730:0'
+
+  it('parses the stored body from row d13acd93 verbatim, Go-slice metadata and all', async () => {
+    const at = deposit([{ assetId: ASSET_B, amount: 900n }])
+    const { outcome } = await submitting(INCIDENT_BODY.slice(SUBMIT_PREFIX.length), [fundingCoin(80_000)], at)
+
+    expect(outcome).toBeInstanceOf(OfferSubmitRejectedError)
+    // Read out of `[<txid>:0]`, unquoted.
+    expect(outcome).toMatchObject({ spentOutpoints: [INCIDENT_DEPOSIT] })
+    expect(outcome).toMatchObject({ depositSpent: false })
+  })
+
+  it('calls it the deposit when that stored body names the outpoint we were given', async () => {
+    const at = deposit([{ assetId: ASSET_B, amount: 900n }])
+    // Only the txid swapped: the SDK needs a deposit whose prevout it can resolve.
+    const body = INCIDENT_BODY.slice(SUBMIT_PREFIX.length).replaceAll(INCIDENT_DEPOSIT.split(':')[0] as string, at.txid)
+    const { outcome } = await submitting(body, [fundingCoin(80_000)], at)
+
+    expect(outcome).toMatchObject({ depositSpent: true, spentOutpoints: [`${at.txid}:0`] })
+  })
+
+  it('refuses to build the fill when the deposit is gone, and says nothing was sent', async () => {
+    // After the latch, before any submission — and no claim the deposit is spent.
+    state.arkTx = undefined
+    state.vtxos = []
+    const at = { txid: 'c'.repeat(64), vout: 0, value: 900 }
+    const spending = ctx([fundingCoin(80_000)])
+    const latched: string[] = []
+
+    const outcome = await fulfillOffer(
+      spending,
+      'http://emulator.test',
+      offerFor({ offerAsset: asset.AssetId.fromString(ASSET_B) }),
+      at,
+      {
+        markSubmitting: async () => {
+          latched.push('latched')
+          return true
+        },
+      },
+    ).then(
+      () => null,
+      (error: unknown) => error,
+    )
+
+    expect(outcome).toBeInstanceOf(OfferSubmitRejectedError)
+    // The latch HAD flipped, which is why the 'selecting' walk-back cannot serve.
+    expect(latched).toEqual(['latched'])
+    expect(outcome).toMatchObject({ depositSpent: false, spentOutpoints: [] })
+    expect(state.arkTx).toBeUndefined()
+    expect(spending.reservations.reserved().size).toBe(0)
+  })
 
   it('names the DEPOSIT when that is the outpoint arkd refused over', async () => {
     const at = deposit([{ assetId: ASSET_B, amount: 900n }])

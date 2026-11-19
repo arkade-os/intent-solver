@@ -18,7 +18,8 @@
  *
  * A throw is the right shape for all of them. `tickAll` moves the row from
  * `filling` to `stuck` on a throw, and `stuck` means "needs a human" — which is
- * precisely what a row disagreeing with the chain needs.
+ * precisely what a row disagreeing with the chain needs. The deposit's own
+ * liveness is the exception: a lost race is no disagreement, so it is typed.
  *
  * MONEY PATH, AND UNEXERCISED AGAINST REAL FUNDS. The guards are unit-pinned
  * below; the spend they gate is only ever executed by
@@ -29,7 +30,7 @@ import { capture, unwrap } from '@arkade-os/solver-core/util/capture.js'
 import type { ArkadeContext } from './wallet.js'
 import { offerFromFundingTx } from './offerPacket.js'
 import { heldOf, offerFillInputFrom } from './offerFill.js'
-import { fulfillOffer, type FulfillOptions } from './offerFulfill.js'
+import { fulfillOffer, OfferNotSubmittedError, type FulfillOptions } from './offerFulfill.js'
 import { liveOfferOutpoints, type OfferOutpoint } from './offerOutpoints.js'
 import {
   OFFER_CONTRACT_VERSIONS,
@@ -157,8 +158,12 @@ export const offerSettleFor = (
     // it reads a cancelled or already-filled deposit as still fundable.
     const live = unwrap(await liveP)
     const deposit = live.find((o) => o.txid === intent.offerTxid && o.vout === intent.offerVout)
+    // ABOVE `fulfill`, so a later sweep may re-attempt. Typed, not terminal: `lost` cannot be
+    // undone here, since the relay streams only NEW funding transactions.
     if (!deposit) {
-      throw new Error(`${intent.offerTxid}:${intent.offerVout} is no longer live at ${intent.offerPkScript}`)
+      throw new OfferNotSubmittedError(
+        `${intent.offerTxid}:${intent.offerVout} is no longer live at ${intent.offerPkScript}; nothing was submitted`,
+      )
     }
 
     // A ROW CAN BE PRICED AGAINST MORE THAN THE OUTPOINT HOLDS.

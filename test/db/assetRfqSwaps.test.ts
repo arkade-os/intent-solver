@@ -11,13 +11,14 @@
  * Service — which this solver has no key for and cannot perform.
  */
 
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { AssetRfqSwapStore, type AssetRfqQuoteRecord } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
 import { offerExitDelay, offerScriptFrom } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
 import { quotedOfferSettleFor } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
+import { OfferNotSubmittedError } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 
 const ASSET_A = `${'aa'.repeat(32)}0100`
 const ASSET_B = `${'bb'.repeat(32)}0100`
@@ -627,6 +628,59 @@ describe('a fill arkd rejected at submit', () => {
     expect(await store.refuseRejectedSubmit('swap-1', 'deposit gone')).toBe(false)
     expect(await store.revertRejectedSubmit('swap-1')).toBe(false)
     expect((await store.get('swap-1')).state).toBe(to)
+    await store.close()
+  })
+})
+
+/** The REAL adapter against the REAL store — the pair production runs. */
+describe('a deposit already gone when the adapter looked', () => {
+  const xonly = (fill: number) => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
+  const derivation = {
+    serverPubkey: xonly(2),
+    emulatorPubkey: xonly(4),
+    hrp: 'tark',
+    exitDelay: offerExitDelay(605_184),
+  }
+  const maker = { script: `5120${'cc'.repeat(32)}`, key: hex.encode(xonly(3)) }
+
+  it('refuses typed, so the claimed row walks back instead of needing a human', async () => {
+    const terms = {
+      wantAmount: 99_500_000_000n,
+      wantAssetId: ASSET_A,
+      offerAssetId: null,
+      makerPkScript: maker.script,
+      makerPublicKey: maker.key,
+    }
+    const derived = offerScriptFrom(derivation)(terms)
+    const store = await open()
+    await store.insertQuote(
+      quote({
+        offerPkScript: derived.pkScript,
+        offerAddress: derived.address,
+        makerPkScript: maker.script,
+        makerPublicKey: maker.key,
+      }),
+    )
+    await store.transition('swap-1', 'quoted', 'funded', { deposit_txid: 'a'.repeat(64), deposit_vout: 0 })
+    await store.transition('swap-1', 'funded', 'filling', { fill_phase: 'selecting' })
+
+    const fulfill = vi.fn()
+    const settle = quotedOfferSettleFor({
+      ctx: {} as never,
+      emulatorUrl: 'http://emulator.test',
+      derivation,
+      outpointsAt: async () => [],
+      fulfill: fulfill as never,
+    })
+    const error = await settle(await store.get('swap-1')).then(
+      () => null,
+      (e: unknown) => e,
+    )
+
+    expect(error).toBeInstanceOf(OfferNotSubmittedError)
+    expect(fulfill).not.toHaveBeenCalled()
+    expect(await store.revertUnsubmitted('swap-1')).toBe(true)
+    expect((await store.get('swap-1')).state).toBe('funded')
     await store.close()
   })
 })
