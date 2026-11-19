@@ -190,6 +190,8 @@ if (entry) {
   for (const [from, name, symbol, requiredMethod] of [
     [entry, '@arkade-os/sdk', CANDIDATE_SDK_SYMBOL],
     [entry, '@arkade-os/sdk', 'ServiceWorkerReadonlyWallet', 'onWalletUpdate'],
+    [entry, '@arkade-os/sdk', 'ServiceWorkerReadonlyWallet', 'dispose'],
+    [entry, '@arkade-os/sdk', 'IndexedDBVtxoReservationRepository', 'deleteReservationIfMatches'],
     [at(TAXI_CONSUMER, 'package.json'), '@arkade-os/swap', SWAP_FILL_SYMBOL],
     [at(TAXI_CONSUMER, 'package.json'), '@arkade-os/swap', 'InMemoryAssetSwapRepository', 'createSwapRecordIfAbsent'],
   ]) {

@@ -492,6 +492,11 @@ one.
   receives. A solver predating the field refuses it as an unknown field, so a
   client that can also derive the baseline retries without it.
 
+  Asset swaps support `asset-swap-v3` (the canonical compiled active-input
+  programs) and `asset-swap-v2`. The selected version is fixed per quote;
+  versionless requests retain V2. Recovery matches the exact stored script,
+  including historical frozen Taxi trees, without admitting new offers on those trees.
+
 ### 4.2 `rfq_quote`
 
 ```json

@@ -14,7 +14,7 @@ import { publishStateOf } from '../publishState.js'
 import type { AdminDeps } from '../server.js'
 import { assetCardMarketsFromPolicy } from '../../ops/assetRfqMarkets.js'
 import { descriptorFor } from '@arkade-os/solver-corridors/corridors/index.js'
-import { RFQ_ASSET_SWAP_V2, rfqContractEnabled } from '@arkade-os/solver-core/core/rfqContract.js'
+import { RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_V3, rfqContractEnabled } from '@arkade-os/solver-core/core/rfqContract.js'
 
 /** `RELAY_URL` then `SOLVER_CARD_RELAYS`. */
 export const advertisedRelays = (relayUrl: string | null, extra: readonly string[]): string[] =>
@@ -38,11 +38,11 @@ export type CardSource = Pick<
   'config' | 'policy' | 'bootPolicy' | 'assetMarkets' | 'liveOfferMarkets' | 'assetRfqMarkets' | 'providerPubkey'
 > & { arkade: { identity: Pick<Services['arkade']['identity'], 'signMessage'> } }
 
+const assetContractEnabled = (configured: readonly string[] | null): boolean =>
+  [RFQ_ASSET_SWAP_V3, RFQ_ASSET_SWAP_V2].some((version) => rfqContractEnabled(configured, version))
+
 /** ENABLED already — `assetMarketPolicy` drops a pause. */
-const assetMarketsOf = (
-  source: CardSource,
-  rfqServed = rfqContractEnabled(source.bootPolicy.rfqContractVersions, RFQ_ASSET_SWAP_V2),
-) =>
+const assetMarketsOf = (source: CardSource, rfqServed = assetContractEnabled(source.bootPolicy.rfqContractVersions)) =>
   publishableAssetMarkets(
     assetCardMarketsFromPolicy({
       pricing: source.assetMarkets,
@@ -64,10 +64,9 @@ export const cardOmissions = (source: CardSource): string[] => [
     (corridor) =>
       `${corridor} is enabled but omitted: contract version ${descriptorFor(corridor).contractVersion} is not in rfq.contractVersions`,
   ),
-  ...(source.assetRfqMarkets.length === 0 ||
-  rfqContractEnabled(source.bootPolicy.rfqContractVersions, RFQ_ASSET_SWAP_V2)
+  ...(source.assetRfqMarkets.length === 0 || assetContractEnabled(source.bootPolicy.rfqContractVersions)
     ? []
-    : ['asset RFQ markets are omitted: contract version asset-swap-v2 is not in rfq.contractVersions']),
+    : ['asset RFQ markets are omitted: neither asset-swap-v3 nor asset-swap-v2 is in rfq.contractVersions']),
   // LIVE unlike the corridor map: `rebuild` builds the corridor set from `livePolicy.evmCorridors`.
   ...unpublishableCorridors(
     source.policy.evmCorridors.filter((corridor) => corridor.enabled).map((corridor) => corridor.corridor),

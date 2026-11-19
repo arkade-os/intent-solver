@@ -105,7 +105,12 @@ export const servedContractVersions = (
   configured: readonly string[] | null,
   extra: readonly Corridor[],
 ): ReadonlySet<string> =>
-  new Set(configured ?? [...RFQ_CONTRACT_VERSIONS, ...extra.map((corridor) => corridor.descriptor.contractVersion)])
+  new Set(
+    configured ?? [
+      ...RFQ_CONTRACT_VERSIONS,
+      ...extra.flatMap((corridor) => corridor.descriptor.contractVersions ?? [corridor.descriptor.contractVersion]),
+    ],
+  )
 
 /**
  * One gate rather than each quote's own LND read: the onchain legs make none before the client has funded, so

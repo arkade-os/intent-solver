@@ -13,11 +13,12 @@
 import { describe, it, expect } from 'vitest'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { asset } from '@arkade-os/sdk'
-import { offerContract } from '@arkade-os/swap/protocol'
+import { ASSET_SWAP_V2, ASSET_SWAP_V3, decodeOffer, offerContract } from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
 import {
   offerExitDelay,
   offerFromTerms,
+  offerHexFrom,
   offerScriptFrom,
   xOnlyPubkey,
   type QuotedOfferTerms,
@@ -45,6 +46,45 @@ const terms = (over: Partial<QuotedOfferTerms> = {}): QuotedOfferTerms => ({
 const derive = offerScriptFrom(derivation)
 
 describe('offerScriptFrom', () => {
+  it('recovers a frozen taxi.0 RFQ script without constructing new offers on that tree', () => {
+    const historical = {
+      serverPubkey: hex.decode('4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa'),
+      emulatorPubkey: hex.decode('466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27'),
+      hrp: 'tark',
+      exitDelay: { type: 'blocks' as const, value: 10n },
+    }
+    const oldTerms = terms({
+      wantAmount: 50_000n,
+      wantAssetId: 'aa'.repeat(32) + '0000',
+      makerPkScript: '51203c72addb4fdf09af94f0c94d7fe92a386a7e70cf8a1d85916386bb2535c7b1b1',
+      makerPublicKey: '3c72addb4fdf09af94f0c94d7fe92a386a7e70cf8a1d85916386bb2535c7b1b1',
+    })
+    const pkScript = '5120eb9014efb2d54a75cfcadcd2dcf1f3490228b59bb955b8211453fcb39c1f1d30'
+    const encoded = offerHexFrom(historical)(oldTerms, pkScript)
+    expect(hex.encode(decodeOffer(hex.decode(encoded)).swapPkScript)).toBe(pkScript)
+    for (const version of [ASSET_SWAP_V2, ASSET_SWAP_V3]) {
+      expect(offerScriptFrom(historical)(oldTerms, version).pkScript).not.toBe(pkScript)
+    }
+    expect(() => offerHexFrom(historical)({ ...oldTerms, wantAmount: 50_001n }, pkScript)).toThrow()
+  })
+
+  it.each([ASSET_SWAP_V2, ASSET_SWAP_V3] as const)('builds the explicitly selected %s program', (version) => {
+    const selected = derive(terms(), version)
+    const expected = offerContract(offerFromTerms(terms(), EMULATOR, EXIT), SERVER, version)
+    expect(selected.pkScript).toBe(hex.encode(expected.pkScript))
+    expect(selected.address).toBe(expected.address('tark', SERVER).encode())
+  })
+
+  it.each([ASSET_SWAP_V2, ASSET_SWAP_V3] as const)(
+    'preserves a recorded %s program while encoding its recovery offer',
+    (version) => {
+      const existing = offerContract(offerFromTerms(terms(), EMULATOR, EXIT), SERVER, version)
+      const encoded = offerHexFrom(derivation)(terms(), hex.encode(existing.pkScript))
+      expect(decodeOffer(hex.decode(encoded)).swapPkScript).toEqual(existing.pkScript)
+      expect(() => offerHexFrom(derivation)(terms({ wantAmount: 1_001n }), hex.encode(existing.pkScript))).toThrow()
+    },
+  )
+
   it('compiles the same covenant the SDK does from the equivalent offer', () => {
     const direct = offerContract(
       {

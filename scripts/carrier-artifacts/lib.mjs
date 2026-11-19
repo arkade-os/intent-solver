@@ -13,9 +13,9 @@ export const MANIFEST_PATH = `${VENDOR_DIR}/manifest.json`
 
 const TS_SDK = 'https://github.com/arkade-os/ts-sdk.git'
 const ARKADE_TAXI = 'https://github.com/ArkLabsHQ/arkade-taxi.git'
-const SDK_COMMIT = '8c428b36d33f5c19584b652bdd98243f15900db1'
-const SWAP_COMMIT = '37aa317a08750dd39b5a9f639f4d0452d46655fa'
-const TAXI_CLIENT_COMMIT = 'e6f4b274c8eadb8bf1bdfec512132aeebc27d2ad'
+const SDK_COMMIT = '9b3a8fcf2dbcde47d1a0efe2b229efc57f289014'
+const SWAP_COMMIT = 'fdf784fbb8d1e8a4ddf50ac7d5e239bcbe2e681f'
+const TAXI_CLIENT_COMMIT = '435c93031b4d0d37e53899e4969e1421ecf0be69'
 const TAXI_COMMIT = 'a9d2fbb47149ea3518fe28733d896197094bddf4'
 
 // Every package whose resolution must come from a frozen archive, and the exact
@@ -61,7 +61,7 @@ export function artifactLicense(manifest, sourceRoot) {
 export const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex')
 
 // Capabilities required from the frozen candidate rather than the registry build.
-export const SWAP_VERSION = '0.1.6'
+export const SWAP_VERSION = '0.1.8'
 export const SWAP_FILL_SYMBOL = 'buildOfferFillPlan'
 export const CANDIDATE_SDK_SYMBOL = 'SendDeadlineExceededError'
 export const CANDIDATE_TAXI_FILL_SYMBOL = 'TaxiClient'

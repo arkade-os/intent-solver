@@ -215,7 +215,7 @@ export interface AssetRfqDeps {
    * The offer covenant this solver will watch, derived from terms it has
    * already fixed. `offerVtxoScript` in the composition root.
    */
-  deriveOffer: (terms: OfferTerms) => { pkScript: string; address: string }
+  deriveOffer: (terms: OfferTerms, contractVersion?: string) => { pkScript: string; address: string }
   /** What is funded at the offer's script, or null while nothing is. */
   depositAt: (offerPkScript: string, depositLeg: AssetLeg | null) => Promise<ObservedDeposit | null>
   /** Spendable balance per asset id — `available`, never `total`. */
@@ -253,6 +253,7 @@ export type AssetRfqQuoteOutcome =
   | { accepted: false; reason: AssetRfqQuoteRefusal; detail?: string }
 
 export interface AssetRfqQuoteRequest {
+  contractVersion?: string
   requesterKey?: string
   rfqId: string
   pair: string
@@ -537,7 +538,7 @@ export class AssetRfqSwapService {
    * touching the network, and only then is a price fetched.
    */
   quote(request: AssetRfqQuoteRequest): Promise<AssetRfqQuoteOutcome> {
-    return this.quoteInner(request)
+    return this.quoteInner({ ...request })
   }
 
   private async quoteInner(request: AssetRfqQuoteRequest): Promise<AssetRfqQuoteOutcome> {
@@ -685,13 +686,16 @@ export class AssetRfqSwapService {
         }
       }
 
-      const offer = this.deps.deriveOffer({
-        wantAmount: resolved.toAmount,
-        wantAssetId: pair.to,
-        offerAssetId: pair.from,
-        makerPkScript: request.makerPkScript,
-        makerPublicKey: request.makerPublicKey,
-      })
+      const offer = this.deps.deriveOffer(
+        {
+          wantAmount: resolved.toAmount,
+          wantAssetId: pair.to,
+          offerAssetId: pair.from,
+          makerPkScript: request.makerPkScript,
+          makerPublicKey: request.makerPublicKey,
+        },
+        request.contractVersion,
+      )
 
       try {
         const swap = await this.deps.store.insertQuote({

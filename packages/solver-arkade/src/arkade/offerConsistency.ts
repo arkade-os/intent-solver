@@ -11,7 +11,7 @@
  * something else — and a taker that priced the packet would spend the deposit
  * under terms it never checked.
  */
-import { offerContract, type Offer } from '@arkade-os/swap/protocol'
+import { ASSET_SWAP_CONTRACT_VERSIONS, offerContract, type Offer } from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
 import { offerContractVersionOf, type OfferContractVersion } from '@arkade-os/solver-core/core/offerContract.js'
 
@@ -25,7 +25,14 @@ export interface OfferContractMatch {
  */
 export const offerContractMatch = (offer: Offer, serverPubkey: Uint8Array): OfferContractMatch | null => {
   try {
-    const matches = hex.encode(offerContract(offer, serverPubkey).pkScript) === hex.encode(offer.swapPkScript)
+    const { swapPkScript, ...terms } = offer
+    const matches = ASSET_SWAP_CONTRACT_VERSIONS.some((version) => {
+      try {
+        return hex.encode(offerContract(terms, serverPubkey, version).pkScript) === hex.encode(swapPkScript)
+      } catch {
+        return false
+      }
+    })
     return matches ? { version: offerContractVersionOf(offer) } : null
   } catch {
     return null

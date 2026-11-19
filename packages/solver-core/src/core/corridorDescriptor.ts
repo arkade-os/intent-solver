@@ -46,6 +46,7 @@ export interface CorridorDescriptor<State extends string = string> {
    * be opt-in per request instead.
    */
   readonly contractVersion: RfqContractVersion
+  readonly contractVersions?: readonly RfqContractVersion[]
   /** Which rail's balance funds this corridor's payout — the destination leg. */
   readonly payoutRail: PayoutRail
   /**

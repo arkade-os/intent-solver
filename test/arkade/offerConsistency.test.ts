@@ -9,7 +9,9 @@
  * that matters: it is the actual attack.
  */
 import { describe, it, expect } from 'vitest'
-import { offerContract, type Offer } from '@arkade-os/swap/protocol'
+import { ASSET_SWAP_CONTRACT_VERSIONS, offerContract, type Offer } from '@arkade-os/swap/protocol'
+import { asset } from '@arkade-os/sdk'
+import { hex } from '@scure/base'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { offerContractMatch, offerIsConsistent } from '@arkade-os/solver-arkade/arkade/offerConsistency.js'
 import { OFFER_CONTRACT_V1, OFFER_CONTRACT_V2 } from '@arkade-os/solver-core/core/offerContract.js'
@@ -34,6 +36,28 @@ const offerWith = (over: Record<string, unknown>): Offer => ({ ...terms, ...over
 const honest = offerContract(offerWith({ swapPkScript: new Uint8Array(34) }), SERVER).pkScript
 
 describe('offerIsConsistent', () => {
+  it.each(ASSET_SWAP_CONTRACT_VERSIONS)('admits freshly built %s offers with their exact terms', (version) => {
+    const { swapPkScript: _script, ...fresh } = offerWith({ swapPkScript: new Uint8Array(34) })
+    const pkScript = offerContract(fresh, SERVER, version).pkScript
+    expect(offerContractMatch({ ...fresh, swapPkScript: pkScript }, SERVER)).toEqual({ version: OFFER_CONTRACT_V1 })
+    expect(offerContractMatch({ ...fresh, wantAmount: 999n, swapPkScript: pkScript }, SERVER)).toBeNull()
+  })
+
+  it('rejects a frozen taxi.0 tree for new admission while the SDK can recover it exactly', () => {
+    const operator = hex.decode('4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa')
+    const pkScript = '51209c06e6e9c33c521574425ce064c571a541af76d60f3fa32fd19b2df195601722'
+    const recorded: Offer = {
+      wantAmount: 50_000n,
+      wantAsset: asset.AssetId.fromString('aa'.repeat(32) + '0000'),
+      makerPkScript: hex.decode('51203c72addb4fdf09af94f0c94d7fe92a386a7e70cf8a1d85916386bb2535c7b1b1'),
+      makerPublicKey: hex.decode('3c72addb4fdf09af94f0c94d7fe92a386a7e70cf8a1d85916386bb2535c7b1b1'),
+      emulatorPubkey: hex.decode('466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27'),
+      swapPkScript: hex.decode(pkScript),
+    }
+    expect(hex.encode(offerContract(recorded, operator).pkScript)).toBe(pkScript)
+    expect(offerContractMatch(recorded, operator)).toBeNull()
+  })
+
   it('accepts an offer claiming the script its terms compile to', () => {
     expect(offerIsConsistent(offerWith({ swapPkScript: honest }), SERVER)).toBe(true)
   })

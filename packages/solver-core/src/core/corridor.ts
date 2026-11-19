@@ -32,6 +32,7 @@ export interface CorridorRfqOutcome {
  */
 export interface QuoteOptions {
   requesterKey?: string
+  readonly contractVersion?: string
 }
 
 /**
@@ -347,12 +348,13 @@ export const createCorridorSet = (corridors: readonly Corridor[], options: Corri
  */
 const negotiatingContractVersion = (corridor: Corridor, supported: ReadonlySet<string> | undefined): Corridor => {
   const { pair, contractVersion: version } = corridor.descriptor
-  const served = supported === undefined || supported.has(version)
+  const versions = new Set(corridor.descriptor.contractVersions ?? [version])
   const quote: Corridor['quote'] = async (payload, options) => {
     const rfqId = extractRfqId(payload)
     const asked = typeof payload === 'object' && payload !== null && 'contract_versions' in payload
     if (!asked) {
-      if (served) return corridor.quote(payload, options)
+      if (versions.has(version) && (supported === undefined || supported.has(version)))
+        return corridor.quote(payload, options)
       return {
         kind: 'refused',
         payload: rfqRefusalPayload(rfqId, 'unsupported_pair'),
@@ -368,22 +370,30 @@ const negotiatingContractVersion = (corridor: Corridor, supported: ReadonlySet<s
         detail: 'contract_versions is malformed',
       }
     }
-    if (!served || !parsed.data.includes(version)) {
-      return {
-        kind: 'refused',
-        payload: rfqRefusalPayload(rfqId, 'unsupported_payload', {
-          error_code: 'contract_version_unsupported',
-          field: 'contract_versions',
-        }),
-        detail: served
-          ? `${pair} speaks contract version ${version}, which contract_versions does not list`
-          : `${pair} speaks contract version ${version}, which rfq.contractVersions disables`,
-      }
+    const allowed = new Set(
+      parsed.data.filter((each) => versions.has(each) && (supported === undefined || supported.has(each))),
+    )
+    const selected = parsed.data.find((each) => allowed.has(each))
+    const unsupported = (detail: string): CorridorRfqOutcome => ({
+      kind: 'refused',
+      payload: rfqRefusalPayload(rfqId, 'unsupported_payload', {
+        error_code: 'contract_version_unsupported',
+        field: 'contract_versions',
+      }),
+      detail,
+    })
+    if (selected === undefined) {
+      return unsupported(`${pair} serves no enabled version listed in contract_versions`)
     }
-    const outcome = await corridor.quote(rest, options)
-    return outcome.kind === 'quote'
-      ? { ...outcome, payload: { ...outcome.payload, contract_version: version } }
-      : outcome
+    const outcome = await corridor.quote(rest, Object.freeze({ ...options, contractVersion: selected }))
+    if (outcome.kind !== 'quote') return outcome
+    if ('contract_version' in outcome.payload) {
+      const original = outcome.payload.contract_version
+      return typeof original === 'string' && allowed.has(original)
+        ? outcome
+        : unsupported(`${pair} returned a contract version not requested and enabled`)
+    }
+    return { ...outcome, payload: { ...outcome.payload, contract_version: selected } }
   }
   const wrapped = withQuote(corridor, quote)
   negotiated.add(wrapped)

@@ -240,6 +240,20 @@ describe('GET /api/card', () => {
     expect(body.cardOmitted).toEqual([])
     const asset = body.card!.markets.find((m) => quoteId(m) === `arkade:mutinynet/asset:${ASSET}`)!
     expect(asset).toMatchObject({ fee_flat: '1000000', min_quote_amount: '0', max_quote_amount: '0' })
+    for (const version of ['asset-swap-v3', 'asset-swap-v2']) {
+      const allowed = await getCard(
+        makeDeps({
+          assetMarkets: [configured],
+          assetRfqMarkets: [{ ...configured, symbol: 'ASSET', sellBase: { min: 0n, max: 0n } }],
+          rfqContractVersions: [
+            ...RFQ_CONTRACT_VERSIONS.filter((candidate) => !candidate.startsWith('asset-swap-')),
+            version,
+          ],
+        }),
+      )
+      expect(allowed.body.card!.markets.some((m) => quoteId(m) === `arkade:mutinynet/asset:${ASSET}`)).toBe(true)
+      expect(allowed.body.cardOmitted).toEqual([])
+    }
 
     const withoutContractVersion = async (market: typeof configured) =>
       (
@@ -247,14 +261,14 @@ describe('GET /api/card', () => {
           makeDeps({
             assetMarkets: [market],
             assetRfqMarkets: [{ ...market, symbol: 'ASSET', sellBase: { min: 0n, max: 0n } }],
-            rfqContractVersions: RFQ_CONTRACT_VERSIONS.filter((version) => version !== 'asset-swap-v2'),
+            rfqContractVersions: RFQ_CONTRACT_VERSIONS.filter((version) => !version.startsWith('asset-swap-')),
           }),
         )
       ).body
     const off = await withoutContractVersion(configured)
     expect(off.card!.markets.some((m) => quoteId(m) === `arkade:mutinynet/asset:${ASSET}`)).toBe(false)
     expect(off.cardOmitted).toEqual([
-      'asset RFQ markets are omitted: contract version asset-swap-v2 is not in rfq.contractVersions',
+      'asset RFQ markets are omitted: neither asset-swap-v3 nor asset-swap-v2 is in rfq.contractVersions',
     ])
     const faulty = await withoutContractVersion({ ...configured, baseDecimals: 6 })
     expect(faulty.cardOmitted.join(' ')).toContain('the BTC leg is 8 decimals (sats), got 6')
