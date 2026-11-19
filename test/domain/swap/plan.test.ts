@@ -30,6 +30,7 @@ const POLICIES: Policies = {
   canFill: () => ({ ok: true }),
   acceptsOverfunding: false,
   onLockFailed: () => 'stick',
+  onLockMissing: () => 'wait',
   canCollect: () => ({ ok: true }),
   onClaimFailed: () => 'retry',
   onRefundFailed: () => 'retry',
@@ -117,6 +118,16 @@ describe('plan: paying out', () => {
       do: 'abandon',
     })
     expect(plan(filling(), seen({ to: { ...NOTHING, lock: 'pending' } }), POLICIES)).toEqual({ do: 'wait' })
+  })
+
+  it('asks the route about a payout that was recorded but never reached the rail', () => {
+    const swap = filling(LIGHTNING)
+    expect(plan(swap, seen(), POLICIES)).toEqual({ do: 'wait' })
+    expect(plan(swap, seen(), policies({ onLockMissing: () => 'retry' }))).toEqual({ do: 'lock', side: 'to' })
+    expect(plan(swap, seen(), policies({ onLockMissing: () => 'refuse' }))).toMatchObject({ do: 'abandon' })
+    expect(plan(swap, seen(), policies({ onLockMissing: () => 'stick' }))).toMatchObject({ outcome: 'stuck' })
+    const pending = seen({ to: { ...NOTHING, lock: 'pending' } })
+    expect(plan(swap, pending, policies({ onLockMissing: () => 'stick' }))).toEqual({ do: 'wait' })
   })
 
   it('sticks on a spend of our lock it does not recognise', () => {
@@ -236,6 +247,20 @@ describe('plan: offers and coupled swaps', () => {
     swap.lock('from', t(1_001), 'deposit')
     return swap
   }
+
+  it('adopts a deposit that arrives after the swap was refused, so it can be handed back', () => {
+    const swap = quoted()
+    swap.fail('refused', 'quote expired before the client funded', t(2_000))
+    expect(plan(swap, seen({ now: t(2_001) }), POLICIES)).toEqual({ do: 'wait' })
+    const late = { ...NOTHING, funding: 'short' as const }
+    expect(plan(swap, seen({ from: late }), POLICIES)).toEqual({ do: 'record', side: 'from', state: 'locking' })
+    swap.locking('from', t(2_002))
+    expect(plan(swap, seen({ from: late }), POLICIES)).toEqual({ do: 'wait' })
+    const confirmed = seen({ from: { ...late, matured: true } })
+    expect(plan(swap, confirmed, POLICIES)).toEqual({ do: 'record', side: 'from', state: 'locked' })
+    swap.lock('from', t(2_003))
+    expect(plan(swap, confirmed, POLICIES)).toEqual({ do: 'refund', side: 'from' })
+  })
 
   it('fills an offer in one decision once its transaction landed', () => {
     const swap = offer()

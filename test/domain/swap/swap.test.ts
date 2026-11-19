@@ -45,6 +45,8 @@ describe('swap state', () => {
   it('has no state for a pair outside the table', () => {
     expect(SwapState.derive('pending', 'claimed')).toBeNull()
     expect(SwapState.derive('refunded', 'claimed')).toBeNull()
+    expect(SwapState.derive('claimed', 'refunded')).toBeNull()
+    expect(SwapState.derive('claiming', 'refunded')).toBeNull()
     expect(SwapState.derive('claimed', 'locking')).toBeNull()
   })
 

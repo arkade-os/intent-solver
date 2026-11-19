@@ -9,7 +9,7 @@ export const SwapOutcome = {
 
 export type SwapOutcome = ValueOf<typeof SwapOutcome>
 
-type Pair = readonly [from: LegState | '*', to: LegState]
+type Pair = readonly [from: LegState, to: LegState]
 
 interface Derived {
   readonly pairs: readonly Pair[]
@@ -53,7 +53,18 @@ const DERIVED = {
     exposed: true,
     terminal: false,
   },
-  refunded: { pairs: [['*', 'refunded']], exposed: false, terminal: true },
+  // Not `claiming` or `claimed` on `from`: taking the client's funds with ours back is no refund, so it derives nothing.
+  refunded: {
+    pairs: [
+      ['pending', 'refunded'],
+      ['locking', 'refunded'],
+      ['locked', 'refunded'],
+      ['refunding', 'refunded'],
+      ['refunded', 'refunded'],
+    ],
+    exposed: false,
+    terminal: true,
+  },
 } as const satisfies Record<string, Derived>
 
 export type DerivedSwapState = keyof typeof DERIVED
@@ -66,7 +77,7 @@ const isDerived = (state: SwapState): state is DerivedSwapState => state in DERI
 export const SwapState = {
   /** Null for a pair outside the table: legs that disagree about what happened. */
   derive: (from: LegState, to: LegState): DerivedSwapState | null =>
-    ENTRIES.find(([, { pairs }]) => pairs.some(([f, t]) => (f === '*' || f === from) && t === to))?.[0] ?? null,
+    ENTRIES.find(([, { pairs }]) => pairs.some(([f, t]) => f === from && t === to))?.[0] ?? null,
   isExposed: (state: SwapState): boolean => isDerived(state) && DERIVED[state].exposed,
   isTerminal: (state: SwapState): boolean => !isDerived(state) || DERIVED[state].terminal,
 }

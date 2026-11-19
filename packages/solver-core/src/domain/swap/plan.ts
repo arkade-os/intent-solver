@@ -1,7 +1,7 @@
 import type { ValueOf } from '../shared/brand.js'
 import type { Preimage } from './hashlock.js'
 import { ContractKind, type Leg, type LegState, type Side } from './leg.js'
-import type { Observation } from './observation.js'
+import { FundingSeen, TxSeen, type Observation } from './observation.js'
 import type { Swap } from './swap.js'
 import { SwapOutcome } from './swap_state.js'
 
@@ -9,7 +9,7 @@ export type Decision =
   | { readonly do: 'wait' }
   // The rail already shows it: record it on the leg.
   | { readonly do: 'record'; readonly side: Side; readonly state: LegState; readonly preimage?: Preimage }
-  // Record the leg as `locking` / `claiming` / `refunding` FIRST, then ask its rail to act.
+  // Record the leg as `locking` / `claiming` / `refunding` FIRST, unless it already is, then ask its rail to act.
   | { readonly do: 'lock' | 'claim' | 'refund'; readonly side: Side }
   // The lock on `to` failed for good: record that, and the payout may be tried again.
   | { readonly do: 'unlock' }
@@ -23,6 +23,7 @@ export const Recovery = {
   Retry: 'retry',
   Refuse: 'refuse',
   Stick: 'stick',
+  Wait: 'wait',
 } as const
 
 export type Recovery = ValueOf<typeof Recovery>
@@ -39,11 +40,16 @@ export interface Policies {
   /** An overfunded lock: taken as funded, or refused. */
   readonly acceptsOverfunding: boolean
   /** The lock on `to` definitely failed: pay again, end the swap, or call a human. */
-  onLockFailed(swap: Swap, seen: Observation): Recovery
+  onLockFailed(swap: Swap, seen: Observation): Exclude<Recovery, 'wait'>
+  /**
+   * `to` is recorded as locking and the rail shows nothing: either the call is still in flight, or we
+   * crashed before making it. Only the route knows how long is too long, and whether asking again is safe.
+   */
+  onLockMissing(swap: Swap, seen: Observation): Recovery
   /** Whether `from` may still be collected, e.g. once its own refund has opened. */
   canCollect(swap: Swap, seen: Observation): Verdict
-  onClaimFailed(swap: Swap, seen: Observation): Exclude<Recovery, 'refuse'>
-  onRefundFailed(swap: Swap, seen: Observation): Exclude<Recovery, 'refuse'>
+  onClaimFailed(swap: Swap, seen: Observation): Extract<Recovery, 'retry' | 'stick'>
+  onRefundFailed(swap: Swap, seen: Observation): Extract<Recovery, 'retry' | 'stick'>
   /** A swap that ended without paying out: whether the client's lock may be handed back now. */
   canRelease(swap: Swap, seen: Observation): boolean
 }
@@ -95,6 +101,12 @@ const toShows = (swap: Swap, seen: Observation, policies: Policies): Decision | 
     if (verdict === Recovery.Retry) return { do: 'unlock' }
     if (verdict === Recovery.Refuse) return { do: 'abandon', reason: 'the payout failed and nothing left our side' }
     return fail(SwapOutcome.Stuck, 'the lock on the to leg failed')
+  }
+  if (to.state === 'locking' && rail.lock === TxSeen.None) {
+    const verdict = policies.onLockMissing(swap, seen)
+    if (verdict === Recovery.Retry) return { do: 'lock', side: 'to' }
+    if (verdict === Recovery.Refuse) return { do: 'abandon', reason: 'the payout was never sent' }
+    if (verdict === Recovery.Stick) return fail(SwapOutcome.Stuck, 'the payout was recorded but never reached the rail')
   }
   if (to.state === 'refunding' && rail.refund === 'failed') {
     return policies.onRefundFailed(swap, seen) === Recovery.Retry
@@ -159,6 +171,10 @@ const whenOver = (swap: Swap, seen: Observation, policies: Policies): Decision =
   const { from } = swap
   const unpaid = swap.outcome === SwapOutcome.Refused || (swap.outcome === null && swap.to.state === 'refunded')
   if (!unpaid) return WAIT
+  // A deposit that arrives, or confirms, after the swap ended is still the client's: adopt it so it can go back.
+  if ((from.state === 'pending' || from.state === 'locking') && seen.from.funding !== FundingSeen.None) {
+    return record(swap, 'from', seen.from.matured ? 'locked' : 'locking') ?? WAIT
+  }
   if (from.state === 'refunding' && seen.from.refund === 'landed') return record(swap, 'from', 'refunded') ?? WAIT
   if (from.state === 'locked' && from.canMoveTo('refunding') && policies.canRelease(swap, seen)) {
     return { do: 'refund', side: 'from' }
