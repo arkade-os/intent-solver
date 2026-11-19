@@ -2,7 +2,7 @@ import type { Asset } from '../shared/asset.js'
 import { checkBps } from '../shared/bps.js'
 import type { Pair } from './pair.js'
 import type { Price } from './price.js'
-import { QuoteRefusal, QuoteSide, refuse, type PricedQuote } from './quote_terms.js'
+import { PricedQuote, QuoteRefusal, QuoteSide } from './quote_terms.js'
 import { InvalidValue } from '../shared/error.js'
 
 const BPS = 10_000n
@@ -73,14 +73,14 @@ export class AssetPricing {
   quote(request: AssetQuoteRequest): PricedQuote {
     const priced = this.priced(request)
     if (!priced.ok || request.to !== this.props.native) return priced
-    return priced.payout < (request.minOutput ?? 0n) ? refuse(QuoteRefusal.PayoutBelowDust) : priced
+    return priced.payout < (request.minOutput ?? 0n) ? PricedQuote.refused(QuoteRefusal.PayoutBelowDust) : priced
   }
 
   private priced({ from, to, amount, side, price, carrier, dust }: AssetQuoteRequest): PricedQuote {
     const givesBase = this.givesBase(from, to)
-    if (givesBase === null) return refuse(QuoteRefusal.UnsupportedPair)
-    if (amount <= 0n) return refuse(QuoteRefusal.AmountOutOfRange)
-    if (carrier < 0n || dust < 0n) return refuse(QuoteRefusal.PriceUnavailable)
+    if (givesBase === null) return PricedQuote.refused(QuoteRefusal.UnsupportedPair)
+    if (amount <= 0n) return PricedQuote.refused(QuoteRefusal.AmountOutOfRange)
+    if (carrier < 0n || dust < 0n) return PricedQuote.refused(QuoteRefusal.PriceUnavailable)
 
     const { native, minPayout, maxPayout } = this.props
     const solverDelivers = to !== native
@@ -93,21 +93,21 @@ export class AssetPricing {
 
     if (side === QuoteSide.To) {
       const wanted = amount - ontoPayout
-      if (wanted <= 0n) return refuse(QuoteRefusal.FeeConsumesSwap)
-      if (outOfRange(wanted)) return refuse(QuoteRefusal.AmountOutOfRange)
+      if (wanted <= 0n) return PricedQuote.refused(QuoteRefusal.FeeConsumesSwap)
+      if (outOfRange(wanted)) return PricedQuote.refused(QuoteRefusal.AmountOutOfRange)
       const net = this.inputFor(wanted, givesBase, feeBps, 0, price)
-      if (net === null) return refuse(QuoteRefusal.PriceUnavailable)
-      if (!solverDelivers && amount < dust) return refuse(QuoteRefusal.AmountOutOfRange)
+      if (net === null) return PricedQuote.refused(QuoteRefusal.PriceUnavailable)
+      if (!solverDelivers && amount < dust) return PricedQuote.refused(QuoteRefusal.AmountOutOfRange)
       return { ok: true, give: net + offInput, payout: amount }
     }
 
     const net = amount - offInput
-    if (net <= 0n) return refuse(QuoteRefusal.FeeConsumesSwap)
+    if (net <= 0n) return PricedQuote.refused(QuoteRefusal.FeeConsumesSwap)
     const converted = this.payoutFor(net, givesBase, feeBps, 0, price)
-    if (converted <= 0n) return refuse(QuoteRefusal.FeeConsumesSwap)
-    if (outOfRange(converted)) return refuse(QuoteRefusal.AmountOutOfRange)
+    if (converted <= 0n) return PricedQuote.refused(QuoteRefusal.FeeConsumesSwap)
+    if (outOfRange(converted)) return PricedQuote.refused(QuoteRefusal.AmountOutOfRange)
     const payout = converted + ontoPayout
-    if (!solverDelivers && payout < dust) return refuse(QuoteRefusal.AmountOutOfRange)
+    if (!solverDelivers && payout < dust) return PricedQuote.refused(QuoteRefusal.AmountOutOfRange)
     return { ok: true, give: amount, payout }
   }
 

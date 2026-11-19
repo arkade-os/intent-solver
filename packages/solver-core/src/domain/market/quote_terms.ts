@@ -23,4 +23,4 @@ export type PricedQuote =
   | { readonly ok: true; readonly give: bigint; readonly payout: bigint }
   | { readonly ok: false; readonly reason: QuoteRefusal }
 
-export const refuse = (reason: QuoteRefusal): PricedQuote => ({ ok: false, reason })
+export const PricedQuote = { refused: (reason: QuoteRefusal): PricedQuote => ({ ok: false, reason }) }

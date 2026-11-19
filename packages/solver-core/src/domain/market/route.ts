@@ -3,7 +3,7 @@ import { Rail, type Endpoint } from '../shared/endpoint.js'
 import { RouteId } from '../shared/ids.js'
 import type { AssetPricing } from './asset_pricing.js'
 import type { Price } from './price.js'
-import { QuoteRefusal, QuoteSide } from './quote_terms.js'
+import { PricedQuote, QuoteRefusal, QuoteSide } from './quote_terms.js'
 import type { SpreadPricing } from './spread_pricing.js'
 import { InvalidValue } from '../shared/error.js'
 
@@ -81,7 +81,7 @@ export class Route {
       pricing.kind === 'spread'
         ? pricing.quote(amount.units, side, minOutput?.units)
         : !market || market.price === null
-          ? ({ ok: false, reason: QuoteRefusal.PriceUnavailable } as const)
+          ? PricedQuote.refused(QuoteRefusal.PriceUnavailable)
           : pricing.quote({
               from: from.asset,
               to: to.asset,

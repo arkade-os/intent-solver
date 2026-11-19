@@ -37,7 +37,13 @@ export const LegMachine = defineMachine({
 
 export type LegState = StateOf<typeof LegMachine>
 
-export type FactKind = 'funding' | 'claim' | 'refund'
+export const FactKind = {
+  Funding: 'funding',
+  Claim: 'claim',
+  Refund: 'refund',
+} as const
+
+export type FactKind = ValueOf<typeof FactKind>
 
 /** Where a leg shows on its rail: a txid, an outpoint, a payment id. */
 export type Reference = Brand<string, 'Reference'>

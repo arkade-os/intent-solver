@@ -1,11 +1,19 @@
+import type { ValueOf } from '../domain/shared/brand.js'
 import type { UnixSeconds } from '../domain/shared/time.js'
+
+export const ActionOutcome = {
+  Ok: 'ok',
+  Error: 'error',
+} as const
+
+export type ActionOutcome = ValueOf<typeof ActionOutcome>
 
 /** One line of the audit log: what an operator did, to what, and how it ended. */
 export interface ActionRecord {
   readonly at: UnixSeconds
   readonly action: string
   readonly target: string | null
-  readonly outcome: 'ok' | 'error'
+  readonly outcome: ActionOutcome
   readonly detail: string | null
   /** Redacted before it gets here: no feed URLs, no keys. */
   readonly params: string

@@ -22,11 +22,17 @@ export const TxSeen = {
 
 export type TxSeen = ValueOf<typeof TxSeen>
 
+export const Spender = {
+  Nobody: 'nobody',
+  Claim: 'claim',
+  Refund: 'refund',
+  Unknown: 'unknown',
+} as const
+
+export type Spender = ValueOf<typeof Spender>
+
 export type SpentSeen =
-  | { readonly by: 'nobody' }
-  | { readonly by: 'claim'; readonly preimage: Preimage | null }
-  | { readonly by: 'refund' }
-  | { readonly by: 'unknown' }
+  { readonly by: Exclude<Spender, 'claim'> } | { readonly by: typeof Spender.Claim; readonly preimage: Preimage | null }
 
 /** Facts from the rail about one leg. No decisions. */
 export interface LegSeen {
