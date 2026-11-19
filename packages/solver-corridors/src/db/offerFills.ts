@@ -387,9 +387,11 @@ export class OfferFillStore {
   /** The deposit was spent elsewhere — exactly what `lost` already means here.
    * A legal edge, so only the phase guard is extra. @see OfferSubmitRejectedError */
   async loseRejectedSubmit(id: string, reason: string): Promise<boolean> {
+    // EITHER phase: the proof is the named spender, not the phase, and both callers read it
+    // before anything is sent — the liveness guard at `selecting`, arkd's refusal at `submitting`.
     const result = await this.driver.run(
       `UPDATE offer_fill SET state = 'lost', fill_phase = NULL, failure_reason = ?, updated_at = ?
-       WHERE id = ? AND state = 'filling' AND fill_phase = 'submitting'`,
+       WHERE id = ? AND state = 'filling' AND fill_phase IN ('selecting', 'submitting')`,
       [reason, this.now(), id],
     )
     if (result.changes === 1) {

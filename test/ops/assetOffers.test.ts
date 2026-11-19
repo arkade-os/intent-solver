@@ -1338,3 +1338,57 @@ describe('tickAll on a lost race caught before the submission', () => {
     expect(await store.findById('fill-1')).toMatchObject({ state: 'stuck' })
   })
 })
+
+/** The payoff: an offer another taker took ends `lost` on the first sweep. */
+describe('tickAll on a deposit the indexer proves spent', () => {
+  const SPENDER = 'f1'.repeat(32)
+
+  const settling = async (error: () => Error, latch: boolean) => {
+    const errors: { id: string; error: unknown }[] = []
+    const settle = vi.fn(async (_row: unknown, options?: { markSubmitting?: () => Promise<boolean> }) => {
+      if (latch) await options?.markSubmitting?.()
+      throw error()
+    })
+    const built = await build({
+      settle: settle as unknown as AssetOfferDeps['settle'],
+      onError: (id, e) => void errors.push({ id, error: e }),
+    })
+    await built.service.consider(found)
+    return { ...built, errors }
+  }
+
+  const proven = () =>
+    new OfferSubmitRejectedError(
+      `${'a'.repeat(64)}:0 was spent by ${SPENDER}; nothing was submitted`,
+      [`${'a'.repeat(64)}:0`],
+      true,
+      {
+        spentBy: SPENDER,
+      },
+    )
+
+  it.each([
+    ['above the latch, at selecting', false],
+    ['under the latch, at submitting', true],
+  ] as const)('ends lost on the first sweep %s', async (_where, latch) => {
+    const { store, service, errors } = await settling(proven, latch)
+    expect(await service.tickAll()).toBe(0)
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'lost', failureReason: DEPOSIT_SPENT_REASON })
+    expect(errors).toEqual([])
+  })
+
+  /** A spender that IS our fill means a filled row would be misread as lost. */
+  it('refuses to call it lost when the named spender is our own fill', async () => {
+    const { store, service } = await build({
+      settle: async (_row, options) => {
+        await options?.markSubmitting?.()
+        throw new OfferSubmitRejectedError('spent by us', [`${'a'.repeat(64)}:0`], true, { spentBy: '0xfill' })
+      },
+    })
+    await service.consider(found)
+    await store.transition('fill-1', 'fillable', 'filling', { fill_phase: 'selecting', fill_txid: '0xfill' })
+    await store.revertUnsubmitted('fill-1')
+    await service.tickAll()
+    expect((await store.findById('fill-1'))?.state).not.toBe('lost')
+  })
+})

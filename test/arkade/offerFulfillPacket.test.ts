@@ -504,3 +504,52 @@ describe('a submission arkd refused as already spent', () => {
     expect(outcome).not.toBeInstanceOf(OfferSubmitRejectedError)
   })
 })
+
+/** The same probe one step lower, where `resolveDeposit` refuses to build. */
+describe('the deposit-gone probe under the latch', () => {
+  const DEPOSIT_TXID = 'c'.repeat(64)
+  const gone = (vtxos: unknown[]) => ({ getVtxos: async () => ({ vtxos: vtxos as never }) })
+
+  const building = async (probe?: { getVtxos: () => Promise<{ vtxos: never }> }) => {
+    state.arkTx = undefined
+    state.vtxos = []
+    const at = { txid: DEPOSIT_TXID, vout: 0, value: 900 }
+    const spending = ctx([fundingCoin(80_000)])
+    const outcome = await fulfillOffer(
+      spending,
+      'http://emulator.test',
+      offerFor({ offerAsset: asset.AssetId.fromString(ASSET_B) }),
+      at,
+      { markSubmitting: async () => true, ...(probe ? { probe } : {}) },
+    ).then(
+      () => null,
+      (error: unknown) => error,
+    )
+    return { outcome, at, spending }
+  }
+
+  it('claims the deposit spent when the indexer names a foreign spender', async () => {
+    const { outcome } = await building(
+      gone([{ txid: DEPOSIT_TXID, vout: 0, isSpent: true, spentBy: 'e5'.repeat(32), isUnrolled: false }]),
+    )
+    expect(outcome).toMatchObject({
+      depositSpent: true,
+      spentOutpoints: [`${DEPOSIT_TXID}:0`],
+      spentBy: 'e5'.repeat(32),
+    })
+  })
+
+  it('withholds the claim when the indexer names no spender', async () => {
+    const { outcome, spending } = await building(
+      gone([{ txid: DEPOSIT_TXID, vout: 0, isSpent: true, spentBy: '', isUnrolled: false }]),
+    )
+    expect(outcome).toBeInstanceOf(OfferSubmitRejectedError)
+    expect(outcome).toMatchObject({ depositSpent: false, spentOutpoints: [] })
+    expect(spending.reservations.reserved().size).toBe(0)
+  })
+
+  it('withholds the claim when no indexer is wired', async () => {
+    const { outcome } = await building()
+    expect(outcome).toMatchObject({ depositSpent: false, spentOutpoints: [] })
+  })
+})

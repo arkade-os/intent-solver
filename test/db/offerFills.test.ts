@@ -503,12 +503,18 @@ describe('OfferFillStore: a fill arkd rejected at submit', () => {
     expect(await store.findById(row.id)).toMatchObject({ state: 'fillable', fillPhase: null })
   })
 
-  it('leaves a selecting row alone: it was never told anything', async () => {
+  it('leaves a selecting row for the walk-back, which is the only exit it has', async () => {
     const row = await store.insertIntent(baseIntent)
     await store.transition(row.id, 'fillable', 'filling', { fill_phase: 'selecting' })
-    expect(await store.loseRejectedSubmit(row.id, 'deposit gone')).toBe(false)
     expect(await store.revertRejectedSubmit(row.id)).toBe(false)
     expect((await store.findById(row.id))?.state).toBe('filling')
+  })
+
+  it('loses a selecting row too, since the proof is the spender and not the phase', async () => {
+    const row = await store.insertIntent(baseIntent)
+    await store.transition(row.id, 'fillable', 'filling', { fill_phase: 'selecting' })
+    expect(await store.loseRejectedSubmit(row.id, 'deposit gone')).toBe(true)
+    expect(await store.findById(row.id)).toMatchObject({ state: 'lost', fillPhase: null })
   })
 
   it('is a no-op once another writer moved the row, so a lost race changes nothing', async () => {

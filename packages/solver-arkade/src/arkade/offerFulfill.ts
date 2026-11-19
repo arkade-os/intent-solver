@@ -37,6 +37,7 @@ import { hex } from '@scure/base'
 import { type ArkadeContext } from './wallet.js'
 import { outpointKey } from './lockupFunding.js'
 import { offerIsConsistent } from './offerConsistency.js'
+import { depositSpentBy, type DepositSpendProbe } from './depositSpend.js'
 
 /** The dust carrier output[0] takes when the maker is paid in an ASSET, not sats.
  * Re-exported from the SDK rather than restated: it is a covenant constant, and a
@@ -63,14 +64,18 @@ export class OfferNotSubmittedError extends Error {
  * already spent. NOT a subclass of {@link OfferNotSubmittedError}, whose walk-back no-ops here,
  * so the callers' existing arms would catch it and stick the row. */
 export class OfferSubmitRejectedError extends Error {
+  /** Named by a probe, never by arkd's refusal. The row's owner rules out our own
+   * fill before ending the row on it. @see depositSpentBy */
+  readonly spentBy?: string
   constructor(
     message: string,
     readonly spentOutpoints: readonly string[],
     readonly depositSpent: boolean,
-    options?: { cause?: unknown },
+    options?: { cause?: unknown; spentBy?: string },
   ) {
     super(message, options)
     this.name = 'OfferSubmitRejectedError'
+    this.spentBy = options?.spentBy
   }
 }
 
@@ -120,6 +125,8 @@ const spentOutpointsIn = (error: unknown): string[] | null => {
 }
 
 export interface FulfillOptions {
+  /** Overrides the wallet's own indexer for the spend probe. @see depositSpentBy */
+  probe?: DepositSpendProbe
   /**
    * Claimed immediately before the submission: `false` means another attempt
    * holds the row and nothing may be sent. A throw is left untyped — a failed
@@ -243,16 +250,20 @@ export const fulfillOffer = async (
       // it. It only ever names the client's own key anyway; the covenant here is
       // rebuilt from the offer's, and a mismatch fails loudly against
       // `swapPkScript` rather than silently.
-    }).catch((error: unknown) => {
+    }).catch(async (error: unknown) => {
       // `resolveDeposit`, inside `fillOffer` nine lines above its only `send()`: nothing was
-      // built, let alone sent. `depositSpent` stays FALSE — absence from a coin list is not
-      // arkd proving a spend, so only the action-time gate may end the row on it.
+      // built, let alone sent. Absence is no proof, so ask the indexer; uncertainty leaves
+      // `depositSpent` false and the caller walks the row back.
       if (error instanceof NoSpendableDepositError) {
+        const outpoint = outpointKey(deposit.txid, deposit.vout)
+        const spentBy = await depositSpentBy(options?.probe ?? ctx.wallet?.indexerProvider, deposit)
         throw new OfferSubmitRejectedError(
-          `the deposit ${outpointKey(deposit.txid, deposit.vout)} was not spendable when the fill was built; nothing was submitted`,
-          [],
-          false,
-          { cause: error },
+          spentBy === null
+            ? `the deposit ${outpoint} was not spendable when the fill was built; nothing was submitted`
+            : `the deposit ${outpoint} was spent by ${spentBy}; nothing was submitted`,
+          spentBy === null ? [] : [outpoint],
+          spentBy !== null,
+          { cause: error, ...(spentBy === null ? {} : { spentBy }) },
         )
       }
       const spent = spentOutpointsIn(error)

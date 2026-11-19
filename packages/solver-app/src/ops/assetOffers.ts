@@ -199,6 +199,11 @@ const termsOf = (row: OfferFillRow): OfferFillInput => ({
   offerAmount: row.offerAmount,
 })
 
+/** Only `fill_txid` records a submission of ours, so this cannot see an earlier
+ * attempt's — which is why the probe is asked only where nothing was sent. */
+const ourOwnFill = (error: { spentBy?: string }, row: OfferFillRow): boolean =>
+  error.spentBy !== undefined && row.fillTxid !== null && error.spentBy === row.fillTxid.toLowerCase()
+
 /** The decision, plus the row id when the intent was recorded. `offer_held_by_rfq` never
  * reaches `onRefused`, so it stays off the `OfferFillRefusal` union forks consume. */
 export type ConsiderOutcome = (OfferFillDecision | { fill: false; reason: 'offer_held_by_rfq' }) & { id?: string }
@@ -480,7 +485,8 @@ export class AssetOfferService {
         filled += 1
       } catch (error) {
         // A lost CAS on any exit below means another writer moved the row and reports it.
-        if (error instanceof OfferSubmitRejectedError && error.depositSpent) {
+        // A probed spender that is OUR fill would make this a filled row misread as lost.
+        if (error instanceof OfferSubmitRejectedError && error.depositSpent && !ourOwnFill(error, row)) {
           await this.deps.store.loseRejectedSubmit(row.id, DEPOSIT_SPENT_REASON)
           continue
         }
