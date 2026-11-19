@@ -4,7 +4,7 @@ import { bookSwap, type SwapBooking } from '@arkade-os/solver-core/domain/ledger
 import { Posting, JournalEntry } from '@arkade-os/solver-core/domain/ledger/journal_entry.js'
 import { Reconciliation } from '@arkade-os/solver-core/domain/ledger/reconciliation.js'
 import { Endpoint } from '@arkade-os/solver-core/domain/shared/endpoint.js'
-import { SwapId } from '@arkade-os/solver-core/domain/shared/ids.js'
+import { RouteId, SwapId } from '@arkade-os/solver-core/domain/shared/ids.js'
 import { ARKADE, BTC, btc, LIGHTNING, t, USDT, usdt } from '../support.js'
 
 const balances = (entries: readonly JournalEntry[]): Record<string, bigint> => {
@@ -34,7 +34,7 @@ describe('journal entry', () => {
 describe('booking a swap', () => {
   const quoted: SwapBooking = {
     swapId: SwapId.of('swap-1'),
-    route: 'arkade:btc->lightning:btc',
+    route: RouteId.of('arkade:btc->lightning:btc'),
     from: { endpoint: ARKADE, amount: btc(10_000n), collected: false },
     to: { endpoint: LIGHTNING, amount: btc(9_973n), paidOut: false, returned: false },
     lost: false,
@@ -87,7 +87,7 @@ describe('booking a swap', () => {
   it('keeps a flat fee in the asset given and a spread in the asset paid', () => {
     const cross: SwapBooking = {
       ...quoted,
-      route: 'arkade:btc->arkade:usdt',
+      route: RouteId.of('arkade:btc->arkade:usdt'),
       from: { ...quoted.from, collected: true },
       to: { endpoint: Endpoint.of('arkade', USDT), amount: usdt(9_686_121n), paidOut: true, returned: false },
       income: [btc(330n), usdt(29_145n)],
@@ -105,7 +105,7 @@ describe('booking a swap', () => {
   it('closes a swap that changes asset through trading, balanced in each asset', () => {
     const cross: SwapBooking = {
       ...quoted,
-      route: 'arkade:btc->arkade:usdt',
+      route: RouteId.of('arkade:btc->arkade:usdt'),
       to: { endpoint: Endpoint.of('arkade', USDT), amount: usdt(9_686_121n), paidOut: true, returned: false },
       from: { ...quoted.from, collected: true },
     }

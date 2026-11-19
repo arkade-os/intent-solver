@@ -1,5 +1,5 @@
 import type { LegSeen } from '../domain/swap/observation.js'
-import type { Side } from '../domain/swap/leg.js'
+import type { Reference, Side } from '../domain/swap/leg.js'
 import type { Swap } from '../domain/swap/swap.js'
 
 /** Reads a rail and changes nothing, so it may be called from anywhere, as often as needed. */
@@ -9,7 +9,7 @@ export interface RailWatcher {
 
 /** `unknown` is not `not_sent`: something may have left, so the leg must not be tried again blindly. */
 export type Sent =
-  { readonly sent: 'yes'; readonly reference: string } | { readonly sent: 'no' } | { readonly sent: 'unknown' }
+  { readonly sent: 'yes'; readonly reference: Reference } | { readonly sent: 'no' } | { readonly sent: 'unknown' }
 
 /** Moves value. Called only AFTER the leg was recorded as `locking` / `claiming` / `refunding`. */
 export interface RailService {

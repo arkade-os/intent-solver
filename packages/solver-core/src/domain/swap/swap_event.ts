@@ -1,7 +1,7 @@
 import type { RfqId, SwapId } from '../shared/ids.js'
 import type { UnixSeconds } from '../shared/time.js'
 import type { Hashlock, Preimage } from './hashlock.js'
-import type { LegReferences, LegState, LegTerms, Side } from './leg.js'
+import type { LegReferences, LegState, LegTerms, Reference, Side } from './leg.js'
 import type { AmountMode, Quote } from './quote.js'
 import type { SwapOutcome } from './swap_state.js'
 
@@ -41,7 +41,7 @@ export interface LegReferenced extends SwapEventBase {
 /** One transaction took the client's offer and paid them: both legs end together. */
 export interface OfferFilled extends SwapEventBase {
   readonly type: 'OfferFilled'
-  readonly fill: string | null
+  readonly fill: Reference | null
 }
 
 export interface SwapFailed extends SwapEventBase {

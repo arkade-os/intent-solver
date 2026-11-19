@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { evaluateApproval } from '@arkade-os/solver-core/core/approvalGate.js'
 import { Approval } from '@arkade-os/solver-core/domain/admin/approval.js'
 import { Setting } from '@arkade-os/solver-core/domain/admin/setting.js'
-import { SwapId } from '@arkade-os/solver-core/domain/shared/ids.js'
+import { RouteId, SwapId } from '@arkade-os/solver-core/domain/shared/ids.js'
 import { btc, t } from '../support.js'
 
 describe('approval', () => {
@@ -19,7 +19,7 @@ describe('approval', () => {
   })
 
   it('starts as a request, and approving again moves the timestamp as it does today', () => {
-    const approval = Approval.request(SwapId.of('swap-1'), 'arkade:btc->onchain:btc', btc(5_000n), t(100))
+    const approval = Approval.request(SwapId.of('swap-1'), RouteId.of('arkade:btc->onchain:btc'), btc(5_000n), t(100))
     expect(approval.verdict).toBe('pending')
     approval.approve(t(200))
     approval.approve(t(300))

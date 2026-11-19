@@ -1,6 +1,7 @@
 import type { Asset } from '../shared/asset.js'
 import type { ValueOf } from '../shared/brand.js'
 import type { Endpoint } from '../shared/endpoint.js'
+import type { RouteId } from '../shared/ids.js'
 
 export const AccountKind = {
   Asset: 'asset',
@@ -39,11 +40,11 @@ export class Account {
     return new Account(`equity:trading:${asset}`, asset, AccountKind.Equity)
   }
 
-  static swapIncome(route: string, asset: Asset): Account {
+  static swapIncome(route: RouteId, asset: Asset): Account {
     return new Account(`income:swap:${route}`, asset, AccountKind.Income)
   }
 
-  static swapExpense(route: string, asset: Asset): Account {
+  static swapExpense(route: RouteId, asset: Asset): Account {
     return new Account(`expenses:swap:${route}`, asset, AccountKind.Expense)
   }
 

@@ -3,7 +3,7 @@ import type { LegSeen, Observation } from '@arkade-os/solver-core/domain/swap/ob
 import { plan, type Policies } from '@arkade-os/solver-core/domain/swap/plan.js'
 import { Quote } from '@arkade-os/solver-core/domain/swap/quote.js'
 import type { Swap } from '@arkade-os/solver-core/domain/swap/swap.js'
-import { bothLocked, btc, quoted, SECRET, t, terms, usdt } from '../support.js'
+import { bothLocked, btc, quoted, ref, SECRET, t, terms, usdt } from '../support.js'
 
 const NOTHING: LegSeen = {
   funding: 'none',
@@ -40,7 +40,7 @@ const policies = (override: Partial<Policies>): Policies => ({ ...POLICIES, ...o
 
 const funded = (override: Parameters<typeof quoted>[0] = {}): Swap => {
   const swap = quoted(override)
-  swap.lock('from', t(1_001), 'txid-in')
+  swap.lock('from', t(1_001), ref('txid-in'))
   return swap
 }
 const filling = (override: Parameters<typeof quoted>[0] = {}): Swap => {
@@ -48,7 +48,7 @@ const filling = (override: Parameters<typeof quoted>[0] = {}): Swap => {
   swap.locking('to', t(1_002))
   return swap
 }
-const LIGHTNING = { to: { rail: 'lightning', amount: btc(9_990n), contract: 'lightning' } } as const
+const LIGHTNING = { to: { rail: 'lightning', amount: btc(9_990n), contract: 'lightning', version: null } } as const
 const claimedBy = { ...NOTHING, spent: { by: 'claim' as const, preimage: SECRET } }
 
 describe('plan: funding', () => {
@@ -241,10 +241,10 @@ describe('plan: offers and coupled swaps', () => {
     const swap = quoted({
       hashlock: null,
       quote: Quote.of(null, { fee: btc(0n), spreadBps: 0 }),
-      from: { rail: 'arkade', amount: usdt(5_000n), contract: 'offer' },
-      to: { rail: 'arkade', amount: btc(9_990n), contract: 'payment' },
+      from: { rail: 'arkade', amount: usdt(5_000n), contract: 'offer', version: null },
+      to: { rail: 'arkade', amount: btc(9_990n), contract: 'payment', version: null },
     })
-    swap.lock('from', t(1_001), 'deposit')
+    swap.lock('from', t(1_001), ref('deposit'))
     return swap
   }
 
@@ -285,14 +285,14 @@ describe('plan: offers and coupled swaps', () => {
 
   it('settles nothing on the receiving side of a coupled pair: the collateral is the peer lock', () => {
     const receiver = quoted({
-      from: { rail: 'lightning', amount: btc(10_000n), contract: 'lightning' },
+      from: { rail: 'lightning', amount: btc(10_000n), contract: 'lightning', version: null },
       to: terms.from,
     })
     const own = { ownInvoice: true, peer: { state: 'funded' as const, preimage: null } }
     expect(plan(receiver, seen(own), POLICIES)).toEqual({ do: 'record', side: 'from', state: 'locked' })
     receiver.lock('from', t(1_001))
     receiver.locking('to', t(1_002))
-    receiver.lock('to', t(1_003), 'lockup')
+    receiver.lock('to', t(1_003), ref('lockup'))
     receiver.claim('to', t(1_004), { preimage: SECRET })
     expect(plan(receiver, seen({ ...own, to: claimedBy }), POLICIES)).toEqual({
       do: 'record',

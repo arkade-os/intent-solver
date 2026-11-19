@@ -1,7 +1,7 @@
 import { Amount } from '../shared/amount.js'
 import type { Asset } from '../shared/asset.js'
 import { Endpoint } from '../shared/endpoint.js'
-import type { SwapId } from '../shared/ids.js'
+import type { RouteId, SwapId } from '../shared/ids.js'
 import type { UnixSeconds } from '../shared/time.js'
 import { Account } from './account.js'
 import { Posting, JournalEntry } from './journal_entry.js'
@@ -9,7 +9,7 @@ import { Posting, JournalEntry } from './journal_entry.js'
 /** What the ledger needs to know about a swap; the application maps a swap onto it. */
 export interface SwapBooking {
   readonly swapId: SwapId
-  readonly route: string
+  readonly route: RouteId
   /** `collected`: we claimed it. A client merely funding their lock moves nothing of ours. */
   readonly from: { readonly endpoint: Endpoint; readonly amount: Amount; readonly collected: boolean }
   readonly to: {

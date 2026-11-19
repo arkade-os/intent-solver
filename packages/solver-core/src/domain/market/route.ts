@@ -1,5 +1,6 @@
 import { Amount } from '../shared/amount.js'
 import { Rail, type Endpoint } from '../shared/endpoint.js'
+import { RouteId } from '../shared/ids.js'
 import type { AssetPricing } from './asset_pricing.js'
 import type { Price } from './price.js'
 import { QuoteRefusal, QuoteSide } from './quote_terms.js'
@@ -58,8 +59,8 @@ export class Route {
   get enabled(): boolean {
     return this.props.enabled
   }
-  get key(): string {
-    return `${this.from.key}->${this.to.key}`
+  get id(): RouteId {
+    return RouteId.of(`${this.from.key}->${this.to.key}`)
   }
   /** A corridor is a route leaving Arkade. */
   get isCorridor(): boolean {
@@ -71,9 +72,9 @@ export class Route {
     const { from, to, enabled, pricing } = this.props
     const fixed = side === QuoteSide.From ? from : to
     if (amount.asset !== fixed.asset)
-      throw new InvalidValue(`route ${this.key} takes ${fixed.asset} on its ${side} side`)
+      throw new InvalidValue(`route ${this.id} takes ${fixed.asset} on its ${side} side`)
     if (minOutput !== undefined && minOutput.asset !== to.asset) {
-      throw new InvalidValue(`route ${this.key} pays out ${to.asset}, not ${minOutput.asset}`)
+      throw new InvalidValue(`route ${this.id} pays out ${to.asset}, not ${minOutput.asset}`)
     }
     if (!enabled) return { ok: false, reason: QuoteRefusal.RouteDisabled }
     const priced =

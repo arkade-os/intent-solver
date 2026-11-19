@@ -1,5 +1,6 @@
 import type { RfqId, SwapId } from '../shared/ids.js'
 import type { Hashlock } from './hashlock.js'
+import type { Reference } from './leg.js'
 import type { Swap } from './swap.js'
 
 export interface Page {
@@ -19,6 +20,6 @@ export interface SwapRepository {
   findLiveByHash(hashlock: Hashlock): Promise<readonly Swap[]>
   findLiveByScript(script: string): Promise<Swap | null>
   // A list: one transaction can fund several swaps.
-  findByFundingTx(txid: string): Promise<readonly Swap[]>
+  findByFundingTx(funding: Reference): Promise<readonly Swap[]>
   listOpen(page: Page): Promise<readonly Swap[]>
 }

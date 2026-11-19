@@ -1,6 +1,6 @@
 import type { Amount } from '../shared/amount.js'
 import type { ValueOf } from '../shared/brand.js'
-import type { SwapId } from '../shared/ids.js'
+import type { RouteId, SwapId } from '../shared/ids.js'
 import type { UnixSeconds } from '../shared/time.js'
 
 export const ApprovalVerdict = {
@@ -23,7 +23,7 @@ export type ApprovalDecision = { readonly proceed: true } | { readonly proceed: 
 
 export interface ApprovalProps {
   readonly swapId: SwapId
-  readonly route: string
+  readonly route: RouteId
   readonly quantity: Amount
   readonly requestedAt: UnixSeconds
   readonly approvedAt: UnixSeconds | null
@@ -36,7 +36,7 @@ export class Approval {
   private constructor(private props: ApprovalProps) {}
 
   /** Only a held swap can be approved, so an approval always starts as a request. */
-  static request(swapId: SwapId, route: string, quantity: Amount, at: UnixSeconds): Approval {
+  static request(swapId: SwapId, route: RouteId, quantity: Amount, at: UnixSeconds): Approval {
     return new Approval({ swapId, route, quantity, requestedAt: at, approvedAt: null })
   }
 

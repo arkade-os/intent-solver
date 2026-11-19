@@ -1,5 +1,5 @@
 import type { Amount } from '../shared/amount.js'
-import type { ValueOf } from '../shared/brand.js'
+import { nonEmpty, type Brand, type ValueOf } from '../shared/brand.js'
 import type { Rail } from '../shared/endpoint.js'
 import { IllegalTransition, InvalidValue } from '../shared/error.js'
 import { defineMachine, type StateOf } from '../shared/state_machine.js'
@@ -39,20 +39,27 @@ export type LegState = StateOf<typeof LegMachine>
 
 export type FactKind = 'funding' | 'claim' | 'refund'
 
+/** Where a leg shows on its rail: a txid, an outpoint, a payment id. */
+export type Reference = Brand<string, 'Reference'>
+export const Reference = { of: (value: string): Reference => nonEmpty('reference', value) }
+
+export type ContractVersion = Brand<string, 'ContractVersion'>
+export const ContractVersion = { of: (value: string): ContractVersion => nonEmpty('contract version', value) }
+
 /**
- * References into the rail (txid, outpoint, payment id), oldest first; the last is the current one.
+ * Oldest first; the last is the current one.
  * A list because transactions get replaced: a refund is fee-bumped, a claim spends several outputs.
  */
-export type LegFacts = Readonly<Record<FactKind, readonly string[]>>
+export type LegFacts = Readonly<Record<FactKind, readonly Reference[]>>
 
-export type LegReferences = Partial<Record<FactKind, string>>
+export type LegReferences = Partial<Record<FactKind, Reference>>
 
 export interface LegTerms {
   readonly rail: Rail
   readonly amount: Amount
   readonly contract: ContractKind
-  /** The version of the contract the leg was agreed under, where the rail has several. */
-  readonly version?: string
+  /** What the leg was agreed under; null where the contract has only ever had one version. */
+  readonly version: ContractVersion | null
 }
 
 // ln payment send in flight is `locking`: it is never a lock waiting on chain, and it never refunds.
@@ -102,7 +109,7 @@ export class Leg {
   }
 
   /** The current reference of a kind, or null when none was recorded. */
-  reference(kind: FactKind): string | null {
+  reference(kind: FactKind): Reference | null {
     return this.facts[kind].at(-1) ?? null
   }
 

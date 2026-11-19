@@ -2,21 +2,22 @@ import { describe, expect, it } from 'vitest'
 import { Hashlock } from '@arkade-os/solver-core/domain/swap/hashlock.js'
 import { Quote } from '@arkade-os/solver-core/domain/swap/quote.js'
 import { Swap } from '@arkade-os/solver-core/domain/swap/swap.js'
+import { ContractVersion } from '@arkade-os/solver-core/domain/swap/leg.js'
 import { SwapState } from '@arkade-os/solver-core/domain/swap/swap_state.js'
-import { bothLocked, btc, quoted, SECRET, t, terms, usdt, WRONG_SECRET } from '../support.js'
+import { bothLocked, btc, quoted, ref, SECRET, t, terms, usdt, WRONG_SECRET } from '../support.js'
 
 const offer = (): Swap =>
   quoted({
     hashlock: null,
     rfqId: null,
     quote: Quote.of(null, { fee: btc(0n), spreadBps: 0 }),
-    from: { rail: 'arkade', amount: usdt(5_000n), contract: 'offer', version: 'offer-v2' },
-    to: { rail: 'arkade', amount: btc(9_990n), contract: 'payment' },
+    from: { rail: 'arkade', amount: usdt(5_000n), contract: 'offer', version: ContractVersion.of('offer-v2') },
+    to: { rail: 'arkade', amount: btc(9_990n), contract: 'payment', version: null },
   })
 
 const lightningSend = (): Swap => {
-  const swap = quoted({ to: { rail: 'lightning', amount: btc(9_990n), contract: 'lightning' } })
-  swap.lock('from', t(1_001), 'txid-in')
+  const swap = quoted({ to: { rail: 'lightning', amount: btc(9_990n), contract: 'lightning', version: null } })
+  swap.lock('from', t(1_001), ref('txid-in'))
   swap.locking('to', t(1_002))
   return swap
 }
@@ -89,11 +90,11 @@ describe('swap aggregate', () => {
     const swap = bothLocked()
     expect(swap.state).toBe('awaiting_claim')
     expect(swap.exposed).toBe(true)
-    swap.claim('to', t(1_004), { claim: 'txid-claim', preimage: SECRET })
+    swap.claim('to', t(1_004), { claim: ref('txid-claim'), preimage: SECRET })
     expect(swap.state).toBe('filled')
     expect(swap.preimage).toBe(SECRET)
     swap.claiming('from', t(1_005))
-    swap.claim('from', t(1_006), { claim: 'txid-collect' })
+    swap.claim('from', t(1_006), { claim: ref('txid-collect') })
     expect(swap.state).toBe('settled')
     expect(swap.to.facts).toEqual({ funding: ['txid-out'], claim: ['txid-claim'], refund: [] })
   })
@@ -118,7 +119,7 @@ describe('swap aggregate', () => {
   it('attaches a reference learned after the intent, and its replacements', () => {
     const swap = lightningSend()
     expect(swap.owesPayout).toBe(true)
-    swap.reference('to', { funding: 'payment-id' }, t(1_003))
+    swap.reference('to', { funding: ref('payment-id') }, t(1_003))
     expect(swap.to.state).toBe('locking')
     expect(swap.to.reference('funding')).toBe('payment-id')
     expect(swap.owesPayout).toBe(false)
@@ -127,7 +128,7 @@ describe('swap aggregate', () => {
   it('still owes an on-chain payout until it is locked, reference or not', () => {
     const swap = quoted()
     swap.lock('from', t(1_001))
-    swap.locking('to', t(1_002), 'signed-tx')
+    swap.locking('to', t(1_002), ref('signed-tx'))
     expect(swap.owesPayout).toBe(true)
     swap.lock('to', t(1_003))
     expect(swap.owesPayout).toBe(false)
@@ -135,23 +136,23 @@ describe('swap aggregate', () => {
 
   it('takes back a failed Lightning payment, but never a transaction that may still land', () => {
     const paying = lightningSend()
-    paying.reference('to', { funding: 'payment-id' }, t(1_003))
+    paying.reference('to', { funding: ref('payment-id') }, t(1_003))
     paying.lockFailed('to', t(1_004))
     expect(paying.state).toBe('funded')
 
     const funding = quoted()
     funding.lock('from', t(1_001))
     funding.locking('to', t(1_002))
-    funding.reference('to', { funding: 'signed-tx' }, t(1_003))
+    funding.reference('to', { funding: ref('signed-tx') }, t(1_003))
     expect(() => funding.lockFailed('to', t(1_004))).toThrow('may still land')
   })
 
   it('fills an offer in one step, both legs at once', () => {
     const swap = offer()
-    swap.lock('from', t(1_001), 'deposit')
+    swap.lock('from', t(1_001), ref('deposit'))
     expect(() => swap.fillOffer(t(1_002))).toThrow('cannot fill while funded')
     swap.locking('to', t(1_002))
-    swap.fillOffer(t(1_003), 'fill-txid')
+    swap.fillOffer(t(1_003), ref('fill-txid'))
     expect(swap.state).toBe('settled')
     expect(swap.from.reference('claim')).toBe('fill-txid')
     expect(swap.to.reference('claim')).toBe('fill-txid')
@@ -160,10 +161,10 @@ describe('swap aggregate', () => {
 
   it('refunds our leg when the client never claims', () => {
     const swap = bothLocked()
-    swap.refunding('to', t(1_010), 'refund-1')
-    swap.reference('to', { refund: 'refund-2' }, t(1_011))
+    swap.refunding('to', t(1_010), ref('refund-1'))
+    swap.reference('to', { refund: ref('refund-2') }, t(1_011))
     expect(swap.state).toBe('refunding')
-    swap.refund('to', t(1_012), 'refund-2')
+    swap.refund('to', t(1_012), ref('refund-2'))
     expect(swap.state).toBe('refunded')
     expect(swap.to.facts.refund).toEqual(['refund-1', 'refund-2'])
   })
@@ -185,13 +186,13 @@ describe('swap aggregate', () => {
 
   it('fails once, re-judges only a stuck swap, and still records what the rails do', () => {
     const swap = quoted()
-    swap.lock('from', t(1_001), 'txid-in')
+    swap.lock('from', t(1_001), ref('txid-in'))
     swap.fail('stuck', 'unsure', t(1_002))
     expect(swap.fail('stuck', 'again', t(1_003))).toBeNull()
     expect(swap.fail('refused', 'quote_expired', t(1_003))).not.toBeNull()
     expect(() => swap.fail('lost', 'no', t(1_004))).toThrow('already refused')
     expect(swap.snapshot.outcomeReason).toBe('quote_expired')
-    swap.refund('from', t(1_005), 'client-refund')
+    swap.refund('from', t(1_005), ref('client-refund'))
     expect(swap.from.state).toBe('refunded')
     expect(swap.state).toBe('refused')
   })
@@ -226,7 +227,7 @@ describe('swap aggregate', () => {
 
   it('rebuilds from its events and counts them as its version', () => {
     const swap = bothLocked()
-    swap.claim('to', t(1_004), { claim: 'txid-claim', preimage: SECRET })
+    swap.claim('to', t(1_004), { claim: ref('txid-claim'), preimage: SECRET })
     expect(swap.version).toBe(0)
     const loaded = Swap.fromEvents(swap.changes)
     expect(loaded.version).toBe(5)

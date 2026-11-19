@@ -1,7 +1,7 @@
 import type { RfqId, SwapId } from '../shared/ids.js'
 import type { UnixSeconds } from '../shared/time.js'
 import { Preimage, type Hashlock } from './hashlock.js'
-import { ContractKind, Leg, Side, type LegReferences, type LegState } from './leg.js'
+import { ContractKind, Leg, Side, type LegReferences, type LegState, type Reference } from './leg.js'
 import type { AmountMode, Quote } from './quote.js'
 import { SWAP_TOPIC, type SwapEvent, type SwapQuoted } from './swap_event.js'
 import { SwapOutcome, SwapState } from './swap_state.js'
@@ -60,7 +60,7 @@ const applied = (props: SwapProps, e: SwapEvent): SwapProps => {
   }
 }
 
-const referenced = (kind: keyof LegReferences, reference?: string): LegReferences =>
+const referenced = (kind: keyof LegReferences, reference?: Reference): LegReferences =>
   reference === undefined ? {} : { [kind]: reference }
 
 export class Swap {
@@ -161,11 +161,11 @@ export class Swap {
   }
 
   /** Record the intent BEFORE acting on the rail: a crash in between must find the payout already tracked. */
-  locking(side: Side, at: UnixSeconds, funding?: string): SwapEvent {
+  locking(side: Side, at: UnixSeconds, funding?: Reference): SwapEvent {
     return this.advance(side, 'locking', at, referenced('funding', funding))
   }
 
-  lock(side: Side, at: UnixSeconds, funding?: string): SwapEvent {
+  lock(side: Side, at: UnixSeconds, funding?: Reference): SwapEvent {
     return this.advance(side, 'locked', at, referenced('funding', funding))
   }
 
@@ -182,19 +182,23 @@ export class Swap {
     return this.advance(side, 'pending', at, {})
   }
 
-  claiming(side: Side, at: UnixSeconds, claim?: string): SwapEvent {
+  claiming(side: Side, at: UnixSeconds, claim?: Reference): SwapEvent {
     return this.advance(side, 'claiming', at, referenced('claim', claim))
   }
 
-  claim(side: Side, at: UnixSeconds, proof: { readonly claim?: string; readonly preimage?: Preimage } = {}): SwapEvent {
+  claim(
+    side: Side,
+    at: UnixSeconds,
+    proof: { readonly claim?: Reference; readonly preimage?: Preimage } = {},
+  ): SwapEvent {
     return this.advance(side, 'claimed', at, referenced('claim', proof.claim), proof.preimage)
   }
 
-  refunding(side: Side, at: UnixSeconds, refund?: string): SwapEvent {
+  refunding(side: Side, at: UnixSeconds, refund?: Reference): SwapEvent {
     return this.advance(side, 'refunding', at, referenced('refund', refund))
   }
 
-  refund(side: Side, at: UnixSeconds, refund?: string): SwapEvent {
+  refund(side: Side, at: UnixSeconds, refund?: Reference): SwapEvent {
     return this.advance(side, 'refunded', at, referenced('refund', refund))
   }
 
@@ -204,7 +208,7 @@ export class Swap {
   }
 
   /** The one transaction of an offer: it takes the client's deposit and pays them, so both legs end at once. */
-  fillOffer(at: UnixSeconds, fill?: string): SwapEvent {
+  fillOffer(at: UnixSeconds, fill?: Reference): SwapEvent {
     if (!this.isOffer) throw this.error(RuleViolated, 'only an offer is filled in one transaction')
     if (this.props.outcome !== null || this.legsState !== 'filling')
       throw this.error(IllegalTransition, `cannot fill while ${this.state}`)

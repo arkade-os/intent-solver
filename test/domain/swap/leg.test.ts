@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { Leg, LegMachine } from '@arkade-os/solver-core/domain/swap/leg.js'
-import { btc } from '../support.js'
+import { btc, ref } from '../support.js'
 
 describe('leg state machine', () => {
   it('has the edges of the domain model', () => {
@@ -36,24 +36,28 @@ describe('leg state machine', () => {
 })
 
 describe('leg', () => {
-  const open = (): Leg => Leg.open('from', { rail: 'arkade', amount: btc(1_000n), contract: 'vhtlc' })
+  const open = (): Leg => Leg.open('from', { rail: 'arkade', amount: btc(1_000n), contract: 'vhtlc', version: null })
 
   it('opens pending and refuses an empty amount', () => {
     expect(open().state).toBe('pending')
-    expect(() => Leg.open('to', { rail: 'arkade', amount: btc(0n), contract: 'vhtlc' })).toThrow('must be positive')
+    expect(() => Leg.open('to', { rail: 'arkade', amount: btc(0n), contract: 'vhtlc', version: null })).toThrow(
+      'must be positive',
+    )
   })
 
   it('moves along its edges without mutating', () => {
     const leg = open()
-    const locked = leg.moveTo('locked', { funding: 'txid' })
+    const locked = leg.moveTo('locked', { funding: ref('txid') })
     expect(leg.state).toBe('pending')
     expect(locked.reference('funding')).toBe('txid')
     expect(() => leg.moveTo('refunded')).toThrow('from leg cannot go pending -> refunded')
   })
 
   it('keeps every version of a reference, the last one current', () => {
-    const refunding = open().moveTo('locked', { funding: 'txid' }).moveTo('refunding', { refund: 'refund-1' })
-    const bumped = refunding.record({ refund: 'refund-2' }).record({ refund: 'refund-2' })
+    const refunding = open()
+      .moveTo('locked', { funding: ref('txid') })
+      .moveTo('refunding', { refund: ref('refund-1') })
+    const bumped = refunding.record({ refund: ref('refund-2') }).record({ refund: ref('refund-2') })
     expect(bumped.facts.refund).toEqual(['refund-1', 'refund-2'])
     expect(bumped.reference('refund')).toBe('refund-2')
     expect(bumped.reference('claim')).toBeNull()

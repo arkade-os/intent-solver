@@ -296,7 +296,7 @@ describe('route', () => {
   const route = Route.of({ from: ARKADE, to: LIGHTNING, enabled: true, pricing: spread })
 
   it('is a corridor when it leaves Arkade', () => {
-    expect(route.key).toBe('arkade:btc->lightning:btc')
+    expect(route.id).toBe('arkade:btc->lightning:btc')
     expect(route.isCorridor).toBe(true)
     expect(Route.of({ from: LIGHTNING, to: ARKADE, enabled: true, pricing: spread }).isCorridor).toBe(false)
   })
