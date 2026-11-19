@@ -474,3 +474,48 @@ describe('OfferFillStore: queries', () => {
     expect(rows).toHaveLength(2)
   })
 })
+
+/** The phase is what makes each exit sound. */
+describe('OfferFillStore: a fill arkd rejected at submit', () => {
+  const latched = async () => {
+    const row = await store.insertIntent(baseIntent)
+    await store.transition(row.id, 'fillable', 'filling', { fill_phase: 'selecting' })
+    await store.markSubmitting(row.id)
+    return row
+  }
+
+  it('marks a latched row lost when the deposit was spent elsewhere', async () => {
+    const row = await latched()
+    const announced: string[] = []
+    store.onTransition = (event) => void announced.push(`${event.from}->${event.to}`)
+    expect(await store.loseRejectedSubmit(row.id, 'deposit gone')).toBe(true)
+    expect(await store.findById(row.id)).toMatchObject({
+      state: 'lost',
+      fillPhase: null,
+      failureReason: 'deposit gone',
+    })
+    expect(announced).toEqual(['filling->lost'])
+  })
+
+  it('walks a latched row back to fillable when one of our own coins was spent', async () => {
+    const row = await latched()
+    expect(await store.revertRejectedSubmit(row.id)).toBe(true)
+    expect(await store.findById(row.id)).toMatchObject({ state: 'fillable', fillPhase: null })
+  })
+
+  it('leaves a selecting row alone: it was never told anything', async () => {
+    const row = await store.insertIntent(baseIntent)
+    await store.transition(row.id, 'fillable', 'filling', { fill_phase: 'selecting' })
+    expect(await store.loseRejectedSubmit(row.id, 'deposit gone')).toBe(false)
+    expect(await store.revertRejectedSubmit(row.id)).toBe(false)
+    expect((await store.findById(row.id))?.state).toBe('filling')
+  })
+
+  it('is a no-op once another writer moved the row, so a lost race changes nothing', async () => {
+    const row = await latched()
+    await store.transition(row.id, 'filling', 'filled')
+    expect(await store.loseRejectedSubmit(row.id, 'deposit gone')).toBe(false)
+    expect(await store.revertRejectedSubmit(row.id)).toBe(false)
+    expect((await store.findById(row.id))?.state).toBe('filled')
+  })
+})

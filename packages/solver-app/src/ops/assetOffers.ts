@@ -42,7 +42,12 @@ import { askApprovalFor, type ApprovalCheck } from '@arkade-os/solver-core/core/
 import type { FetchPrice } from '@arkade-os/solver-core/price/feed.js'
 import { createSerialiser, type Serialiser } from '@arkade-os/solver-core/util/serialise.js'
 import { offerFillInputFrom } from '@arkade-os/solver-arkade/arkade/offerFill.js'
-import { OfferNotSubmittedError, type FulfillOptions } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
+import {
+  DEPOSIT_SPENT_REASON,
+  OfferNotSubmittedError,
+  OfferSubmitRejectedError,
+  type FulfillOptions,
+} from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { offerFromFundingTx } from '@arkade-os/solver-arkade/arkade/offerPacket.js'
 import { offerDepositFrom, type OfferOutputView } from '@arkade-os/solver-arkade/arkade/offerDeposit.js'
 import { offerInventoryFrom, type SpendableBalance } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
@@ -138,6 +143,11 @@ export interface AssetOfferDeps {
   settle?: (row: OfferFillRow, options?: FulfillOptions) => Promise<string>
   /** The large-swap approval gate. Absent means no gate. @see ops/approvals.ts */
   approvalGate?: ApprovalCheck
+  /** Is one of this solver's own asset-RFQ negotiations LIVE at this script? Its
+   * client funds the covenant with a public offer packet, so our own deposit
+   * arrives here as a discoverable offer and both paths race to fill it — the
+   * loser gets `VTXO_ALREADY_SPENT`. Optional, so a fork may leave it unset. */
+  rfqHolds?: (offerPkScript: string) => Promise<boolean>
   onError?: (id: string, error: unknown) => void
   /**
    * A fill put back for a later sweep because the float was pinned or short.
@@ -191,8 +201,10 @@ const termsOf = (row: OfferFillRow): OfferFillInput => ({
   offerAmount: row.offerAmount,
 })
 
-/** The decision, plus the row id when the intent was recorded. */
-export type ConsiderOutcome = OfferFillDecision & { id?: string }
+/** The decision, plus the row id when the intent was recorded.
+ * `offer_held_by_rfq` stays off `OfferFillRefusal`: it never reaches
+ * `onRefused`, so widening a union forks consume would publish a dead word. */
+export type ConsiderOutcome = (OfferFillDecision | { fill: false; reason: 'offer_held_by_rfq' }) & { id?: string }
 
 export class AssetOfferService {
   private readonly newId: () => string
@@ -343,6 +355,9 @@ export class AssetOfferService {
     // Hex, because that is the spelling the deposit adapter compares against
     // `OfferOutputView.script` and the store persists.
     const pkScript = hex.encode(offer.swapPkScript)
+    // BEFORE the chain and float reads, and silently: a refusal row here would
+    // read as someone else's offer being declined. @see AssetOfferDeps.rfqHolds
+    if (await this.deps.rfqHolds?.(pkScript)) return { fill: false, reason: 'offer_held_by_rfq' }
     const [outputs, available] = await Promise.all([this.deps.outputsAt(pkScript), this.deps.balance()])
     const input = offerFillInputFrom(offer, offerDepositFrom(pkScript, outputs))
     const bounds = this.boundsIn(input)
@@ -468,9 +483,21 @@ export class AssetOfferService {
         await this.deps.store.transition(row.id, 'filling', 'filled', { fill_txid: txid })
         filled += 1
       } catch (error) {
-        // The ONE retryable shape, and only because `fulfillOffer` raises it
-        // above the call that submits. A later sweep re-runs every gate and the CAS.
+        // Nothing was submitted, so neither exit leaves exposure.
+        if (error instanceof OfferSubmitRejectedError && error.depositSpent) {
+          if (await this.deps.store.loseRejectedSubmit(row.id, DEPOSIT_SPENT_REASON)) continue
+        }
+        // The TWO retryable shapes, and only because `fulfillOffer` proves each
+        // sent nothing. A later sweep re-runs every gate and the CAS.
         const deferrals = (this.deferrals.get(row.id) ?? 0) + 1
+        // One of OUR coins: walked back from `submitting`, not `selecting`.
+        if (error instanceof OfferSubmitRejectedError && deferrals <= MAX_FILL_DEFERRALS) {
+          if (await this.deps.store.revertRejectedSubmit(row.id)) {
+            this.deferrals.set(row.id, deferrals)
+            if (deferrals === 1) this.deps.onDeferred?.(row.id, error)
+            continue
+          }
+        }
         if (error instanceof OfferNotSubmittedError && deferrals <= MAX_FILL_DEFERRALS) {
           if (await this.deps.store.revertUnsubmitted(row.id)) {
             this.deferrals.set(row.id, deferrals)
@@ -482,10 +509,11 @@ export class AssetOfferService {
         // submitted, and only a human can tell which.
         this.deps.onError?.(row.id, error)
         const reason = error instanceof Error ? error.message : String(error)
+        const exhausted = error instanceof OfferNotSubmittedError || error instanceof OfferSubmitRejectedError
         await this.deps.store.fail(
           row.id,
           'filling',
-          error instanceof OfferNotSubmittedError ? `${reason}; ${MAX_FILL_DEFERRALS} retries exhausted` : reason,
+          exhausted ? `${reason}; ${MAX_FILL_DEFERRALS} retries exhausted` : reason,
         )
       }
     }

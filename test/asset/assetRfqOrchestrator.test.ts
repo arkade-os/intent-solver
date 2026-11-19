@@ -19,7 +19,11 @@ import { fileURLToPath } from 'node:url'
 import { approvalGateFor } from '@arkade-os/solver-app/ops/approvals.js'
 import type { SwapApprovalRequest } from '@arkade-os/solver-app/admin/db.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
-import { OfferNotSubmittedError } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
+import {
+  DEPOSIT_SPENT_REASON,
+  OfferNotSubmittedError,
+  OfferSubmitRejectedError,
+} from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { IMPLIED_PRICE_HEADROOM } from '@arkade-os/solver-core/core/assetRfq.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 import {
@@ -977,5 +981,81 @@ describe('replaceMarkets', () => {
       accepted: false,
       reason: 'unsupported_pair',
     })
+  })
+})
+
+/** The fake `settle` latches before it throws, or the walk-backs no-op. */
+describe('a fill arkd rejected as already spent', () => {
+  const funded = async (over: Partial<AssetRfqDeps> = {}) => {
+    const built = await harness({ depositAt: async () => deposit(), ...over })
+    await built.service.quote(request())
+    await built.service.tick('swap-1')
+    return built
+  }
+
+  const rejecting =
+    (error: () => Error) => async (_row: unknown, options?: { markSubmitting?: () => Promise<boolean> }) => {
+      await options?.markSubmitting?.()
+      throw error()
+    }
+
+  const spent = (outpoints: string[], depositSpent: boolean) =>
+    new OfferSubmitRejectedError(
+      `arkd refused the fill: ${outpoints.join(', ')} already spent`,
+      outpoints,
+      depositSpent,
+    )
+
+  it('refuses the row with a neutral reason when the DEPOSIT was spent elsewhere', async () => {
+    const errors: unknown[] = []
+    const { service, store } = await funded({
+      settle: rejecting(() => spent([`${'ff'.repeat(32)}:0`], true)),
+      onError: (_id, error) => void errors.push(error),
+    })
+    await service.tick('swap-1')
+    expect(await store.get('swap-1')).toMatchObject({
+      state: 'refused',
+      fillTxid: null,
+      failureReason: DEPOSIT_SPENT_REASON,
+    })
+    expect((await store.get('swap-1')).failureReason).not.toMatch(/taker/i)
+    expect(errors).toEqual([])
+  })
+
+  it('walks the row back to funded when one of OUR coins was the one spent', async () => {
+    const deferred: string[] = []
+    const { service, store } = await funded({
+      settle: rejecting(() => spent([`${'99'.repeat(32)}:1`], false)),
+      onDeferred: (id) => void deferred.push(id),
+    })
+    await service.tick('swap-1')
+    expect(await store.get('swap-1')).toMatchObject({ state: 'funded', fillTxid: null, failureReason: null })
+    expect(deferred).toEqual(['swap-1'])
+  })
+
+  it('fills on the next tick once the coin race is over, submitting exactly once', async () => {
+    let racing = true
+    const settled: string[] = []
+    const { service, store } = await funded({
+      settle: async (row, options) => {
+        await options?.markSubmitting?.()
+        if (racing) throw spent([`${'99'.repeat(32)}:1`], false)
+        settled.push(row.id)
+        return 'fa'.repeat(32)
+      },
+    })
+    await service.tick('swap-1')
+    racing = false
+    await service.tick('swap-1')
+    expect(settled).toEqual(['swap-1'])
+    expect(await store.get('swap-1')).toMatchObject({ state: 'filled', fillTxid: 'fa'.repeat(32) })
+  })
+
+  it('still sticks every other failure, because only a rejection proves nothing was sent', async () => {
+    const { service, store } = await funded({
+      settle: rejecting(() => new Error('Failed to submit tx to emulator: something else entirely')),
+    })
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).state).toBe('stuck')
   })
 })

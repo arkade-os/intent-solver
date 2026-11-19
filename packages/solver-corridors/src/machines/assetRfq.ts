@@ -8,7 +8,8 @@ export const AssetRfqMachine = defineMachine({
   quoted: { live: true, exposed: false, holdsOfferScript: true, to: ['funded', 'refused'] },
   funded: { live: true, exposed: false, holdsOfferScript: true, to: ['filling', 'refused'] },
   // No edge back to `funded`: an unknown outcome is `stuck`, never a retry (`revertUnsubmitted` is off-graph).
-  filling: { live: true, exposed: true, holdsOfferScript: true, outgoing: true, to: ['filled', 'stuck'] },
+  // `-> refused` only where arkd REJECTED the submission, which proves no exposure was ever created.
+  filling: { live: true, exposed: true, holdsOfferScript: true, outgoing: true, to: ['filled', 'refused', 'stuck'] },
   filled: { live: false, exposed: false, holdsOfferScript: true, to: [] },
   refused: { live: false, exposed: false, to: [] },
   stuck: { live: false, exposed: false, to: [] },

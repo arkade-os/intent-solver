@@ -22,11 +22,12 @@
  * - `funded`   a deposit matching the quoted terms is at the offer's script;
  *              NOTHING submitted, and no solver capital is committed yet
  * - `filling`  an attempt holds the row — the one EXPOSED state — and
- *              `fill_phase` says how far it got (@see FillPhase). Only
- *              `selecting` may be walked back, by the one refusal above the
- *              submission; @see AssetRfqSwapStore.revertUnsubmitted
+ *              `fill_phase` says how far it got (@see FillPhase). Walked back
+ *              only where nothing was sent: @see revertUnsubmitted above the
+ *              submission, @see revertRejectedSubmit on a refused one
  * - `filled`   the fill landed; the client is paid and the deposit is ours
- * - `refused`  declined, or the quote lapsed unfunded; no exposure ever existed
+ * - `refused`  declined, the quote lapsed unfunded, or the deposit was spent
+ *              elsewhere before a fill arkd then refused; no exposure either way
  * - `stuck`    `fulfill` failed or its outcome is unknown; needs a human
  *
  * THERE IS NO `refunded` STATE, and its absence is the point. § 7.2's refund is
@@ -430,6 +431,17 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
     return raw ? toRow(raw) : undefined
   }
 
+  /** Narrower than `findLiveByOfferScript`, which counts `filled` — and a later
+   * offer at the same address (identical terms derive an identical covenant) is
+   * legitimate once our row is done. @see AssetOfferDeps.rfqHolds */
+  async heldByLiveNegotiation(offerPkScript: string): Promise<boolean> {
+    const raw = await this.driver.get<Raw>(
+      `SELECT 1 AS held FROM asset_rfq_swap WHERE offer_pk_script = ? AND state IN (${AssetRfqMachine.sqlList(AssetRfqMachine.live)})`,
+      [offerPkScript],
+    )
+    return raw !== undefined && raw !== null
+  }
+
   async listNonTerminal(): Promise<AssetRfqSwapRow[]> {
     return this.findRecoverable()
   }
@@ -496,16 +508,39 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
    * an edge cannot say "only when nothing was sent", so this is reached by name.
    */
   async revertUnsubmitted(id: string): Promise<boolean> {
+    return this.revertFilling(id, 'selecting')
+  }
+
+  /** The SECOND off-graph edge out, for a fill arkd rejected over one of OUR
+   * coins. Gated on `submitting`: the latch has flipped. @see OfferSubmitRejectedError */
+  async revertRejectedSubmit(id: string): Promise<boolean> {
+    return this.revertFilling(id, 'submitting')
+  }
+
+  private async revertFilling(id: string, phase: FillPhase): Promise<boolean> {
     const result = await this.driver.run(
       `UPDATE asset_rfq_swap SET state = 'funded', fill_phase = NULL, updated_at = ?
-       WHERE id = ? AND state = 'filling' AND fill_phase = 'selecting'`,
-      [this.now(), id],
+       WHERE id = ? AND state = 'filling' AND fill_phase = ?`,
+      [this.now(), id, phase],
     )
     if (result.changes === 1) {
       await this.recordEvent(id, 'filling', 'funded', null)
       announceTransition(this.onTransition, id, 'filling', 'funded')
     }
     return result.changes === 1
+  }
+
+  /** The deposit was spent elsewhere, so nothing was submitted and no exposure
+   * exists to unwind — the difference from `fail`. ON the graph: `refused` is
+   * where a negotiation that committed nothing belongs. */
+  async refuseRejectedSubmit(id: string, reason: string): Promise<boolean> {
+    return this.transitionWhere(
+      id,
+      'filling',
+      'refused',
+      { failure_reason: reason, fill_phase: null },
+      `fill_phase = 'submitting'`,
+    )
   }
 
   /** THE LATCH. @see OfferFillStore.markSubmitting */

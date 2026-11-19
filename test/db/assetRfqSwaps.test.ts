@@ -553,4 +553,80 @@ describe('reads the sweep and the console depend on', () => {
     await expect(store.get('nope')).rejects.toThrow(/no asset rfq swap/)
     await store.close()
   })
+
+  it.each(['quoted', 'funded', 'filling'] as const)('reports %s as holding the offer script', async (state) => {
+    const store = await open()
+    await store.insertQuote(quote())
+    if (state !== 'quoted') await store.transition('swap-1', 'quoted', 'funded')
+    if (state === 'filling') await store.transition('swap-1', 'funded', 'filling', { fill_phase: 'selecting' })
+    expect(await store.heldByLiveNegotiation(OFFER_SCRIPT)).toBe(true)
+    await store.close()
+  })
+
+  it.each(['filled', 'refused', 'stuck'] as const)('releases the offer script once %s', async (state) => {
+    const store = await open()
+    await store.insertQuote(quote())
+    if (state === 'refused') await store.fail('swap-1', 'quoted', 'declined')
+    else {
+      await store.transition('swap-1', 'quoted', 'funded')
+      await store.transition('swap-1', 'funded', 'filling', { fill_phase: 'selecting' })
+      await store.transition('swap-1', 'filling', state)
+    }
+    expect(await store.heldByLiveNegotiation(OFFER_SCRIPT)).toBe(false)
+    await store.close()
+  })
+})
+
+/** The phase is what makes each exit sound. */
+describe('a fill arkd rejected at submit', () => {
+  const latched = async () => {
+    const store = await open()
+    await store.insertQuote(quote())
+    await store.transition('swap-1', 'quoted', 'funded')
+    await store.transition('swap-1', 'funded', 'filling', { fill_phase: 'selecting' })
+    await store.markSubmitting('swap-1')
+    return store
+  }
+
+  it('refuses a latched row whose deposit was spent elsewhere, rather than sticking it', async () => {
+    const store = await latched()
+    const announced: string[] = []
+    store.onTransition = (event) => void announced.push(`${event.from}->${event.to}`)
+    expect(await store.refuseRejectedSubmit('swap-1', 'deposit gone')).toBe(true)
+    expect(await store.get('swap-1')).toMatchObject({
+      state: 'refused',
+      fillPhase: null,
+      failureReason: 'deposit gone',
+    })
+    expect(announced).toEqual(['filling->refused'])
+    expect((await store.history('swap-1')).map((e) => e.to)).toEqual(['quoted', 'funded', 'filling', 'refused'])
+    await store.close()
+  })
+
+  it('walks a latched row back to funded when one of our own coins was spent', async () => {
+    const store = await latched()
+    expect(await store.revertRejectedSubmit('swap-1')).toBe(true)
+    expect(await store.get('swap-1')).toMatchObject({ state: 'funded', fillPhase: null })
+    await store.close()
+  })
+
+  it.each(['selecting', null] as const)('leaves a %s row alone: it was never told anything', async (phase) => {
+    const store = await open()
+    await store.insertQuote(quote())
+    await store.transition('swap-1', 'quoted', 'funded')
+    await store.transition('swap-1', 'funded', 'filling', ...(phase ? [{ fill_phase: phase }] : []))
+    expect(await store.refuseRejectedSubmit('swap-1', 'deposit gone')).toBe(false)
+    expect(await store.revertRejectedSubmit('swap-1')).toBe(false)
+    expect((await store.get('swap-1')).state).toBe('filling')
+    await store.close()
+  })
+
+  it.each(['filled', 'stuck'] as const)('is a no-op once the row is %s, so a lost race changes nothing', async (to) => {
+    const store = await latched()
+    await store.transition('swap-1', 'filling', to)
+    expect(await store.refuseRejectedSubmit('swap-1', 'deposit gone')).toBe(false)
+    expect(await store.revertRejectedSubmit('swap-1')).toBe(false)
+    expect((await store.get('swap-1')).state).toBe(to)
+    await store.close()
+  })
 })

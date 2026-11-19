@@ -51,7 +51,12 @@ import { capture, unwrap } from '@arkade-os/solver-core/util/capture.js'
 import { createSerialiser, type Serialiser } from '@arkade-os/solver-core/util/serialise.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
-import { OfferNotSubmittedError, type FulfillOptions } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
+import {
+  DEPOSIT_SPENT_REASON,
+  OfferNotSubmittedError,
+  OfferSubmitRejectedError,
+  type FulfillOptions,
+} from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { assetRfqPairFor } from '../wire/assetRfqPayloads.js'
 import { AssetRfqSwapStore, type AssetRfqSwapRow } from '../db/assetRfqSwaps.js'
 
@@ -492,12 +497,23 @@ export class AssetRfqSwapService {
       // investigation.
       if (filled) await this.recordFillMark(row)
     } catch (error) {
-      // The one shape that is NOT ambiguous: raised above the call that submits,
-      // so the row goes back to `funded` for a later tick. No counter — `validUntil`
-      // already bounds the retrying — and no fill mark, because nothing filled.
+      // The first of the two shapes that are NOT ambiguous: raised above the call
+      // that submits, so the row goes back to `funded` for a later tick. No counter —
+      // `validUntil` already bounds the retrying — and no fill mark, nothing filled.
       if (error instanceof OfferNotSubmittedError) {
         if (await this.deps.store.revertUnsubmitted(row.id)) this.deps.onDeferred?.(row.id, error)
         return
+      }
+      // Nothing was submitted, so neither exit leaves exposure: a spent DEPOSIT
+      // needs nobody, and one of OUR coins is a race the next tick re-selects.
+      if (error instanceof OfferSubmitRejectedError) {
+        if (error.depositSpent) {
+          if (await this.deps.store.refuseRejectedSubmit(row.id, DEPOSIT_SPENT_REASON)) return
+        } else if (await this.deps.store.revertRejectedSubmit(row.id)) {
+          this.deps.onDeferred?.(row.id, error)
+          return
+        }
+        // Neither CAS won, so another writer moved the row: fall through.
       }
       // `filling` fails to `stuck`, never to something retryable: the spend may
       // already have been submitted, and only a human can tell which.

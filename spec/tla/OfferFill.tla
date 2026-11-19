@@ -25,6 +25,10 @@
 (*                  before fillOffer: the latch                            *)
 (*   Submit         fillOffer resolving                                    *)
 (*   SubmitFails    fillOffer throwing, after it may have reached arkd     *)
+(*   SubmitRejected arkd REFUSING the submission: OfferSubmitRejectedError *)
+(*   ResolveRejected refuseRejectedSubmit / loseRejectedSubmit where the   *)
+(*                  deposit was spent elsewhere, revertRejectedSubmit      *)
+(*                  where one of our own coins was                         *)
 (*   Defer          revertUnsubmitted from the loop, or fail() once the    *)
 (*                  in-memory MAX_FILL_DEFERRALS is spent                  *)
 (*   Recover        a sweep finding `filling` it did not start:            *)
@@ -62,6 +66,8 @@ CONSTANTS
     Recovery,             \* a sweep resolves `filling` it did not start (FALSE = #331 as first pushed)
     BreakLatch,           \* markSubmitting no longer requires fill_phase = 'selecting'
     BreakRevertGuard,     \* revertUnsubmitted no longer requires fill_phase = 'selecting'
+    BreakRejectedProof,   \* a rejection is classified over a submission arkd may have TAKEN
+    BreakRejectedGuard,   \* the rejected exits no longer require fill_phase = 'submitting'
     BreakRevertReset,     \* revertUnsubmitted leaves fill_phase = 'selecting' instead of clearing it
     BreakLegacyReverted,  \* recovery walks back a `filling` row with NO phase too
     LateTyped             \* control: fillOffer's own failure arrives typed
@@ -160,6 +166,28 @@ SubmitFails(w) == /\ pc[w] = "marked"
                   /\ pc' = [pc EXCEPT ![w] = IF LateTyped /\ New(w) THEN "typed" ELSE "failed"]
                   /\ UNCHANGED <<st, phase, loc, defs, crashes>>
 
+\* arkd answering VTXO_ALREADY_SPENT. A rejected SubmitTx accepts nothing, so
+\* `subs` does not move — THE WHOLE PREMISE of the two exits below, and the one
+\* BreakRejectedProof drops to show what the classification is worth.
+SubmitRejected(w) == /\ pc[w] = "marked"
+                     /\ New(w)
+                     /\ subs' = IF BreakRejectedProof THEN subs + 1 ELSE subs
+                     /\ pc' = [pc EXCEPT ![w] = "rejected"]
+                     /\ UNCHANGED <<st, phase, loc, defs, crashes>>
+
+\* Both exits: WHERE state = 'filling' AND fill_phase = 'submitting'.
+RejectedGuard == st = "filling" /\ (BreakRejectedGuard \/ phase = "submitting")
+
+\* The deposit spent elsewhere ends the row; one of ours re-selects. Losing the
+\* CAS falls through to fail(), which is the code's own order.
+ResolveRejected(w) == /\ pc[w] = "rejected"
+                      /\ IF RejectedGuard
+                         THEN \/ st' = "refused" /\ phase' = "none"
+                              \/ st' = "ready" /\ phase' = "none"
+                         ELSE IF StuckGuard THEN StuckWrite ELSE UNCHANGED <<st, phase>>
+                      /\ pc' = [pc EXCEPT ![w] = "idle"]
+                      /\ UNCHANGED <<subs, loc, defs, crashes>>
+
 \* transition(row, 'filling', 'filled'): WHERE state = 'filling'.
 Finish(w) == /\ pc[w] = "sent"
              /\ IF st = "filling" THEN st' = "filled" ELSE UNCHANGED st
@@ -195,7 +223,8 @@ Expire == /\ st = "ready"
 
 Step(w) == \/ Read(w) \/ Skip(w) \/ Claim(w) \/ Recover(w) \/ GuardFails(w)
            \/ SelectRefused(w) \/ SelectOk(w) \/ Mark(w) \/ Submit(w)
-           \/ SubmitFails(w) \/ Finish(w) \/ FailRow(w) \/ Defer(w)
+           \/ SubmitFails(w) \/ SubmitRejected(w) \/ ResolveRejected(w)
+           \/ Finish(w) \/ FailRow(w) \/ Defer(w)
 
 Next == Expire \/ \E w \in Workers : Step(w) \/ Crash(w)
 
@@ -205,7 +234,8 @@ Spec == Init /\ [][Next]_vars /\ \A w \in Workers : WF_vars(Step(w))
 TypeOK == /\ st \in States
           /\ phase \in Phases
           /\ subs \in Nat
-          /\ pc \in [Workers -> {"idle", "read", "claimed", "selected", "marked", "sent", "typed", "failed"}]
+          /\ pc \in [Workers -> {"idle", "read", "claimed", "selected", "marked", "sent", "typed", "failed",
+                                "rejected"}]
           /\ loc \in [Workers -> (States \cup {"none"}) \X Phases]
           /\ defs \in [Workers -> 0..MaxDeferrals]
           /\ crashes \in 0..MaxCrashes
@@ -224,17 +254,26 @@ FillingResolves == [](st = "filling" => <>(st # "filling"))
 (***************************************************************************)
 (* CHECKPOINT (TLC2 2.19, tla2tools v1.7.4, -workers 2)                    *)
 (*                                                                         *)
-(*   OfferFill.cfg                      GREEN  4,323 distinct, depth 24    *)
-(*   OfferFill_LateTypedControl.cfg     GREEN  4,477 distinct, depth 24    *)
-(*   OfferFill_RevertResetControl.cfg   GREEN  1,266 distinct, depth 16    *)
+(*   OfferFill.cfg                      GREEN  5,182 distinct, depth 25    *)
+(*   OfferFill_LateTypedControl.cfg     GREEN  5,350 distinct, depth 25    *)
+(*   OfferFill_RevertResetControl.cfg   GREEN  1,422 distinct, depth 20    *)
+(*   OfferFill_RejectedGuardControl.cfg GREEN  5,182 distinct, depth 25    *)
 (*   OfferFill_Upgrade.cfg              GREEN     88 distinct, depth 7     *)
 (*   OfferFill_NoLatch.cfg              NoDoubleFill                       *)
 (*   OfferFill_RevertGuard.cfg          NoDoubleFill                       *)
 (*   OfferFill_RevertReset.cfg          NoDoubleFill                       *)
 (*   OfferFill_LegacyReverted.cfg       NoDoubleFill                       *)
+(*   OfferFill_RejectedProof.cfg        NoDoubleFill                       *)
 (*   OfferFill_NoRecovery.cfg           FillingResolves (temporal)         *)
 (*   OfferFill_Sim.cfg                  20,000 traces, depth 100, clean    *)
 (*                                                                         *)
 (* The green runs check FillingResolves as well as the invariants.         *)
+(*                                                                         *)
+(* `BreakRejectedGuard` is a CONTROL rather than a mutation, and the reason *)
+(* is the finding: dropping fill_phase = 'submitting' from the two rejected *)
+(* exits does not double-fill, because the latch already decides who can   *)
+(* reach a rejection. Green at two workers and again at three (168,192     *)
+(* distinct, depth 33). The code keeps the guard for symmetry with         *)
+(* revertUnsubmitted, where OfferFill_RevertGuard.cfg shows it IS needed.  *)
 (***************************************************************************)
 =============================================================================

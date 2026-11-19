@@ -7,7 +7,7 @@ describe('AssetRfqMachine', () => {
     expect(AssetRfqMachine.edges).toEqual({
       quoted: ['funded', 'refused'],
       funded: ['filling', 'refused'],
-      filling: ['filled', 'stuck'],
+      filling: ['filled', 'refused', 'stuck'],
       filled: [],
       refused: [],
       stuck: [],

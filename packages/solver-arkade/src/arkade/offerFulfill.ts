@@ -50,6 +50,76 @@ export class OfferNotSubmittedError extends Error {
   }
 }
 
+/**
+ * A submission arkd REFUSED, naming outpoints already spent. Proves nothing was
+ * sent, as {@link OfferNotSubmittedError} does, but NOT a subclass of it: raised
+ * BELOW the latch, where that error's walk-back is a no-op, so a subclass would
+ * be caught by the callers' existing arms and stick the row.
+ */
+export class OfferSubmitRejectedError extends Error {
+  constructor(
+    message: string,
+    readonly spentOutpoints: readonly string[],
+    /** Whether the deposit this fill was given is one of them. */
+    readonly depositSpent: boolean,
+    options?: { cause?: unknown },
+  ) {
+    super(message, options)
+    this.name = 'OfferSubmitRejectedError'
+  }
+}
+
+/** Names no culprit — the refusal cannot tell which of another taker, the
+ * maker's `cancel` or our other watcher spent it — and the RFQ path publishes
+ * this to the client verbatim. */
+export const DEPOSIT_SPENT_REASON =
+  'the deposit was already spent by another transaction when this fill was submitted; arkd rejected the fill and nothing was sent'
+
+const SUBMIT_FAILURE_PREFIX = 'Failed to submit tx to emulator: '
+
+/**
+ * `vtxo_outpoints` is Go's rendering of a string slice — `[txid:0 txid:1]`,
+ * space-separated and UNQUOTED — because arkd flattens every metadata value
+ * through `fmt.Sprintf("%v", …)` into a `map[string]string`. A real JSON array
+ * is taken too, so an arkd that stops flattening still parses.
+ */
+const outpointsIn = (metadata: Record<string, unknown> | undefined): string[] => {
+  const many = metadata?.vtxo_outpoints
+  const listed = Array.isArray(many)
+    ? many.map((entry) => String(entry))
+    : typeof many === 'string'
+      ? many.replace(/^\[|\]$/g, '').split(/[\s,]+/)
+      : []
+  const cleaned = listed.map((entry) => entry.trim().toLowerCase()).filter((entry) => entry !== '')
+  if (cleaned.length > 0) return cleaned
+  const one = metadata?.vtxo_outpoint
+  return typeof one === 'string' && one.trim() !== '' ? [one.trim().toLowerCase()] : []
+}
+
+/** The outpoints a `VTXO_ALREADY_SPENT` refusal named, or null for anything
+ * else — an unparseable body included, since it proves nothing. Read off the
+ * structured entry, never the prose: that message is a format string in arkd. */
+const spentOutpointsIn = (error: unknown): string[] | null => {
+  if (!(error instanceof Error) || !error.message.startsWith(SUBMIT_FAILURE_PREFIX)) return null
+  let body: unknown
+  try {
+    body = JSON.parse(error.message.slice(SUBMIT_FAILURE_PREFIX.length))
+  } catch {
+    return null
+  }
+  const details = (body as { details?: unknown } | null)?.details
+  if (!Array.isArray(details)) return null
+  for (const detail of details) {
+    const entry = detail as { code?: unknown; name?: unknown; metadata?: Record<string, unknown> } | null
+    // BOTH: arkd sets the two off one registry entry, and codes 4, 7, 8 and 9
+    // carry this very metadata shape for entirely different facts.
+    if (entry?.name !== 'VTXO_ALREADY_SPENT' || Number(entry?.code) !== 6) continue
+    const outpoints = outpointsIn(entry?.metadata)
+    if (outpoints.length > 0) return outpoints
+  }
+  return null
+}
+
 export interface FulfillOptions {
   /**
    * Claimed immediately before the submission: `false` means another attempt
@@ -174,6 +244,23 @@ export const fulfillOffer = async (
       // it. It only ever names the client's own key anyway; the covenant here is
       // rebuilt from the offer's, and a mismatch fails loudly against
       // `swapPkScript` rather than silently.
+    }).catch((error: unknown) => {
+      const spent = spentOutpointsIn(error)
+      // Rethrown AS IT WAS: anything unclassified keeps meaning "outcome
+      // unknown", the one reading that needs a human.
+      if (spent === null) throw error
+      const depositSpent = spent.includes(outpointKey(deposit.txid, deposit.vout).toLowerCase())
+      // THE SHAPE THAT PROVES NOTHING: arkd lists every already-spent input, so
+      // the deposit named BESIDE a coin of ours is also what a fill of ours that
+      // landed looks like. @see spec/tla OfferFill_RejectedProof.cfg
+      const oursToo = funding.some((coin) => spent.includes(outpointKey(coin.txid, coin.vout).toLowerCase()))
+      if (depositSpent && oursToo) throw error
+      throw new OfferSubmitRejectedError(
+        `arkd refused the fill: ${spent.join(', ')} already spent; nothing was submitted`,
+        spent,
+        depositSpent,
+        { cause: error },
+      )
     })
   } finally {
     // Freed on failure too, where nothing else would release the pin.

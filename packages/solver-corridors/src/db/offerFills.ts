@@ -24,12 +24,14 @@
  *
  * - `fillable`  we decided to fill and recorded the intent; NOTHING submitted
  * - `filling`   an attempt holds the row; `fill_phase` says how far it got (@see
- *               FillPhase). Only `selecting` may be walked back, by the one
- *               refusal above the submission; @see OfferFillStore.revertUnsubmitted
+ *               FillPhase). Walked back only where nothing was sent: @see
+ *               revertUnsubmitted above the submission, @see
+ *               revertRejectedSubmit on one arkd refused
  * - `filled`    the spend confirmed and `classifySpend` read it as a fill
  * - `lost`      the offer output was spent by someone else, or cancelled by its
  *               funder — either way it is gone and this service committed
- *               nothing (see the note on why these are one state)
+ *               nothing (see the note on why these are one state). @see
+ *               loseRejectedSubmit for the same fact learned at submit
  * - `refused`   a client asked and this service declined
  * - `stuck`     `fulfill` failed, or the spend classified as `indeterminate`;
  *               needs a human
@@ -360,14 +362,39 @@ export class OfferFillStore {
    * an edge cannot say "only when nothing was sent", so this is reached by name.
    */
   async revertUnsubmitted(id: string): Promise<boolean> {
+    return this.revertFilling(id, 'selecting')
+  }
+
+  /** The SECOND off-graph edge out, for a fill arkd rejected over one of OUR
+   * coins. Gated on `submitting`: the latch has flipped. @see OfferSubmitRejectedError */
+  async revertRejectedSubmit(id: string): Promise<boolean> {
+    return this.revertFilling(id, 'submitting')
+  }
+
+  private async revertFilling(id: string, phase: FillPhase): Promise<boolean> {
     const result = await this.driver.run(
       `UPDATE offer_fill SET state = 'fillable', fill_phase = NULL, updated_at = ?
-       WHERE id = ? AND state = 'filling' AND fill_phase = 'selecting'`,
-      [this.now(), id],
+       WHERE id = ? AND state = 'filling' AND fill_phase = ?`,
+      [this.now(), id, phase],
     )
     if (result.changes === 1) {
       await this.recordEvent(id, 'filling', 'fillable', null)
       announceTransition(this.onTransition, id, 'filling', 'fillable')
+    }
+    return result.changes === 1
+  }
+
+  /** The deposit was spent elsewhere — exactly what `lost` already means here.
+   * A legal edge, so only the phase guard is extra. @see OfferSubmitRejectedError */
+  async loseRejectedSubmit(id: string, reason: string): Promise<boolean> {
+    const result = await this.driver.run(
+      `UPDATE offer_fill SET state = 'lost', fill_phase = NULL, failure_reason = ?, updated_at = ?
+       WHERE id = ? AND state = 'filling' AND fill_phase = 'submitting'`,
+      [reason, this.now(), id],
+    )
+    if (result.changes === 1) {
+      await this.recordEvent(id, 'filling', 'lost', null)
+      announceTransition(this.onTransition, id, 'filling', 'lost')
     }
     return result.changes === 1
   }
