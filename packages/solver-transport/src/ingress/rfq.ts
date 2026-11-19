@@ -15,6 +15,8 @@ import type { CorridorReaderSet, CorridorRfqOutcome, CorridorSet } from '@arkade
 // must not know which corridors exist cannot import one to read constants.
 import {
   RfqStatusRequest,
+  RfqRevealRequest,
+  rfqRevealAckPayload,
   rfqRefusalPayload,
   isRfqRefusalErrorCode,
   isRfqRefusalReason,
@@ -191,5 +193,37 @@ export const respondToRfqStatus = async (readers: CorridorReaderSet, payload: un
     kind: 'unknown',
     payload: rfqRefusalPayload(rfqId, 'unsupported_payload'),
     detail: 'no negotiation with this rfq_id in any corridor',
+  }
+}
+
+export type RfqRevealOutcome =
+  | { kind: 'ack'; payload: Record<string, unknown>; detail?: never }
+  | { kind: 'refused'; payload: Record<string, unknown>; detail?: string }
+  | { kind: 'unknown'; payload: Record<string, unknown>; detail?: string }
+  | { kind: 'invalid'; payload: Record<string, unknown>; detail?: string }
+
+/** Handle one `rfq_reveal`: corridors that can send a claim are asked in turn until one owns the `rfq_id`. */
+export const respondToRfqReveal = async (corridors: CorridorSet, payload: unknown): Promise<RfqRevealOutcome> => {
+  const parsed = RfqRevealRequest.safeParse(payload)
+  if (!parsed.success) {
+    return {
+      kind: 'invalid',
+      payload: rfqRefusalPayload(extractRfqId(payload), 'unsupported_payload'),
+      detail: `schema: ${zodDetail(parsed.error)}`,
+    }
+  }
+  const { rfq_id: rfqId, preimage } = parsed.data
+  for (const corridor of corridors) {
+    if (!corridor.reveal) continue
+    const outcome = await corridor.reveal(rfqId, preimage)
+    if (outcome.kind === 'accepted') return { kind: 'ack', payload: rfqRevealAckPayload(rfqId) }
+    if (outcome.kind === 'refused') {
+      return { kind: 'refused', payload: rfqRefusalPayload(rfqId, 'unsupported_payload'), detail: outcome.detail }
+    }
+  }
+  return {
+    kind: 'unknown',
+    payload: rfqRefusalPayload(rfqId, 'unsupported_payload'),
+    detail: 'no corridor relays a claim for this rfq_id',
   }
 }

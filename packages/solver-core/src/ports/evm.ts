@@ -158,6 +158,8 @@ export interface EvmHtlcBackend {
   lockCalls(lock: Erc20SwapLock, currentAllowance: bigint): readonly EvmCall[]
   /** Calldata to claim it with a revealed preimage. Caller must be `claimAddress`. */
   claimCall(preimage: Uint8Array, lock: Erc20SwapLock): EvmCall
+  /** The same claim sent by anyone; the tokens still go to `lock.claimAddress`. */
+  claimForCall(preimage: Uint8Array, lock: Erc20SwapLock): EvmCall
   /** Calldata to refund it after the timelock. Caller must be `refundAddress`. */
   refundCall(lock: Erc20SwapLock): EvmCall
   /**

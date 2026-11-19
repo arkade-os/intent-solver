@@ -125,3 +125,43 @@ describe('the status endpoint distinguishes “cannot read” from “no such sw
     expect(await response.json()).toEqual({ v: 1, type: 'not_found' })
   })
 })
+
+describe('rfq_reveal over HTTP', () => {
+  const reveal = { v: 1, type: 'rfq_reveal', rfq_id: RFQ_ID, preimage: '07'.repeat(32) }
+  const withReveal = (outcome: unknown): CorridorSet =>
+    ({
+      get: () => undefined,
+      size: 1,
+      [Symbol.iterator]: function* () {
+        yield { descriptor: { pair: 'evm' }, reveal: async () => outcome }
+      },
+    }) as never as CorridorSet
+
+  it.each([
+    [{ kind: 'accepted' }, 202, 'rfq_reveal_ack'],
+    [{ kind: 'refused', detail: 'swap is quoted' }, 422, 'rfq_refusal'],
+    [{ kind: 'unknown' }, 404, 'rfq_refusal'],
+  ])('maps %o to %i', async (outcome, status, type) => {
+    const app = buildApp({ corridors: withReveal(outcome), readers: okReaders(), network: 'regtest' })
+    const response = await quote(app, reveal)
+    expect(response.status).toBe(status)
+    expect(await response.json()).toMatchObject({ type })
+  })
+
+  it('answers a thrown corridor fault with a 500 and reports it', async () => {
+    const onError = vi.fn()
+    const corridors = withReveal(undefined)
+    const broken = {
+      ...corridors,
+      [Symbol.iterator]: function* () {
+        yield { descriptor: { pair: 'evm' }, reveal: async () => Promise.reject(BOOM) }
+      },
+    } as never as CorridorSet
+    const response = await quote(
+      buildApp({ corridors: broken, readers: okReaders(), network: 'regtest', onError }),
+      reveal,
+    )
+    expect(response.status).toBe(500)
+    expect(onError).toHaveBeenCalledWith('http reveal', BOOM)
+  })
+})

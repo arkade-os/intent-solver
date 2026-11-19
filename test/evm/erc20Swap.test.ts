@@ -6,6 +6,7 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { keccak_256 } from '@noble/hashes/sha3.js'
 import {
   CLAIM_EVENT_SIGNATURE,
+  CLAIM_FOR_SIGNATURE,
   CLAIM_SIGNATURE,
   LOCK_SIGNATURE,
   REFUND_EVENT_SIGNATURE,
@@ -13,6 +14,7 @@ import {
   REFUND_SIGNATURE,
   claimEventTopic,
   encodeClaim,
+  encodeClaimFor,
   encodeLock,
   encodeRefund,
   encodeRefundFor,
@@ -52,6 +54,7 @@ describe('selectors — pinned against the public 4byte registry', () => {
     // selector. Getting it wrong is not a compile error anywhere — it is a
     // transaction that reverts on chain.
     [REFUND_FOR_SIGNATURE, '0e5bbd59'],
+    [CLAIM_FOR_SIGNATURE, 'bc586b28'],
   ])('%s -> %s', (signature, expected) => {
     expect(hex.encode(keccak_256(new TextEncoder().encode(signature)).subarray(0, 4))).toBe(expected)
   })
@@ -238,6 +241,17 @@ describe('third-party refund', () => {
   it('names refundAddress explicitly on the refund side', () => {
     const refundAddress = new Uint8Array(20).fill(0x3f)
     expect(wordAt(encodeRefundFor(lock({ refundAddress })), 4)).toBe('00'.repeat(12) + '3f'.repeat(20))
+  })
+})
+
+describe('third-party claim', () => {
+  it('pays the lock it names: the preimage, then the lock words claimAddress included', () => {
+    const l = lock()
+    const preimage = new Uint8Array(32).fill(0x07)
+    const claimed = encodeClaimFor(preimage, l)
+    expect(hex.encode(claimed.subarray(0, 4))).toBe('bc586b28')
+    expect(wordAt(claimed, 0)).toBe('07'.repeat(32))
+    for (const index of [1, 2, 3, 4, 5]) expect(wordAt(claimed, index)).toBe(wordAt(encodeLock(l), index))
   })
 })
 
