@@ -1022,6 +1022,23 @@ describe('a fill arkd rejected as already spent', () => {
     expect(errors).toEqual([])
   })
 
+  it('stays silent when another writer moved the row before the exit lands', async () => {
+    const errors: unknown[] = []
+    let store!: Awaited<ReturnType<typeof funded>>['store']
+    const built = await funded({
+      settle: async (_row: unknown, options?: { markSubmitting?: () => Promise<boolean> }) => {
+        await options?.markSubmitting?.()
+        await store.fail('swap-1', 'filling', 'parked by recovery')
+        throw spent([`${'ff'.repeat(32)}:0`], true)
+      },
+      onError: (_id, error) => void errors.push(error),
+    })
+    store = built.store
+    await built.service.tick('swap-1')
+    expect(await store.get('swap-1')).toMatchObject({ state: 'stuck', failureReason: 'parked by recovery' })
+    expect(errors).toEqual([])
+  })
+
   it('walks the row back to funded when one of OUR coins was the one spent', async () => {
     const deferred: string[] = []
     const { service, store } = await funded({

@@ -504,16 +504,12 @@ export class AssetRfqSwapService {
         if (await this.deps.store.revertUnsubmitted(row.id)) this.deps.onDeferred?.(row.id, error)
         return
       }
-      // Nothing was submitted, so neither exit leaves exposure: a spent DEPOSIT
-      // needs nobody, and one of OUR coins is a race the next tick re-selects.
+      // Nothing was submitted, so neither exit leaves exposure: a spent DEPOSIT needs nobody, and
+      // anything else re-selects next tick. A lost CAS means another writer moved the row and reports it.
       if (error instanceof OfferSubmitRejectedError) {
-        if (error.depositSpent) {
-          if (await this.deps.store.refuseRejectedSubmit(row.id, DEPOSIT_SPENT_REASON)) return
-        } else if (await this.deps.store.revertRejectedSubmit(row.id)) {
-          this.deps.onDeferred?.(row.id, error)
-          return
-        }
-        // Neither CAS won, so another writer moved the row: fall through.
+        if (error.depositSpent) await this.deps.store.refuseRejectedSubmit(row.id, DEPOSIT_SPENT_REASON)
+        else if (await this.deps.store.revertRejectedSubmit(row.id)) this.deps.onDeferred?.(row.id, error)
+        return
       }
       // `filling` fails to `stuck`, never to something retryable: the spend may
       // already have been submitted, and only a human can tell which.

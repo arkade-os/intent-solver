@@ -264,6 +264,7 @@ export const fulfillOffer = async (
       // landed looks like. @see spec/tla OfferFill_RejectedProof.cfg
       const oursToo = funding.some((coin) => spent.includes(outpointKey(coin.txid, coin.vout).toLowerCase()))
       if (depositSpent && oursToo) throw error
+      // Any other shape sent nothing, whichever input it named; only a named deposit ends the row.
       throw new OfferSubmitRejectedError(
         `arkd refused the fill: ${spent.join(', ')} already spent; nothing was submitted`,
         spent,

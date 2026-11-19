@@ -171,9 +171,8 @@ SubmitFails(w) == /\ pc[w] = "marked"
                   /\ pc' = [pc EXCEPT ![w] = IF LateTyped /\ New(w) THEN "typed" ELSE "failed"]
                   /\ UNCHANGED <<st, phase, loc, defs, crashes>>
 
-\* arkd answering VTXO_ALREADY_SPENT. A rejected SubmitTx accepts nothing, so
-\* `subs` does not move — THE WHOLE PREMISE of the two exits below, and the one
-\* BreakRejectedProof drops to show what the classification is worth.
+\* arkd refusing the fill, or resolveDeposit refusing to build it: either accepts
+\* nothing, so `subs` does not move. The premise BreakRejectedProof drops.
 SubmitRejected(w) == /\ pc[w] = "marked"
                      /\ New(w)
                      /\ subs' = IF BreakRejectedProof THEN subs + 1 ELSE subs
@@ -183,13 +182,13 @@ SubmitRejected(w) == /\ pc[w] = "marked"
 \* Both exits: WHERE state = 'filling' AND fill_phase = 'submitting'.
 RejectedGuard == st = "filling" /\ (BreakRejectedGuard \/ phase = "submitting")
 
-\* The deposit spent elsewhere ends the row; one of ours re-selects. Losing the
-\* CAS falls through to fail(), which is the code's own order.
+\* The deposit spent elsewhere ends the row; anything else re-selects. A lost CAS
+\* writes nothing: another writer moved the row.
 ResolveRejected(w) == /\ pc[w] = "rejected"
                       /\ IF RejectedGuard
                          THEN \/ st' = "refused" /\ phase' = "none"
                               \/ st' = "ready" /\ phase' = "none"
-                         ELSE IF StuckGuard THEN StuckWrite ELSE UNCHANGED <<st, phase>>
+                         ELSE UNCHANGED <<st, phase>>
                       /\ pc' = [pc EXCEPT ![w] = "idle"]
                       /\ UNCHANGED <<subs, loc, defs, crashes>>
 
@@ -273,12 +272,5 @@ FillingResolves == [](st = "filling" => <>(st # "filling"))
 (*   OfferFill_Sim.cfg                  20,000 traces, depth 100, clean    *)
 (*                                                                         *)
 (* The green runs check FillingResolves as well as the invariants.         *)
-(*                                                                         *)
-(* `BreakRejectedGuard` is a CONTROL rather than a mutation, and the reason *)
-(* is the finding: dropping fill_phase = 'submitting' from the two rejected *)
-(* exits does not double-fill, because the latch already decides who can   *)
-(* reach a rejection. Green at two workers and again at three (168,192     *)
-(* distinct, depth 33). The code keeps the guard for symmetry with         *)
-(* revertUnsubmitted, where OfferFill_RevertGuard.cfg shows it IS needed.  *)
 (***************************************************************************)
 =============================================================================

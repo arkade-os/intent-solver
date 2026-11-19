@@ -479,21 +479,19 @@ export class AssetOfferService {
         await this.deps.store.transition(row.id, 'filling', 'filled', { fill_txid: txid })
         filled += 1
       } catch (error) {
+        // A lost CAS on any exit below means another writer moved the row and reports it.
         if (error instanceof OfferSubmitRejectedError && error.depositSpent) {
-          if (await this.deps.store.loseRejectedSubmit(row.id, DEPOSIT_SPENT_REASON)) continue
+          await this.deps.store.loseRejectedSubmit(row.id, DEPOSIT_SPENT_REASON)
+          continue
         }
         // The TWO retryable shapes, and only because `fulfillOffer` proves each
         // sent nothing. A later sweep re-runs every gate and the CAS.
         const deferrals = (this.deferrals.get(row.id) ?? 0) + 1
-        if (error instanceof OfferSubmitRejectedError && deferrals <= MAX_FILL_DEFERRALS) {
-          if (await this.deps.store.revertRejectedSubmit(row.id)) {
-            this.deferrals.set(row.id, deferrals)
-            if (deferrals === 1) this.deps.onDeferred?.(row.id, error)
-            continue
-          }
-        }
-        if (error instanceof OfferNotSubmittedError && deferrals <= MAX_FILL_DEFERRALS) {
-          if (await this.deps.store.revertUnsubmitted(row.id)) {
+        const rejected = error instanceof OfferSubmitRejectedError
+        const unsent = rejected || error instanceof OfferNotSubmittedError
+        if (unsent && deferrals <= MAX_FILL_DEFERRALS) {
+          const store = this.deps.store
+          if (await (rejected ? store.revertRejectedSubmit(row.id) : store.revertUnsubmitted(row.id))) {
             this.deferrals.set(row.id, deferrals)
             if (deferrals === 1) this.deps.onDeferred?.(row.id, error)
           }
@@ -503,11 +501,10 @@ export class AssetOfferService {
         // submitted, and only a human can tell which.
         this.deps.onError?.(row.id, error)
         const reason = error instanceof Error ? error.message : String(error)
-        const exhausted = error instanceof OfferNotSubmittedError || error instanceof OfferSubmitRejectedError
         await this.deps.store.fail(
           row.id,
           'filling',
-          exhausted ? `${reason}; ${MAX_FILL_DEFERRALS} retries exhausted` : reason,
+          unsent ? `${reason}; ${MAX_FILL_DEFERRALS} retries exhausted` : reason,
         )
       }
     }

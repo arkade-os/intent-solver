@@ -1147,6 +1147,24 @@ describe('tickAll classifies a fill arkd rejected as already spent', () => {
     expect(errors).toEqual([])
   })
 
+  it('stays silent when another writer moved the row before the exit lands', async () => {
+    const errors: unknown[] = []
+    let store!: Awaited<ReturnType<typeof build>>['store']
+    const built = await build({
+      settle: async (_row, options) => {
+        await options?.markSubmitting?.()
+        await store.fail('fill-1', 'filling', 'parked by recovery')
+        throw spent([`${'a'.repeat(64)}:0`], true)
+      },
+      onError: (_id, e) => void errors.push(e),
+    })
+    store = built.store
+    await built.service.consider(found)
+    expect(await built.service.tickAll()).toBe(0)
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'stuck', failureReason: 'parked by recovery' })
+    expect(errors).toEqual([])
+  })
+
   it('walks the row back to fillable when one of OUR coins was the one spent', async () => {
     const { store, service, deferred, errors } = await rejecting(() => spent([`${'9'.repeat(64)}:1`], false))
     expect(await service.tickAll()).toBe(0)
