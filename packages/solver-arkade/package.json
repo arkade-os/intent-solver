@@ -26,9 +26,9 @@
     "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
-    "@arkade-os/sdk": "0.5.9-taxi.0",
+    "@arkade-os/sdk": "0.5.9-taxi-v1",
     "@arkade-os/solver-core": "workspace:*",
-    "@arkade-os/swap": "0.2.0-taxi.2",
+    "@arkade-os/swap": "0.2.0-taxi-v1",
     "@noble/hashes": "^2.0.0",
     "@scure/base": "^2.0.0",
     "@scure/btc-signer": "2.4.1",

@@ -18,7 +18,6 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   CANDIDATE_SDK_SYMBOL,
   SWAP_FILL_SYMBOL,
-  SWAP_VERSION,
   CANDIDATE_TAXI_FILL_SYMBOL,
   PINNED_PACKAGES,
   PINNED_SOURCES,
@@ -136,13 +135,8 @@ try {
 
   const consumerManifest = harness.buildConsumerManifest(taxiTarballs, consumer)
   consumerManifest.pnpm.overrides['@arkade-os/sdk'] = spec(consumer, candidate['@arkade-os/sdk'])
-  if (candidate['@arkade-os/swap']) {
-    consumerManifest.pnpm.overrides['@arkade-os/swap'] = spec(consumer, candidate['@arkade-os/swap'])
-    consumerManifest.dependencies['@arkade-os/swap'] = frozenSdkArtifacts.get('@arkade-os/swap').version
-  } else {
-    delete consumerManifest.pnpm.overrides['@arkade-os/swap']
-    consumerManifest.dependencies['@arkade-os/swap'] = SWAP_VERSION
-  }
+  consumerManifest.pnpm.overrides['@arkade-os/swap'] = spec(consumer, candidate['@arkade-os/swap'])
+  consumerManifest.dependencies['@arkade-os/swap'] = frozenSdkArtifacts.get('@arkade-os/swap').version
   const { pnpm: workspace, ...consumerPackage } = consumerManifest
   writeFileSync(join(consumer, 'pnpm-workspace.yaml'), `${JSON.stringify(workspace, null, 2)}\n`)
   writeFileSync(join(consumer, 'package.json'), `${JSON.stringify(consumerPackage, null, 2)}\n`)

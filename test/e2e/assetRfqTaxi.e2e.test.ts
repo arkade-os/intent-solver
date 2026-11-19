@@ -9,7 +9,7 @@ import { generateMnemonic } from '@scure/bip39'
 import { wordlist } from '@scure/bip39/wordlists/english.js'
 import { ArkAddress, asset, RestIndexerProvider, Transaction } from '@arkade-os/sdk'
 import { TaxiClient } from '@arkade-taxi/client'
-import { requestArkadeSwap } from '@arkade-os/swap/protocol'
+import { ASSET_SWAP_V2, ASSET_SWAP_V3, decodeOffer, offerContract, requestArkadeSwap } from '@arkade-os/swap/protocol'
 import { receiverPaidTransport } from './support/receiverPaidTransport.js'
 import { nostrRfqTransport } from '@arkade-os/swap/nostr'
 import { base64, hex } from '@scure/base'
@@ -484,10 +484,26 @@ describe('running solver to Taxi on regtest', () => {
       })
       await transport.close()
       expect(carrier.assertQuote(swap.quote).mode).toBe('recycle_receiver')
+      expect(swap.quote.contract_version).toBe(ASSET_SWAP_V3)
+      const { swapPkScript: recordedScript, ...freshTerms } = decodeOffer(hex.decode(swap.offerHex))
+      const compiled = offerContract(freshTerms, arkade.ctx.wallet.arkServerPublicKey, ASSET_SWAP_V3)
+      const baseline = offerContract(freshTerms, arkade.ctx.wallet.arkServerPublicKey, ASSET_SWAP_V2)
+      expect(compiled.pkScript).toEqual(recordedScript)
+      expect(hex.encode(compiled.pkScript)).toBe(swap.swapPkScript)
+      expect(compiled.address(arkade.profile.arkadeHrp, arkade.ctx.wallet.arkServerPublicKey).encode()).toBe(
+        swap.address,
+      )
+      expect(compiled.pkScript).not.toEqual(baseline.pkScript)
+      const validUntil = Math.min(swap.quote.valid_until, verified.descriptor.expiresAt)
+      const inputExpiryFloor = {
+        kind: verified.quote.inputExpiryFloor.kind,
+        value: BigInt(verified.quote.inputExpiryFloor.value),
+      }
+      expect(Math.floor(Date.now() / 1_000)).toBeLessThan(validUntil)
       const fundingTxid = await buyer.wallet.send({
-        address: swap.address,
-        amount: Number(swap.fundAmount),
-        extensions: [swap.extension],
+        recipients: [{ address: swap.address, amount: Number(swap.fundAmount), extensions: [swap.extension] }],
+        validUntil,
+        inputExpiryFloor,
       })
       expect(fundingTxid).toMatch(/^[0-9a-f]{64}$/)
 
@@ -673,6 +689,22 @@ describe('running solver to Taxi on regtest', () => {
         )
         expect(status).toMatchObject({ type: 'rfq_status', state: 'settled' })
         expect(status?.profile['fill_txid']).toMatch(/^[0-9a-f]{64}$/)
+        console.log(
+          'COMPILED_RFQ_PROOF',
+          JSON.stringify({
+            rfqId,
+            contractVersion: swap.quote.contract_version,
+            swapPkScript: swap.swapPkScript,
+            address: swap.address,
+            fundingBounds: {
+              validUntil,
+              inputExpiryFloor: { ...inputExpiryFloor, value: String(inputExpiryFloor.value) },
+            },
+            fundingTxid,
+            fillTxid: status?.profile['fill_txid'],
+            claimTxid: claimedTxid,
+          }),
+        )
       } catch (error) {
         const state = await readRfqState(rfqId).catch((cause: unknown) => ({ error: String(cause) }))
         const evidence = await readCarrierEvidence(rfqId).catch((cause: unknown) => ({ error: String(cause) }))

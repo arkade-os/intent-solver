@@ -100,7 +100,7 @@ export interface FlatCorridorDeps {
   rfqContractVersions?: ReadonlySet<string>
 }
 
-/** `rfq.contractVersions` as served; unset adds each injected corridor's own version to this build's defaults. */
+/** `rfq.contractVersions` as served; unset adds each injected corridor's own versions to this build's defaults. */
 export const servedContractVersions = (
   configured: readonly string[] | null,
   extra: readonly Corridor[],
@@ -108,7 +108,10 @@ export const servedContractVersions = (
   new Set(
     configured ?? [
       ...RFQ_CONTRACT_VERSIONS,
-      ...extra.flatMap((corridor) => corridor.descriptor.contractVersions ?? [corridor.descriptor.contractVersion]),
+      ...extra.flatMap((corridor) => [
+        corridor.descriptor.contractVersion,
+        ...(corridor.descriptor.contractVersions ?? []),
+      ]),
     ],
   )
 

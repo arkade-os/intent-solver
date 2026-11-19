@@ -13,6 +13,7 @@
  * stays in `wire/payloads.ts` is what only the Lightning-send leg means — its
  * `profile`, its quote payload, its state mapping.
  */
+import { RFQ_CONTRACT_VERSION_UNSUPPORTED } from '@arkade-os/swap/rfq-contract'
 import { z } from 'zod'
 import { WIRE_AMOUNT } from './wireAmount.js'
 import { MAX_PAIR_LENGTH } from './marketKey.js'
@@ -131,7 +132,7 @@ export const isRfqRefusalReason = (value: string): value is RfqRefusalReason =>
 
 export const RFQ_REFUSAL_ERROR_CODE_VALUES = [
   'amount_side_unsupported',
-  'contract_version_unsupported',
+  RFQ_CONTRACT_VERSION_UNSUPPORTED,
   'exact_out_unsupported',
   'invalid_amount',
   'invalid_payout_address',

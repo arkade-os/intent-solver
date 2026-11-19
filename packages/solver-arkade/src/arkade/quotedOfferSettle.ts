@@ -16,7 +16,14 @@ import type { ArkadeContext } from './wallet.js'
 import { fulfillOffer, type FulfillOptions } from './offerFulfill.js'
 import { heldOf } from './offerFill.js'
 import { liveOfferOutpoints, type OfferOutpoint } from './offerOutpoints.js'
-import { recordedOfferFrom, type OfferDerivation, type QuotedOfferTerms } from './offerTerms.js'
+import {
+  offerFromTerms,
+  offerScriptFrom,
+  xOnlyPubkey,
+  type OfferDerivation,
+  type QuotedOfferTerms,
+} from './offerTerms.js'
+import { hex } from '@scure/base'
 
 const assertSafeSats = (sats: bigint): number => {
   if (sats > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error(`deposit of ${sats} sats exceeds a safe integer`)
@@ -36,6 +43,8 @@ export interface QuotedOfferIntent {
   depositTxid: string | null
   depositVout: number | null
   carrierTerms?: { mode: 'purchase' | 'recycle' | 'recycle_receiver' } | null
+  /** The negotiated contract version; null is the baseline, asset-swap-v2. */
+  contractVersion: string | null
 }
 
 export interface QuotedOfferSettleDeps {
@@ -60,7 +69,8 @@ export const quotedOfferSettleFor = (
 ): ((intent: QuotedOfferIntent, options?: FulfillOptions) => Promise<string>) => {
   const outpointsAt = deps.outpointsAt ?? ((pkScript: string) => liveOfferOutpoints(deps.ctx, pkScript))
   const fulfill = deps.fulfill ?? fulfillOffer
-  const recorded = recordedOfferFrom(deps.derivation)
+  const derive = offerScriptFrom(deps.derivation)
+  const emulatorPubkey = xOnlyPubkey(deps.derivation.emulatorPubkey)
 
   return async (intent, options) => {
     if (intent.carrierTerms?.mode === 'recycle' || intent.carrierTerms?.mode === 'recycle_receiver') {
@@ -73,7 +83,10 @@ export const quotedOfferSettleFor = (
     // Derived, never read off the row. The row's terms are what was quoted and
     // its script is what the client was told; if the two have stopped agreeing,
     // spending the row's script would spend a covenant these terms do not open.
-    const offer = recorded(termsOf(intent), intent.offerPkScript)
+    const derived = derive(termsOf(intent), intent.contractVersion ?? undefined)
+    if (derived.pkScript.toLowerCase() !== intent.offerPkScript.toLowerCase()) {
+      throw new Error(`the recorded terms derive ${derived.pkScript}, not the offer script ${intent.offerPkScript}`)
+    }
 
     const live = await outpointsAt(intent.offerPkScript)
     const deposit = live.find((o) => o.txid === intent.depositTxid && o.vout === intent.depositVout)
@@ -96,7 +109,10 @@ export const quotedOfferSettleFor = (
     return fulfill(
       deps.ctx,
       deps.emulatorUrl,
-      offer,
+      {
+        ...offerFromTerms(termsOf(intent), emulatorPubkey, deps.derivation.exitDelay),
+        swapPkScript: hex.decode(derived.pkScript),
+      },
       {
         txid: deposit.txid,
         vout: deposit.vout,

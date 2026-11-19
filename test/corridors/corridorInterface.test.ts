@@ -154,6 +154,51 @@ describe('contract version negotiation', () => {
     },
   )
 
+  const multi = () => {
+    const seen: (string | undefined)[] = []
+    const corridor: Corridor = {
+      ...stub('a->b', 'A', 'v2'),
+      descriptor: { ...descriptor('a->b', 'A', 'v2'), contractVersions: ['v2', 'v3'] },
+      quote: async (_payload, options) => {
+        seen.push(options?.contractVersion)
+        return { kind: 'quote', payload: { v: 1, type: 'rfq_quote', rfq_id: RFQ.rfq_id } }
+      },
+    }
+    return { corridor, seen }
+  }
+
+  it('serves the client most-preferred version both sides build, and passes it down', async () => {
+    const { corridor, seen } = multi()
+    const set = createCorridorSet([corridor], { supportedContractVersions: new Set(['v2', 'v3']) })
+    const outcome = await set.get('a->b')!.quote({ ...RFQ, contract_versions: ['v3', 'v2'] })
+    expect(seen).toEqual(['v3'])
+    expect(outcome).toMatchObject({ payload: { contract_version: 'v3' } })
+  })
+
+  it('falls to the next version the client lists when the top one is disabled', async () => {
+    const { corridor, seen } = multi()
+    const set = createCorridorSet([corridor], { supportedContractVersions: new Set(['v2']) })
+    const outcome = await set.get('a->b')!.quote({ ...RFQ, contract_versions: ['v3', 'v2'] })
+    expect(seen).toEqual(['v2'])
+    expect(outcome).toMatchObject({ payload: { contract_version: 'v2' } })
+  })
+
+  it('derives the baseline and names no version when the request does not negotiate', async () => {
+    const { corridor, seen } = multi()
+    const set = createCorridorSet([corridor], { supportedContractVersions: new Set(['v2', 'v3']) })
+    const outcome = await set.get('a->b')!.quote(RFQ)
+    expect(seen).toEqual([undefined])
+    expect(outcome.payload).toEqual({ v: 1, type: 'rfq_quote', rfq_id: RFQ.rfq_id })
+  })
+
+  it('serves v2 to a client that lists only v2, though v3 is served too', async () => {
+    const { corridor, seen } = multi()
+    const set = createCorridorSet([corridor], { supportedContractVersions: new Set(['v2', 'v3']) })
+    const outcome = await set.get('a->b')!.quote({ ...RFQ, contract_versions: ['v2'] })
+    expect(seen).toEqual(['v2'])
+    expect(outcome).toMatchObject({ payload: { contract_version: 'v2' } })
+  })
+
   it('keeps a class-based corridor whole, prototype methods and private fields included', async () => {
     class Counted {
       readonly descriptor = descriptor('a->b', 'A', 'example-v1')

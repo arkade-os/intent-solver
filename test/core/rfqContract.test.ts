@@ -12,7 +12,7 @@ import {
 } from '@arkade-os/solver-core/core/rfqContract.js'
 
 describe('RFQ contract versions', () => {
-  it('ships the supported versions for every built-in RFQ method', () => {
+  it('serves every built-in method, asset-swap on both v2 and v3', () => {
     expect(RFQ_CONTRACT_VERSIONS).toEqual([
       RFQ_LIGHTNING_SEND_V2,
       RFQ_LIGHTNING_RECEIVE_V2,

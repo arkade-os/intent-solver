@@ -115,18 +115,6 @@ export const offerScriptFrom = (
   }
 }
 
-export const recordedOfferFrom = (deps: OfferDerivation): ((terms: QuotedOfferTerms, pkScript: string) => Offer) => {
-  const emulatorPubkey = xOnlyPubkey(deps.emulatorPubkey)
-  return (terms, pkScript) => {
-    const offer = { ...offerFromTerms(terms, emulatorPubkey, deps.exitDelay), swapPkScript: hex.decode(pkScript) }
-    const script = offerContract(offer, deps.serverPubkey)
-    if (hex.encode(script.pkScript).toLowerCase() !== pkScript.toLowerCase()) {
-      throw new Error(`the recorded terms derive ${hex.encode(script.pkScript)}, not the offer script ${pkScript}`)
-    }
-    return offer
-  }
-}
-
 /**
  * The same covenant, encoded — what a fill builder takes instead of a script.
  *
@@ -135,7 +123,21 @@ export const recordedOfferFrom = (deps: OfferDerivation): ((terms: QuotedOfferTe
  * offer that encodes one covenant while the deposit sits at another describes a
  * spend of something else.
  */
-export const offerHexFrom = (deps: OfferDerivation): ((terms: QuotedOfferTerms, offerPkScript: string) => string) => {
-  const recorded = recordedOfferFrom(deps)
-  return (terms, offerPkScript) => hex.encode(encodeOffer(recorded(terms, offerPkScript)))
+export const offerHexFrom = (
+  deps: OfferDerivation,
+): ((terms: QuotedOfferTerms, offerPkScript: string, contractVersion?: string) => string) => {
+  const derive = offerScriptFrom(deps)
+  const emulatorPubkey = xOnlyPubkey(deps.emulatorPubkey)
+  return (terms, offerPkScript, contractVersion) => {
+    const derived = derive(terms, contractVersion)
+    if (derived.pkScript.toLowerCase() !== offerPkScript.toLowerCase()) {
+      throw new Error(`the recorded terms derive ${derived.pkScript}, not the offer script ${offerPkScript}`)
+    }
+    return hex.encode(
+      encodeOffer({
+        ...offerFromTerms(terms, emulatorPubkey, deps.exitDelay),
+        swapPkScript: hex.decode(derived.pkScript),
+      }),
+    )
+  }
 }

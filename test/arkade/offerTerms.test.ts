@@ -13,7 +13,14 @@
 import { describe, it, expect } from 'vitest'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { asset } from '@arkade-os/sdk'
-import { ASSET_SWAP_V2, ASSET_SWAP_V3, decodeOffer, offerContract } from '@arkade-os/swap/protocol'
+import {
+  ASSET_SWAP_V2,
+  ASSET_SWAP_V3,
+  assetSwapContractVersion,
+  decodeOffer,
+  offerContract,
+  offerVtxoScript,
+} from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
 import {
   offerExitDelay,
@@ -23,6 +30,7 @@ import {
   xOnlyPubkey,
   type QuotedOfferTerms,
 } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
+import { RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_V3 } from '@arkade-os/solver-core/core/rfqContract.js'
 
 const xonly = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
 const SERVER = xonly(2)
@@ -46,28 +54,6 @@ const terms = (over: Partial<QuotedOfferTerms> = {}): QuotedOfferTerms => ({
 const derive = offerScriptFrom(derivation)
 
 describe('offerScriptFrom', () => {
-  it('recovers a frozen taxi.0 RFQ script without constructing new offers on that tree', () => {
-    const historical = {
-      serverPubkey: hex.decode('4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa'),
-      emulatorPubkey: hex.decode('466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27'),
-      hrp: 'tark',
-      exitDelay: { type: 'blocks' as const, value: 10n },
-    }
-    const oldTerms = terms({
-      wantAmount: 50_000n,
-      wantAssetId: 'aa'.repeat(32) + '0000',
-      makerPkScript: '51203c72addb4fdf09af94f0c94d7fe92a386a7e70cf8a1d85916386bb2535c7b1b1',
-      makerPublicKey: '3c72addb4fdf09af94f0c94d7fe92a386a7e70cf8a1d85916386bb2535c7b1b1',
-    })
-    const pkScript = '5120eb9014efb2d54a75cfcadcd2dcf1f3490228b59bb955b8211453fcb39c1f1d30'
-    const encoded = offerHexFrom(historical)(oldTerms, pkScript)
-    expect(hex.encode(decodeOffer(hex.decode(encoded)).swapPkScript)).toBe(pkScript)
-    for (const version of [ASSET_SWAP_V2, ASSET_SWAP_V3]) {
-      expect(offerScriptFrom(historical)(oldTerms, version).pkScript).not.toBe(pkScript)
-    }
-    expect(() => offerHexFrom(historical)({ ...oldTerms, wantAmount: 50_001n }, pkScript)).toThrow()
-  })
-
   it.each([ASSET_SWAP_V2, ASSET_SWAP_V3] as const)('builds the explicitly selected %s program', (version) => {
     const selected = derive(terms(), version)
     const expected = offerContract(offerFromTerms(terms(), EMULATOR, EXIT), SERVER, version)
@@ -79,11 +65,21 @@ describe('offerScriptFrom', () => {
     'preserves a recorded %s program while encoding its recovery offer',
     (version) => {
       const existing = offerContract(offerFromTerms(terms(), EMULATOR, EXIT), SERVER, version)
-      const encoded = offerHexFrom(derivation)(terms(), hex.encode(existing.pkScript))
+      const encoded = offerHexFrom(derivation)(terms(), hex.encode(existing.pkScript), version)
       expect(decodeOffer(hex.decode(encoded)).swapPkScript).toEqual(existing.pkScript)
-      expect(() => offerHexFrom(derivation)(terms({ wantAmount: 1_001n }), hex.encode(existing.pkScript))).toThrow()
+      expect(() =>
+        offerHexFrom(derivation)(terms({ wantAmount: 1_001n }), hex.encode(existing.pkScript), version),
+      ).toThrow()
     },
   )
+
+  it('refuses a recorded V3 script when its stored version is the V2 baseline', () => {
+    const recorded = derive(terms(), ASSET_SWAP_V3)
+    expect(() => offerHexFrom(derivation)(terms(), recorded.pkScript)).toThrow(/derive .*, not the offer script/)
+    expect(() => offerHexFrom(derivation)(terms(), recorded.pkScript, ASSET_SWAP_V2)).toThrow(
+      /derive .*, not the offer script/,
+    )
+  })
 
   it('compiles the same covenant the SDK does from the equivalent offer', () => {
     const direct = offerContract(
@@ -96,6 +92,7 @@ describe('offerScriptFrom', () => {
         exitDelay: EXIT,
       },
       SERVER,
+      'asset-swap-v2',
     )
     expect(derive(terms()).pkScript).toBe(hex.encode(direct.pkScript))
     expect(derive(terms()).address).toBe(direct.address('tark', SERVER).encode())
@@ -149,6 +146,38 @@ describe('offerScriptFrom', () => {
     expect(offerScriptFrom({ ...derivation, serverPubkey: xonly(9) })(terms()).pkScript).not.toBe(
       derive(terms()).pkScript,
     )
+  })
+})
+
+describe('contract version', () => {
+  const sdk = (contractVersion: string): string =>
+    hex.encode(
+      offerVtxoScript(
+        {
+          wantAmount: 1_000n,
+          wantAsset: asset.AssetId.fromString(USDA),
+          makerPkScript: hex.decode(MAKER_SCRIPT),
+          makerPublicKey: MAKER_KEY,
+          emulatorPubkey: EMULATOR,
+          exitDelay: EXIT,
+        },
+        SERVER,
+        assetSwapContractVersion(contractVersion),
+      ).pkScript,
+    )
+
+  it('refuses a version the SDK cannot derive instead of falling back to v2', () => {
+    expect(() => derive(terms(), 'asset-swap-v9')).toThrow(/unknown contract version/)
+  })
+
+  it('derives v2 for the baseline and v3 only when it is named', () => {
+    expect(derive(terms()).pkScript).toBe(sdk(RFQ_ASSET_SWAP_V2))
+    expect(derive(terms(), RFQ_ASSET_SWAP_V2).pkScript).toBe(sdk(RFQ_ASSET_SWAP_V2))
+    expect(derive(terms(), RFQ_ASSET_SWAP_V3).pkScript).toBe(sdk(RFQ_ASSET_SWAP_V3))
+  })
+
+  it('puts a v3 deposit at a different address than a v2 one', () => {
+    expect(derive(terms(), RFQ_ASSET_SWAP_V3).pkScript).not.toBe(derive(terms()).pkScript)
   })
 })
 

@@ -168,7 +168,13 @@ const derivation = (): OfferDerivation => ({
   exitDelay: offerExitDelay(arkade.ctx.advertisedExitDelay),
 })
 
-const deriveOffer = (terms: OfferTerms): { pkScript: string; address: string } => offerScriptFrom(derivation())(terms)
+const termsOf = (row: AssetRfqSwapRow): OfferTerms => ({
+  wantAmount: row.toAmount,
+  wantAssetId: row.toAssetId,
+  offerAssetId: row.fromAssetId,
+  makerPkScript: row.makerPkScript,
+  makerPublicKey: row.makerPublicKey,
+})
 
 const depositAt = async (offerPkScript: string): Promise<ObservedDeposit | null> => {
   const { vtxos } = await arkade.ctx.wallet.indexerProvider.getVtxos({ scripts: [offerPkScript] })
@@ -228,7 +234,7 @@ const harness = async (over: Partial<AssetRfqMarket> = {}): Promise<Harness> => 
     solverPubkey: makerPublicKey,
     quoteValiditySeconds: 600,
     dustSats: arkade.ctx.dustSats,
-    deriveOffer,
+    deriveOffer: offerScriptFrom(derivation()),
     depositAt,
     balance,
     fetchPrice: createPriceFeed(),
@@ -341,6 +347,7 @@ describe('Alice, Bob and the solver over the regtest Nostr relay', () => {
         expect(funded.depositTxid).toBe(fundingTxid)
 
         const filled = await driveTo(tickAll, store, id, 'filled')
+        expect(filled.contractVersion).toBe('asset-swap-v3')
         expect(filled.fillTxid).toMatch(/^[0-9a-f]{64}$/)
         expect(await depositSpent(filled.offerPkScript)).toBe('spent')
 

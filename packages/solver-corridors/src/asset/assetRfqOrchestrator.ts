@@ -211,6 +211,8 @@ export interface AssetRfqDeps {
   quoteValiditySeconds: number
   /** The chain's dust floor. A rule, unlike the carrier, which is per market. */
   dustSats: bigint
+  /** arkd's smallest fundable output, `max(dust, vtxoMin)`. Floors a sats payout only. */
+  minOutputSats?: bigint
   /**
    * The offer covenant this solver will watch, derived from terms it has
    * already fixed. `offerVtxoScript` in the composition root.
@@ -245,6 +247,7 @@ export type AssetRfqQuoteRefusal =
   | 'price_unavailable'
   | 'fee_consumes_swap'
   | 'amount_out_of_range'
+  | 'payout_below_dust'
   | 'insufficient_inventory'
   | 'duplicate_swap'
 
@@ -253,7 +256,6 @@ export type AssetRfqQuoteOutcome =
   | { accepted: false; reason: AssetRfqQuoteRefusal; detail?: string }
 
 export interface AssetRfqQuoteRequest {
-  contractVersion?: string
   requesterKey?: string
   rfqId: string
   pair: string
@@ -263,6 +265,8 @@ export interface AssetRfqQuoteRequest {
   makerPublicKey: string
   /** Absent is the legacy request; explicit modes apply to an asset payout only. */
   carrier?: AssetRfqCarrierChoice
+  /** The negotiated contract version, if any. Absent derives the corridor's baseline. */
+  contractVersion?: string
 }
 
 /** How much of one leg a deposit holds — sats when the leg is BTC. */
@@ -627,6 +631,9 @@ export class AssetRfqSwapService {
         detail: `the receiver fare of ${receiverFare.units} asset units is not smaller than the ${resolved.toAmount} delivered`,
       }
     }
+    if (pair.to === null && resolved.toAmount < (this.deps.minOutputSats ?? 0n)) {
+      return { accepted: false, reason: 'payout_below_dust' }
+    }
 
     // § 9 permits a quote-time pre-check and does not accept it as sufficient —
     // `tick` runs the same gate again immediately before spending. Quoting a
@@ -726,6 +733,7 @@ export class AssetRfqSwapService {
           // amounts an explicit mode actually quoted.
           ...quoteSnapshot({ resolved, market: priced, pair, feed, carrierSats: priceTerm }),
           ...(terms === undefined ? {} : { carrierTerms: terms }),
+          ...(request.contractVersion === undefined ? {} : { contractVersion: request.contractVersion }),
         })
         return { accepted: true, swap, carrierSats: publishedSats }
       } catch (error) {

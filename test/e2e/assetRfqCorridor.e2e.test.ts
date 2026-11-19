@@ -164,7 +164,8 @@ const offerFrom = (terms: OfferTerms): Omit<Offer, 'swapPkScript'> => {
   return offerFromTerms(terms, emulatorPubkey, exitDelay)
 }
 
-const deriveOffer = (terms: OfferTerms): { pkScript: string; address: string } => offerScriptFrom(derivation())(terms)
+const deriveOffer = (terms: OfferTerms, contractVersion?: string): { pkScript: string; address: string } =>
+  offerScriptFrom(derivation())(terms, contractVersion)
 
 const termsOf = (row: AssetRfqSwapRow): OfferTerms => ({
   wantAmount: row.toAmount,
@@ -244,7 +245,7 @@ const shippedCarrier = async (
     identity,
     operatorUrl: arkade.ctx.operatorUrl,
     dustSats: arkade.ctx.dustSats,
-    offerHex: (row) => offerHex(termsOf(row), row.offerPkScript),
+    offerHex: (row) => offerHex(termsOf(row), row.offerPkScript, row.contractVersion ?? undefined),
     proceedsAddress: await wallet.getAddress(),
     solverKeys: [makerPublicKey],
     serverKey: () => wallet.arkServerPublicKey,

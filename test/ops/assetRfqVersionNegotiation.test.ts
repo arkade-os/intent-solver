@@ -132,6 +132,7 @@ async function assertQuote(
     offer_address: expected.address('tark', derivation.serverPubkey).encode(),
   })
   expect(row.offerPkScript).toBe(hex.encode(expected.pkScript))
+  expect(row.contractVersion).toBe(negotiated ? version : null)
   return row
 }
 
@@ -189,6 +190,7 @@ describe('asset RFQ program negotiation', () => {
       const persisted = await reopened.findByRfqId(id)
       if (!persisted) throw new Error('persisted quote missing')
       expect(persisted.offerPkScript).toBe(row.offerPkScript)
+      expect(persisted.contractVersion).toBe(version)
       const fulfill = vi.fn<typeof fulfillOffer>(async () => 'ff'.repeat(32))
       const settle = quotedOfferSettleFor({
         ctx: {} as never,

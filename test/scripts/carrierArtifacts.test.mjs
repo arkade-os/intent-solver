@@ -18,7 +18,13 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, expect, it } from 'vitest'
-import { MANIFEST_PATH, TAXI_CONSUMER, VENDOR_DIR, packageRootFrom } from '../../scripts/carrier-artifacts/lib.mjs'
+import {
+  MANIFEST_PATH,
+  TAXI_CONSUMER,
+  VENDOR_DIR,
+  assertInstalledPackages,
+  packageRootFrom,
+} from '../../scripts/carrier-artifacts/lib.mjs'
 
 const scripts = fileURLToPath(new URL('../../scripts/carrier-artifacts/', import.meta.url))
 const repo = join(scripts, '..', '..')
@@ -119,16 +125,6 @@ beforeAll(() => {
     link(packageRootFrom(join(repo, 'package.json'), '@scure/btc-signer'), join(root, 'node_modules/@scure/btc-signer'))
   if (existsSync(join(root, 'packages/solver-app/package.json')))
     link(join(root, 'node_modules'), join(root, 'packages/solver-app/node_modules'))
-  if (!candidates.has('@arkade-os/swap')) {
-    const swapOriginal = packageRootFrom(join(repo, 'package.json'), '@arkade-os/swap')
-    const swapFixture = join(root, 'node_modules/@arkade-os/swap')
-    if (existsSync(swapFixture)) rmSync(swapFixture)
-    cpSync(swapOriginal, swapFixture, {
-      recursive: true,
-      filter: (path) => path !== join(swapOriginal, 'node_modules'),
-    })
-    installDependencies(swapOriginal, swapFixture)
-  }
   sdk = join(root, 'node_modules/@arkade-os/sdk')
   const declared = JSON.parse(readFileSync(join(sdk, 'package.json'), 'utf8'))
   sdkEntry = join(sdk, declared.exports['.'].import.default)
@@ -142,6 +138,25 @@ afterAll(() => {
 it('accepts an unchanged installation extracted from the frozen archives', () => {
   const result = run()
   expect(result.status, result.stderr).toBe(0)
+})
+
+it('refuses a missing Swap artifact even when its manifest claims a published version', () => {
+  const path = join(root, 'node_modules/@arkade-os/swap/package.json')
+  const original = readFileSync(path)
+  const declared = JSON.parse(original)
+  declared.version = '0.1.8'
+  writeFileSync(path, JSON.stringify(declared))
+  try {
+    expect(() =>
+      assertInstalledPackages(
+        [join(root, 'package.json'), join(root, TAXI_CONSUMER, 'package.json')],
+        manifest.artifacts.filter(({ package: name }) => name !== '@arkade-os/swap'),
+        join(root, VENDOR_DIR),
+      ),
+    ).toThrow(/missing.*artifact.*@arkade-os\/swap/i)
+  } finally {
+    writeFileSync(path, original)
+  }
 })
 
 it('rejects overrides placed in the ignored package manifest before importing installed code', () => {

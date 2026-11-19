@@ -195,6 +195,7 @@ const row = (over: Partial<AssetRfqSwapRow> = {}): AssetRfqSwapRow => ({
   // No carrier terms: this fixture is the LEGACY row, whose quote profile must
   // stay byte-identical to what it was before the field existed.
   carrierTerms: null,
+  contractVersion: null,
   ...over,
 })
 

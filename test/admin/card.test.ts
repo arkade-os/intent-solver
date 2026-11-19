@@ -268,10 +268,22 @@ describe('GET /api/card', () => {
     const off = await withoutContractVersion(configured)
     expect(off.card!.markets.some((m) => quoteId(m) === `arkade:mutinynet/asset:${ASSET}`)).toBe(false)
     expect(off.cardOmitted).toEqual([
-      'asset RFQ markets are omitted: neither asset-swap-v3 nor asset-swap-v2 is in rfq.contractVersions',
+      'asset RFQ markets are omitted: none of asset-swap-v2, asset-swap-v3 is in rfq.contractVersions',
     ])
     const faulty = await withoutContractVersion({ ...configured, baseDecimals: 6 })
     expect(faulty.cardOmitted.join(' ')).toContain('the BTC leg is 8 decimals (sats), got 6')
+
+    const v3Only = (
+      await getCard(
+        makeDeps({
+          assetMarkets: [configured],
+          assetRfqMarkets: [{ ...configured, symbol: 'ASSET', sellBase: { min: 0n, max: 0n } }],
+          rfqContractVersions: ['asset-swap-v3'],
+        }),
+      )
+    ).body
+    expect(v3Only.card!.markets.some((m) => quoteId(m) === `arkade:mutinynet/asset:${ASSET}`)).toBe(true)
+    expect(v3Only.cardOmitted.join(' ')).not.toContain('asset RFQ markets are omitted')
   })
 
   /**

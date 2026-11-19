@@ -96,6 +96,9 @@ const ASSET_RFQ_STATES: CorridorDescriptor<AssetRfqSwapState>['states'] = {
   delivered: ['filled'],
 }
 
+/** Every contract version the asset RFQ corridor builds, baseline first. */
+export const ASSET_RFQ_CONTRACT_VERSIONS = [RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_V3] as const
+
 export const assetRfqDescriptor = (
   market: ReadableAssetRfqMarket,
   direction: AssetRfqDirection,
@@ -105,7 +108,8 @@ export const assetRfqDescriptor = (
     pair: assetRfqPairFor(legs.from, legs.to),
     envStem: assetRfqEnvStem(market, direction),
     contractVersion: RFQ_ASSET_SWAP_V2,
-    contractVersions: [RFQ_ASSET_SWAP_V3, RFQ_ASSET_SWAP_V2],
+    // v2 baseline for old wallets; v3 (the #1147 fix) opt-in via negotiation.
+    contractVersions: ASSET_RFQ_CONTRACT_VERSIONS,
     // Both legs are Arkade, so the payout always comes out of the Arkade float
     // — whether it is paid in sats or in an asset.
     payoutRail: 'arkade',

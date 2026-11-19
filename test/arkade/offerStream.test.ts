@@ -136,7 +136,9 @@ describe('streamOfferTxs', () => {
       }
     })
     const signal = AbortSignal.timeout(2_000)
-    const got = await collect(streamOfferTxs({ arkdUrl: `${url}/`, signal }), 1)
+    const got = await collect(streamOfferTxs({ arkdUrl: `${url}/`, signal }), 1).finally(() =>
+      configureEventSource(undefined),
+    )
     expect(got).toEqual([{ txid: 'a', tx: 'tx-a' }])
     const opened0 = new URL(opened[0]!)
     expect(`${opened0.origin}${opened0.pathname}`).toBe(`${url}/v1/indexer/subscription`)

@@ -161,6 +161,8 @@ export interface AssetRfqSwapRow {
   /** The terms this negotiation was issued under, or null for legacy.
    * Written once at insert and never moved. */
   carrierTerms: AssetRfqCarrierTerms | null
+  /** The contract version negotiated for this quote; null is the baseline, asset-swap-v2. */
+  contractVersion: string | null
 }
 
 export interface AssetRfqQuoteRecord {
@@ -192,6 +194,7 @@ export interface AssetRfqQuoteRecord {
   quotePrice?: { impliedMantissa: bigint; scale: number; givesBase: boolean }
   /** Spread at the call site; omitted means the market's own pass-through. */
   carrierTerms?: AssetRfqCarrierTerms
+  contractVersion?: string
 }
 
 export interface CarrierAttemptRecord {
@@ -356,7 +359,8 @@ const COLUMNS = `
   fill_price_scale       INTEGER,
   carrier_terms          TEXT,
   carrier_attempt        TEXT,
-  fill_phase             TEXT
+  fill_phase             TEXT,
+  contract_version       TEXT
 `
 
 const SCHEMA = `
@@ -432,6 +436,7 @@ const toRow = (raw: Raw): AssetRfqSwapRow => ({
   fillPriceMantissa: bigIntOrNull(raw.fill_price_mantissa),
   fillPriceScale: numberOrNull(raw.fill_price_scale),
   carrierTerms: carrierTermsOrNull(raw.carrier_terms),
+  contractVersion: text(raw.contract_version),
 })
 
 const bigIntOrNull = (value: string | number | null | undefined): bigint | null =>
@@ -508,6 +513,7 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
       ['carrier_terms', 'TEXT'],
       ['carrier_attempt', 'TEXT'],
       ['fill_phase', 'TEXT'],
+      ['contract_version', 'TEXT'],
     ])
   }
 
@@ -554,8 +560,8 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
          from_decimals, from_flat_fee, to_asset_id, to_amount, to_decimals, to_spread,
          maker_pk_script, maker_public_key, offer_pk_script,
          offer_address, solver_pubkey, valid_until, deposit_txid, deposit_vout, fill_txid, failure_reason,
-         quote_implied_mantissa, quote_implied_scale, quote_gives_base, carrier_terms
-       ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?)`,
+         quote_implied_mantissa, quote_implied_scale, quote_gives_base, carrier_terms, contract_version
+       ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?)`,
       [
         record.id,
         at,
@@ -582,6 +588,7 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
         record.quotePrice?.scale ?? null,
         record.quotePrice === undefined ? null : record.quotePrice.givesBase ? 1 : 0,
         carrierTerms === null ? null : JSON.stringify(carrierTerms),
+        record.contractVersion ?? null,
       ],
     )
     await this.recordEvent(record.id, null, 'quoted', null)

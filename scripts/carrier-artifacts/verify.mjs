@@ -14,7 +14,6 @@ import { fileURLToPath } from 'node:url'
 import {
   CANDIDATE_SDK_SYMBOL,
   SWAP_FILL_SYMBOL,
-  SWAP_VERSION,
   CANDIDATE_TAXI_FILL_SYMBOL,
   MANIFEST_PATH,
   PINNED_PACKAGES,
@@ -100,7 +99,7 @@ for (const [name, spec] of Object.entries(overrides)) {
 }
 
 const clientArchive = byPackage.get('@arkade-taxi/client')?.file
-const swapVersion = byPackage.get('@arkade-os/swap')?.version ?? SWAP_VERSION
+const swapVersion = byPackage.get('@arkade-os/swap')?.version
 const consumer = readJson(at(TAXI_CONSUMER, 'package.json'))
 const clientSpec = consumer.dependencies?.['@arkade-taxi/client']
 check(consumer.dependencies?.['@arkade-os/swap'] === swapVersion, `${TAXI_CONSUMER} must pin swap ${swapVersion}`)
@@ -182,21 +181,28 @@ try {
 }
 if (entry) {
   try {
-    assertInstalledPackages([at('package.json'), at(TAXI_CONSUMER, 'package.json')], manifest.artifacts, at(VENDOR_DIR))
+    const packageManifests = readdirSync(at('packages'), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && existsSync(at('packages', entry.name, 'package.json')))
+      .map((entry) => at('packages', entry.name, 'package.json'))
+    assertInstalledPackages([at('package.json'), ...packageManifests], manifest.artifacts, at(VENDOR_DIR))
   } catch (error) {
     failures.push(error.message)
   }
   failIfInvalid()
-  for (const [from, name, symbol, requiredMethod] of [
+  for (const [from, name, symbol, requiredMethod, subpath = '.'] of [
     [entry, '@arkade-os/sdk', CANDIDATE_SDK_SYMBOL],
     [entry, '@arkade-os/sdk', 'ServiceWorkerReadonlyWallet', 'onWalletUpdate'],
     [entry, '@arkade-os/sdk', 'ServiceWorkerReadonlyWallet', 'dispose'],
     [entry, '@arkade-os/sdk', 'IndexedDBVtxoReservationRepository', 'deleteReservationIfMatches'],
+    [entry, '@arkade-taxi/covenant', 'DUST_COVENANT_ARTIFACT'],
+    [entry, '@arkade-taxi/covenant', 'compileDustCovenant'],
+    [entry, '@arkade-taxi/covenant', 'dustCovenantArgs'],
     [at(TAXI_CONSUMER, 'package.json'), '@arkade-os/swap', SWAP_FILL_SYMBOL],
     [at(TAXI_CONSUMER, 'package.json'), '@arkade-os/swap', 'InMemoryAssetSwapRepository', 'createSwapRecordIfAbsent'],
+    [at('packages/solver-core/package.json'), '@arkade-os/swap', 'RFQ_CONTRACT_VERSION_KEY', undefined, './rfq-contract'],
   ]) {
     try {
-      await assertCandidateExport(packageRootFrom(from, name), name, symbol, '.', requiredMethod)
+      await assertCandidateExport(packageRootFrom(from, name), name, symbol, subpath, requiredMethod)
     } catch (error) {
       failures.push(error.message)
     }
