@@ -13,11 +13,19 @@
 import { describe, it, expect } from 'vitest'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { asset } from '@arkade-os/sdk'
-import { assetSwapContractVersion, offerVtxoScript } from '@arkade-os/swap/protocol'
+import {
+  ASSET_SWAP_V2,
+  ASSET_SWAP_V3,
+  assetSwapContractVersion,
+  decodeOffer,
+  offerContract,
+  offerVtxoScript,
+} from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
 import {
   offerExitDelay,
   offerFromTerms,
+  offerHexFrom,
   offerScriptFrom,
   xOnlyPubkey,
   type QuotedOfferTerms,
@@ -46,8 +54,35 @@ const terms = (over: Partial<QuotedOfferTerms> = {}): QuotedOfferTerms => ({
 const derive = offerScriptFrom(derivation)
 
 describe('offerScriptFrom', () => {
+  it.each([ASSET_SWAP_V2, ASSET_SWAP_V3] as const)('builds the explicitly selected %s program', (version) => {
+    const selected = derive(terms(), version)
+    const expected = offerContract(offerFromTerms(terms(), EMULATOR, EXIT), SERVER, version)
+    expect(selected.pkScript).toBe(hex.encode(expected.pkScript))
+    expect(selected.address).toBe(expected.address('tark', SERVER).encode())
+  })
+
+  it.each([ASSET_SWAP_V2, ASSET_SWAP_V3] as const)(
+    'preserves a recorded %s program while encoding its recovery offer',
+    (version) => {
+      const existing = offerContract(offerFromTerms(terms(), EMULATOR, EXIT), SERVER, version)
+      const encoded = offerHexFrom(derivation)(terms(), hex.encode(existing.pkScript), version)
+      expect(decodeOffer(hex.decode(encoded)).swapPkScript).toEqual(existing.pkScript)
+      expect(() =>
+        offerHexFrom(derivation)(terms({ wantAmount: 1_001n }), hex.encode(existing.pkScript), version),
+      ).toThrow()
+    },
+  )
+
+  it('refuses a recorded V3 script when its stored version is the V2 baseline', () => {
+    const recorded = derive(terms(), ASSET_SWAP_V3)
+    expect(() => offerHexFrom(derivation)(terms(), recorded.pkScript)).toThrow(/derive .*, not the offer script/)
+    expect(() => offerHexFrom(derivation)(terms(), recorded.pkScript, ASSET_SWAP_V2)).toThrow(
+      /derive .*, not the offer script/,
+    )
+  })
+
   it('compiles the same covenant the SDK does from the equivalent offer', () => {
-    const direct = offerVtxoScript(
+    const direct = offerContract(
       {
         wantAmount: 1_000n,
         wantAsset: asset.AssetId.fromString(USDA),

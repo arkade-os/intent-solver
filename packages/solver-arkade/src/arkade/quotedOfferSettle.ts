@@ -12,7 +12,6 @@
  * A throw leaves the row `stuck`, which is what a row disagreeing with the chain
  * needs: a human.
  */
-import { hex } from '@scure/base'
 import type { ArkadeContext } from './wallet.js'
 import { fulfillOffer, type FulfillOptions } from './offerFulfill.js'
 import { heldOf } from './offerFill.js'
@@ -24,6 +23,7 @@ import {
   type OfferDerivation,
   type QuotedOfferTerms,
 } from './offerTerms.js'
+import { hex } from '@scure/base'
 
 const assertSafeSats = (sats: bigint): number => {
   if (sats > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error(`deposit of ${sats} sats exceeds a safe integer`)
@@ -32,6 +32,7 @@ const assertSafeSats = (sats: bigint): number => {
 
 /** The negotiated row, structurally. `AssetRfqSwapRow` satisfies it. */
 export interface QuotedOfferIntent {
+  id: string
   offerPkScript: string
   fromAssetId: string | null
   fromAmount: bigint
@@ -41,6 +42,7 @@ export interface QuotedOfferIntent {
   makerPublicKey: string
   depositTxid: string | null
   depositVout: number | null
+  carrierTerms?: { mode: 'purchase' | 'recycle' | 'recycle_receiver' } | null
   /** The negotiated contract version; null is the baseline, asset-swap-v2. */
   contractVersion: string | null
 }
@@ -68,11 +70,12 @@ export const quotedOfferSettleFor = (
   const outpointsAt = deps.outpointsAt ?? ((pkScript: string) => liveOfferOutpoints(deps.ctx, pkScript))
   const fulfill = deps.fulfill ?? fulfillOffer
   const derive = offerScriptFrom(deps.derivation)
-  // The same normalisation `offerScriptFrom` applies, or the offer handed to
-  // `fulfillOffer` would carry a key the derived script was not compiled from.
   const emulatorPubkey = xOnlyPubkey(deps.derivation.emulatorPubkey)
 
   return async (intent, options) => {
+    if (intent.carrierTerms?.mode === 'recycle' || intent.carrierTerms?.mode === 'recycle_receiver') {
+      throw new Error(`${intent.carrierTerms.mode} settlement requires the dedicated receive-carrier adapter`)
+    }
     if (intent.depositTxid === null || intent.depositVout === null) {
       throw new Error(`the negotiation at ${intent.offerPkScript} records no deposit outpoint to spend`)
     }
@@ -123,6 +126,7 @@ export const quotedOfferSettleFor = (
         // an input that does not exist.
         assetAmount: intent.fromAssetId === null ? undefined : held,
       },
+      { kind: 'rfq', id: intent.id },
       options,
     )
   }

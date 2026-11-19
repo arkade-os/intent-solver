@@ -101,7 +101,7 @@ export interface E2eArkade {
   limits: Limits
   /** Cap passed to every service — generous, so a shared regtest wallet's other rows never refuse a test quote. */
   maxExposedSats: number
-  close(): void
+  close(): Promise<void>
 }
 
 /**
@@ -116,6 +116,7 @@ export const openArkade = async (): Promise<E2eArkade> => {
   const ctx = await createArkadeContext({
     mnemonic: required('WALLET_MNEMONIC'),
     operatorUrl: required('ARKADE_OPERATOR_URL'),
+    esploraUrl: process.env.ARKADE_ESPLORA_URL?.trim() || esploraUrl(),
     // The service's own resolution, not a copy of it: this suite is only
     // meaningful against the same wallet database the service opens.
     databasePath: walletDbPath(process.env),

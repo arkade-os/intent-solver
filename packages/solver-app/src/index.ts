@@ -224,6 +224,7 @@ export {
 } from '@arkade-os/solver-core/core/corridorDescriptor.js'
 export {
   RFQ_ASSET_SWAP_V2,
+  RFQ_ASSET_SWAP_V3,
   RFQ_CONTRACT_VERSIONS,
   RFQ_EVM_RECEIVE_V1,
   RFQ_EVM_SEND_V1,

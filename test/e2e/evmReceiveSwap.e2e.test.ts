@@ -49,7 +49,7 @@
 
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { beforeAll, describe, expect, it } from 'vitest'
+import { beforeAll, afterAll, describe, expect, it } from 'vitest'
 import { hex } from '@scure/base'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { EvmReceiveSwapService } from '@arkade-os/solver-corridors-evm/receive/evmOrchestrator.js'
@@ -185,6 +185,10 @@ beforeAll(async () => {
   })
   available = true
 }, 240_000)
+
+afterAll(async () => {
+  await arkade?.close()
+})
 
 const onBothStacks: typeof it = ((name: string, fn: any, timeout?: number) =>
   it(

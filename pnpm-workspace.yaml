@@ -1,2 +1,18 @@
-packages:
-  - 'packages/*'
+{
+  "packages": [
+    "packages/*"
+  ],
+  "onlyBuiltDependencies": [
+    "better-sqlite3",
+    "esbuild",
+    "protobufjs",
+    "@foundry-rs/anvil"
+  ],
+  "overrides": {
+    "@arkade-os/sdk": "file:packages/solver-app/vendor/carrier/arkade-os-sdk-0.5.9-taxi-v1-9674c5a1.tgz",
+    "@arkade-os/swap": "file:packages/solver-app/vendor/carrier/arkade-os-swap-0.2.0-taxi-v1-ba2996cd.tgz",
+    "@arkade-taxi/client": "file:packages/solver-app/vendor/carrier/arkade-taxi-client-1.0.0-3f4aaaad.tgz",
+    "@arkade-taxi/covenant": "file:packages/solver-app/vendor/carrier/arkade-taxi-covenant-1.0.0-3f4aaaad.tgz",
+    "@arkade-taxi/protocol": "file:packages/solver-app/vendor/carrier/arkade-taxi-protocol-1.0.0-3f4aaaad.tgz"
+  }
+}

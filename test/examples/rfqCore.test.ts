@@ -44,6 +44,11 @@ import {
 } from '../../examples/lib/rfq-core.mjs'
 import { buildAppFrom, relayIngressFrom } from '../support/transportFrom.js'
 
+const swapClientSpecifier = ['..', '..', 'examples', 'lib', 'swap-client.mjs'].join('/')
+const { deriveLockup } = (await import(swapClientSpecifier)) as {
+  deriveLockup: (input: Record<string, unknown>) => { candidates: { address: string }[] }
+}
+
 const INVOICE =
   'lnbc21u1pnk8larsp526g88ejh9ac0es9j6juxwenzdzvs6hcrphna5pp3jefpukmtk3hqpp5m206npk0fr6k45u8f90capqw48k3pzymlqhk0j98kyx4mz383pkqdz9235x2gr3w45kx6eqvfex7amwypnx77pqdf6k6urnyphhvetjyp6xsefqd3sh57fqv3hkwxqyp2xqcqz95rzjqv9ruzr6quwpsuwmyshlvenk0xm7djrtt8ugt2ja6cx3dkqtccdgvzzxeyqq28qqqqqqqqqqqqqqq9gq2y9qyysgqvu5k5w9q0xe62envhds058r9h8v5uak09hn3uzlw39sqkcuwh34j44gc53j6x6sg0u6yf6l0durxqqekytupxpf66zc7rc9cpav72ssqpcgv3p'
 const PAYMENT_HASH = 'da9fa986cf48f56ad387495f8e840ea9ed10889bf82f67c8a7b10d5d8a27886c'
@@ -267,12 +272,7 @@ describe('rfq-core.d.mts', () => {
    * renamed, a delay swapped, the legacy variant reordered — this fails, and
    * if it drifts in a way that does not, the copy is still correct.
    */
-  it('derives byte-identical lockups to the example client it mirrors', async () => {
-    const specifier = ['..', '..', 'examples', 'lib', 'swap-client.mjs'].join('/')
-    const { deriveLockup } = (await import(specifier)) as {
-      deriveLockup: (input: Record<string, unknown>) => { candidates: { address: string }[] }
-    }
-
+  it('derives byte-identical lockups to the example client it mirrors', () => {
     const quote = {
       solver_pubkey: key(1),
       refund_locktime: 1_800_000_000,

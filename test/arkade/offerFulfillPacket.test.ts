@@ -12,25 +12,33 @@
  * = 0`. Every other asset on every input must still be declared or arkd
  * answers ASSET_NOT_FOUND.
  */
-import { describe, it, expect, vi } from 'vitest'
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
 import { base64, hex } from '@scure/base'
 import { schnorr } from '@noble/curves/secp256k1.js'
-import { fulfillOffer, OfferNotSubmittedError } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
+import {
+  fulfillOffer,
+  offerInventoryFor,
+  OfferNotSubmittedError,
+} from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { sqliteExecutor } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { DirectFillAttempts } from '@arkade-os/solver-arkade/arkade/directFillAttempts.js'
+import { createDirectFillRecovery } from '@arkade-os/solver-app/ops/directFillRecovery.js'
 
 const state = vi.hoisted(() => ({
   vtxos: [] as unknown[],
   arkTx: undefined as string | undefined,
   prevTxs: new Map<string, string>(),
-  submitError: undefined as Error | undefined,
+  submissions: [] as { arkTx: string; checkpointTxs: string[] }[],
+  submissionError: undefined as string | undefined,
+  finalized: true,
 }))
 
 vi.mock('@arkade-os/sdk', async (importOriginal) => {
   const mod = await importOriginal<typeof import('@arkade-os/sdk')>()
   const SERVER = hex.decode('4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa')
-  // The SDK's `fillOffer` builds `RestOperatorProvider`; older SDKs named it `RestArkProvider`.
-  class OperatorProvider {
+  const TestArkProvider = class {
     async getInfo() {
       return {
         signerPubkey: `02${hex.encode(SERVER)}`,
@@ -45,10 +53,39 @@ vi.mock('@arkade-os/sdk', async (importOriginal) => {
   }
   return {
     ...mod,
-    RestArkProvider: OperatorProvider,
-    RestOperatorProvider: OperatorProvider,
+    RestArkProvider: TestArkProvider,
+    RestOperatorProvider: TestArkProvider,
     RestIndexerProvider: class {
-      async getVtxos() {
+      async getVtxos(options?: { outpoints?: { txid: string; vout: number }[] }) {
+        if (options?.outpoints && state.submissions.length) {
+          if (!state.finalized) return { vtxos: [] }
+          const sent = state.submissions.at(-1)!
+          const ark = mod.Transaction.fromPSBT(base64.decode(sent.arkTx))
+          const checkpoints = sent.checkpointTxs.map((psbt) => mod.Transaction.fromPSBT(base64.decode(psbt)))
+          return {
+            vtxos: options.outpoints.flatMap(
+              (
+                point,
+              ): Array<{
+                txid: string
+                vout: number
+                spentBy?: string
+                arkTxId?: string
+                script?: string
+                value?: number
+              }> => {
+                const index = checkpoints.findIndex((tx) => {
+                  const input = tx.getInput(0)
+                  return input.txid && hex.encode(input.txid) === point.txid && input.index === point.vout
+                })
+                if (index >= 0) return [{ ...point, spentBy: checkpoints[index]!.id, arkTxId: ark.id }]
+                if (point.txid !== ark.id) return []
+                const output = ark.getOutput(point.vout)
+                return [{ ...point, script: hex.encode(output.script!), value: Number(output.amount) }]
+              },
+            ),
+          }
+        }
         return { vtxos: state.vtxos }
       }
       async getVirtualTxs(txids: string[]) {
@@ -58,16 +95,21 @@ vi.mock('@arkade-os/sdk', async (importOriginal) => {
     RestEmulatorProvider: class {
       constructor(readonly url: string) {}
       async submitTx(arkTx: string, checkpointTxs: string[]) {
-        if (state.submitError) throw state.submitError
         state.arkTx = arkTx
+        state.submissions.push({ arkTx, checkpointTxs })
+        for (const raw of [arkTx, ...checkpointTxs]) {
+          state.prevTxs.set(mod.Transaction.fromPSBT(base64.decode(raw)).id, raw)
+        }
+        if (state.submissionError !== undefined) throw new Error(state.submissionError)
         return { signedArkTx: arkTx, signedCheckpointTxs: checkpointTxs }
       }
     },
   }
 })
 
-const { ArkAddress, Extension, MultisigTapscript, Transaction, VtxoScript, asset } = await import('@arkade-os/sdk')
-const { offerVtxoScript } = await import('@arkade-os/swap/protocol')
+const { ArkAddress, Extension, MultisigTapscript, Transaction, VtxoScript, RestIndexerProvider, asset } =
+  await import('@arkade-os/sdk')
+const { offerContract } = await import('@arkade-os/swap/protocol')
 type Offer = import('@arkade-os/swap/protocol').Offer
 
 const SERVER_KEY = hex.decode('4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa')
@@ -81,19 +123,32 @@ const identity = { xOnlyPublicKey: async () => takerKey, sign: async (tx: unknow
 
 /** Only what `fulfillOffer` and the SDK client below it reach for. `spendable`
  * is what the gate would have handed back, which is the half this repo keeps. */
-const ctx = (spendable: unknown[], read: () => Promise<unknown[]> = async () => spendable): ArkadeContext =>
-  ({
+let database: ReturnType<typeof sqliteExecutor>
+const ctx = async (spendable: unknown[]): Promise<ArkadeContext> => {
+  const reservations = createReservationLedger()
+  const address = new ArkAddress(SERVER_KEY, hex.decode('22'.repeat(32)), 'tark').encode()
+  const directFills = await DirectFillAttempts.open(
+    database,
+    reservations,
+    'packet-test-wallet',
+    hex.encode(ArkAddress.decode(address).pkScript),
+  )
+  return {
     wallet: {
       identity,
       arkServerPublicKey: SERVER_KEY,
-      getSpendableVtxos: read,
-      getAddress: async () => new ArkAddress(SERVER_KEY, hex.decode('22'.repeat(32)), 'tark').encode(),
+      indexerProvider: new RestIndexerProvider('http://ark'),
+      getSpendableVtxos: async () => spendable,
+      getAddress: async () => address,
       getContractManager: async () => null,
     },
     identity,
-    operatorUrl: 'http://arkade',
-    reservations: createReservationLedger(),
-  }) as unknown as ArkadeContext
+    reservations,
+    directFills,
+    dustSats: 330n,
+    operatorUrl: 'http://ark',
+  } as unknown as ArkadeContext
+}
 
 let minted = 0
 const mintCoin = (value: number) => {
@@ -126,7 +181,7 @@ const offerFor = (over: Record<string, unknown>): Offer => {
     emulatorPubkey: hex.decode(EMULATOR_KEY),
     ...over,
   } as Omit<Offer, 'swapPkScript'>
-  return { ...terms, swapPkScript: offerVtxoScript(terms, SERVER_KEY).pkScript } as Offer
+  return { ...terms, swapPkScript: offerContract(terms, SERVER_KEY).pkScript } as Offer
 }
 
 /**
@@ -147,7 +202,49 @@ const packetGroups = (): string[] => {
   return groupIds(Extension.fromTx(Transaction.fromPSBT(base64.decode(state.arkTx))).getAssetPacket())
 }
 
+beforeEach(() => {
+  database = sqliteExecutor(':memory:')
+  state.submissions = []
+  state.submissionError = undefined
+  state.finalized = true
+  state.arkTx = undefined
+})
+afterEach(() => database.close())
+
 describe('the asset packet fulfillOffer submits', () => {
+  it('claims the parent submission latch before sending the recorded graph', async () => {
+    const at = deposit([{ assetId: ASSET_B, amount: 900n }])
+    const context = await ctx([fundingCoin(80_000)])
+    const markSubmitting = vi.fn(async () => {
+      expect(state.submissions).toEqual([])
+      return true
+    })
+    await fulfillOffer(
+      context,
+      'http://emulator.test',
+      offerFor({ offerAsset: asset.AssetId.fromString(ASSET_B) }),
+      at,
+      {
+        markSubmitting,
+      },
+    )
+    expect(markSubmitting).toHaveBeenCalledOnce()
+    expect(state.submissions).toHaveLength(1)
+  })
+
+  it('abandons its unsent graph when another invocation owns the parent submission', async () => {
+    const at = deposit([{ assetId: ASSET_B, amount: 900n }])
+    const context = await ctx([fundingCoin(80_000)])
+    await expect(
+      fulfillOffer(context, 'http://emulator.test', offerFor({ offerAsset: asset.AssetId.fromString(ASSET_B) }), at, {
+        markSubmitting: async () => false,
+      }),
+    ).rejects.toBeInstanceOf(OfferNotSubmittedError)
+    expect(state.submissions).toEqual([])
+    expect(context.reservations.reserved().size).toBe(0)
+    expect(await context.directFills.list()).toEqual([])
+  })
+
   const deposit = (assets?: { assetId: string; amount: bigint }[]) => {
     const coin = { ...mintCoin(60_000), ...(assets ? { assets } : {}) }
     state.vtxos = [coin]
@@ -160,7 +257,7 @@ describe('the asset packet fulfillOffer submits', () => {
     const coins = [fundingCoin(80_000, [{ assetId: ASSET_A, amount: 600n }])]
 
     await fulfillOffer(
-      ctx(coins),
+      await ctx(coins),
       'http://emulator.test',
       offerFor({ wantAsset: asset.AssetId.fromString(ASSET_A) }),
       at,
@@ -183,7 +280,7 @@ describe('the asset packet fulfillOffer submits', () => {
     ]
 
     await fulfillOffer(
-      ctx(coins),
+      await ctx(coins),
       'http://emulator.test',
       offerFor({ wantAsset: asset.AssetId.fromString(ASSET_A) }),
       at,
@@ -197,7 +294,7 @@ describe('the asset packet fulfillOffer submits', () => {
     const at = deposit([{ assetId: ASSET_B, amount: 900n }])
 
     await fulfillOffer(
-      ctx([fundingCoin(80_000)]),
+      await ctx([fundingCoin(80_000)]),
       'http://emulator.test',
       offerFor({ offerAsset: asset.AssetId.fromString(ASSET_B) }),
       at,
@@ -206,124 +303,131 @@ describe('the asset packet fulfillOffer submits', () => {
     expect(packetGroups()).toEqual([ASSET_B])
   })
 
-  it('submits once, and refuses the other fill, when two race for one coin', async () => {
-    state.arkTx = undefined
+  const lostReplyFill = async () => {
     const at = deposit([{ assetId: ASSET_B, amount: 900n }])
-    const coins = [fundingCoin(80_000)]
-    let entered = 0
-    let open: () => void = () => {}
-    const barrier = new Promise<void>((resolve) => (open = resolve))
-    // Both read the float before either pins it, so the second sees the first's coin only if the pin lands in that turn.
-    const racing = ctx(coins, async () => {
-      entered += 1
-      if (entered === 2) open()
-      await barrier
-      return coins
-    })
-    const offer = offerFor({ offerAsset: asset.AssetId.fromString(ASSET_B) })
+    const coins = [fundingCoin(20_000), fundingCoin(30_000)]
+    const context = await ctx(coins)
+    const offer = offerFor({ wantAmount: 50_000n, offerAsset: asset.AssetId.fromString(ASSET_B) })
+    state.submissionError = 'accepted fill reply lost'
+    await expect(fulfillOffer(context, 'http://emulator.test', offer, at)).rejects.toThrow('accepted fill reply lost')
+    return { context, coins, offer, at }
+  }
 
-    const results = await Promise.allSettled([
-      fulfillOffer(racing, 'http://emulator.test', offer, at),
-      fulfillOffer(racing, 'http://emulator.test', offer, at),
-    ])
-
-    const refusals = results.flatMap((result) => (result.status === 'rejected' ? [String(result.reason)] : []))
-    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
-    expect(refusals).toEqual([expect.stringMatching(/no spendable coins/)])
-    expect(racing.reservations.reserved().size).toBe(0)
+  it('retains all selected funding after one ambiguous emulator submission without retrying it', async () => {
+    const { context, coins, offer, at } = await lostReplyFill()
+    expect(state.submissions).toHaveLength(1)
+    expect(state.submissions[0]?.checkpointTxs).toHaveLength(3)
+    expect(context.reservations.reserved()).toEqual(new Set(coins.map(({ txid, vout }) => `${txid}:${vout}`)))
+    expect((await offerInventoryFor(context)).get(null) ?? 0n).toBe(0n)
+    await expect(fulfillOffer(context, 'http://emulator.test', offer, at)).rejects.toThrow('no spendable coins')
+    expect(state.submissions).toHaveLength(1)
   })
 
-  it('latches the row once, and before anything reaches the emulator', async () => {
-    state.arkTx = undefined
-    const at = deposit([{ assetId: ASSET_B, amount: 900n }])
-    const submittedAtLatch: (string | undefined)[] = []
-    const markSubmitting = vi.fn(async () => {
-      submittedAtLatch.push(state.arkTx)
-      return true
-    })
-
-    await fulfillOffer(
-      ctx([fundingCoin(80_000)]),
-      'http://emulator.test',
-      offerFor({ offerAsset: asset.AssetId.fromString(ASSET_B) }),
-      at,
-      { markSubmitting },
-    )
-
-    expect(markSubmitting).toHaveBeenCalledTimes(1)
-    expect(submittedAtLatch).toEqual([undefined])
-    expect(state.arkTx).toBeDefined()
+  it('restores ambiguous direct-fill funding holds before a restarted context can admit another fill', async () => {
+    const { context, coins } = await lostReplyFill()
+    expect(context.reservations.reserved().size).toBe(2)
+    const restarted = await ctx(coins)
+    expect(restarted.reservations.reserved()).toEqual(new Set(coins.map(({ txid, vout }) => `${txid}:${vout}`)))
+    expect((await offerInventoryFor(restarted)).get(null) ?? 0n).toBe(0n)
+    expect(state.submissions).toHaveLength(1)
   })
 
-  it('submits nothing when the latch is lost, and says so retryably', async () => {
-    state.arkTx = undefined
+  it('does not treat a successful emulator reply as finality while the indexer is missing it', async () => {
     const at = deposit([{ assetId: ASSET_B, amount: 900n }])
-    const spending = ctx([fundingCoin(80_000)])
-
-    const outcome = await fulfillOffer(
-      spending,
-      'http://emulator.test',
-      offerFor({ offerAsset: asset.AssetId.fromString(ASSET_B) }),
-      at,
-      { markSubmitting: async () => false },
-    ).then(
-      () => null,
-      (error: unknown) => error,
-    )
-
-    expect(outcome).toBeInstanceOf(OfferNotSubmittedError)
-    expect(state.arkTx).toBeUndefined()
-    expect(spending.reservations.reserved().size).toBe(0)
-  })
-
-  it('leaves a FAILED latch write untyped — a broken database is not a clean refusal', async () => {
-    state.arkTx = undefined
-    const at = deposit([{ assetId: ASSET_B, amount: 900n }])
-    const spending = ctx([fundingCoin(80_000)])
-    const broken = new Error('database is locked')
-
-    const outcome = await fulfillOffer(
-      spending,
-      'http://emulator.test',
-      offerFor({ offerAsset: asset.AssetId.fromString(ASSET_B) }),
-      at,
-      {
-        markSubmitting: async () => {
-          throw broken
-        },
+    const context = await ctx([fundingCoin(80_000)])
+    state.finalized = false
+    await expect(
+      fulfillOffer(context, 'http://emulator.test', offerFor({ offerAsset: asset.AssetId.fromString(ASSET_B) }), at),
+    ).rejects.toThrow('finalization is not yet proven')
+    expect(state.submissions).toHaveLength(1)
+    expect(context.reservations.reserved().size).toBe(1)
+    expect((await context.directFills.list())[0]?.phase).toBe('submitting')
+    state.finalized = true
+    const recovery = createDirectFillRecovery({
+      attempts: context.directFills,
+      chain: context.wallet.indexerProvider,
+      parent: () => null,
+      coins: async () => [],
+      serverUnrollScript: {} as never,
+      graph: {
+        ark: { submitTx: vi.fn(), finalizeTx: vi.fn(), getPendingTxs: vi.fn() },
+        signer: identity as never,
+        serverKey: SERVER_KEY,
+        solverKeys: [hex.encode(takerKey)],
       },
-    ).then(
-      () => null,
-      (error: unknown) => error,
-    )
-
-    expect(outcome).toBe(broken)
-    expect(outcome).not.toBeInstanceOf(OfferNotSubmittedError)
-    expect(state.arkTx).toBeUndefined()
-    expect(spending.reservations.reserved().size).toBe(0)
+    })
+    await recovery.sweep()
+    expect(await context.directFills.list()).toEqual([])
+    expect(context.reservations.reserved().size).toBe(0)
+    expect(state.submissions).toHaveLength(1)
   })
 
-  it('leaves a rejection from the submission itself untyped, so no loop can retry it', async () => {
-    state.arkTx = undefined
+  it('sends nothing when the durable attempt cannot be inserted', async () => {
     const at = deposit([{ assetId: ASSET_B, amount: 900n }])
-    const spending = ctx([fundingCoin(80_000)])
-    const rejected = new Error('emulator refused the fill')
-    state.submitError = rejected
-    try {
-      const outcome = await fulfillOffer(
-        spending,
+    const context = await ctx([fundingCoin(80_000)])
+    const original = database.run
+    vi.spyOn(database, 'run').mockImplementation(async (sql, params) => {
+      if (sql.startsWith('INSERT INTO direct_fill_attempt')) throw new Error('database full')
+      return original(sql, params)
+    })
+    await expect(
+      fulfillOffer(context, 'http://emulator.test', offerFor({ offerAsset: asset.AssetId.fromString(ASSET_B) }), at),
+    ).rejects.toThrow('database full')
+    expect(state.submissions).toEqual([])
+    expect(context.reservations.reserved().size).toBe(0)
+  })
+
+  it('acknowledges a positively finalized standalone fill without requiring an application recovery service', async () => {
+    const at = deposit([{ assetId: ASSET_B, amount: 900n }])
+    const context = await ctx([fundingCoin(80_000)])
+    const txid = await fulfillOffer(
+      context,
+      'http://emulator.test',
+      offerFor({ offerAsset: asset.AssetId.fromString(ASSET_B) }),
+      at,
+    )
+    expect(txid).toBe(Transaction.fromPSBT(base64.decode(state.submissions[0]!.arkTx)).id)
+    expect(state.submissions).toHaveLength(1)
+    expect(await context.directFills.list()).toEqual([])
+    expect(context.reservations.reserved().size).toBe(0)
+    const restarted = await ctx([fundingCoin(80_000)])
+    expect(await restarted.directFills.list()).toEqual([])
+  })
+
+  it.each(['offer', 'rfq'] as const)(
+    'keeps a finalized %s fill pinned until its parent acknowledges it',
+    async (kind) => {
+      const at = deposit([{ assetId: ASSET_B, amount: 900n }])
+      const context = await ctx([fundingCoin(80_000)])
+      const txid = await fulfillOffer(
+        context,
         'http://emulator.test',
         offerFor({ offerAsset: asset.AssetId.fromString(ASSET_B) }),
         at,
-      ).then(
-        () => null,
-        (error: unknown) => error,
+        { kind, id: 'row' },
       )
-      expect(outcome).toBe(rejected)
-      expect(outcome).not.toBeInstanceOf(OfferNotSubmittedError)
-      expect(spending.reservations.reserved().size).toBe(0)
-    } finally {
-      state.submitError = undefined
-    }
-  })
+      expect((await context.directFills.list())[0]).toMatchObject({ phase: 'settled', acknowledged: false })
+      expect(context.reservations.reserved().size).toBe(1)
+      const parent = { recoverDirectFill: vi.fn(async () => true), cancelDirectFill: vi.fn() }
+      await createDirectFillRecovery({
+        attempts: context.directFills,
+        chain: context.wallet.indexerProvider,
+        parent: () => parent,
+        coins: async () => [],
+        serverUnrollScript: {} as never,
+        graph: {
+          ark: { submitTx: vi.fn(), finalizeTx: vi.fn(), getPendingTxs: vi.fn() },
+          signer: identity as never,
+          serverKey: SERVER_KEY,
+          solverKeys: [hex.encode(takerKey)],
+        },
+      }).sweep()
+      expect(parent.recoverDirectFill).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'row', depositTxid: at.txid }),
+        txid,
+      )
+      expect(context.reservations.reserved().size).toBe(0)
+      expect(state.submissions).toHaveLength(1)
+    },
+  )
 })

@@ -71,7 +71,7 @@ describe('block-typed timelocks against a live arkd', () => {
     advertisedExitDelay = Number(info.unilateralExitDelay)
   }, SETUP_TIMEOUT_MS)
 
-  afterAll(() => arkade?.close())
+  afterAll(async () => await arkade?.close())
 
   it('is running against a block-typed arkd, or says why it is not', () => {
     const { unit } = relativeDelayFrom(advertisedExitDelay)

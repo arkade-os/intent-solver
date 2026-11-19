@@ -181,7 +181,8 @@ const floatServices = (
   ({
     arkade: {
       wallet: {
-        settle: boarding.settle ?? (async () => 'settle-txid'),
+        settle: async (params: SettleParams) => (boarding.settle ?? (async () => 'settle-txid'))(params),
+        intentRepository: { getLockedVtxoOutpoints: async () => [] },
         getBoardingUtxos: async () => boarding.boarded ?? [],
         // Read by resplitFloat after a renewal; empty means the float needs no reshaping.
         getSpendableVtxos: async () => [],
@@ -720,7 +721,7 @@ describe('runFloatLifecycle keeps renewal off reserved coins', () => {
 
     expect(settle).not.toHaveBeenCalled()
     expect(report.renewed).toBeNull()
-    expect(report.failures.join(' ')).toContain('pinned')
+    expect(report.failures.join(' ')).toContain('reserved')
   })
 })
 

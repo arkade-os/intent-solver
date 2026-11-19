@@ -88,7 +88,12 @@ export const registerDiagnosticsRoutes = (app: Hono, deps: AdminDeps): void => {
       }
     })
 
+    const directFills = services.directFillRecovery
+      ? await attempt(() => services.directFillRecovery!.diagnostics())
+      : { value: null, error: null }
     return c.json({
+      directFills: directFills.value,
+      directFillsError: directFills.error,
       btcRail: Boolean(services.ln),
       backends,
       relay: deps.relay ? { url: deps.relay.url, connected: deps.relay.isConnected() } : null,

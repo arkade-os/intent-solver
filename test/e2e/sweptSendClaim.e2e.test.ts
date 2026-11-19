@@ -50,7 +50,7 @@ describe('a swept send-leg lockup is claimed through a batch', () => {
     arkade = await openArkade()
   }, SETUP_TIMEOUT_MS)
 
-  afterAll(() => arkade?.close())
+  afterAll(async () => await arkade?.close())
 
   it(
     'proves the preimage and pays the receiver from the swept lockup',

@@ -492,6 +492,12 @@ one.
   receives. A solver predating the field refuses it as an unknown field, so a
   client that can also derive the baseline retries without it.
 
+  Asset swaps support `asset-swap-v3` (the canonical compiled active-input
+  programs) and `asset-swap-v2`. The selected version is fixed per quote;
+  versionless requests retain V2. The quote records its selected version;
+  older rows without one remain V2. Recovery derives that stored version and
+  fixed terms before comparing the exact recorded script.
+
 ### 4.2 `rfq_quote`
 
 ```json

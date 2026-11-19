@@ -21,7 +21,7 @@
  * `pricefeed` service on 8088. Skipped, not failed, when either is absent.
  */
 
-import { beforeAll, describe, expect, it } from 'vitest'
+import { beforeAll, afterAll, describe, expect, it } from 'vitest'
 import { asTimelockHeight } from '@arkade-os/solver-core/ports/evm.js'
 import { hex } from '@scure/base'
 import { EvmSendSwapService } from '@arkade-os/solver-corridors-evm/send/evmOrchestrator.js'
@@ -99,6 +99,10 @@ beforeAll(async () => {
   })
   available = true
 }, 180_000)
+
+afterAll(async () => {
+  await arkade?.close()
+})
 
 const itOnStack: typeof it = ((name: string, fn: any, timeout?: number) =>
   it(

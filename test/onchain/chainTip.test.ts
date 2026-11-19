@@ -50,6 +50,18 @@ describe('esploraChainTip', () => {
     expect(await tip.height()).toBe(900)
   })
 
+  it('serves no cached height at all when asked for none, even if the clock steps backwards', async () => {
+    let now = 10_000
+    let height = 812
+    const getText = vi.fn(async () => String(height))
+    const tip = esploraChainTip(client(getText), { cacheMs: 0, now: () => now })
+    expect(await tip.height()).toBe(812)
+    height = 900
+    now = 0
+    expect(await tip.height()).toBe(900)
+    expect(getText).toHaveBeenCalledTimes(2)
+  })
+
   it.each(['', 'not-a-height', '0', '-1', '812.5'])('throws rather than returning %s as a height', async (raw) => {
     // A NaN height silently makes every `tipHeight >= locktime` comparison false,
     // so every refund would look permanently unripe and nothing would ever be

@@ -11,6 +11,7 @@ export const FULL_DOCUMENT = {
       esploraUrl: 'http://localhost:3000/api',
       unilateralExitDelay: 260096,
       covclaimdUrl: 'http://localhost:7080',
+      taxiUrl: 'http://localhost:8080',
       poolAutoMint: false,
       contractRetentionDays: 30,
     },

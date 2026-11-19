@@ -175,9 +175,29 @@ exact boundaries. The orchestrator holds the one rule that matters
 operationally: **the row is the truth**; every step commits intent before the
 irreversible side effect and is safe to re-run from any crash.
 
+### Taxi carrier integration
+
+Set `rails.arkade.taxiUrl` to enable the configured Taxi receive-carrier adapter.
+The receiver may also choose its own Taxi. Quotes bind the operator, asset,
+recipient, fare and expiry before funding. An uncertain submission retains its
+recorded graph and inputs for reconciliation; it is never retried as a new fill.
+`TAXI_RECEIVER_ALLOW_PRIVATE=1` permits private receiver-selected endpoints for
+regtest and is refused on Bitcoin mainnet.
+
+The solver stores batch registrations in its wallet SQLite database. A failed
+renewal keeps its durable input locks until confirmed cancellation or settlement;
+startup and lifecycle reconciliation recover ownership after a lost response.
+
+Freeze updated SDK, swap and Taxi packages from their clean pinned sources with
+`node scripts/carrier-artifacts/pack.mjs --sdk <sdk-checkout> --taxi <taxi-checkout> --sdk-bundle <sdk-bundle>`.
+The swap candidate loads the compiled artifacts from its canonical `.ark` offer
+definitions; the manifest records the independent SDK and swap source commits.
+Update source pins, the manifest and `pnpm-workspace.yaml` overrides together,
+then run `pnpm install` and `pnpm verify:artifacts --installed`.
+
 ## Running it
 
-- **Node 22 or 24** (`engines.node` is `>=22.6.0 <27`). Both ends are exercised
+- **Node 22 or 24** (`engines.node` is `>=22.13.0 <27`). Both ends are exercised
   in CI — the whole suite runs under `node:22-slim` and `node:24-slim`, and the
   Docker image is built and smoke-tested on both — so the range is a tested
   claim rather than a declaration. **22 is active LTS until April 2027 and stays

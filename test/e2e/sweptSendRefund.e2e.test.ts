@@ -40,7 +40,7 @@ describe('a swept send-leg lockup is refunded through a batch', () => {
     arkade = await openArkade()
   }, SETUP_TIMEOUT_MS)
 
-  afterAll(() => arkade?.close())
+  afterAll(async () => await arkade?.close())
 
   it(
     'returns the client their sats and leaves the lockup spent',

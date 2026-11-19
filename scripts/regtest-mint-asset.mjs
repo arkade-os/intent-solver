@@ -67,5 +67,5 @@ if ((after.availableAssets ?? []).length === 0) {
   console.log('the same unsettled issuance. Run:')
   console.log('  node --experimental-eventsource --env-file=<env> scripts/regtest-settle.mjs')
 }
-arkade.close()
+await arkade.close()
 process.exit(0)

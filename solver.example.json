@@ -10,6 +10,7 @@
       "esploraUrl": "https://mempool.arkade.sh/api",
       "unilateralExitDelay": 260096,
       "covclaimdUrl": "https://covclaimd.example.com",
+      "taxiUrl": "https://taxi.example.com",
       "poolAutoMint": false,
       "contractRetentionDays": 30
     },

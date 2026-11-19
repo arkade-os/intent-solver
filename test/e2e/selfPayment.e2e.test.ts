@@ -76,6 +76,7 @@ describe('e2e self-payment refresh (lightning:BTC->arkade:BTC coupled to arkade:
   afterAll(async () => {
     await receiveStore?.close()
     sendStore?.close()
+    await arkade?.close()
   })
 
   it(

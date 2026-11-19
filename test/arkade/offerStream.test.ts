@@ -5,9 +5,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { getEventListeners } from 'node:events'
 import {
-  EventSourceUnavailableError,
   configureEventSource,
-  type EventSourceLike,
+  EventSourceUnavailableError,
   type SubscriptionEvent,
   type SubscriptionHeartbeat,
 } from '@arkade-os/sdk'
@@ -18,6 +17,7 @@ import {
 } from '@arkade-os/solver-arkade/arkade/offerStream.js'
 
 type Message = SubscriptionEvent | SubscriptionHeartbeat
+type NativeListener = Parameters<EventTarget['addEventListener']>[1]
 
 const event = (txid: string, tx?: string): SubscriptionEvent => ({
   type: 'event',
@@ -101,6 +101,7 @@ const driveFailing = (
 }
 
 afterEach(() => {
+  configureEventSource()
   vi.useRealTimers()
   vi.unstubAllGlobals()
 })
@@ -126,8 +127,14 @@ describe('streamOfferTxs', () => {
       }
       close() {}
     }
-    // The SDK prefers its fetch-based SSE over the global, so the fake goes in through its own hook.
-    configureEventSource((u) => new FakeEventSource(u) as unknown as EventSourceLike)
+    configureEventSource((url) => {
+      const source = new FakeEventSource(url)
+      return {
+        addEventListener: (type, listener) => source.addEventListener(type, listener as NativeListener),
+        removeEventListener: (type, listener) => source.removeEventListener(type, listener as NativeListener),
+        close: () => source.close(),
+      }
+    })
     const signal = AbortSignal.timeout(2_000)
     const got = await collect(streamOfferTxs({ arkdUrl: `${url}/`, signal }), 1).finally(() =>
       configureEventSource(undefined),

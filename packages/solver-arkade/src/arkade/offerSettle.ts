@@ -45,6 +45,7 @@ import {
  * dependency, and `OfferFillRow` satisfies them.
  */
 export interface OfferFillIntent {
+  id: string
   offerTxid: string
   offerVout: number
   offerPkScript: string
@@ -195,6 +196,7 @@ export const offerSettleFor = (
         value: found.value,
         assetAmount,
       },
+      { kind: 'offer', id: intent.id },
       options,
     )
   }

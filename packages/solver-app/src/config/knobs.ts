@@ -48,6 +48,7 @@ export const PATHS: readonly Row[] = [
   ['rails.arkade.esploraUrl', 'ARKADE_ESPLORA_URL'],
   ['rails.arkade.unilateralExitDelay', 'ARKADE_UNILATERAL_EXIT_DELAY'],
   ['rails.arkade.covclaimdUrl', 'COVCLAIMD_URL'],
+  ['rails.arkade.taxiUrl', 'TAXI_URL'],
   ['rails.arkade.poolAutoMint', 'POOL_AUTO_MINT'],
   ['rails.arkade.contractRetentionDays', 'CONTRACT_RETENTION_DAYS'],
   ['rails.lightning.backend', 'LN_BACKEND'],

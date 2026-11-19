@@ -12,7 +12,7 @@
  */
 import { asset, type RelativeTimelock } from '@arkade-os/sdk'
 import { isEncodableRelativeDelay, relativeDelayFrom } from '@arkade-os/solver-core/core/timelocks.js'
-import { assetSwapContractVersion, offerVtxoScript, type Offer } from '@arkade-os/swap/protocol'
+import { assetSwapContractVersion, encodeOffer, offerContract, type Offer } from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
 
 /**
@@ -97,26 +97,47 @@ export const offerFromTerms = (
   exitDelay,
 })
 
-/**
- * Bind a derivation to this deployment's keys and network.
- *
- * Curried because `AssetRfqDeps.deriveOffer` is a one-argument port: the terms
- * are the only thing that varies per quote.
- */
+/** Bind deployment keys while keeping each quote's selected program independent. */
 export const offerScriptFrom = (
   deps: OfferDerivation,
 ): ((terms: QuotedOfferTerms, contractVersion?: string) => { pkScript: string; address: string }) => {
   const emulatorPubkey = xOnlyPubkey(deps.emulatorPubkey)
   return (terms, contractVersion) => {
-    const script = offerVtxoScript(
+    const script = offerContract(
       offerFromTerms(terms, emulatorPubkey, deps.exitDelay),
       deps.serverPubkey,
-      // Explicit, not the SDK default: absent is the wire baseline; an unknown id throws.
       assetSwapContractVersion(contractVersion),
     )
     // Both from the SAME compiled script: the address is what the client is
     // told and the pkScript is what the deposit is recognised by, so two
     // compilations could disagree about one covenant.
     return { pkScript: hex.encode(script.pkScript), address: script.address(deps.hrp, deps.serverPubkey).encode() }
+  }
+}
+
+/**
+ * The same covenant, encoded — what a fill builder takes instead of a script.
+ *
+ * Compiled from the terms rather than read off the row, and refusing when the
+ * result does not derive the script the client was actually told to fund: an
+ * offer that encodes one covenant while the deposit sits at another describes a
+ * spend of something else.
+ */
+export const offerHexFrom = (
+  deps: OfferDerivation,
+): ((terms: QuotedOfferTerms, offerPkScript: string, contractVersion?: string) => string) => {
+  const derive = offerScriptFrom(deps)
+  const emulatorPubkey = xOnlyPubkey(deps.emulatorPubkey)
+  return (terms, offerPkScript, contractVersion) => {
+    const derived = derive(terms, contractVersion)
+    if (derived.pkScript.toLowerCase() !== offerPkScript.toLowerCase()) {
+      throw new Error(`the recorded terms derive ${derived.pkScript}, not the offer script ${offerPkScript}`)
+    }
+    return hex.encode(
+      encodeOffer({
+        ...offerFromTerms(terms, emulatorPubkey, deps.exitDelay),
+        swapPkScript: hex.decode(derived.pkScript),
+      }),
+    )
   }
 }

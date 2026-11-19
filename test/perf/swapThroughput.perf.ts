@@ -993,8 +993,8 @@ describe('perf — parallel swaps across all three corridors', () => {
     }
     await ln?.close()
     await onchain?.close?.()
-    fleet?.close()
-    arkade?.close()
+    await fleet?.close()
+    await arkade?.close()
   })
 
   it(
