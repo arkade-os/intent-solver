@@ -208,6 +208,9 @@ importers:
 
   packages/solver-core:
     dependencies:
+      '@arkade-os/swap':
+        specifier: 0.1.8
+        version: 0.1.8(nostr-tools@2.24.1(typescript@5.9.3))
       '@noble/curves':
         specifier: ^2.2.0
         version: 2.2.0
