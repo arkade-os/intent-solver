@@ -96,8 +96,7 @@ const FEED = { mantissa: 100_000n, scale: 0 }
 
 describe('resolveAssetQuote — the two amounts a quote resolves', () => {
   it('prices one whole BTC into the asset leg, fee folded into the spread', () => {
-    // mid = 1e8 sats * 1e5 quote/base * 1e6 / 1e8 = 1e11 atomic = 100 000.000000
-    // fee = ceil(1e11 * 50 / 1e4) = 5e8;  payout = 1e11 - 5e8
+    // 1e8 sats * 1e5 quote/base * 1e6 / 1e8 = 1e11 atomic = 100 000.000000, less 50 bps
     const outcome = resolveAssetQuote({
       pair: { from: null, to: ASSET_A },
       amount: 100_000_000n,
@@ -118,7 +117,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
       fromAmount: 100_000_000n,
       toAmount: 100_000_000_000n,
     })
-    // Giving quote takes buyBaseFeeBps = 900: 1e8 - ceil(1e8 * 900 / 1e4).
+    // Giving quote takes buyBaseFeeBps = 900, off a 1e8-sat conversion.
     expect(resolveAssetQuote({ ...args, pair: { from: ASSET_A, to: null }, amount: 100_000_000_000n })).toEqual({
       ok: true,
       fromAmount: 100_000_000_000n,
@@ -135,7 +134,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
   })
 
   it('prices the mirror direction, asset in and sats out', () => {
-    // mid = 1e11 * 1e8 / (1e6 * 1e5) = 1e8 sats;  fee = ceil(1e8*50/1e4) = 5e5
+    // 1e11 * 1e8 / (1e6 * 1e5) = 1e8 sats, less 50 bps
     const outcome = resolveAssetQuote({
       pair: { from: ASSET_A, to: null },
       amount: 100_000_000_000n,
@@ -204,12 +203,8 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
     expect(outcome).toEqual({ ok: true, fromAmount: 100_000_000n, toAmount: 10n ** 18n })
   })
 
-  /**
-   * The rounding direction, isolated. A payout with a fractional remainder must
-   * round DOWN and a fee must round UP — both against the client — because the
-   * alternative is the solver funding a sub-unit of every swap out of its float.
-   */
-  it('rounds the payout down and the fee up, never the other way', () => {
+  /** The direction, isolated: a fractional payout rounds DOWN, never out of the float. */
+  it('rounds the payout down, never up', () => {
     const market: AssetQuoteMarket = { ...MARKET, feeBps: 1 }
     const outcome = resolveAssetQuote({
       pair: { from: null, to: ASSET_A },
@@ -222,8 +217,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
       // shift is deliberately fractional.
       feed: { mantissa: 7n, scale: 3 },
     })
-    // mid = floor(3 * 7 * 1e6 / (1e8 * 1e3)) = floor(0.00021) = 0 -> the fee
-    // has nothing to take, and a zero payout is not a swap.
+    // floor(3 * 7 * 1e6 * 9999 / (1e8 * 1e3 * 1e4)) = 0, and a zero payout is not a swap.
     expect(outcome).toEqual({ ok: false, reason: 'fee_consumes_swap' })
   })
 
@@ -389,7 +383,7 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
    * emulator code-13. The carrier fixes that at the root: output 0 lands at 429.
    */
   it('quotes a sub-dust payout once the returned carrier lifts output 0 clear', () => {
-    // mid = 100_000 / 1000 = 100 sats; fee = ceil(100 * 50 / 10_000) = 1.
+    // 100_000 / 1000 = 100 sats, less 50 bps = 99; the returned carrier adds 330.
     expect(
       resolveAssetQuote({
         pair: { from: ASSET_A, to: null },

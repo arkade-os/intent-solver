@@ -3,7 +3,11 @@ import type { Price } from './priceFeed.js'
 const BPS = 10_000n
 const pow10 = (n: number): bigint => 10n ** BigInt(n)
 
-/** Exact-in payout after conversion, then payout-side bps, with optional feed tolerance. */
+/**
+ * Exact-in payout: ONE floor over the conceded value, with optional feed tolerance.
+ * Not a floored mid minus a ceiled fee, which paid an atomic unit under what the
+ * published client's `computeWantAmount` predicts from the same card.
+ */
 export const assetExactInPayout = (args: {
   netInput: bigint
   givesBase: boolean
@@ -18,11 +22,10 @@ export const assetExactInPayout = (args: {
   const baseUnit = pow10(baseDecimals)
   const quoteUnit = pow10(quoteDecimals)
   const tolerance = BigInt(toleranceBps)
-  const mid = givesBase
-    ? (netInput * feed.mantissa * (BPS + tolerance) * quoteUnit) / (baseUnit * scale * BPS)
-    : (netInput * baseUnit * scale * BPS) / (quoteUnit * feed.mantissa * (BPS - tolerance))
-  const fee = (mid * BigInt(feeBps) + BPS - 1n) / BPS
-  return mid - fee
+  const net = BPS - BigInt(feeBps)
+  return givesBase
+    ? (netInput * feed.mantissa * (BPS + tolerance) * quoteUnit * net) / (baseUnit * scale * BPS * BPS)
+    : (netInput * baseUnit * scale * net) / (quoteUnit * feed.mantissa * (BPS - tolerance))
 }
 
 /**

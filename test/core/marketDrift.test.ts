@@ -128,11 +128,21 @@ describe('the mark moves with the market, which is the whole point', () => {
    * where the claim survives.
    */
   it('reads the spread on a flat market, and both legs agree at ordinary fees', () => {
-    for (const feeBps of [1, 30, 50, 99]) {
+    for (const feeBps of [30, 50, 99]) {
       const m = market({ feeBps })
       expect(fill({ quoteFeed: FEED, fillFeed: FEED, market: m, givesBase: true }).marketDriftBps).toBe(feeBps)
       expect(fill({ quoteFeed: FEED, fillFeed: FEED, market: m, givesBase: false }).marketDriftBps).toBe(feeBps)
     }
+  })
+
+  /**
+   * This leg concedes EXACTLY 1 bp (166 650 of a 166 666.67-sat mid) and the drift
+   * truncates, so 0.9999 reads as 0. The ceiled fee used to overshoot to 1.05.
+   */
+  it('truncates an exactly-one-bp spread to zero on the buying leg', () => {
+    const m = market({ feeBps: 1 })
+    expect(fill({ quoteFeed: FEED, fillFeed: FEED, market: m, givesBase: true }).marketDriftBps).toBe(1)
+    expect(fill({ quoteFeed: FEED, fillFeed: FEED, market: m, givesBase: false }).marketDriftBps).toBe(0)
   })
 
   it('diverges from feeBps on the buying leg at a large fee, as the ratio says it must', () => {
