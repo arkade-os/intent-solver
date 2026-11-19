@@ -1,8 +1,8 @@
-import { defineMachine, type StateOf } from '../../core/stateMachine.js'
 import type { Amount } from '../shared/amount.js'
 import type { ValueOf } from '../shared/brand.js'
 import type { Rail } from '../shared/endpoint.js'
 import { IllegalTransition, InvalidValue } from '../shared/error.js'
+import { defineMachine, type StateOf } from '../shared/state_machine.js'
 
 export const Side = {
   From: 'from',

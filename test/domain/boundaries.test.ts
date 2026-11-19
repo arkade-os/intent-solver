@@ -11,8 +11,7 @@ describe('domain boundaries', () => {
       readdirSync(`${DOMAIN}${context}`).flatMap((file) =>
         [...readFileSync(`${DOMAIN}${context}/${file}`, 'utf8').matchAll(IMPORT)]
           .map(([, specifier]) => specifier!)
-          // The one way out of the domain: the state machine helper, pinned in core by its own no-imports guard.
-          .filter((s) => s.startsWith('../') && !s.startsWith('../shared/') && s !== '../../core/stateMachine.js')
+          .filter((s) => s.startsWith('../') && !s.startsWith('../shared/'))
           .map((specifier) => `${context}/${file} imports ${specifier}`),
       ),
     )
