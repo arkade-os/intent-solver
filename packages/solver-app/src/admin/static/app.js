@@ -244,41 +244,104 @@ const assetLabel = (asset) =>
  * rather than being applied, so nothing here is a number an operator could
  * compare against a taker's request and be wrong by a power of ten.
  */
-const assetRows = (balance) => {
-  if (balance === null || typeof balance !== 'object') return null
-  const held = Array.isArray(balance.assets) ? balance.assets : []
-  if (held.length === 0) return null
-  const available = new Map(
-    (Array.isArray(balance.availableAssets) ? balance.availableAssets : []).map((a) => [a.assetId, a.amount]),
-  )
-  return h(
+const assetAmount = (available, held, decimals) =>
+  h(
     'span',
-    held.map((asset, index) => {
-      const spendable = available.get(asset.assetId) ?? '0'
-      return h(
-        'span',
-        index > 0 ? h('span.faint', ' · ') : null,
-        assetLabel(asset),
-        ' ',
-        h('span', spendable),
-        spendable === asset.amount ? null : h('span.muted', ` of ${asset.amount} held`),
-        typeof asset.decimals === 'number' && asset.decimals > 0 ? h('span.faint', ` (${asset.decimals}dp)`) : null,
-      )
-    }),
+    h('span', available),
+    held === null ? h('span.muted', ' none held') : available === held ? null : h('span.muted', ` of ${held} held`),
+    typeof decimals === 'number' && decimals > 0 ? h('span.faint', ` (${decimals}dp)`) : null,
   )
+
+/** Every asset an enabled market trades, held or not, then every other asset held; each with those markets. */
+const assetHoldings = (balance, markets) => {
+  const held = new Map((Array.isArray(balance?.assets) ? balance.assets : []).map((a) => [a.assetId, a]))
+  const available = new Map(
+    (Array.isArray(balance?.availableAssets) ? balance.availableAssets : []).map((a) => [a.assetId, a.amount]),
+  )
+  const tradedBy = new Map()
+  for (const market of markets ?? []) {
+    if (!market.enabled) continue
+    for (const leg of [market.base, market.quote]) {
+      if (leg !== null && leg !== 'BTC') tradedBy.set(leg, [...(tradedBy.get(leg) ?? []), market])
+    }
+  }
+  return [...tradedBy.keys(), ...[...held.keys()].filter((id) => !tradedBy.has(id))].map((assetId) => ({
+    assetId,
+    asset: held.get(assetId) ?? null,
+    available: available.get(assetId) ?? '0',
+    markets: tradedBy.get(assetId) ?? [],
+  }))
+}
+
+/** A market card's `spendable` row: what the solver could pay out of each asset leg now. */
+const marketSpendable = (market) => {
+  const legs = [market.base, market.quote].filter((leg) => leg !== null && leg !== 'BTC')
+  if (legs.length === 0) return []
+  const b = state.data.overviewBalances ?? state.overview?.balances
+  const find = (list, leg) => (Array.isArray(list) ? list : []).find((a) => a.assetId === leg)
+  return [
+    h('dt', 'spendable'),
+    h(
+      'dd',
+      state.data.overviewBalanceError || b?.arkadeError || (b && !b.arkade)
+        ? h('span.muted', 'unavailable')
+        : !b
+          ? '…'
+          : legs.map((leg, index) => {
+              const held = find(b.arkade.assets, leg)
+              const available = find(b.arkade.availableAssets, leg)?.amount ?? '0'
+              return h(
+                'span',
+                index > 0 ? ' · ' : null,
+                legName(leg),
+                ' ',
+                assetAmount(available, held?.amount ?? null, held?.decimals),
+              )
+            }),
+    ),
+  ]
 }
 
 /**
- * The `assets` row of a `dl.kv`, or nothing at all when no asset is held.
- *
- * Returns the pair so the row disappears entirely for a sats-only solver rather
- * than showing an empty label — most operators never hold one, and a permanent
- * blank row is a question they have to re-answer on every glance.
+ * The wallet's assets, open on the page. A traded asset the solver holds none of
+ * still gets its row: that market is one it cannot pay out of. No panel at all
+ * for a sats-only solver with no asset market.
  */
-const assetRowsPair = (balance) => {
-  const rows = assetRows(balance)
-  return rows ? [h('dt', 'assets'), h('dd', rows)] : []
+const walletAssetsPanel = (balance, markets) => {
+  const rows = assetHoldings(balance, markets)
+  if (rows.length === 0) return null
+  return h(
+    'section.panel.wallet-assets',
+    h('h2', 'Assets'),
+    h(
+      'table',
+      h('thead', h('tr', h('th', 'asset'), h('th', 'spendable'), h('th', 'markets'))),
+      h(
+        'tbody',
+        rows.map(({ assetId, asset, available, markets: traded }) =>
+          h(
+            'tr',
+            h('td', asset ? assetLabel(asset) : legNode(assetId)),
+            h('td', assetAmount(available, asset?.amount ?? null, asset?.decimals)),
+            h(
+              'td',
+              traded.length === 0
+                ? h('span.muted', 'none')
+                : traded.map((market, index) =>
+                    h('span', index > 0 ? ', ' : null, legName(market.base), '/', legName(market.quote)),
+                  ),
+            ),
+          ),
+        ),
+      ),
+    ),
+  )
 }
+
+/** Always a node, so `paintStatus` can fill it in place when the markets land after the wallet. */
+const walletAssets = (wallet) =>
+  (wallet.arkade.balanceError ? null : walletAssetsPanel(wallet.arkade.balance, state.overview?.markets)) ??
+  h('div.wallet-assets-slot')
 
 /* ---- end assets block --------------------------------------------------- */
 
@@ -703,6 +766,7 @@ const marketCard = (market) =>
       ),
       h('dt', 'state'),
       h('dd', marketState(market)),
+      ...marketSpendable(market),
       h('dt', 'sell base'),
       h('dd', marketBounds(market.sellBase, market.baseDecimals)),
       h('dt', 'buy base'),
@@ -722,7 +786,7 @@ const marketCard = (market) =>
 // them would push the exposure figure below the fold.
 const marketsPanel = (o) => {
   const markets = o.markets ?? []
-  return markets.length === 0 ? null : h('div.panels', ...markets.map(marketCard))
+  return markets.length === 0 ? null : h('div.panels', { id: 'overview-markets' }, ...markets.map(marketCard))
 }
 
 /** The two balances a swap pays out of; the breakdown lives on the wallet page. */
@@ -737,12 +801,23 @@ const overviewBalancesPanel = () => {
     b && state.overview?.btcRail !== false
       ? h('span.faint', ` · lightning ${b.lightningError ? 'unavailable' : sats(b.lightningSats)}`)
       : null,
+    b?.arkade?.assets?.length
+      ? h(
+          'span.faint',
+          ' ',
+          h('span.asset-count', `· ${b.arkade.assets.length} asset${b.arkade.assets.length === 1 ? '' : 's'}`),
+        )
+      : null,
   )
 }
 
 const paintOverviewBalances = () => {
   const live = document.getElementById('overview-balances')
   if (live) morph(live, overviewBalancesPanel())
+  // The market cards carry each asset leg's balance from the same read.
+  const cards = document.getElementById('overview-markets')
+  const next = state.overview && marketsPanel(state.overview)
+  if (cards && next) morph(cards, next)
 }
 
 const overviewView = () => {
@@ -1487,9 +1562,6 @@ const walletView = () => {
               'dd.balance-list',
               w.arkade.balanceError ? h('span.muted', w.arkade.balanceError) : balanceRows(w.arkade.balance),
             ),
-            /* assets: begin */
-            ...(w.arkade.balanceError ? [] : assetRowsPair(w.arkade.balance)),
-            /* assets: end */
           ),
         ),
       ),
@@ -1522,6 +1594,9 @@ const walletView = () => {
             h('p.muted', w.onchain.error ?? 'Estimated network fee'),
           )
         : null,
+      /* assets: begin */
+      walletAssets(w),
+      /* assets: end */
     ),
     /* fund sources: the one call into the block above. */
     fundsPanel(),
@@ -5698,6 +5773,8 @@ const paintStatus = () => {
   if (status) morph(status, statusBar())
   const slot = root.querySelector('.restart-banner, .restart-slot')
   if (slot) morph(slot, restartBanner() ?? h('div.restart-slot'))
+  const assets = root.querySelector('.wallet-assets, .wallet-assets-slot')
+  if (assets && state.data.wallet) morph(assets, walletAssets(state.data.wallet))
 }
 
 const render = () => {
