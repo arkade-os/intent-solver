@@ -960,6 +960,7 @@ export const createServices = async (
     solverPubkey: hex.encode(await arkade.identity.xOnlyPublicKey()),
     quoteValiditySeconds: policy.assetQuoteValiditySeconds,
     dustSats: arkade.dustSats,
+    minOutputSats: arkade.dustSats > arkade.vtxoMinSats ? arkade.dustSats : arkade.vtxoMinSats,
     deriveOffer: offerScriptFrom(assetRfqDerivation),
     depositAt: async (offerPkScript, depositLeg) =>
       largestOfferOutpoint(await liveOfferOutpoints(arkade, offerPkScript), depositLeg),

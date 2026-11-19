@@ -278,6 +278,21 @@ describe('quote', () => {
     expect(await service.quote(request())).toMatchObject({ accepted: false, reason: 'insufficient_inventory' })
   })
 
+  it('refuses payout_below_dust, a sats payout under the smallest output arkd funds', async () => {
+    const balance = async () => new Map<string | null, bigint>([[null, 10n ** 18n]])
+    const satsOut = request({ pair: `arkade:${ASSET_A}->arkade:BTC` })
+    const quoted = await (await harness({ balance })).service.quote(satsOut)
+    if (!quoted.accepted) throw new Error(quoted.reason)
+    const floored = async (minOutputSats: bigint) => (await harness({ balance, minOutputSats })).service.quote(satsOut)
+    expect(await floored(quoted.swap.toAmount + 1n)).toEqual({ accepted: false, reason: 'payout_below_dust' })
+    expect(await floored(quoted.swap.toAmount)).toMatchObject({ accepted: true })
+  })
+
+  it('leaves an asset payout alone, whatever the sats floor', async () => {
+    const { service } = await harness({ minOutputSats: 10n ** 30n })
+    expect(await service.quote(request())).toMatchObject({ accepted: true })
+  })
+
   /**
    * The bound that applies is the one for the direction being quoted, read in
    * the units of the leg actually being paid out. A market bounded generously

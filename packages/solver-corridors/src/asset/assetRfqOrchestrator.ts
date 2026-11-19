@@ -124,6 +124,8 @@ export interface AssetRfqDeps {
   quoteValiditySeconds: number
   /** The chain's dust floor. A rule, unlike the carrier, which is per market. */
   dustSats: bigint
+  /** arkd's smallest fundable output, `max(dust, vtxoMin)`. Floors a sats payout only. */
+  minOutputSats?: bigint
   /**
    * The offer covenant this solver will watch, derived from terms it has
    * already fixed. `offerVtxoScript` in the composition root.
@@ -155,6 +157,7 @@ export type AssetRfqQuoteRefusal =
   | 'price_unavailable'
   | 'fee_consumes_swap'
   | 'amount_out_of_range'
+  | 'payout_below_dust'
   | 'insufficient_inventory'
   | 'duplicate_swap'
 
@@ -296,6 +299,9 @@ export class AssetRfqSwapService {
       dustSats: this.deps.dustSats,
     })
     if (!resolved.ok) return { accepted: false, reason: resolved.reason }
+    if (pair.to === null && resolved.toAmount < (this.deps.minOutputSats ?? 0n)) {
+      return { accepted: false, reason: 'payout_below_dust' }
+    }
 
     // § 9 permits a quote-time pre-check and does not accept it as sufficient —
     // `tick` runs the same gate again immediately before spending. Quoting a
