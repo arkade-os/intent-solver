@@ -81,8 +81,7 @@ export class OfferSubmitRejectedError extends Error {
 
 /** Names no culprit (another taker, the maker's `cancel`, our other watcher): the RFQ
  * path publishes it to the client verbatim. */
-export const DEPOSIT_SPENT_REASON =
-  'the deposit was already spent by another transaction when this fill was submitted; arkd rejected the fill and nothing was sent'
+export const DEPOSIT_SPENT_REASON = 'the deposit was already spent by another transaction; this fill sent nothing'
 
 const SUBMIT_FAILURE_PREFIX = 'Failed to submit tx to emulator: '
 

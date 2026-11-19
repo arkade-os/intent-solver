@@ -315,6 +315,15 @@ describe('offerSettleFor — the deposit-gone probe', () => {
     expect(fulfill).not.toHaveBeenCalled()
   })
 
+  it('matches the outpoint whatever case the indexer writes its txid in', async () => {
+    const { settle } = probing([vtxo({ txid: txidOf(raw).toUpperCase() })])
+    const error = await settle(intentFor(published, raw)).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(error).toMatchObject({ depositSpent: true, spentBy: 'f1'.repeat(32) })
+  })
+
   it.each([
     ['the outpoint is not spent', [{ isSpent: false, spentBy: '' }]],
     ['the spend names nobody', [{ spentBy: '' }]],

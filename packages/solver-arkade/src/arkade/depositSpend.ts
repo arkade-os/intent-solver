@@ -21,7 +21,8 @@ export const depositSpentBy = async (
   let found: VirtualCoin | undefined
   try {
     const { vtxos } = await probe.getVtxos({ outpoints: [{ txid: outpoint.txid, vout: outpoint.vout }] })
-    found = vtxos.find((vtxo) => vtxo.txid === outpoint.txid && vtxo.vout === outpoint.vout)
+    const txid = outpoint.txid.toLowerCase()
+    found = vtxos.find((vtxo) => vtxo.txid.toLowerCase() === txid && vtxo.vout === outpoint.vout)
   } catch {
     return null
   }
