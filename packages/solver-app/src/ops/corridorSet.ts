@@ -100,12 +100,20 @@ export interface FlatCorridorDeps {
   rfqContractVersions?: ReadonlySet<string>
 }
 
-/** `rfq.contractVersions` as served; unset adds each injected corridor's own version to this build's defaults. */
+/** `rfq.contractVersions` as served; unset adds each injected corridor's own versions to this build's defaults. */
 export const servedContractVersions = (
   configured: readonly string[] | null,
   extra: readonly Corridor[],
 ): ReadonlySet<string> =>
-  new Set(configured ?? [...RFQ_CONTRACT_VERSIONS, ...extra.map((corridor) => corridor.descriptor.contractVersion)])
+  new Set(
+    configured ?? [
+      ...RFQ_CONTRACT_VERSIONS,
+      ...extra.flatMap((corridor) => [
+        corridor.descriptor.contractVersion,
+        ...(corridor.descriptor.contractVersions ?? []),
+      ]),
+    ],
+  )
 
 /**
  * One gate rather than each quote's own LND read: the onchain legs make none before the client has funded, so

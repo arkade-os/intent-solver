@@ -89,6 +89,13 @@ describe('a consumer corridor joins the shipped registry', () => {
     expect((await quoteWith(['lightning-send-v2'])).detail).toContain('example-v1')
   })
 
+  it('serves every version an injected corridor builds, not only its baseline', () => {
+    const base = corridorFor('arkade:BTC->example:BTC', 'EXAMPLE')
+    const multi = { ...base, descriptor: { ...base.descriptor, contractVersions: ['example-v1', 'example-v2'] } }
+    const served = servedContractVersions(null, [multi])
+    expect([served.has('example-v1'), served.has('example-v2')]).toEqual([true, true])
+  })
+
   it('cannot shadow a built-in env stem either', () => {
     // A duplicate stem darkens a corridor the operator did not name, because
     // `<STEM>_ENABLED=false` would hit both.

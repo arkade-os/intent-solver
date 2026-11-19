@@ -124,11 +124,13 @@ export interface AssetRfqDeps {
   quoteValiditySeconds: number
   /** The chain's dust floor. A rule, unlike the carrier, which is per market. */
   dustSats: bigint
+  /** arkd's smallest fundable output, `max(dust, vtxoMin)`. Floors a sats payout only. */
+  minOutputSats?: bigint
   /**
    * The offer covenant this solver will watch, derived from terms it has
    * already fixed. `offerVtxoScript` in the composition root.
    */
-  deriveOffer: (terms: OfferTerms) => { pkScript: string; address: string }
+  deriveOffer: (terms: OfferTerms, contractVersion?: string) => { pkScript: string; address: string }
   /** What is funded at the offer's script, or null while nothing is. */
   depositAt: (offerPkScript: string, depositLeg: AssetLeg | null) => Promise<ObservedDeposit | null>
   /** Spendable balance per asset id — `available`, never `total`. */
@@ -155,6 +157,7 @@ export type AssetRfqQuoteRefusal =
   | 'price_unavailable'
   | 'fee_consumes_swap'
   | 'amount_out_of_range'
+  | 'payout_below_dust'
   | 'insufficient_inventory'
   | 'duplicate_swap'
 
@@ -170,6 +173,8 @@ export interface AssetRfqQuoteRequest {
   amountSide: 'from' | 'to'
   makerPkScript: string
   makerPublicKey: string
+  /** The negotiated contract version, if any. Absent derives the corridor's baseline. */
+  contractVersion?: string
 }
 
 /** How much of one leg a deposit holds — sats when the leg is BTC. */
@@ -294,6 +299,9 @@ export class AssetRfqSwapService {
       dustSats: this.deps.dustSats,
     })
     if (!resolved.ok) return { accepted: false, reason: resolved.reason }
+    if (pair.to === null && resolved.toAmount < (this.deps.minOutputSats ?? 0n)) {
+      return { accepted: false, reason: 'payout_below_dust' }
+    }
 
     // § 9 permits a quote-time pre-check and does not accept it as sufficient —
     // `tick` runs the same gate again immediately before spending. Quoting a
@@ -304,13 +312,16 @@ export class AssetRfqSwapService {
       return { accepted: false, reason: 'insufficient_inventory' }
     }
 
-    const offer = this.deps.deriveOffer({
-      wantAmount: resolved.toAmount,
-      wantAssetId: pair.to,
-      offerAssetId: pair.from,
-      makerPkScript: request.makerPkScript,
-      makerPublicKey: request.makerPublicKey,
-    })
+    const offer = this.deps.deriveOffer(
+      {
+        wantAmount: resolved.toAmount,
+        wantAssetId: pair.to,
+        offerAssetId: pair.from,
+        makerPkScript: request.makerPkScript,
+        makerPublicKey: request.makerPublicKey,
+      },
+      request.contractVersion,
+    )
 
     try {
       const swap = await this.deps.store.insertQuote({
@@ -338,6 +349,7 @@ export class AssetRfqSwapService {
         // while the quote was outstanding; against its own feed it would measure
         // the configured spread and nothing else.
         ...quoteSnapshot({ resolved, market: priced, pair, feed, carrierSats: market.carrierSats }),
+        ...(request.contractVersion === undefined ? {} : { contractVersion: request.contractVersion }),
       })
       return { accepted: true, swap, carrierSats: market.carrierSats }
     } catch (error) {
