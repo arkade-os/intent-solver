@@ -430,12 +430,12 @@ export class OfferFillStore {
    * stuck", which sends a reader looking at the lifecycle graph rather than at
    * the call that asked a finished row to fail.
    */
-  async fail(id: string, from: OfferFillState, reason: string): Promise<void> {
+  async fail(id: string, from: OfferFillState, reason: string): Promise<boolean> {
     if (!NON_TERMINAL.includes(from)) {
       throw new Error(`fail() cannot act on ${from}: it is terminal, so there is nothing left to fail`)
     }
     const to: OfferFillState = from === 'fillable' ? 'refused' : 'stuck'
-    await this.transition(id, from, to, { failure_reason: reason })
+    return this.transition(id, from, to, { failure_reason: reason })
   }
 
   private async recordEvent(

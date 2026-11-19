@@ -512,9 +512,10 @@ export class AssetRfqSwapService {
         return
       }
       // `filling` fails to `stuck`, never to something retryable: the spend may
-      // already have been submitted, and only a human can tell which.
-      this.deps.onError?.(row.id, error)
-      await this.deps.store.fail(row.id, 'filling', error instanceof Error ? error.message : String(error))
+      // already have been submitted, and only a human can tell which. The alert follows the
+      // WRITE, so a tick that lost the CAS says nothing: the writer that parked it reports it.
+      const reason = error instanceof Error ? error.message : String(error)
+      if (await this.deps.store.fail(row.id, 'filling', reason)) this.deps.onError?.(row.id, error)
     }
   }
 

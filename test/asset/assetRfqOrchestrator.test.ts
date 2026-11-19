@@ -1162,3 +1162,63 @@ describe('a lost race caught before the submission', () => {
     expect(await store.get('swap-1')).toMatchObject({ state: 'refused', failureReason: DEPOSIT_SPENT_REASON })
   })
 })
+
+/** The two remaining places a lost CAS could still alert on the RFQ path. */
+describe('a tick whose exit another writer already took', () => {
+  const funded = async (over: Partial<AssetRfqDeps> = {}) => {
+    const built = await harness({ depositAt: async () => deposit(), ...over })
+    await built.service.quote(request())
+    await built.service.tick('swap-1')
+    return built
+  }
+
+  it('stays silent on the unclassified tail', async () => {
+    const errors: unknown[] = []
+    let store!: Awaited<ReturnType<typeof funded>>['store']
+    const built = await funded({
+      settle: async () => {
+        await store.fail('swap-1', 'filling', 'parked by recovery')
+        throw new Error('the emulator said something nobody classified')
+      },
+      onError: (_id, error) => void errors.push(error),
+    })
+    store = built.store
+    await built.service.tick('swap-1')
+    expect(await store.get('swap-1')).toMatchObject({ state: 'stuck', failureReason: 'parked by recovery' })
+    expect(errors).toEqual([])
+  })
+
+  it('still alerts on the unclassified tail when this tick parks it', async () => {
+    const errors: unknown[] = []
+    const { service, store } = await funded({
+      settle: async () => {
+        throw new Error('the emulator said something nobody classified')
+      },
+      onError: (_id, error) => void errors.push(error),
+    })
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).state).toBe('stuck')
+    expect(errors).toHaveLength(1)
+  })
+
+  /** The `depositSpent = false` walk-back, which had no lost-CAS test. */
+  it('stays silent when the walk-back loses to another writer', async () => {
+    const deferred: string[] = []
+    const errors: unknown[] = []
+    let store!: Awaited<ReturnType<typeof funded>>['store']
+    const built = await funded({
+      settle: async (_row: unknown, options?: { markSubmitting?: () => Promise<boolean> }) => {
+        await options?.markSubmitting?.()
+        await store.fail('swap-1', 'filling', 'parked by recovery')
+        throw new OfferSubmitRejectedError('one of our coins went', [`${'99'.repeat(32)}:1`], false)
+      },
+      onDeferred: (id) => void deferred.push(id),
+      onError: (_id, error) => void errors.push(error),
+    })
+    store = built.store
+    await built.service.tick('swap-1')
+    expect(await store.get('swap-1')).toMatchObject({ state: 'stuck', failureReason: 'parked by recovery' })
+    expect(deferred).toEqual([])
+    expect(errors).toEqual([])
+  })
+})

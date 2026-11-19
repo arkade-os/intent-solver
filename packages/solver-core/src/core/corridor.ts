@@ -461,7 +461,9 @@ export const createCorridorReaderSet = (corridors: readonly CorridorReader[]): C
 export const parkVia = async <State extends string>(
   store: {
     get(id: string): Promise<{ state: State }>
-    fail(id: string, from: State, reason: string): Promise<void>
+    // `unknown`, not `void`: a store whose `fail` reports whether it won the CAS
+    // still satisfies this, and `Promise<boolean>` is not a `Promise<void>`.
+    fail(id: string, from: State, reason: string): Promise<unknown>
   },
   states: { readonly live: readonly State[]; readonly parked: readonly State[] },
   id: string,

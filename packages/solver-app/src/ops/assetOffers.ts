@@ -504,14 +504,15 @@ export class AssetOfferService {
           continue
         }
         // `filling` fails to `stuck`, not `refused`: something may have been
-        // submitted, and only a human can tell which.
-        this.deps.onError?.(row.id, error)
+        // submitted, and only a human can tell which. The alert follows the WRITE, so a
+        // tail that lost the CAS says nothing — the writer that parked the row reports it.
         const reason = error instanceof Error ? error.message : String(error)
-        await this.deps.store.fail(
+        const parked = await this.deps.store.fail(
           row.id,
           'filling',
           unsent ? `${reason}; ${MAX_FILL_DEFERRALS} retries exhausted` : reason,
         )
+        if (parked) this.deps.onError?.(row.id, error)
       }
     }
     return filled

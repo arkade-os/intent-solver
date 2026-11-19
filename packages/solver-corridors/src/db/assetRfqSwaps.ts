@@ -553,10 +553,10 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
     return result.changes === 1
   }
 
-  override async fail(id: string, from: AssetRfqSwapState, reason: string): Promise<void> {
+  override async fail(id: string, from: AssetRfqSwapState, reason: string): Promise<boolean> {
     if (!NON_TERMINAL.includes(from)) {
       throw new Error(`fail() cannot act on ${from}: it is terminal, so there is nothing left to fail`)
     }
-    await super.fail(id, from, reason)
+    return super.fail(id, from, reason)
   }
 }

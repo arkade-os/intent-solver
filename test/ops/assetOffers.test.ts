@@ -1392,3 +1392,42 @@ describe('tickAll on a deposit the indexer proves spent', () => {
     expect((await store.findById('fill-1'))?.state).not.toBe('lost')
   })
 })
+
+/** The exhausted tail is the last place a lost CAS could still alert. */
+describe('tickAll at the end of the retry budget', () => {
+  it('stays silent when another writer parked the row before the tail lands', async () => {
+    const errors: unknown[] = []
+    let store!: Awaited<ReturnType<typeof build>>['store']
+    let sweeps = 0
+    const built = await build({
+      settle: async () => {
+        sweeps += 1
+        // On the sweep that spends the budget, recovery gets there first.
+        if (sweeps > MAX_FILL_DEFERRALS) await store.fail('fill-1', 'filling', 'parked by recovery')
+        throw new OfferNotSubmittedError('no spendable coins to pay the maker 1000 sats')
+      },
+      onError: (_id, e) => void errors.push(e),
+    })
+    store = built.store
+    await built.service.consider(found)
+    for (let sweep = 0; sweep <= MAX_FILL_DEFERRALS; sweep += 1) await built.service.tickAll()
+
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'stuck', failureReason: 'parked by recovery' })
+    expect(errors).toEqual([])
+  })
+
+  it('still alerts when this attempt is the one that parks it', async () => {
+    const errors: unknown[] = []
+    const { store, service } = await build({
+      settle: async () => {
+        throw new OfferNotSubmittedError('no spendable coins to pay the maker 1000 sats')
+      },
+      onError: (_id, e) => void errors.push(e),
+    })
+    await service.consider(found)
+    for (let sweep = 0; sweep <= MAX_FILL_DEFERRALS; sweep += 1) await service.tickAll()
+
+    expect((await store.findById('fill-1'))?.failureReason).toMatch(/retries exhausted/)
+    expect(errors).toHaveLength(1)
+  })
+})
