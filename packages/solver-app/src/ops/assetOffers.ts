@@ -143,10 +143,8 @@ export interface AssetOfferDeps {
   settle?: (row: OfferFillRow, options?: FulfillOptions) => Promise<string>
   /** The large-swap approval gate. Absent means no gate. @see ops/approvals.ts */
   approvalGate?: ApprovalCheck
-  /** Is one of this solver's own asset-RFQ negotiations LIVE at this script? Its
-   * client funds the covenant with a public offer packet, so our own deposit
-   * arrives here as a discoverable offer and both paths race to fill it — the
-   * loser gets `VTXO_ALREADY_SPENT`. Optional, so a fork may leave it unset. */
+  /** Whether a live asset-RFQ negotiation of ours holds this script: its deposit carries a
+   * public offer packet, so it arrives here too, and both paths would race to fill it. */
   rfqHolds?: (offerPkScript: string) => Promise<boolean>
   onError?: (id: string, error: unknown) => void
   /**
@@ -201,9 +199,8 @@ const termsOf = (row: OfferFillRow): OfferFillInput => ({
   offerAmount: row.offerAmount,
 })
 
-/** The decision, plus the row id when the intent was recorded.
- * `offer_held_by_rfq` stays off `OfferFillRefusal`: it never reaches
- * `onRefused`, so widening a union forks consume would publish a dead word. */
+/** The decision, plus the row id when the intent was recorded. `offer_held_by_rfq` never
+ * reaches `onRefused`, so it stays off the `OfferFillRefusal` union forks consume. */
 export type ConsiderOutcome = (OfferFillDecision | { fill: false; reason: 'offer_held_by_rfq' }) & { id?: string }
 
 export class AssetOfferService {
@@ -355,8 +352,7 @@ export class AssetOfferService {
     // Hex, because that is the spelling the deposit adapter compares against
     // `OfferOutputView.script` and the store persists.
     const pkScript = hex.encode(offer.swapPkScript)
-    // BEFORE the chain and float reads, and silently: a refusal row here would
-    // read as someone else's offer being declined. @see AssetOfferDeps.rfqHolds
+    // Silently: a refusal row would read as someone else's offer declined.
     if (await this.deps.rfqHolds?.(pkScript)) return { fill: false, reason: 'offer_held_by_rfq' }
     const [outputs, available] = await Promise.all([this.deps.outputsAt(pkScript), this.deps.balance()])
     const input = offerFillInputFrom(offer, offerDepositFrom(pkScript, outputs))
@@ -483,14 +479,12 @@ export class AssetOfferService {
         await this.deps.store.transition(row.id, 'filling', 'filled', { fill_txid: txid })
         filled += 1
       } catch (error) {
-        // Nothing was submitted, so neither exit leaves exposure.
         if (error instanceof OfferSubmitRejectedError && error.depositSpent) {
           if (await this.deps.store.loseRejectedSubmit(row.id, DEPOSIT_SPENT_REASON)) continue
         }
         // The TWO retryable shapes, and only because `fulfillOffer` proves each
         // sent nothing. A later sweep re-runs every gate and the CAS.
         const deferrals = (this.deferrals.get(row.id) ?? 0) + 1
-        // One of OUR coins: walked back from `submitting`, not `selecting`.
         if (error instanceof OfferSubmitRejectedError && deferrals <= MAX_FILL_DEFERRALS) {
           if (await this.deps.store.revertRejectedSubmit(row.id)) {
             this.deferrals.set(row.id, deferrals)

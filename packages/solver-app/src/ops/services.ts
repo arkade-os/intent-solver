@@ -911,8 +911,7 @@ export const createServices = async (
           contractVersions: new Set(policy.offerContractVersions),
         }),
         approvalGate: gateFor('arkade offer fill'),
-        // Reads a store opened BELOW: markets must resolve before any file is
-        // created, and nothing calls this until an offer is discovered.
+        // A store opened below on purpose (markets resolve before any file); called only after discovery.
         rfqHolds: (pkScript) => assetRfqStore.heldByLiveNegotiation(pkScript),
         onError: (id, error) => log(`offer ${id} failed:`, error instanceof Error ? error.message : String(error)),
         // Not a failure either: nothing was submitted, so the row waits a sweep.

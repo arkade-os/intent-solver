@@ -50,17 +50,13 @@ export class OfferNotSubmittedError extends Error {
   }
 }
 
-/**
- * A submission arkd REFUSED, naming outpoints already spent. Proves nothing was
- * sent, as {@link OfferNotSubmittedError} does, but NOT a subclass of it: raised
- * BELOW the latch, where that error's walk-back is a no-op, so a subclass would
- * be caught by the callers' existing arms and stick the row.
- */
+/** arkd refused the submission over spent outpoints, so nothing was sent. NOT a subclass of
+ * {@link OfferNotSubmittedError}: it is raised below the latch, where that error's walk-back
+ * no-ops, so the callers' existing arms would catch it and stick the row. */
 export class OfferSubmitRejectedError extends Error {
   constructor(
     message: string,
     readonly spentOutpoints: readonly string[],
-    /** Whether the deposit this fill was given is one of them. */
     readonly depositSpent: boolean,
     options?: { cause?: unknown },
   ) {
@@ -69,20 +65,15 @@ export class OfferSubmitRejectedError extends Error {
   }
 }
 
-/** Names no culprit — the refusal cannot tell which of another taker, the
- * maker's `cancel` or our other watcher spent it — and the RFQ path publishes
- * this to the client verbatim. */
+/** Names no culprit (another taker, the maker's `cancel`, our other watcher): the RFQ
+ * path publishes it to the client verbatim. */
 export const DEPOSIT_SPENT_REASON =
   'the deposit was already spent by another transaction when this fill was submitted; arkd rejected the fill and nothing was sent'
 
 const SUBMIT_FAILURE_PREFIX = 'Failed to submit tx to emulator: '
 
-/**
- * `vtxo_outpoints` is Go's rendering of a string slice — `[txid:0 txid:1]`,
- * space-separated and UNQUOTED — because arkd flattens every metadata value
- * through `fmt.Sprintf("%v", …)` into a `map[string]string`. A real JSON array
- * is taken too, so an arkd that stops flattening still parses.
- */
+/** arkd flattens metadata through `fmt.Sprintf("%v", …)`, so `vtxo_outpoints` arrives as a
+ * Go slice, `[txid:0 txid:1]`, unquoted. A JSON array parses too. */
 const outpointsIn = (metadata: Record<string, unknown> | undefined): string[] => {
   const many = metadata?.vtxo_outpoints
   const listed = Array.isArray(many)
@@ -96,9 +87,8 @@ const outpointsIn = (metadata: Record<string, unknown> | undefined): string[] =>
   return typeof one === 'string' && one.trim() !== '' ? [one.trim().toLowerCase()] : []
 }
 
-/** The outpoints a `VTXO_ALREADY_SPENT` refusal named, or null for anything
- * else — an unparseable body included, since it proves nothing. Read off the
- * structured entry, never the prose: that message is a format string in arkd. */
+/** Null for anything but a parsed `VTXO_ALREADY_SPENT` entry: it is read off the structured
+ * detail, never the prose, which is a format string in arkd. */
 const spentOutpointsIn = (error: unknown): string[] | null => {
   if (!(error instanceof Error) || !error.message.startsWith(SUBMIT_FAILURE_PREFIX)) return null
   let body: unknown
@@ -246,8 +236,7 @@ export const fulfillOffer = async (
       // `swapPkScript` rather than silently.
     }).catch((error: unknown) => {
       const spent = spentOutpointsIn(error)
-      // Rethrown AS IT WAS: anything unclassified keeps meaning "outcome
-      // unknown", the one reading that needs a human.
+      // Rethrown as it was: unclassified keeps meaning "outcome unknown".
       if (spent === null) throw error
       const depositSpent = spent.includes(outpointKey(deposit.txid, deposit.vout).toLowerCase())
       // THE SHAPE THAT PROVES NOTHING: arkd lists every already-spent input, so
