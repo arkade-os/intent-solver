@@ -36,6 +36,10 @@ export class Amount {
     return this.units >= this.sameAsset(other).units
   }
 
+  gt(other: Amount): boolean {
+    return this.units > this.sameAsset(other).units
+  }
+
   private sameAsset(other: Amount): Amount {
     if (other.asset !== this.asset) throw new InvalidValue(`cannot combine ${this.asset} with ${other.asset}`)
     return other

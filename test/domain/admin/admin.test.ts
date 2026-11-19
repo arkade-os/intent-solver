@@ -10,13 +10,12 @@ describe('approval', () => {
     for (const threshold of [null, 0n, 1_000n]) {
       for (const amount of [0n, 999n, 1_000n, 5_000n]) {
         for (const approval of ['approved', 'none', 'unreadable'] as const) {
-          expect(Approval.decide(btc(amount), threshold, approval)).toEqual(
+          expect(Approval.decide(btc(amount), threshold === null ? null : btc(threshold), approval)).toEqual(
             evaluateApproval({ amount, threshold, approval }),
           )
         }
       }
     }
-    expect(() => Approval.decide(btc(1n), -1n, 'none')).toThrow('negative')
   })
 
   it('starts as a request, and approving again moves the timestamp as it does today', () => {

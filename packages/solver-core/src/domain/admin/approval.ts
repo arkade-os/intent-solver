@@ -2,7 +2,6 @@ import type { Amount } from '../shared/amount.js'
 import type { ValueOf } from '../shared/brand.js'
 import type { SwapId } from '../shared/ids.js'
 import type { UnixSeconds } from '../shared/time.js'
-import { InvalidValue } from '../shared/error.js'
 
 export const ApprovalVerdict = {
   Pending: 'pending',
@@ -46,10 +45,9 @@ export class Approval {
   }
 
   /** `threshold` null means the asset is not gated. Measured on the payout. */
-  static decide(quantity: Amount, threshold: bigint | null, record: ApprovalRecord): ApprovalDecision {
+  static decide(quantity: Amount, threshold: Amount | null, record: ApprovalRecord): ApprovalDecision {
     if (threshold === null) return { proceed: true }
-    if (threshold < 0n) throw new InvalidValue(`approval threshold cannot be negative, got ${threshold}`)
-    if (quantity.units < threshold || record === ApprovalRecord.Approved) return { proceed: true }
+    if (threshold.gt(quantity) || record === ApprovalRecord.Approved) return { proceed: true }
     return { proceed: false, reason: Approval.REFUSAL }
   }
 

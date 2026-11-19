@@ -2,7 +2,7 @@ import { Amount } from '../shared/amount.js'
 import { Rail, type Endpoint } from '../shared/endpoint.js'
 import type { AssetPricing } from './asset_pricing.js'
 import type { Price } from './price.js'
-import { QuoteRefusal, type QuoteSide } from './quote_terms.js'
+import { QuoteRefusal, QuoteSide } from './quote_terms.js'
 import type { SpreadPricing } from './spread_pricing.js'
 import { InvalidValue } from '../shared/error.js'
 
@@ -24,13 +24,13 @@ export interface RouteProps {
 /** What only a route that changes asset needs to price a request. */
 export interface MarketConditions {
   readonly price: Price | null
-  readonly carrier: bigint
-  readonly dust: bigint
+  readonly carrier: Amount
+  readonly dust: Amount
 }
 
 export interface Destination {
   /** The smallest output the payout rail can hold; absent where it has no such floor. */
-  readonly minOutput?: bigint
+  readonly minOutput?: Amount
 }
 
 export class Route {
@@ -66,15 +66,31 @@ export class Route {
     return this.from.rail === Rail.Arkade
   }
 
-  quote(amount: bigint, side: QuoteSide, market?: MarketConditions, { minOutput }: Destination = {}): RouteQuote {
+  /** `amount` is in the asset of the side it fixes; a floor is in the asset paid out. */
+  quote(amount: Amount, side: QuoteSide, market?: MarketConditions, { minOutput }: Destination = {}): RouteQuote {
     const { from, to, enabled, pricing } = this.props
+    const fixed = side === QuoteSide.From ? from : to
+    if (amount.asset !== fixed.asset)
+      throw new InvalidValue(`route ${this.key} takes ${fixed.asset} on its ${side} side`)
+    if (minOutput !== undefined && minOutput.asset !== to.asset) {
+      throw new InvalidValue(`route ${this.key} pays out ${to.asset}, not ${minOutput.asset}`)
+    }
     if (!enabled) return { ok: false, reason: QuoteRefusal.RouteDisabled }
     const priced =
       pricing.kind === 'spread'
-        ? pricing.quote(amount, side, minOutput)
+        ? pricing.quote(amount.units, side, minOutput?.units)
         : !market || market.price === null
           ? ({ ok: false, reason: QuoteRefusal.PriceUnavailable } as const)
-          : pricing.quote({ from: from.asset, to: to.asset, amount, side, ...market, price: market.price, minOutput })
+          : pricing.quote({
+              from: from.asset,
+              to: to.asset,
+              amount: amount.units,
+              side,
+              price: market.price,
+              carrier: market.carrier.units,
+              dust: market.dust.units,
+              minOutput: minOutput?.units,
+            })
     if (!priced.ok) return priced
     return { ok: true, terms: { give: Amount.of(from.asset, priced.give), payout: Amount.of(to.asset, priced.payout) } }
   }

@@ -14,7 +14,7 @@ import { AssetPricing } from '@arkade-os/solver-core/domain/market/asset_pricing
 import { Route } from '@arkade-os/solver-core/domain/market/route.js'
 import { SpreadPricing } from '@arkade-os/solver-core/domain/market/spread_pricing.js'
 import { Endpoint } from '@arkade-os/solver-core/domain/shared/endpoint.js'
-import { ARKADE, BTC, btc, LIGHTNING, USDT } from '../support.js'
+import { ARKADE, BTC, btc, LIGHTNING, USDT, usdt } from '../support.js'
 
 describe('fee', () => {
   it('matches the corridor fee arithmetic it replaces', () => {
@@ -302,10 +302,10 @@ describe('route', () => {
   })
 
   it('quotes in amounts of its two endpoints', () => {
-    expect(route.quote(10_000n, 'from')).toEqual({ ok: true, terms: { give: btc(10_000n), payout: btc(9_973n) } })
-    expect(route.quote(499n, 'from')).toEqual({ ok: false, reason: 'amount_out_of_range' })
+    expect(route.quote(btc(10_000n), 'from')).toEqual({ ok: true, terms: { give: btc(10_000n), payout: btc(9_973n) } })
+    expect(route.quote(btc(499n), 'from')).toEqual({ ok: false, reason: 'amount_out_of_range' })
     const closed = Route.of({ from: ARKADE, to: LIGHTNING, enabled: false, pricing: spread })
-    expect(closed.quote(10_000n, 'from')).toEqual({ ok: false, reason: 'route_disabled' })
+    expect(closed.quote(btc(10_000n), 'from')).toEqual({ ok: false, reason: 'route_disabled' })
   })
 
   it('is priced by a market exactly when it changes asset', () => {
@@ -323,9 +323,19 @@ describe('route', () => {
     expect(() => Route.of({ from: ARKADE, to: LIGHTNING, enabled: true, pricing: market })).toThrow('exactly when')
     expect(() => Route.of({ from: ARKADE, to: ARKADE, enabled: true, pricing: spread })).toThrow('back to itself')
     const cross = Route.of({ from: ARKADE, to: usdtOnArkade, enabled: true, pricing: market })
-    expect(cross.quote(10_000n, 'from')).toEqual({ ok: false, reason: 'price_unavailable' })
-    const quote = cross.quote(10_000n, 'from', { price: Price.parse('97123.45'), carrier: 330n, dust: 546n })
+    expect(cross.quote(btc(10_000n), 'from')).toEqual({ ok: false, reason: 'price_unavailable' })
+    const quote = cross.quote(btc(10_000n), 'from', {
+      price: Price.parse('97123.45'),
+      carrier: btc(330n),
+      dust: btc(546n),
+    })
     expect(quote).toMatchObject({ ok: true, terms: { give: btc(10_000n) } })
     expect(quote.ok && quote.terms.payout.asset).toBe(USDT)
+    expect(() => cross.quote(btc(10_000n), 'to')).toThrow('takes usdt on its to side')
+    expect(() => route.quote(btc(10_000n), 'from', undefined, { minOutput: usdt(330n) })).toThrow('pays out btc')
+    expect(route.quote(btc(10_000n), 'from', undefined, { minOutput: btc(9_974n) })).toEqual({
+      ok: false,
+      reason: 'payout_below_dust',
+    })
   })
 })

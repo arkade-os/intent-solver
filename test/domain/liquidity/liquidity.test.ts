@@ -4,54 +4,54 @@ import { Inventory } from '@arkade-os/solver-core/domain/liquidity/inventory.js'
 import { RebalancePolicy, type RebalanceLimits } from '@arkade-os/solver-core/domain/liquidity/rebalance_policy.js'
 import { Transfer, TransferId } from '@arkade-os/solver-core/domain/liquidity/transfer.js'
 import { Withdrawal, WithdrawalId } from '@arkade-os/solver-core/domain/liquidity/withdrawal.js'
-import { ARKADE, btc, LIGHTNING, ONCHAIN, t, usdt } from '../support.js'
+import { ARKADE, BTC, btc, LIGHTNING, ONCHAIN, t, usdt } from '../support.js'
 
 describe('exposure', () => {
+  const NONE = Exposure.none(BTC)
+
   it('admits up to the cap, counting stored swaps and quotes in flight', () => {
-    const first = Exposure.NONE.reserve(400n, 500n, 1_000n)
-    expect(first?.reserved).toBe(400n)
-    expect(first?.reserve(101n, 500n, 1_000n)).toBeNull()
-    expect(first?.reserve(100n, 500n, 1_000n)?.reserved).toBe(500n)
-    expect(first?.release(400n)).toEqual(Exposure.NONE)
-    expect(() => first?.release(401n)).toThrow('negative')
-    expect(() => Exposure.NONE.reserve(1n, -1n, 1_000n)).toThrow('cannot be negative')
+    const first = NONE.reserve(btc(400n), btc(500n), btc(1_000n))
+    expect(first?.reserved).toEqual(btc(400n))
+    expect(first?.reserve(btc(101n), btc(500n), btc(1_000n))).toBeNull()
+    expect(first?.reserve(btc(100n), btc(500n), btc(1_000n))?.reserved).toEqual(btc(500n))
+    expect(first?.release(btc(400n))).toEqual(NONE)
+    expect(() => first?.release(btc(401n))).toThrow('negative')
   })
 
   it('refuses float it cannot read, rather than treating it as zero or as plenty', () => {
-    expect(Exposure.NONE.reserveFloat(10n, 0n, null)).toBeNull()
-    expect(Exposure.NONE.reserveFloat(10n, 95n, 100n)).toBeNull()
-    expect(Exposure.NONE.reserveFloat(5n, 95n, 100n)?.reservedFloat).toBe(5n)
-    expect(() => Exposure.NONE.releaseFloat(1n)).toThrow('negative')
-    expect(() => Exposure.NONE.reserveFloat(5n, 0n, -1n)).toThrow('cannot be negative')
+    expect(NONE.reserveFloat(btc(10n), btc(0n), null)).toBeNull()
+    expect(NONE.reserveFloat(btc(10n), btc(95n), btc(100n))).toBeNull()
+    expect(NONE.reserveFloat(btc(5n), btc(95n), btc(100n))?.reservedFloat).toEqual(btc(5n))
+    expect(() => NONE.releaseFloat(btc(1n))).toThrow('negative')
   })
 
   it('tracks inventory per pool', () => {
-    const held = Exposure.NONE.reserveInventory('arkade', 70n, 0n, 100n)
-    expect(held?.inventory('arkade')).toBe(70n)
-    expect(held?.reserveInventory('arkade', 31n, 0n, 100n)).toBeNull()
-    expect(held?.releaseInventory('arkade', 70n).inventory('arkade')).toBe(0n)
-    expect(() => Exposure.NONE.releaseInventory('arkade', 1n)).toThrow('negative')
+    const held = NONE.reserveInventory('arkade', btc(70n), btc(0n), btc(100n))
+    expect(held?.inventory('arkade')).toEqual(btc(70n))
+    expect(held?.reserveInventory('arkade', btc(31n), btc(0n), btc(100n))).toBeNull()
+    expect(held?.releaseInventory('arkade', btc(70n)).inventory('arkade')).toEqual(btc(0n))
+    expect(() => NONE.releaseInventory('arkade', btc(1n))).toThrow('negative')
   })
 
   it('puts back a hold that outlived a restart without asking again', () => {
-    expect(Exposure.NONE.reserveInventory('arkade', 70n, 50n, 100n)).toBeNull()
-    expect(Exposure.NONE.restoreInventory('arkade', 70n).inventory('arkade')).toBe(70n)
+    expect(NONE.reserveInventory('arkade', btc(70n), btc(50n), btc(100n))).toBeNull()
+    expect(NONE.restoreInventory('arkade', btc(70n)).inventory('arkade')).toEqual(btc(70n))
   })
 })
 
 describe('rebalancing', () => {
   const limits: RebalanceLimits = {
     enabled: true,
-    reserve: 0n,
-    maxDebit: 500_000n,
-    dailyDebit: 1_000_000n,
-    maxFee: 1_000n,
+    reserve: btc(0n),
+    maxDebit: btc(500_000n),
+    dailyDebit: btc(1_000_000n),
+    maxFee: btc(1_000n),
     maxFeeBps: 50,
-    minTransfer: 10_000n,
+    minTransfer: btc(10_000n),
     cooldownSeconds: 600,
   }
   const policy = RebalancePolicy.of(limits)
-  const target = { minimum: 100_000n, target: 300_000n }
+  const target = { minimum: btc(100_000n), target: btc(300_000n) }
   const low = Inventory.of(ARKADE, btc(40_000n), target)
   const lower = Inventory.of(LIGHTNING, btc(10_000n), target)
   const fine = Inventory.of(ONCHAIN, btc(100_000n), target)
@@ -60,10 +60,10 @@ describe('rebalancing', () => {
   it('refills the most depleted inventory up to its target, minus what is on its way', () => {
     expect(policy.select([low, lower, fine, blind], new Map(), t(1_000), null)).toEqual({
       inventory: lower,
-      net: 290_000n,
+      net: btc(290_000n),
     })
-    const pending = new Map([[LIGHTNING.key, 285_000n]])
-    expect(policy.select([low, lower], pending, t(1_000), null)).toEqual({ inventory: low, net: 260_000n })
+    const pending = new Map([[LIGHTNING.key, btc(285_000n)]])
+    expect(policy.select([low, lower], pending, t(1_000), null)).toEqual({ inventory: low, net: btc(260_000n) })
   })
 
   it('does nothing while cooling down, when disabled, or when nothing is low', () => {
@@ -74,36 +74,36 @@ describe('rebalancing', () => {
   })
 
   it('caps a transfer per move and by what the day has left, down to the least worth moving', () => {
-    expect(policy.amountFor(290_000n, 0n)).toBe(290_000n)
-    expect(policy.amountFor(900_000n, 0n)).toBe(500_000n)
-    expect(policy.amountFor(290_000n, 900_000n)).toBe(100_000n)
-    expect(policy.amountFor(290_000n, 990_001n)).toBeNull()
-    expect(policy.amountFor(290_000n, 1_000_000n)).toBeNull()
+    expect(policy.amountFor(btc(290_000n), btc(0n))).toEqual(btc(290_000n))
+    expect(policy.amountFor(btc(900_000n), btc(0n))).toEqual(btc(500_000n))
+    expect(policy.amountFor(btc(290_000n), btc(900_000n))).toEqual(btc(100_000n))
+    expect(policy.amountFor(btc(290_000n), btc(990_001n))).toBeNull()
+    expect(policy.amountFor(btc(290_000n), btc(1_000_000n))).toBeNull()
   })
 
   it('caps the debit, which is the credit plus its fees', () => {
-    expect(policy.debitAllowed(500_000n, 0n)).toBe(true)
-    expect(policy.debitAllowed(500_001n, 0n)).toBe(false)
-    expect(policy.debitAllowed(400_000n, 600_001n)).toBe(false)
+    expect(policy.debitAllowed(btc(500_000n), btc(0n))).toBe(true)
+    expect(policy.debitAllowed(btc(500_001n), btc(0n))).toBe(false)
+    expect(policy.debitAllowed(btc(400_000n), btc(600_001n))).toBe(false)
   })
 
   it('takes a zero minimum as an inventory that is never refilled', () => {
-    const never = Inventory.of(ARKADE, btc(0n), { minimum: 0n, target: 300_000n })
+    const never = Inventory.of(ARKADE, btc(0n), { minimum: btc(0n), target: btc(300_000n) })
     expect(policy.select([never], new Map(), t(1_000), null)).toBeNull()
   })
 
   it('bounds fees both flat and as a share of the credit', () => {
-    expect(policy.feesAllowed(100_000n, 100_500n)).toBe(true)
-    expect(policy.feesAllowed(100_000n, 100_501n)).toBe(false)
-    expect(policy.feesAllowed(1_000_000n, 1_001_001n)).toBe(false)
-    expect(() => policy.feesAllowed(100n, 99n)).toThrow('must cover')
+    expect(policy.feesAllowed(btc(100_000n), btc(100_500n))).toBe(true)
+    expect(policy.feesAllowed(btc(100_000n), btc(100_501n))).toBe(false)
+    expect(policy.feesAllowed(btc(1_000_000n), btc(1_001_001n))).toBe(false)
+    expect(() => policy.feesAllowed(btc(100n), btc(99n))).toThrow('must cover')
   })
 
   it('refuses an enabled policy that could move nothing', () => {
-    expect(() => RebalancePolicy.of({ ...limits, maxDebit: 0n })).toThrow('positive maxDebit')
-    expect(() => RebalancePolicy.of({ ...limits, reserve: -1n })).toThrow('negative')
-    expect(() => RebalancePolicy.of({ ...limits, enabled: false, maxDebit: -1n })).toThrow('negative')
+    expect(() => RebalancePolicy.of({ ...limits, maxDebit: btc(0n) })).toThrow('positive maxDebit')
+    expect(() => RebalancePolicy.of({ ...limits, maxFee: usdt(1n) })).toThrow('one asset')
     expect(() => RebalancePolicy.of({ ...limits, cooldownSeconds: 1.5 })).toThrow('whole number')
+    expect(() => Inventory.of(ARKADE, btc(1n), { minimum: usdt(1n), target: usdt(2n) })).toThrow('cannot target')
     expect(() => Inventory.of(ARKADE, usdt(1n), null)).toThrow('cannot hold')
   })
 })
