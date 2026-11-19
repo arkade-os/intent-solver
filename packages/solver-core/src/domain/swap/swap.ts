@@ -1,10 +1,10 @@
 import type { RfqId, SwapId } from '../shared/ids.js'
 import type { UnixSeconds } from '../shared/time.js'
-import { opens, type Hashlock, type Preimage } from './hashlock.js'
+import { Preimage, type Hashlock } from './hashlock.js'
 import { ContractKind, Leg, Side, type LegReferences, type LegState } from './leg.js'
 import type { AmountMode, Quote } from './quote.js'
 import { SWAP_TOPIC, type SwapEvent, type SwapQuoted } from './swap_event.js'
-import { deriveSwapState, isSwapExposed, isSwapTerminal, SwapOutcome, type SwapState } from './swap_state.js'
+import { SwapOutcome, SwapState } from './swap_state.js'
 
 export interface SwapProps {
   readonly id: SwapId
@@ -137,18 +137,18 @@ export class Swap {
 
   /** As the exposure cap counts it: a failed swap is not exposed, whatever its legs say. */
   get exposed(): boolean {
-    return isSwapExposed(this.state)
+    return SwapState.isExposed(this.state)
   }
 
   /** What the legs alone say, outcome aside: our payout is out and neither collected nor back. */
   get capitalOut(): boolean {
     const legs = this.legsState
-    return legs !== null && isSwapExposed(legs)
+    return legs !== null && SwapState.isExposed(legs)
   }
 
   /** The float still has to cover the payout. An in-flight Lightning payment with a known id has left it already. */
   get owesPayout(): boolean {
-    if (isSwapTerminal(this.state)) return false
+    if (SwapState.isTerminal(this.state)) return false
     const { to } = this
     if (to.state === 'pending') return true
     return to.state === 'locking' && !(to.contract === ContractKind.Lightning && to.reference('funding') !== null)
@@ -218,7 +218,7 @@ export class Swap {
     const current = this.props.outcome
     if (current === outcome) return null
     if (current !== null && current !== SwapOutcome.Stuck) throw this.error(`already ${current}`)
-    if (current === null && isSwapTerminal(this.state)) throw this.error(`already ${this.state}`)
+    if (current === null && SwapState.isTerminal(this.state)) throw this.error(`already ${this.state}`)
     if (outcome === SwapOutcome.Refused && this.capitalOut)
       throw this.error('our payout is out, so it cannot be refused')
     return this.raise({ topic: SWAP_TOPIC, type: 'SwapFailed', id: this.id, at, outcome, reason })
@@ -233,13 +233,13 @@ export class Swap {
     return this.raise({ topic: SWAP_TOPIC, type: 'SwapResumed', id: this.id, at })
   }
 
-  private get legsState(): ReturnType<typeof deriveSwapState> {
-    return deriveSwapState(this.from.state, this.to.state)
+  private get legsState(): ReturnType<typeof SwapState.derive> {
+    return SwapState.derive(this.from.state, this.to.state)
   }
 
   // A failed swap still records what the rails do; only a live one must keep its legs coherent.
   private coherentWith(side: Side, state: LegState): boolean {
-    return this.props.outcome !== null || deriveSwapState(...this.pairWith(side, state)) !== null
+    return this.props.outcome !== null || SwapState.derive(...this.pairWith(side, state)) !== null
   }
 
   private pairWith(side: Side, state: LegState): [from: LegState, to: LegState] {
@@ -277,7 +277,7 @@ export class Swap {
       return null
     }
     if (side === Side.To && state === 'claimed') {
-      if (preimage === undefined || !opens(preimage, hashlock)) {
+      if (preimage === undefined || !Preimage.opens(preimage, hashlock)) {
         throw this.error('claiming the to leg needs the preimage of the hashlock')
       }
       return preimage

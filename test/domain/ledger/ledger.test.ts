@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { Account } from '@arkade-os/solver-core/domain/ledger/account.js'
 import { bookSwap, type SwapBooking } from '@arkade-os/solver-core/domain/ledger/book.js'
-import { credit, debit, JournalEntry } from '@arkade-os/solver-core/domain/ledger/journal_entry.js'
+import { Posting, JournalEntry } from '@arkade-os/solver-core/domain/ledger/journal_entry.js'
 import { Reconciliation } from '@arkade-os/solver-core/domain/ledger/reconciliation.js'
 import { Endpoint } from '@arkade-os/solver-core/domain/shared/endpoint.js'
-import { swapId } from '@arkade-os/solver-core/domain/shared/ids.js'
+import { SwapId } from '@arkade-os/solver-core/domain/shared/ids.js'
 import { ARKADE, BTC, btc, LIGHTNING, t, USDT, usdt } from '../support.js'
 
 const balances = (entries: readonly JournalEntry[]): Record<string, bigint> => {
@@ -20,16 +20,20 @@ describe('journal entry', () => {
   const clearing = Account.swapClearing(BTC)
 
   it('balances per asset or does not exist', () => {
-    expect(() => JournalEntry.of('k', t(1), [debit(holding, btc(10n)), credit(clearing, btc(9n))])).toThrow('off by 1')
-    expect(() => JournalEntry.of('k', t(1), [debit(holding, btc(10n))])).toThrow('at least two')
-    expect(() => debit(holding, usdt(1n))).toThrow('holds btc')
-    expect(JournalEntry.of('k', t(1), [debit(holding, btc(10n)), credit(clearing, btc(10n))]).postings).toHaveLength(2)
+    expect(() =>
+      JournalEntry.of('k', t(1), [Posting.debit(holding, btc(10n)), Posting.credit(clearing, btc(9n))]),
+    ).toThrow('off by 1')
+    expect(() => JournalEntry.of('k', t(1), [Posting.debit(holding, btc(10n))])).toThrow('at least two')
+    expect(() => Posting.debit(holding, usdt(1n))).toThrow('holds btc')
+    expect(
+      JournalEntry.of('k', t(1), [Posting.debit(holding, btc(10n)), Posting.credit(clearing, btc(10n))]).postings,
+    ).toHaveLength(2)
   })
 })
 
 describe('booking a swap', () => {
   const quoted: SwapBooking = {
-    swapId: swapId('swap-1'),
+    swapId: SwapId.of('swap-1'),
     route: 'arkade:btc->lightning:btc',
     from: { endpoint: ARKADE, amount: btc(10_000n), collected: false },
     to: { endpoint: LIGHTNING, amount: btc(9_973n), paidOut: false, returned: false },

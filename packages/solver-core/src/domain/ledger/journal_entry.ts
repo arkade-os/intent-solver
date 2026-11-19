@@ -16,8 +16,7 @@ const side =
     return { account, units: sign * amount.units }
   }
 
-export const debit = side(1n)
-export const credit = side(-1n)
+export const Posting = { debit: side(1n), credit: side(-1n) }
 
 export class JournalEntry {
   private constructor(

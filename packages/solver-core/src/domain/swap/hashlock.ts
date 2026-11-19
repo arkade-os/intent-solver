@@ -13,9 +13,12 @@ const hex32 = <B extends string>(name: string, value: string): B => {
   return value as B
 }
 
-export const hashlock = (value: string): Hashlock => hex32('hashlock', value)
-export const preimage = (value: string): Preimage => hex32('preimage', value)
+export const Hashlock = {
+  of: (value: string): Hashlock => hex32('hashlock', value),
+  ofPreimage: (secret: Preimage): Hashlock => hex.encode(sha256(hex.decode(secret))) as Hashlock,
+}
 
-export const hashlockOf = (secret: Preimage): Hashlock => hex.encode(sha256(hex.decode(secret))) as Hashlock
-
-export const opens = (secret: Preimage, lock: Hashlock): boolean => hashlockOf(secret) === lock
+export const Preimage = {
+  of: (value: string): Preimage => hex32('preimage', value),
+  opens: (secret: Preimage, lock: Hashlock): boolean => Hashlock.ofPreimage(secret) === lock,
+}

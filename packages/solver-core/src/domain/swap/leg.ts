@@ -61,9 +61,6 @@ const NEVER: Partial<Record<ContractKind, Partial<Record<Side, readonly LegState
   payment: { to: ['locked', 'refunding', 'refunded'] },
 }
 
-export const legCanTransition = (leg: { side: Side; contract: ContractKind }, from: LegState, to: LegState): boolean =>
-  LegMachine.canTransition(from, to) && !NEVER[leg.contract]?.[leg.side]?.includes(to)
-
 const NO_FACTS: LegFacts = { funding: [], claim: [], refund: [] }
 
 const withReferences = (facts: LegFacts, references: LegReferences): LegFacts => {
@@ -108,8 +105,13 @@ export class Leg {
     return this.facts[kind].at(-1) ?? null
   }
 
+  /** The machine's edges, minus what this kind of contract can never do on this side. */
+  static canTransition(leg: { side: Side; contract: ContractKind }, from: LegState, to: LegState): boolean {
+    return LegMachine.canTransition(from, to) && !NEVER[leg.contract]?.[leg.side]?.includes(to)
+  }
+
   canMoveTo(state: LegState): boolean {
-    return legCanTransition(this, this.state, state)
+    return Leg.canTransition(this, this.state, state)
   }
 
   moveTo(state: LegState, references: LegReferences = {}): Leg {

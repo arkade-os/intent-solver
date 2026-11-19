@@ -4,7 +4,7 @@ import type { Endpoint } from '../shared/endpoint.js'
 import type { UnixSeconds } from '../shared/time.js'
 
 export type TransferId = Brand<string, 'TransferId'>
-export const transferId = (value: string): TransferId => nonEmpty('transfer id', value)
+export const TransferId = { of: (value: string): TransferId => nonEmpty('transfer id', value) }
 
 export const TransferOrigin = {
   Manual: 'manual',

@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { hashlock } from '@arkade-os/solver-core/domain/swap/hashlock.js'
+import { Hashlock } from '@arkade-os/solver-core/domain/swap/hashlock.js'
 import { Quote } from '@arkade-os/solver-core/domain/swap/quote.js'
 import { Swap } from '@arkade-os/solver-core/domain/swap/swap.js'
-import { deriveSwapState, isSwapExposed, isSwapTerminal } from '@arkade-os/solver-core/domain/swap/swap_state.js'
+import { SwapState } from '@arkade-os/solver-core/domain/swap/swap_state.js'
 import { bothLocked, btc, quoted, SECRET, t, terms, usdt, WRONG_SECRET } from '../support.js'
 
 const offer = (): Swap =>
@@ -38,22 +38,22 @@ describe('swap state', () => {
     ['locked', 'refunded', 'refunded', false],
     ['refunded', 'refunded', 'refunded', false],
   ] as const)('%s + %s is %s', (from, to, state, exposed) => {
-    expect(deriveSwapState(from, to)).toBe(state)
-    expect(isSwapExposed(state)).toBe(exposed)
+    expect(SwapState.derive(from, to)).toBe(state)
+    expect(SwapState.isExposed(state)).toBe(exposed)
   })
 
   it('has no state for a pair outside the table', () => {
-    expect(deriveSwapState('pending', 'claimed')).toBeNull()
-    expect(deriveSwapState('refunded', 'claimed')).toBeNull()
-    expect(deriveSwapState('claimed', 'locking')).toBeNull()
+    expect(SwapState.derive('pending', 'claimed')).toBeNull()
+    expect(SwapState.derive('refunded', 'claimed')).toBeNull()
+    expect(SwapState.derive('claimed', 'locking')).toBeNull()
   })
 
   it('ends on settled, refunded and every outcome', () => {
     for (const state of ['settled', 'refunded', 'refused', 'lost', 'stuck'] as const) {
-      expect(isSwapTerminal(state)).toBe(true)
-      expect(isSwapExposed(state)).toBe(false)
+      expect(SwapState.isTerminal(state)).toBe(true)
+      expect(SwapState.isExposed(state)).toBe(false)
     }
-    expect(isSwapTerminal('filled')).toBe(false)
+    expect(SwapState.isTerminal('filled')).toBe(false)
   })
 })
 
@@ -242,7 +242,7 @@ describe('swap aggregate', () => {
   })
 
   it('only takes 32 bytes of lowercase hex as a hashlock', () => {
-    expect(() => hashlock('AB'.repeat(32))).toThrow('lowercase hex')
-    expect(() => hashlock('ab'.repeat(31))).toThrow('lowercase hex')
+    expect(() => Hashlock.of('AB'.repeat(32))).toThrow('lowercase hex')
+    expect(() => Hashlock.of('ab'.repeat(31))).toThrow('lowercase hex')
   })
 })

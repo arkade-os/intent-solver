@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { evaluateApproval } from '@arkade-os/solver-core/core/approvalGate.js'
-import { Approval, decideApproval } from '@arkade-os/solver-core/domain/admin/approval.js'
+import { Approval } from '@arkade-os/solver-core/domain/admin/approval.js'
 import { Setting } from '@arkade-os/solver-core/domain/admin/setting.js'
-import { swapId } from '@arkade-os/solver-core/domain/shared/ids.js'
+import { SwapId } from '@arkade-os/solver-core/domain/shared/ids.js'
 import { btc, t } from '../support.js'
 
 describe('approval', () => {
@@ -10,17 +10,17 @@ describe('approval', () => {
     for (const threshold of [null, 0n, 1_000n]) {
       for (const amount of [0n, 999n, 1_000n, 5_000n]) {
         for (const approval of ['approved', 'none', 'unreadable'] as const) {
-          expect(decideApproval(btc(amount), threshold, approval)).toEqual(
+          expect(Approval.decide(btc(amount), threshold, approval)).toEqual(
             evaluateApproval({ amount, threshold, approval }),
           )
         }
       }
     }
-    expect(() => decideApproval(btc(1n), -1n, 'none')).toThrow('negative')
+    expect(() => Approval.decide(btc(1n), -1n, 'none')).toThrow('negative')
   })
 
   it('starts as a request, and approving again moves the timestamp as it does today', () => {
-    const approval = Approval.request(swapId('swap-1'), 'arkade:btc->onchain:btc', btc(5_000n), t(100))
+    const approval = Approval.request(SwapId.of('swap-1'), 'arkade:btc->onchain:btc', btc(5_000n), t(100))
     expect(approval.verdict).toBe('pending')
     approval.approve(t(200))
     approval.approve(t(300))

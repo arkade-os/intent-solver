@@ -21,20 +21,6 @@ export type ApprovalRecord = ValueOf<typeof ApprovalRecord>
 
 export type ApprovalDecision = { readonly proceed: true } | { readonly proceed: false; readonly reason: string }
 
-export const APPROVAL_REFUSAL = 'awaiting operator approval: this swap is at or above the approval threshold'
-
-/** `threshold` null means the asset is not gated. Measured on the payout. */
-export const decideApproval = (
-  quantity: Amount,
-  threshold: bigint | null,
-  record: ApprovalRecord,
-): ApprovalDecision => {
-  if (threshold === null) return { proceed: true }
-  if (threshold < 0n) throw new Error(`approval threshold cannot be negative, got ${threshold}`)
-  if (quantity.units < threshold || record === ApprovalRecord.Approved) return { proceed: true }
-  return { proceed: false, reason: APPROVAL_REFUSAL }
-}
-
 export interface ApprovalProps {
   readonly swapId: SwapId
   readonly route: string
@@ -45,6 +31,8 @@ export interface ApprovalProps {
 
 // There is no rejected verdict: an operator who will not approve parks the swap instead.
 export class Approval {
+  static readonly REFUSAL = 'awaiting operator approval: this swap is at or above the approval threshold'
+
   private constructor(private props: ApprovalProps) {}
 
   /** Only a held swap can be approved, so an approval always starts as a request. */
@@ -54,6 +42,14 @@ export class Approval {
 
   static restore(props: ApprovalProps): Approval {
     return new Approval(props)
+  }
+
+  /** `threshold` null means the asset is not gated. Measured on the payout. */
+  static decide(quantity: Amount, threshold: bigint | null, record: ApprovalRecord): ApprovalDecision {
+    if (threshold === null) return { proceed: true }
+    if (threshold < 0n) throw new Error(`approval threshold cannot be negative, got ${threshold}`)
+    if (quantity.units < threshold || record === ApprovalRecord.Approved) return { proceed: true }
+    return { proceed: false, reason: Approval.REFUSAL }
   }
 
   get swapId(): SwapId {

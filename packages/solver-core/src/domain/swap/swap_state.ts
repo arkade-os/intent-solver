@@ -63,10 +63,10 @@ const ENTRIES = Object.entries(DERIVED) as [DerivedSwapState, Derived][]
 
 const isDerived = (state: SwapState): state is DerivedSwapState => state in DERIVED
 
-/** Null for a pair outside the table: legs that disagree about what happened. */
-export const deriveSwapState = (from: LegState, to: LegState): DerivedSwapState | null =>
-  ENTRIES.find(([, { pairs }]) => pairs.some(([f, t]) => (f === '*' || f === from) && t === to))?.[0] ?? null
-
-export const isSwapExposed = (state: SwapState): boolean => isDerived(state) && DERIVED[state].exposed
-
-export const isSwapTerminal = (state: SwapState): boolean => !isDerived(state) || DERIVED[state].terminal
+export const SwapState = {
+  /** Null for a pair outside the table: legs that disagree about what happened. */
+  derive: (from: LegState, to: LegState): DerivedSwapState | null =>
+    ENTRIES.find(([, { pairs }]) => pairs.some(([f, t]) => (f === '*' || f === from) && t === to))?.[0] ?? null,
+  isExposed: (state: SwapState): boolean => isDerived(state) && DERIVED[state].exposed,
+  isTerminal: (state: SwapState): boolean => !isDerived(state) || DERIVED[state].terminal,
+}

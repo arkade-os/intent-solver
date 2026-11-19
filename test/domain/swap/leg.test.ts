@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { Leg, legCanTransition, LegMachine } from '@arkade-os/solver-core/domain/swap/leg.js'
+import { Leg, LegMachine } from '@arkade-os/solver-core/domain/swap/leg.js'
 import { btc } from '../support.js'
 
 describe('leg state machine', () => {
@@ -19,19 +19,19 @@ describe('leg state machine', () => {
   it('never locks or refunds a Lightning payment we send, nor the payment of an offer', () => {
     for (const contract of ['lightning', 'payment'] as const) {
       const send = { side: 'to', contract } as const
-      expect(legCanTransition(send, 'pending', 'locking')).toBe(true)
-      expect(legCanTransition(send, 'locking', 'claimed')).toBe(true)
-      expect(legCanTransition(send, 'pending', 'locked')).toBe(false)
-      expect(legCanTransition(send, 'locking', 'refunding')).toBe(false)
+      expect(Leg.canTransition(send, 'pending', 'locking')).toBe(true)
+      expect(Leg.canTransition(send, 'locking', 'claimed')).toBe(true)
+      expect(Leg.canTransition(send, 'pending', 'locked')).toBe(false)
+      expect(Leg.canTransition(send, 'locking', 'refunding')).toBe(false)
     }
-    expect(legCanTransition({ side: 'from', contract: 'lightning' }, 'pending', 'locked')).toBe(true)
+    expect(Leg.canTransition({ side: 'from', contract: 'lightning' }, 'pending', 'locked')).toBe(true)
   })
 
   it('never refunds an offer', () => {
     const offer = { side: 'from', contract: 'offer' } as const
-    expect(legCanTransition(offer, 'locked', 'claimed')).toBe(true)
-    expect(legCanTransition(offer, 'locked', 'refunding')).toBe(false)
-    expect(legCanTransition(offer, 'locked', 'refunded')).toBe(false)
+    expect(Leg.canTransition(offer, 'locked', 'claimed')).toBe(true)
+    expect(Leg.canTransition(offer, 'locked', 'refunding')).toBe(false)
+    expect(Leg.canTransition(offer, 'locked', 'refunded')).toBe(false)
   })
 })
 

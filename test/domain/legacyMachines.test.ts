@@ -1,18 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { EvmReceiveMachine, EvmSendMachine } from '@arkade-os/solver-core/core/evmSwapState.js'
 import type { StateMachine } from '@arkade-os/solver-core/core/stateMachine.js'
-import {
-  legCanTransition,
-  LegMachine,
-  type ContractKind,
-  type LegState,
-} from '@arkade-os/solver-core/domain/swap/leg.js'
-import {
-  deriveSwapState,
-  isSwapExposed,
-  isSwapTerminal,
-  type SwapOutcome,
-} from '@arkade-os/solver-core/domain/swap/swap_state.js'
+import { Leg, LegMachine, type ContractKind, type LegState } from '@arkade-os/solver-core/domain/swap/leg.js'
+import { SwapState, type SwapOutcome } from '@arkade-os/solver-core/domain/swap/swap_state.js'
 import { AssetRfqMachine } from '@arkade-os/solver-corridors/machines/assetRfq.js'
 import { LnReceiveMachine } from '@arkade-os/solver-corridors/machines/lnReceive.js'
 import { LnSendMachine } from '@arkade-os/solver-corridors/machines/lnSend.js'
@@ -168,12 +158,12 @@ const key = ([from, to]: Pair): string => `${from}/${to}`
 const steps = ({ from, to }: Corridor, [f, t]: Pair): Pair[] => {
   const next: Pair[] = [
     ...LegMachine.edges[f]
-      .filter((state) => legCanTransition({ side: 'from', contract: from }, f, state))
+      .filter((state) => Leg.canTransition({ side: 'from', contract: from }, f, state))
       .map((state): Pair => [state, t]),
     ...LegMachine.edges[t]
-      .filter((state) => legCanTransition({ side: 'to', contract: to }, t, state))
+      .filter((state) => Leg.canTransition({ side: 'to', contract: to }, t, state))
       .map((state): Pair => [f, state]),
-  ].filter(([a, b]) => deriveSwapState(a, b) !== null)
+  ].filter(([a, b]) => SwapState.derive(a, b) !== null)
   if (from === 'offer' && f === 'locked' && t === 'locking') next.push(['claimed', 'claimed'])
   return next
 }
@@ -191,7 +181,7 @@ const reaches = (corridor: Corridor, starts: readonly Pair[], goals: readonly Pa
   return false
 }
 
-const exposedPair = ([from, to]: Pair): boolean => isSwapExposed(deriveSwapState(from, to)!)
+const exposedPair = ([from, to]: Pair): boolean => SwapState.isExposed(SwapState.derive(from, to)!)
 
 /** Whether the aggregate can make the move a legacy edge stands for. */
 const expressible = (corridor: Corridor, from: string, to: string): boolean => {
@@ -213,7 +203,7 @@ describe.each(Object.entries(CORRIDORS))('%s on the leg model', (_, corridor) =>
   it('places every legacy state', () => {
     expect(Object.keys(positions).sort()).toEqual([...machine.states].sort())
     for (const state of machine.states) {
-      for (const pair of legs(state)) expect(deriveSwapState(...pair), `${state} ${key(pair)}`).not.toBeNull()
+      for (const pair of legs(state)) expect(SwapState.derive(...pair), `${state} ${key(pair)}`).not.toBeNull()
     }
   })
 
@@ -226,9 +216,10 @@ describe.each(Object.entries(CORRIDORS))('%s on the leg model', (_, corridor) =>
         continue
       }
       for (const pair of position) {
-        const derived = deriveSwapState(...pair)!
-        if (machine.isLive(state) === isSwapTerminal(derived)) disagreements.push(`${state} ${key(pair)} liveness`)
-        if (machine.isExposed(state) !== isSwapExposed(derived)) disagreements.push(`${state} ${key(pair)}`)
+        const derived = SwapState.derive(...pair)!
+        if (machine.isLive(state) === SwapState.isTerminal(derived))
+          disagreements.push(`${state} ${key(pair)} liveness`)
+        if (machine.isExposed(state) !== SwapState.isExposed(derived)) disagreements.push(`${state} ${key(pair)}`)
       }
     }
     expect(disagreements).toEqual(Object.keys(exposureExceptions))

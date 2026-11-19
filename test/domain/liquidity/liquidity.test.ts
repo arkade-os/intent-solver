@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { Exposure } from '@arkade-os/solver-core/domain/liquidity/exposure.js'
 import { Inventory } from '@arkade-os/solver-core/domain/liquidity/inventory.js'
 import { RebalancePolicy, type RebalanceLimits } from '@arkade-os/solver-core/domain/liquidity/rebalance_policy.js'
-import { Transfer, transferId } from '@arkade-os/solver-core/domain/liquidity/transfer.js'
-import { Withdrawal, withdrawalId } from '@arkade-os/solver-core/domain/liquidity/withdrawal.js'
+import { Transfer, TransferId } from '@arkade-os/solver-core/domain/liquidity/transfer.js'
+import { Withdrawal, WithdrawalId } from '@arkade-os/solver-core/domain/liquidity/withdrawal.js'
 import { ARKADE, btc, LIGHTNING, ONCHAIN, t, usdt } from '../support.js'
 
 describe('exposure', () => {
@@ -111,7 +111,7 @@ describe('rebalancing', () => {
 describe('transfer', () => {
   const quote = (): Transfer =>
     Transfer.quote({
-      id: transferId('tr-1'),
+      id: TransferId.of('tr-1'),
       origin: 'automatic',
       requestKey: 'req-1',
       from: ONCHAIN,
@@ -155,7 +155,7 @@ describe('transfer', () => {
   })
 
   it('needs a debit that covers a positive credit', () => {
-    const terms = { id: transferId('tr-2'), origin: 'manual', requestKey: null, from: ONCHAIN, to: ARKADE } as const
+    const terms = { id: TransferId.of('tr-2'), origin: 'manual', requestKey: null, from: ONCHAIN, to: ARKADE } as const
     expect(() => Transfer.quote({ ...terms, net: btc(100n), debit: btc(99n) })).toThrow('must cover')
     expect(() => Transfer.quote({ ...terms, to: ONCHAIN, net: btc(1n), debit: btc(1n) })).toThrow('are the same')
   })
@@ -163,7 +163,7 @@ describe('transfer', () => {
 
 describe('withdrawal', () => {
   const prepare = (): Withdrawal =>
-    Withdrawal.prepare(withdrawalId('wd-1'), 'arkade', ONCHAIN, 'bc1qaddress', btc(50_000n))
+    Withdrawal.prepare(WithdrawalId.of('wd-1'), 'arkade', ONCHAIN, 'bc1qaddress', btc(50_000n))
 
   it('knows its debit from the moment it is sending, and is sent with a reference', () => {
     const withdrawal = prepare()

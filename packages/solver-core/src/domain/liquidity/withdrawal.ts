@@ -3,7 +3,7 @@ import { nonEmpty, type Brand, type ValueOf } from '../shared/brand.js'
 import type { Endpoint } from '../shared/endpoint.js'
 
 export type WithdrawalId = Brand<string, 'WithdrawalId'>
-export const withdrawalId = (value: string): WithdrawalId => nonEmpty('withdrawal id', value)
+export const WithdrawalId = { of: (value: string): WithdrawalId => nonEmpty('withdrawal id', value) }
 
 export const WithdrawalState = {
   Preparing: 'preparing',
