@@ -47,8 +47,8 @@ export { ASSET_CARRIER_SATS }
 
 /**
  * A fill refusal that provably submitted nothing, so a caller holding the row in
- * `filling` may walk it back. Raised ONLY at the two coin-selection refusals
- * below, both above `fillOffer` — the call that builds AND submits. The other
+ * `filling` may walk it back. Raised at coin selection or a rejected submission
+ * latch, before `fillOffer` builds and submits. The other
  * guards here stay plain on purpose: they mean the row disagrees with the chain,
  * which needs a human. @see FundNotSubmittedError, the same boundary on receive.
  */

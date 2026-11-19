@@ -488,12 +488,13 @@ describe('running solver to Taxi on regtest', () => {
       const { swapPkScript: recordedScript, ...freshTerms } = decodeOffer(hex.decode(swap.offerHex))
       const compiled = offerContract(freshTerms, arkade.ctx.wallet.arkServerPublicKey, ASSET_SWAP_V3)
       const baseline = offerContract(freshTerms, arkade.ctx.wallet.arkServerPublicKey, ASSET_SWAP_V2)
-      expect(compiled.pkScript).toEqual(recordedScript)
-      expect(hex.encode(compiled.pkScript)).toBe(swap.swapPkScript)
+      const compiledPkScript = hex.encode(compiled.pkScript)
+      expect(compiledPkScript).toBe(hex.encode(recordedScript))
+      expect(compiledPkScript).toBe(hex.encode(swap.swapPkScript))
       expect(compiled.address(arkade.profile.arkadeHrp, arkade.ctx.wallet.arkServerPublicKey).encode()).toBe(
         swap.address,
       )
-      expect(compiled.pkScript).not.toEqual(baseline.pkScript)
+      expect(compiledPkScript).not.toBe(hex.encode(baseline.pkScript))
       const validUntil = Math.min(swap.quote.valid_until, verified.descriptor.expiresAt)
       const inputExpiryFloor = {
         kind: verified.quote.inputExpiryFloor.kind,
@@ -694,7 +695,7 @@ describe('running solver to Taxi on regtest', () => {
           JSON.stringify({
             rfqId,
             contractVersion: swap.quote.contract_version,
-            swapPkScript: swap.swapPkScript,
+            swapPkScript: compiledPkScript,
             address: swap.address,
             fundingBounds: {
               validUntil,
