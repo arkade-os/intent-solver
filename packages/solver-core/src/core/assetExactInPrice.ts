@@ -3,7 +3,8 @@ import type { Price } from './priceFeed.js'
 const BPS = 10_000n
 const pow10 = (n: number): bigint => 10n ** BigInt(n)
 
-/** Exact-in payout after conversion, then payout-side bps, with optional feed tolerance. */
+/** Exact-in payout after conversion, then payout-side bps, with optional feed tolerance.
+ * Both roundings favour the solver: the mid floors and the fee ceils. */
 export const assetExactInPayout = (args: {
   netInput: bigint
   givesBase: boolean
@@ -41,7 +42,7 @@ export const assetExactOutInput = (args: {
 }): bigint | null => {
   const { payout, ...rate } = args
   if (payout <= 0n) return null
-  const reaches = (netInput: bigint): boolean => assetExactInPayout({ netInput, ...rate }) >= payout
+  const reaches = (netInput: bigint): boolean => assetExactInPayout({ ...rate, netInput }) >= payout
 
   let hi = 1n
   for (let i = 0; i < 256 && !reaches(hi); i++) hi *= 2n
