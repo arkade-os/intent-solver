@@ -61,7 +61,14 @@ describe('e2e pool consolidation', () => {
       const own = await arkade.ctx.wallet.getAddress()
       const piece = { address: own, amount: COIN_SATS }
       for (let sent = 0; sent < COINS; sent += PER_SEND) {
-        await arkade.ctx.wallet.send(piece, ...Array.from({ length: PER_SEND - 1 }, () => piece))
+        const txid = await arkade.ctx.wallet.send(piece, ...Array.from({ length: PER_SEND - 1 }, () => piece))
+        const outpoints = Array.from({ length: PER_SEND }, (_, vout) => ({ txid, vout }))
+        await expect
+          .poll(async () => (await arkade.ctx.wallet.indexerProvider.getVtxos({ outpoints })).vtxos.length, {
+            message: `seed transaction ${txid} is visible to arkd`,
+            timeout: 10_000,
+          })
+          .toBe(PER_SEND)
       }
       const small = (coins: { value: number }[]) => coins.filter((coin) => coin.value === COIN_SATS).length
       const before = await waitFor((coins) => small(coins) >= COINS)
