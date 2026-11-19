@@ -78,7 +78,9 @@ export const openRfqPreview = (
       fromAmount = result.fromAmount
       toAmount = result.toAmount
     } else if (isCorridor(pair)) {
-      if (!served(descriptorFor(pair).contractVersion)) return undefined
+      // The versions `negotiatingContractVersion` can build, so bid and directed quote agree.
+      const descriptor = descriptorFor(pair)
+      if (!served(...(descriptor.contractVersions ?? [descriptor.contractVersion]))) return undefined
       if (amount > BigInt(Number.MAX_SAFE_INTEGER)) return undefined
       const fee = source.bootPolicy.corridorFees[pair]
       const limits = source.bootPolicy.corridorLimits[pair]
