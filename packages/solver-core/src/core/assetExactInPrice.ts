@@ -44,7 +44,7 @@ export const assetExactOutInput = (args: {
 }): bigint | null => {
   const { payout, ...rate } = args
   if (payout <= 0n) return null
-  const reaches = (netInput: bigint): boolean => assetExactInPayout({ netInput, ...rate }) >= payout
+  const reaches = (netInput: bigint): boolean => assetExactInPayout({ ...rate, netInput }) >= payout
 
   let hi = 1n
   for (let i = 0; i < 256 && !reaches(hi); i++) hi *= 2n

@@ -29,7 +29,7 @@ export interface AssetDecomposition {
   /** Sats netted off the deposit, and sats added to the payout. At most one is non-zero. */
   carrierCharged: bigint
   carrierReturned: bigint
-  /** `spreadFee * 10_000 / midPayout`. Null when there is no notional to divide by. */
+  /** `spreadFee * 10_000 / midPayout`, to the nearest bp. Null when there is no notional to divide by. */
   marginBps: number | null
 }
 
@@ -74,7 +74,7 @@ export const decomposeAssetQuote = (args: {
     flatFee,
     carrierCharged: charged,
     carrierReturned: returned,
-    marginBps: midPayout > 0n ? Number((spreadFee * 10_000n) / midPayout) : null,
+    marginBps: midPayout > 0n ? Number((spreadFee * 20_000n + midPayout) / (midPayout * 2n)) : null,
   }
 }
 

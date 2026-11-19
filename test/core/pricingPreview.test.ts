@@ -80,6 +80,21 @@ describe('decomposeAssetQuote agrees with the quote it decomposes', () => {
     }
   })
 
+  it('reads the configured spread on an uneven mid rather than a bp under it', () => {
+    // 2,036 sats net at 98,765.43 into cents: a mid of 201 and a 1-cent spread, 49.75 bps.
+    const decomposed = decomposeAssetQuote({
+      pair,
+      amount: 2_366n,
+      amountSide: 'from',
+      market: { ...sellUsdx, quoteDecimals: 2 },
+      feed: { mantissa: 9_876_543n, scale: 2 },
+      carrierSats: 330n,
+      dustSats: 330n,
+    })
+    if (!decomposed.ok) throw new Error('expected a quote')
+    expect(decomposed.marginBps).toBe(50)
+  })
+
   it('pins the full success shape, so an added field cannot pass silently', () => {
     expect(at(100_000n, 'from').preview).toEqual({
       ok: true,
