@@ -273,6 +273,35 @@ const assetHoldings = (balance, markets) => {
   }))
 }
 
+/** A market card's `spendable` row: what the solver could pay out of each asset leg now. */
+const marketSpendable = (market) => {
+  const legs = [market.base, market.quote].filter((leg) => leg !== null && leg !== 'BTC')
+  if (legs.length === 0) return []
+  const b = state.data.overviewBalances ?? state.overview?.balances
+  const find = (list, leg) => (Array.isArray(list) ? list : []).find((a) => a.assetId === leg)
+  return [
+    h('dt', 'spendable'),
+    h(
+      'dd',
+      state.data.overviewBalanceError || b?.arkadeError || (b && !b.arkade)
+        ? h('span.muted', 'unavailable')
+        : !b
+          ? '…'
+          : legs.map((leg, index) => {
+              const held = find(b.arkade.assets, leg)
+              const available = find(b.arkade.availableAssets, leg)?.amount ?? '0'
+              return h(
+                'span',
+                index > 0 ? ' · ' : null,
+                legName(leg),
+                ' ',
+                assetAmount(available, held?.amount ?? null, held?.decimals),
+              )
+            }),
+    ),
+  ]
+}
+
 /**
  * The wallet's assets, open on the page. A traded asset the solver holds none of
  * still gets its row: that market is one it cannot pay out of. No panel at all
@@ -732,6 +761,7 @@ const marketCard = (market) =>
       ),
       h('dt', 'state'),
       h('dd', marketState(market)),
+      ...marketSpendable(market),
       h('dt', 'sell base'),
       h('dd', marketBounds(market.sellBase, market.baseDecimals)),
       h('dt', 'buy base'),
@@ -751,7 +781,7 @@ const marketCard = (market) =>
 // them would push the exposure figure below the fold.
 const marketsPanel = (o) => {
   const markets = o.markets ?? []
-  return markets.length === 0 ? null : h('div.panels', ...markets.map(marketCard))
+  return markets.length === 0 ? null : h('div.panels', { id: 'overview-markets' }, ...markets.map(marketCard))
 }
 
 /** The two balances a swap pays out of; the breakdown lives on the wallet page. */
@@ -766,12 +796,23 @@ const overviewBalancesPanel = () => {
     b && state.overview?.btcRail !== false
       ? h('span.faint', ` · lightning ${b.lightningError ? 'unavailable' : sats(b.lightningSats)}`)
       : null,
+    b?.arkade?.assets?.length
+      ? h(
+          'span.faint',
+          ' ',
+          h('span.asset-count', `· ${b.arkade.assets.length} asset${b.arkade.assets.length === 1 ? '' : 's'}`),
+        )
+      : null,
   )
 }
 
 const paintOverviewBalances = () => {
   const live = document.getElementById('overview-balances')
   if (live) morph(live, overviewBalancesPanel())
+  // The market cards carry each asset leg's balance from the same read.
+  const cards = document.getElementById('overview-markets')
+  const next = state.overview && marketsPanel(state.overview)
+  if (cards && next) morph(cards, next)
 }
 
 const overviewView = () => {

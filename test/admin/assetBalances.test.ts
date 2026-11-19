@@ -96,3 +96,83 @@ describe('the wallet shows its assets without opening anything', () => {
     expect(paint).toContain("state.view === 'wallet'")
   })
 })
+
+const card = source.slice(source.indexOf('const marketBounds'), source.indexOf('const marketsPanel'))
+const figure = source.slice(
+  source.indexOf('const overviewBalancesPanel'),
+  source.indexOf('const paintOverviewBalances'),
+)
+const overviewWith = (data: Record<string, unknown>, balances: unknown = null) =>
+  new Function(
+    'h',
+    'legNode',
+    'legName',
+    'sats',
+    'state',
+    `${block}; ${card}; ${figure}; return { marketCard, overviewBalancesPanel }`,
+  )(
+    h,
+    (leg: string) => h('legNode', leg),
+    (leg: string) => h('legName', leg),
+    String,
+    { data, overview: { balances } },
+  ) as { marketCard: (m: unknown) => Node; overviewBalancesPanel: () => Node }
+const cardMarket = (quote: string) => ({
+  ...market(quote),
+  active: true,
+  serving: ['rfq'],
+  gaps: [],
+  sellBase: null,
+  buyBase: null,
+  feeBps: 40,
+  toleranceBps: 150,
+  sellBaseFeeFlat: '0',
+  buyBaseFeeFlat: '0',
+})
+const spendable = (cardNode: Node): Node => {
+  const kv = nodes(cardNode).find((n) => n.spec === 'dl.kv')!
+  return kv.args[kv.args.findIndex((n) => texts(n).join('') === 'spendable') + 1] as Node
+}
+
+describe('each market card says what the solver can pay out of it', () => {
+  it("shows the spendable balance of the market's asset leg, and what is held when that differs", () => {
+    const { marketCard } = overviewWith({ overviewBalances: { arkade: balance } })
+    expect(texts(spendable(marketCard(cardMarket(A))))).toEqual(
+      expect.arrayContaining([A, '1250', ' of 1500 held', ' (2dp)']),
+    )
+  })
+
+  it('shows a market whose asset the solver holds none of as a plain zero, never in a risk colour', () => {
+    const row = spendable(overviewWith({ overviewBalances: { arkade: balance } }).marketCard(cardMarket(B)))
+    expect(texts(row)).toEqual([B, ' ', '0', ' none held'])
+    expect(nodes(row).filter((n) => /phase|risk|banner|danger/.test(n.spec))).toEqual([])
+  })
+
+  it('waits for the balance read rather than showing a zero, and says when it failed', () => {
+    expect(texts(spendable(overviewWith({}).marketCard(cardMarket(A))))).toEqual(['…'])
+    expect(texts(spendable(overviewWith({ overviewBalanceError: 'down' }).marketCard(cardMarket(A))))).toEqual([
+      'unavailable',
+    ])
+    const failed = overviewWith({ overviewBalances: { arkade: null, arkadeError: 'down' } })
+    expect(texts(spendable(failed.marketCard(cardMarket(A))))).toEqual(['unavailable'])
+  })
+
+  it('counts the assets held beside the overview balance figure, wrapping before the count, never inside it', () => {
+    const count = nodes(overviewWith({ overviewBalances: { arkade: balance } }).overviewBalancesPanel()).find(
+      (n) => n.spec === 'span.asset-count',
+    )
+    expect(count?.args).toEqual(['· 3 assets'])
+    const css = readFileSync(new URL('../../packages/solver-app/src/admin/static/styles.css', import.meta.url), 'utf8')
+    expect(css).toMatch(/\.asset-count \{\s*white-space: nowrap;/)
+    expect(
+      texts(overviewWith({ overviewBalances: { arkade: { available: 1 } } }).overviewBalancesPanel()).join(''),
+    ).not.toMatch(/asset/)
+  })
+
+  it('repaints the cards in place when the balance read lands', () => {
+    const paint = source.slice(source.indexOf('const paintOverviewBalances'), source.indexOf('const overviewView'))
+    const panel = source.slice(source.indexOf('const marketsPanel'), source.indexOf('/** The two balances a swap'))
+    expect(panel).toContain("id: 'overview-markets'")
+    expect(paint).toContain("getElementById('overview-markets')")
+  })
+})

@@ -1047,6 +1047,10 @@ td.num {
   column-gap: 28px;
 }
 
+.asset-count {
+  white-space: nowrap;
+}
+
 /* ---- backend status ---------------------------------------------------- */
 /* A dot, not a traffic light: only "down" is coloured, for the same reason
    only "exposed" is. */
