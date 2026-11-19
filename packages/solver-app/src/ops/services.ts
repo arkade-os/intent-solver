@@ -711,6 +711,13 @@ export const createServices = async (
   })
   const liveRanges = rangesOf(policy)
   const unclamped = clampedBefore(config.network, config.limits, rangesOf(config))
+  if (unclamped.length > 0) {
+    // stderr, so it outlives a boot log nobody reads: these bounds were capped until this release.
+    console.warn(
+      `[${new Date().toISOString()}] WARNING limits — ${unclamped.length} configured bound(s) were capped by releases before this and now apply as set: ` +
+        `${unclamped.map(({ corridor, field }) => `${corridor ?? 'deployment'}.${field}`).join(', ')}; re-check them against limits.maxExposedSats`,
+    )
+  }
   for (const { corridor, field, now, was } of unclamped) {
     const [bound, before] = field === 'maxSats' ? ['max', 'at most'] : ['min', 'at least']
     const live = (corridor === null ? policy.limits : liveRanges[corridor]!)[field]
