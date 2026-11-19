@@ -16,6 +16,9 @@ import {
   type CoupledSendRow,
 } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import { ReceiveSwapStore } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
+import { LnReceiveSwaps } from '@arkade-os/solver-corridors/adapters/lnReceiveSwaps.js'
+import { LnReceiveMachine } from '@arkade-os/solver-corridors/machines/lnReceive.js'
+import { SwapState } from '@arkade-os/solver-core/domain/swap/swap_state.js'
 import { SwapStore } from '@arkade-os/solver-corridors/db/swaps.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
@@ -210,6 +213,14 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  // Every row a scenario leaves behind must read back as a swap the legacy flags agree with.
+  const swaps = new LnReceiveSwaps(store)
+  for (const row of await store.findByStates(LnReceiveMachine.states)) {
+    const swap = await swaps.load(row)
+    expect(SwapState.isTerminal(swap.state), `${row.id} ${row.state}`).toBe(LnReceiveMachine.isTerminal(row.state))
+    const inFlight = row.state === 'armed' && swap.to.state === 'locking'
+    if (!inFlight) expect(swap.exposed, `${row.id} ${row.state}`).toBe(LnReceiveMachine.isExposed(row.state))
+  }
   await store.close()
   rmSync(dir, { recursive: true, force: true })
 })
