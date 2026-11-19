@@ -1,5 +1,6 @@
 import type { Amount } from '../shared/amount.js'
 import type { Endpoint } from '../shared/endpoint.js'
+import { DomainError, ErrorCode } from '../shared/error.js'
 
 export class Reconciliation {
   private constructor(
@@ -11,7 +12,7 @@ export class Reconciliation {
 
   static of(endpoint: Endpoint, ledgerBalance: bigint, actualBalance: Amount | null): Reconciliation {
     if (actualBalance !== null && actualBalance.asset !== endpoint.asset) {
-      throw new Error(`${endpoint.key} cannot be reconciled against ${actualBalance.asset}`)
+      throw new DomainError(ErrorCode.Invalid, `${endpoint.key} cannot be reconciled against ${actualBalance.asset}`)
     }
     return new Reconciliation(endpoint, ledgerBalance, actualBalance)
   }

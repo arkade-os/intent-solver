@@ -1,5 +1,6 @@
 import type { Asset } from '../shared/asset.js'
 import { MAX_DECIMALS } from './price.js'
+import { DomainError, ErrorCode } from '../shared/error.js'
 
 export interface Denomination {
   readonly asset: Asset
@@ -15,10 +16,14 @@ export class Pair {
   ) {}
 
   static of(base: Denomination, quote: Denomination, priceSource: string): Pair {
-    if (base.asset === quote.asset) throw new Error(`a pair needs two assets, got ${base.asset} twice`)
+    if (base.asset === quote.asset)
+      throw new DomainError(ErrorCode.Invalid, `a pair needs two assets, got ${base.asset} twice`)
     for (const { asset, decimals } of [base, quote]) {
       if (!Number.isInteger(decimals) || decimals < 0 || decimals > MAX_DECIMALS) {
-        throw new Error(`${asset} decimals must be an integer in 0..${MAX_DECIMALS}, got ${decimals}`)
+        throw new DomainError(
+          ErrorCode.Invalid,
+          `${asset} decimals must be an integer in 0..${MAX_DECIMALS}, got ${decimals}`,
+        )
       }
     }
     return new Pair(base, quote, priceSource)

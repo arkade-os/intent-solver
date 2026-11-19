@@ -3,6 +3,7 @@ import { checkBps } from '../shared/bps.js'
 import type { Pair } from './pair.js'
 import type { Price } from './price.js'
 import { QuoteRefusal, QuoteSide, refuse, type PricedQuote } from './quote_terms.js'
+import { DomainError, ErrorCode } from '../shared/error.js'
 
 const BPS = 10_000n
 const pow10 = (n: number): bigint => 10n ** BigInt(n)
@@ -58,9 +59,10 @@ export class AssetPricing {
     const { feeBps, sellBaseFeeBps = feeBps, buyBaseFeeBps = feeBps, toleranceBps } = props
     for (const bps of [feeBps, sellBaseFeeBps, buyBaseFeeBps, toleranceBps]) checkBps('asset pricing', bps)
     if ((props.sellBaseFeeFlat ?? 0n) < 0n || (props.buyBaseFeeFlat ?? 0n) < 0n) {
-      throw new Error('asset pricing: a flat fee cannot be negative')
+      throw new DomainError(ErrorCode.Invalid, 'asset pricing: a flat fee cannot be negative')
     }
-    if (props.minPayout < 0n || props.maxPayout < 0n) throw new Error('asset pricing: payout bounds cannot be negative')
+    if (props.minPayout < 0n || props.maxPayout < 0n)
+      throw new DomainError(ErrorCode.Invalid, 'asset pricing: payout bounds cannot be negative')
     return new AssetPricing(props)
   }
 

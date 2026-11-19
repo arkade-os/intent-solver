@@ -5,6 +5,7 @@ import { ContractKind, Leg, Side, type LegReferences, type LegState } from './le
 import type { AmountMode, Quote } from './quote.js'
 import { SWAP_TOPIC, type SwapEvent, type SwapQuoted } from './swap_event.js'
 import { SwapOutcome, SwapState } from './swap_state.js'
+import { DomainError, ErrorCode } from '../shared/error.js'
 
 export interface SwapProps {
   readonly id: SwapId
@@ -39,7 +40,7 @@ const created = (e: SwapQuoted): SwapProps => ({
 const applied = (props: SwapProps, e: SwapEvent): SwapProps => {
   switch (e.type) {
     case 'SwapQuoted':
-      throw new Error(`swap ${props.id}: quoted twice`)
+      throw new DomainError(ErrorCode.Corrupt, `swap ${props.id}: quoted twice`)
     case 'LegAdvanced':
       return {
         ...props,
@@ -74,9 +75,10 @@ export class Swap {
   static quote(args: NewSwap): Swap {
     const offer = args.from.contract === ContractKind.Offer || args.to.contract === ContractKind.Offer
     if (offer !== (args.hashlock === null)) {
-      throw new Error(`swap ${args.id}: a hashlock is required unless the swap is an offer`)
+      throw new DomainError(ErrorCode.Invalid, `swap ${args.id}: a hashlock is required unless the swap is an offer`)
     }
-    if (args.quote.expiredAt(args.at)) throw new Error(`swap ${args.id}: quote expired at creation`)
+    if (args.quote.expiredAt(args.at))
+      throw new DomainError(ErrorCode.RuleViolated, `swap ${args.id}: quote expired at creation`)
     const event: SwapQuoted = { topic: SWAP_TOPIC, type: 'SwapQuoted', ...args }
     const swap = new Swap(created(event), 0)
     swap.raised.push(event)
@@ -85,7 +87,8 @@ export class Swap {
 
   static fromEvents(events: readonly SwapEvent[]): Swap {
     const [first, ...rest] = events
-    if (first?.type !== 'SwapQuoted') throw new Error('swap: history must start with SwapQuoted')
+    if (first?.type !== 'SwapQuoted')
+      throw new DomainError(ErrorCode.Corrupt, 'swap: history must start with SwapQuoted')
     return new Swap(rest.reduce(applied, created(first)), events.length)
   }
 
@@ -174,9 +177,10 @@ export class Swap {
    */
   lockFailed(side: Side, at: UnixSeconds): SwapEvent {
     const leg = this[side]
-    if (leg.state !== 'locking') throw this.error(`${side} leg is ${leg.state}, not locking`)
+    if (leg.state !== 'locking')
+      throw this.error(ErrorCode.IllegalTransition, `${side} leg is ${leg.state}, not locking`)
     if (leg.contract !== ContractKind.Lightning && leg.reference('funding') !== null) {
-      throw this.error(`${side} leg has a transaction that may still land`)
+      throw this.error(ErrorCode.RuleViolated, `${side} leg has a transaction that may still land`)
     }
     return this.advance(side, 'pending', at, {})
   }
@@ -204,8 +208,9 @@ export class Swap {
 
   /** The one transaction of an offer: it takes the client's deposit and pays them, so both legs end at once. */
   fillOffer(at: UnixSeconds, fill?: string): SwapEvent {
-    if (!this.isOffer) throw this.error('only an offer is filled in one transaction')
-    if (this.props.outcome !== null || this.legsState !== 'filling') throw this.error(`cannot fill while ${this.state}`)
+    if (!this.isOffer) throw this.error(ErrorCode.RuleViolated, 'only an offer is filled in one transaction')
+    if (this.props.outcome !== null || this.legsState !== 'filling')
+      throw this.error(ErrorCode.IllegalTransition, `cannot fill while ${this.state}`)
     return this.raise({ topic: SWAP_TOPIC, type: 'OfferFilled', id: this.id, at, fill: fill ?? null })
   }
 
@@ -217,19 +222,23 @@ export class Swap {
   fail(outcome: SwapOutcome, reason: string, at: UnixSeconds): SwapEvent | null {
     const current = this.props.outcome
     if (current === outcome) return null
-    if (current !== null && current !== SwapOutcome.Stuck) throw this.error(`already ${current}`)
-    if (current === null && SwapState.isTerminal(this.state)) throw this.error(`already ${this.state}`)
+    if (current !== null && current !== SwapOutcome.Stuck)
+      throw this.error(ErrorCode.IllegalTransition, `already ${current}`)
+    if (current === null && SwapState.isTerminal(this.state))
+      throw this.error(ErrorCode.IllegalTransition, `already ${this.state}`)
     if (outcome === SwapOutcome.Refused && this.capitalOut)
-      throw this.error('our payout is out, so it cannot be refused')
+      throw this.error(ErrorCode.RuleViolated, 'our payout is out, so it cannot be refused')
     return this.raise({ topic: SWAP_TOPIC, type: 'SwapFailed', id: this.id, at, outcome, reason })
   }
 
   /** Operator recovery: a stuck swap goes back to being driven, but only to collect with a preimage in hand. */
   resume(at: UnixSeconds): SwapEvent {
     if (this.props.outcome !== SwapOutcome.Stuck)
-      throw this.error(`only a stuck swap resumes, this one is ${this.state}`)
-    if (this.preimage === null) throw this.error('nothing to resume for: the preimage is not known')
-    if (this.legsState === null) throw this.error(`legs ${this.from.state}/${this.to.state} make no sense`)
+      throw this.error(ErrorCode.IllegalTransition, `only a stuck swap resumes, this one is ${this.state}`)
+    if (this.preimage === null)
+      throw this.error(ErrorCode.RuleViolated, 'nothing to resume for: the preimage is not known')
+    if (this.legsState === null)
+      throw this.error(ErrorCode.RuleViolated, `legs ${this.from.state}/${this.to.state} make no sense`)
     return this.raise({ topic: SWAP_TOPIC, type: 'SwapResumed', id: this.id, at })
   }
 
@@ -253,10 +262,14 @@ export class Swap {
     references: LegReferences,
     preimage?: Preimage,
   ): SwapEvent {
-    if (!this[side].canMoveTo(state)) throw this.error(`${side} leg cannot go ${this[side].state} -> ${state}`)
+    if (!this[side].canMoveTo(state))
+      throw this.error(ErrorCode.IllegalTransition, `${side} leg cannot go ${this[side].state} -> ${state}`)
     const revealed = this.secretFor(side, state, preimage)
     if (!this.coherentWith(side, state)) {
-      throw this.error(`legs ${this.pairWith(side, state).join('/')} make no sense; fail the swap`)
+      throw this.error(
+        ErrorCode.RuleViolated,
+        `legs ${this.pairWith(side, state).join('/')} make no sense; fail the swap`,
+      )
     }
     return this.raise({
       topic: SWAP_TOPIC,
@@ -273,24 +286,25 @@ export class Swap {
   private secretFor(side: Side, state: LegState, preimage?: Preimage): Preimage | null {
     const { hashlock } = this
     if (hashlock === null) {
-      if (preimage !== undefined) throw this.error('an offer has no preimage')
+      if (preimage !== undefined) throw this.error(ErrorCode.RuleViolated, 'an offer has no preimage')
       return null
     }
     if (side === Side.To && state === 'claimed') {
       if (preimage === undefined || !Preimage.opens(preimage, hashlock)) {
-        throw this.error('claiming the to leg needs the preimage of the hashlock')
+        throw this.error(ErrorCode.RuleViolated, 'claiming the to leg needs the preimage of the hashlock')
       }
       return preimage
     }
-    if (preimage !== undefined) throw this.error('only the claim of the to leg reveals the preimage')
+    if (preimage !== undefined)
+      throw this.error(ErrorCode.RuleViolated, 'only the claim of the to leg reveals the preimage')
     if (side === Side.From && (state === 'claiming' || state === 'claimed') && this.preimage === null) {
-      throw this.error('the from leg cannot be collected before the preimage is known')
+      throw this.error(ErrorCode.RuleViolated, 'the from leg cannot be collected before the preimage is known')
     }
     return null
   }
 
-  private error(message: string): Error {
-    return new Error(`swap ${this.id}: ${message}`)
+  private error(code: ErrorCode, message: string): DomainError {
+    return new DomainError(code, `swap ${this.id}: ${message}`)
   }
 
   private raise(event: SwapEvent): SwapEvent {

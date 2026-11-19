@@ -1,6 +1,7 @@
 import type { Amount } from '../shared/amount.js'
 import { nonEmpty, type Brand, type ValueOf } from '../shared/brand.js'
 import type { Endpoint } from '../shared/endpoint.js'
+import { DomainError, ErrorCode } from '../shared/error.js'
 
 export type WithdrawalId = Brand<string, 'WithdrawalId'>
 export const WithdrawalId = { of: (value: string): WithdrawalId => nonEmpty('withdrawal id', value) }
@@ -42,9 +43,10 @@ export class Withdrawal {
 
   static prepare(id: WithdrawalId, scope: string, endpoint: Endpoint, address: string, amount: Amount): Withdrawal {
     if (amount.isZero || amount.asset !== endpoint.asset) {
-      throw new Error(`withdrawal ${id}: needs a positive amount of ${endpoint.asset}`)
+      throw new DomainError(ErrorCode.Invalid, `withdrawal ${id}: needs a positive amount of ${endpoint.asset}`)
     }
-    if (address === '' || scope === '') throw new Error(`withdrawal ${id}: missing address or scope`)
+    if (address === '' || scope === '')
+      throw new DomainError(ErrorCode.Invalid, `withdrawal ${id}: missing address or scope`)
     return new Withdrawal({
       id,
       scope,
@@ -76,13 +78,15 @@ export class Withdrawal {
   }
 
   send(fee: Amount): void {
-    if (fee.asset !== this.props.amount.asset) throw this.error(`fee must be in ${this.props.amount.asset}`)
+    if (fee.asset !== this.props.amount.asset)
+      throw this.error(ErrorCode.Invalid, `fee must be in ${this.props.amount.asset}`)
     this.move(WithdrawalState.Sending)
     this.props = { ...this.props, fee }
   }
 
   sent(reference: string): void {
-    if (reference === '' || this.props.fee === null) throw this.error('a sent withdrawal needs its fee and reference')
+    if (reference === '' || this.props.fee === null)
+      throw this.error(ErrorCode.Invalid, 'a sent withdrawal needs its fee and reference')
     this.move(WithdrawalState.Sent)
     this.props = { ...this.props, reference }
   }
@@ -98,11 +102,12 @@ export class Withdrawal {
   }
 
   private move(to: WithdrawalState): void {
-    if (!EDGES[this.state].includes(to)) throw this.error(`cannot go ${this.state} -> ${to}`)
+    if (!EDGES[this.state].includes(to))
+      throw this.error(ErrorCode.IllegalTransition, `cannot go ${this.state} -> ${to}`)
     this.props = { ...this.props, state: to }
   }
 
-  private error(message: string): Error {
-    return new Error(`withdrawal ${this.id}: ${message}`)
+  private error(code: ErrorCode, message: string): DomainError {
+    return new DomainError(code, `withdrawal ${this.id}: ${message}`)
   }
 }

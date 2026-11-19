@@ -19,6 +19,15 @@ describe('domain boundaries', () => {
     expect(offenders).toEqual([])
   })
 
+  it('throws only DomainError, so a caller can handle a failure by its code', () => {
+    const plain = readdirSync(DOMAIN).flatMap((context) =>
+      readdirSync(`${DOMAIN}${context}`).filter((file) =>
+        /new Error\(/.test(readFileSync(`${DOMAIN}${context}/${file}`, 'utf8')),
+      ),
+    )
+    expect(plain).toEqual([])
+  })
+
   it('depends on no package beyond the hash primitives', () => {
     const packages = readdirSync(DOMAIN).flatMap((context) =>
       readdirSync(`${DOMAIN}${context}`).flatMap((file) =>

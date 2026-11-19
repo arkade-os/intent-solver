@@ -1,6 +1,7 @@
 import { checkBps } from '../shared/bps.js'
 import type { UnixSeconds } from '../shared/time.js'
 import { Inventory } from './inventory.js'
+import { DomainError, ErrorCode } from '../shared/error.js'
 
 export interface RebalanceLimits {
   readonly enabled: boolean
@@ -21,15 +22,18 @@ export class RebalancePolicy {
     const { enabled, reserve, maxDebit, dailyDebit, maxFee, maxFeeBps, minTransfer, cooldownSeconds } = limits
     // Checked even when disabled: a negative reserve would quietly widen what may be spent once it is switched on.
     if ([reserve, maxDebit, dailyDebit, maxFee, minTransfer].some((limit) => limit < 0n)) {
-      throw new Error('rebalance limits cannot be negative')
+      throw new DomainError(ErrorCode.Invalid, 'rebalance limits cannot be negative')
     }
     if (!Number.isInteger(cooldownSeconds) || cooldownSeconds < 0) {
-      throw new Error(`cooldown must be a whole number of seconds, got ${cooldownSeconds}`)
+      throw new DomainError(ErrorCode.Invalid, `cooldown must be a whole number of seconds, got ${cooldownSeconds}`)
     }
     // A cap, not a fee taken from a payout: 100% is a legitimate "fees do not bind".
     checkBps('maxFeeBps', maxFeeBps, 10_000)
     if (enabled && !(maxDebit > 0n && dailyDebit > 0n && minTransfer > 0n)) {
-      throw new Error('an enabled rebalance policy needs positive maxDebit, dailyDebit and minTransfer')
+      throw new DomainError(
+        ErrorCode.Invalid,
+        'an enabled rebalance policy needs positive maxDebit, dailyDebit and minTransfer',
+      )
     }
     return new RebalancePolicy(limits)
   }
@@ -66,7 +70,8 @@ export class RebalancePolicy {
   }
 
   feesAllowed(net: bigint, debit: bigint): boolean {
-    if (net <= 0n || debit < net) throw new Error('source debit must cover a positive net credit')
+    if (net <= 0n || debit < net)
+      throw new DomainError(ErrorCode.Invalid, 'source debit must cover a positive net credit')
     const fees = debit - net
     return fees <= this.limits.maxFee && fees * 10_000n <= net * BigInt(this.limits.maxFeeBps)
   }

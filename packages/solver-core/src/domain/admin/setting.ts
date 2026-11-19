@@ -1,3 +1,5 @@
+import { DomainError, ErrorCode } from '../shared/error.js'
+
 export class Setting {
   private constructor(
     readonly key: string,
@@ -7,7 +9,7 @@ export class Setting {
   ) {}
 
   static initial(key: string, value: string | null): Setting {
-    if (key === '') throw new Error('setting needs a key')
+    if (key === '') throw new DomainError(ErrorCode.Invalid, 'setting needs a key')
     return new Setting(key, value, 1)
   }
 
@@ -18,7 +20,7 @@ export class Setting {
   /** `expected` is the revision the operator was looking at; a stale one must not overwrite a newer value. */
   change(value: string | null, expected: number): Setting {
     if (expected !== this.revision) {
-      throw new Error(`setting ${this.key} is at revision ${this.revision}, not ${expected}`)
+      throw new DomainError(ErrorCode.Conflict, `setting ${this.key} is at revision ${this.revision}, not ${expected}`)
     }
     return value === this.value ? this : new Setting(this.key, value, this.revision + 1)
   }
