@@ -2,7 +2,7 @@ import { defineMachine, type StateOf } from '../../core/stateMachine.js'
 import type { Amount } from '../shared/amount.js'
 import type { ValueOf } from '../shared/brand.js'
 import type { Rail } from '../shared/endpoint.js'
-import { DomainError, ErrorCode } from '../shared/error.js'
+import { IllegalTransition, InvalidValue } from '../shared/error.js'
 
 export const Side = {
   From: 'from',
@@ -82,7 +82,7 @@ export class Leg {
   ) {}
 
   static open(side: Side, terms: LegTerms): Leg {
-    if (terms.amount.isZero) throw new DomainError(ErrorCode.Invalid, `${side} leg amount must be positive`)
+    if (terms.amount.isZero) throw new InvalidValue(`${side} leg amount must be positive`)
     return new Leg(side, terms, 'pending', NO_FACTS)
   }
 
@@ -116,8 +116,7 @@ export class Leg {
   }
 
   moveTo(state: LegState, references: LegReferences = {}): Leg {
-    if (!this.canMoveTo(state))
-      throw new DomainError(ErrorCode.IllegalTransition, `${this.side} leg cannot go ${this.state} -> ${state}`)
+    if (!this.canMoveTo(state)) throw new IllegalTransition(`${this.side} leg cannot go ${this.state} -> ${state}`)
     return new Leg(this.side, this.terms, state, withReferences(this.facts, references))
   }
 

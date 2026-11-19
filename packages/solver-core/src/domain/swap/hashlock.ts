@@ -1,7 +1,7 @@
 import { sha256 } from '@noble/hashes/sha2.js'
 import { hex } from '@scure/base'
 import type { Brand } from '../shared/brand.js'
-import { DomainError, ErrorCode } from '../shared/error.js'
+import { InvalidValue } from '../shared/error.js'
 
 export type Hashlock = Brand<string, 'Hashlock'>
 export type Preimage = Brand<string, 'Preimage'>
@@ -10,7 +10,7 @@ export type Preimage = Brand<string, 'Preimage'>
 const HEX_32_BYTES = /^[0-9a-f]{64}$/
 
 const hex32 = <B extends string>(name: string, value: string): B => {
-  if (!HEX_32_BYTES.test(value)) throw new DomainError(ErrorCode.Invalid, `${name} must be 32 bytes of lowercase hex`)
+  if (!HEX_32_BYTES.test(value)) throw new InvalidValue(`${name} must be 32 bytes of lowercase hex`)
   return value as B
 }
 

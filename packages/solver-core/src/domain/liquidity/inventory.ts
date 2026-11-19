@@ -1,6 +1,6 @@
 import type { Amount } from '../shared/amount.js'
 import type { Endpoint } from '../shared/endpoint.js'
-import { DomainError, ErrorCode } from '../shared/error.js'
+import { InvalidValue } from '../shared/error.js'
 
 export interface InventoryTarget {
   /** Below this the inventory is refilled; zero never triggers... */
@@ -19,10 +19,10 @@ export class Inventory {
 
   static of(endpoint: Endpoint, balance: Amount | null, target: InventoryTarget | null): Inventory {
     if (balance !== null && balance.asset !== endpoint.asset) {
-      throw new DomainError(ErrorCode.Invalid, `${endpoint.key} cannot hold a balance in ${balance.asset}`)
+      throw new InvalidValue(`${endpoint.key} cannot hold a balance in ${balance.asset}`)
     }
     if (target !== null && !(target.minimum >= 0n && target.minimum < target.target)) {
-      throw new DomainError(ErrorCode.Invalid, `${endpoint.key}: target needs 0 <= minimum < target`)
+      throw new InvalidValue(`${endpoint.key}: target needs 0 <= minimum < target`)
     }
     return new Inventory(endpoint, balance, target)
   }

@@ -1,5 +1,5 @@
 import type { ValueOf } from '../shared/brand.js'
-import { DomainError, ErrorCode } from '../shared/error.js'
+import { InvalidValue } from '../shared/error.js'
 
 export const LimitBreach = {
   BelowMin: 'below_min',
@@ -15,8 +15,8 @@ export class Limits {
   ) {}
 
   static of(min: bigint, max: bigint): Limits {
-    if (min <= 0n || max <= 0n) throw new DomainError(ErrorCode.Invalid, `limits must be positive, got ${min}..${max}`)
-    if (min > max) throw new DomainError(ErrorCode.Invalid, `limits are empty: min ${min} above max ${max}`)
+    if (min <= 0n || max <= 0n) throw new InvalidValue(`limits must be positive, got ${min}..${max}`)
+    if (min > max) throw new InvalidValue(`limits are empty: min ${min} above max ${max}`)
     return new Limits(min, max)
   }
 

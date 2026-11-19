@@ -4,7 +4,7 @@ import type { AssetPricing } from './asset_pricing.js'
 import type { Price } from './price.js'
 import { QuoteRefusal, type QuoteSide } from './quote_terms.js'
 import type { SpreadPricing } from './spread_pricing.js'
-import { DomainError, ErrorCode } from '../shared/error.js'
+import { InvalidValue } from '../shared/error.js'
 
 export interface RouteTerms {
   readonly give: Amount
@@ -38,13 +38,13 @@ export class Route {
 
   static of(props: RouteProps): Route {
     const { from, to, pricing } = props
-    if (from.equals(to)) throw new DomainError(ErrorCode.Invalid, `route ${from.key} leads back to itself`)
+    if (from.equals(to)) throw new InvalidValue(`route ${from.key} leads back to itself`)
     const changesAsset = from.asset !== to.asset
     if (changesAsset !== (pricing.kind === 'asset')) {
-      throw new DomainError(ErrorCode.Invalid, 'a route is priced by a market exactly when it changes asset')
+      throw new InvalidValue('a route is priced by a market exactly when it changes asset')
     }
     if (pricing.kind === 'asset' && !(pricing.pair.has(from.asset) && pricing.pair.has(to.asset))) {
-      throw new DomainError(ErrorCode.Invalid, `market does not price ${from.asset} against ${to.asset}`)
+      throw new InvalidValue(`market does not price ${from.asset} against ${to.asset}`)
     }
     return new Route(props)
   }

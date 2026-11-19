@@ -1,5 +1,5 @@
 import type { ValueOf } from '../shared/brand.js'
-import { DomainError, ErrorCode } from '../shared/error.js'
+import { InvalidValue } from '../shared/error.js'
 
 export const Rounding = {
   Down: 'down',
@@ -21,12 +21,12 @@ const divRound = (numerator: bigint, denominator: bigint, rounding: Rounding): b
 
 const checkDecimals = (name: string, value: number): void => {
   if (!Number.isInteger(value) || value < 0 || value > MAX_DECIMALS) {
-    throw new DomainError(ErrorCode.Invalid, `${name} must be an integer in 0..${MAX_DECIMALS}, got ${value}`)
+    throw new InvalidValue(`${name} must be an integer in 0..${MAX_DECIMALS}, got ${value}`)
   }
 }
 
 const check = (units: bigint, baseDecimals: number, quoteDecimals: number): void => {
-  if (units < 0n) throw new DomainError(ErrorCode.Invalid, `amount must not be negative, got ${units}`)
+  if (units < 0n) throw new InvalidValue(`amount must not be negative, got ${units}`)
   checkDecimals('baseDecimals', baseDecimals)
   checkDecimals('quoteDecimals', quoteDecimals)
 }
@@ -40,13 +40,13 @@ export class Price {
 
   static parse(text: string): Price {
     const match = DECIMAL.exec(text.trim())
-    if (!match) throw new DomainError(ErrorCode.Invalid, 'price must be a plain decimal')
+    if (!match) throw new InvalidValue('price must be a plain decimal')
     const [, whole = '', fraction = ''] = match
     if (whole.length > MAX_DIGITS || fraction.length > MAX_DIGITS) {
-      throw new DomainError(ErrorCode.Invalid, `price must have at most ${MAX_DIGITS} digits each side of the point`)
+      throw new InvalidValue(`price must have at most ${MAX_DIGITS} digits each side of the point`)
     }
     const mantissa = BigInt(whole + fraction)
-    if (mantissa <= 0n) throw new DomainError(ErrorCode.Invalid, 'price must be positive')
+    if (mantissa <= 0n) throw new InvalidValue('price must be positive')
     return new Price(mantissa, fraction.length)
   }
 

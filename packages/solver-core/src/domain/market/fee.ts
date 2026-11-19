@@ -1,5 +1,5 @@
 import { checkBps } from '../shared/bps.js'
-import { DomainError, ErrorCode } from '../shared/error.js'
+import { InvalidValue } from '../shared/error.js'
 
 const BPS = 10_000n
 
@@ -13,7 +13,7 @@ export class Fee {
 
   static of(bps: number, flat: bigint): Fee {
     checkBps('fee', bps)
-    if (flat < 0n) throw new DomainError(ErrorCode.Invalid, `flat fee cannot be negative, got ${flat}`)
+    if (flat < 0n) throw new InvalidValue(`flat fee cannot be negative, got ${flat}`)
     return new Fee(bps, flat)
   }
 
@@ -22,11 +22,7 @@ export class Fee {
    * An unknown cost falls back to the configured flat fee rather than to zero.
    */
   withNetworkCost(cost: number | null, cap: bigint, min = 0n): Fee {
-    if (min > cap)
-      throw new DomainError(
-        ErrorCode.Invalid,
-        `network fee floor ${min} exceeds its cap ${cap}, so the cap can never hold`,
-      )
+    if (min > cap) throw new InvalidValue(`network fee floor ${min} exceeds its cap ${cap}, so the cap can never hold`)
     const known = cost === null || !Number.isFinite(cost) || cost < 0 ? this.flat : BigInt(Math.ceil(cost))
     const capped = known < cap ? known : cap
     return new Fee(this.bps, capped > min ? capped : min)

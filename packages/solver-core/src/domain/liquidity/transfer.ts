@@ -2,7 +2,7 @@ import type { Amount } from '../shared/amount.js'
 import { nonEmpty, type Brand, type ValueOf } from '../shared/brand.js'
 import type { Endpoint } from '../shared/endpoint.js'
 import type { UnixSeconds } from '../shared/time.js'
-import { DomainError, ErrorCode } from '../shared/error.js'
+import { type DomainError, IllegalTransition, InvalidValue, RuleViolated } from '../shared/error.js'
 
 export type TransferId = Brand<string, 'TransferId'>
 export const TransferId = { of: (value: string): TransferId => nonEmpty('transfer id', value) }
@@ -61,10 +61,9 @@ export class Transfer {
   private constructor(private props: TransferProps) {}
 
   static quote(terms: Omit<TransferProps, 'state' | 'chargedAt' | 'fundingTxid' | 'credited'>): Transfer {
-    if (terms.from.equals(terms.to))
-      throw new DomainError(ErrorCode.Invalid, `transfer ${terms.id}: source and destination are the same`)
+    if (terms.from.equals(terms.to)) throw new InvalidValue(`transfer ${terms.id}: source and destination are the same`)
     if (terms.net.isZero || !terms.debit.gte(terms.net)) {
-      throw new DomainError(ErrorCode.Invalid, `transfer ${terms.id}: debit must cover a positive net credit`)
+      throw new InvalidValue(`transfer ${terms.id}: debit must cover a positive net credit`)
     }
     return new Transfer({ ...terms, state: TransferState.Quoted, chargedAt: null, fundingTxid: null, credited: null })
   }
@@ -96,7 +95,7 @@ export class Transfer {
 
   /** The source took it: `fundingTxid` is the proof, and reconciliation arrives here with one too. */
   accepted(fundingTxid: string): void {
-    if (fundingTxid === '') throw this.error(ErrorCode.Invalid, 'an accepted transfer needs its funding transaction')
+    if (fundingTxid === '') throw this.error(InvalidValue, 'an accepted transfer needs its funding transaction')
     this.move(TransferState.Pending)
     this.props = { ...this.props, fundingTxid }
   }
@@ -112,7 +111,7 @@ export class Transfer {
 
   complete(credited: Amount): void {
     if (!credited.gte(this.props.net))
-      throw this.error(ErrorCode.RuleViolated, `credited ${credited.units} is short of ${this.props.net.units}`)
+      throw this.error(RuleViolated, `credited ${credited.units} is short of ${this.props.net.units}`)
     this.move(TransferState.Completed)
     this.props = { ...this.props, credited }
   }
@@ -122,12 +121,11 @@ export class Transfer {
   }
 
   private move(to: TransferState): void {
-    if (!EDGES[this.state].includes(to))
-      throw this.error(ErrorCode.IllegalTransition, `cannot go ${this.state} -> ${to}`)
+    if (!EDGES[this.state].includes(to)) throw this.error(IllegalTransition, `cannot go ${this.state} -> ${to}`)
     this.props = { ...this.props, state: to }
   }
 
-  private error(code: ErrorCode, message: string): DomainError {
-    return new DomainError(code, `transfer ${this.id}: ${message}`)
+  private error(Kind: new (message: string) => DomainError, message: string): DomainError {
+    return new Kind(`transfer ${this.id}: ${message}`)
   }
 }

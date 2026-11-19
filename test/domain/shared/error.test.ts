@@ -1,11 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import { Setting } from '@arkade-os/solver-core/domain/admin/setting.js'
-import { DomainError, ErrorCode } from '@arkade-os/solver-core/domain/shared/error.js'
+import { CorruptHistory, DomainError, ErrorCode, InvalidValue } from '@arkade-os/solver-core/domain/shared/error.js'
 import { Hashlock } from '@arkade-os/solver-core/domain/swap/hashlock.js'
 import { Swap } from '@arkade-os/solver-core/domain/swap/swap.js'
 import { quoted, t } from '../support.js'
 
 describe('domain errors', () => {
+  it('are catchable by class', () => {
+    expect(() => Hashlock.of('zz')).toThrow(InvalidValue)
+    expect(() => Swap.fromEvents([])).toThrow(CorruptHistory)
+  })
+
   it('throws errors a caller can tell apart by code', () => {
     const swap = quoted()
     const codeOf = (run: () => unknown): unknown => {

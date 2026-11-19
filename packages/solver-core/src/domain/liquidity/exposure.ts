@@ -1,12 +1,12 @@
-import { DomainError, ErrorCode } from '../shared/error.js'
+import { InvalidValue, RuleViolated } from '../shared/error.js'
 
 const positive = (name: string, value: bigint): void => {
-  if (value <= 0n) throw new DomainError(ErrorCode.Invalid, `${name} must be positive, got ${value}`)
+  if (value <= 0n) throw new InvalidValue(`${name} must be positive, got ${value}`)
 }
 
 // A negative reading is a broken input, not a small balance: letting it through would widen the cap.
 const readable = (name: string, value: bigint): void => {
-  if (value < 0n) throw new DomainError(ErrorCode.Invalid, `${name} cannot be negative, got ${value}`)
+  if (value < 0n) throw new InvalidValue(`${name} cannot be negative, got ${value}`)
 }
 
 /**
@@ -59,13 +59,12 @@ export class Exposure {
   }
 
   release(size: bigint): Exposure {
-    if (size > this.reserved) throw new DomainError(ErrorCode.RuleViolated, 'exposure reservation would go negative')
+    if (size > this.reserved) throw new RuleViolated('exposure reservation would go negative')
     return new Exposure(this.reserved - size, this.reservedFloat, this.pools)
   }
 
   releaseFloat(required: bigint): Exposure {
-    if (required > this.reservedFloat)
-      throw new DomainError(ErrorCode.RuleViolated, 'float reservation would go negative')
+    if (required > this.reservedFloat) throw new RuleViolated('float reservation would go negative')
     return new Exposure(this.reserved, this.reservedFloat - required, this.pools)
   }
 
@@ -74,7 +73,7 @@ export class Exposure {
   }
 
   private withPool(pool: string, held: bigint): Exposure {
-    if (held < 0n) throw new DomainError(ErrorCode.RuleViolated, `inventory reservation for ${pool} would go negative`)
+    if (held < 0n) throw new RuleViolated(`inventory reservation for ${pool} would go negative`)
     return new Exposure(this.reserved, this.reservedFloat, new Map(this.pools).set(pool, held))
   }
 }

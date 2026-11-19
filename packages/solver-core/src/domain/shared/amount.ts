@@ -1,5 +1,5 @@
 import type { Asset } from './asset.js'
-import { DomainError, ErrorCode } from './error.js'
+import { InvalidValue } from './error.js'
 
 export class Amount {
   private constructor(
@@ -8,7 +8,7 @@ export class Amount {
   ) {}
 
   static of(asset: Asset, units: bigint): Amount {
-    if (units < 0n) throw new DomainError(ErrorCode.Invalid, `amount of ${asset} cannot be negative: ${units}`)
+    if (units < 0n) throw new InvalidValue(`amount of ${asset} cannot be negative: ${units}`)
     return new Amount(asset, units)
   }
 
@@ -37,8 +37,7 @@ export class Amount {
   }
 
   private sameAsset(other: Amount): Amount {
-    if (other.asset !== this.asset)
-      throw new DomainError(ErrorCode.Invalid, `cannot combine ${this.asset} with ${other.asset}`)
+    if (other.asset !== this.asset) throw new InvalidValue(`cannot combine ${this.asset} with ${other.asset}`)
     return other
   }
 }
