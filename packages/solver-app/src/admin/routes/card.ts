@@ -14,6 +14,9 @@ import type { Services } from '../../ops/services.js'
 import { publishStateOf } from '../publishState.js'
 import type { AdminDeps } from '../server.js'
 import { assetCardMarketsFromPolicy } from '../../ops/assetRfqMarkets.js'
+import { descriptorFor } from '@arkade-os/solver-corridors/corridors/index.js'
+import { ASSET_RFQ_CONTRACT_VERSIONS } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
+import { RFQ_EVM_RECEIVE_V1, RFQ_EVM_SEND_V1, rfqContractEnabled } from '@arkade-os/solver-core/core/rfqContract.js'
 
 /** `RELAY_URL` then `SOLVER_CARD_RELAYS`. */
 export const advertisedRelays = (relayUrl: string | null, extra: readonly string[]): string[] =>
@@ -37,29 +40,39 @@ export type CardSource = Pick<
   'config' | 'policy' | 'bootPolicy' | 'assetMarkets' | 'liveOfferMarkets' | 'assetRfqMarkets' | 'providerPubkey'
 > & { arkade: { identity: Pick<Services['arkade']['identity'], 'signMessage'> } }
 
+/** Any one served contract version is enough: negotiation picks among the enabled ones. */
+const assetRfqServed = (source: CardSource): boolean =>
+  ASSET_RFQ_CONTRACT_VERSIONS.some((version) => rfqContractEnabled(source.bootPolicy.rfqContractVersions, version))
+
 /** ENABLED already — `assetMarketPolicy` drops a pause. */
-const assetMarketsOf = (source: CardSource) =>
+const assetMarketsOf = (source: CardSource, rfqServed = assetRfqServed(source)) =>
   publishableAssetMarkets(
     assetCardMarketsFromPolicy({
       pricing: source.assetMarkets,
       offerMarkets: source.liveOfferMarkets,
       // BOOT: `AssetOfferService` reads these off constructor deps. `rfqMarkets` below is LIVE by contrast.
       offerBounds: { min: source.bootPolicy.offerMinFillAmount, max: source.bootPolicy.offerMaxFillAmount },
-      rfqMarkets: source.assetRfqMarkets,
+      rfqMarkets: rfqServed ? source.assetRfqMarkets : [],
       chargesDeliveredCarrier: source.bootPolicy.offerChargesDeliveredCarrier,
     }),
     source.config.network,
   )
 
+const evmContractVersionOf = (direction: 'send' | 'receive'): string =>
+  direction === 'send' ? RFQ_EVM_SEND_V1 : RFQ_EVM_RECEIVE_V1
+
 export const evmCardMarketsOf = (source: CardSource) => {
   const markets: EvmCardMarket[] = []
   const unavailable: string[] = []
   const chainId = source.config.evmChain?.chainId
+  const served = (policy: { direction: 'send' | 'receive' }): boolean =>
+    rfqContractEnabled(source.bootPolicy.rfqContractVersions, evmContractVersionOf(policy.direction))
   if (chainId !== undefined) {
     for (const market of source.config.evmMarkets ?? []) {
       const policies = source.bootPolicy.evmCorridors.filter(
         (policy) =>
           policy.enabled &&
+          served(policy) &&
           policy.token.address === market.token.address &&
           source.policy.evmCorridors.some((live) => live.corridor === policy.corridor && live.enabled),
       )
@@ -70,10 +83,17 @@ export const evmCardMarketsOf = (source: CardSource) => {
     }
   }
   for (const policy of source.policy.evmCorridors) {
-    if (policy.enabled && !markets.some((market) => market.token.address === policy.token?.address)) {
+    // Per DIRECTION, not per token: one direction surviving used to silence the
+    // other's reason, which a contract version disabling exactly one makes routine.
+    if (
+      policy.enabled &&
+      !markets.some((market) => market.token.address === policy.token?.address && Boolean(market[policy.direction]))
+    ) {
       const boot = source.bootPolicy.evmCorridors.find((entry) => entry.corridor === policy.corridor && entry.enabled)
       unavailable.push(
-        `${policy.corridor} cannot be advertised: ${boot ? 'its EVM chain or price-feed metadata is missing' : 'enabling this EVM direction is pending restart'}`,
+        !served(policy)
+          ? `${policy.corridor} is enabled but omitted: contract version ${evmContractVersionOf(policy.direction)} is not in rfq.contractVersions`
+          : `${policy.corridor} cannot be advertised: ${boot ? 'its EVM chain or price-feed metadata is missing' : 'enabling this EVM direction is pending restart'}`,
       )
     }
   }
@@ -92,7 +112,25 @@ export const cardOmissions = (source: CardSource): string[] => {
         ),
     )
     .map((policy) => `${policy.corridor} requires the open-RFQ inline card; the legacy published card stays version 0`)
-  return [...evm.omitted, ...inlineOnly, ...assetMarketsOf(source).omitted]
+  return [
+    ...CORRIDORS.filter(
+      (corridor) =>
+        source.bootPolicy.corridorEnabled[corridor] &&
+        !rfqContractEnabled(source.bootPolicy.rfqContractVersions, descriptorFor(corridor).contractVersion),
+    ).map(
+      (corridor) =>
+        `${corridor} is enabled but omitted: contract version ${descriptorFor(corridor).contractVersion} is not in rfq.contractVersions`,
+    ),
+    ...(source.assetRfqMarkets.length === 0 || assetRfqServed(source)
+      ? []
+      : [
+          `asset RFQ markets are omitted: none of ${ASSET_RFQ_CONTRACT_VERSIONS.join(', ')} is in rfq.contractVersions`,
+        ]),
+    ...evm.omitted,
+    ...inlineOnly,
+    // As if an asset-swap contract version were on, so a market's own fault still shows beside the contract-version note above.
+    ...assetMarketsOf(source, true).omitted,
+  ]
 }
 
 /**
@@ -119,7 +157,11 @@ export const deploymentCard = async (
   // BOOT, not live: the card is SIGNED, none of these three is in `LIVE_KEYS`, and each is snapshotted into a
   // `private readonly` deps at construction — so boot is what the corridor will honour.
   const served = Object.fromEntries(
-    CORRIDORS.filter((corridor) => bootPolicy.corridorEnabled[corridor]).map((corridor) => [
+    CORRIDORS.filter(
+      (corridor) =>
+        bootPolicy.corridorEnabled[corridor] &&
+        rfqContractEnabled(bootPolicy.rfqContractVersions, descriptorFor(corridor).contractVersion),
+    ).map((corridor) => [
       corridor,
       { limits: bootPolicy.corridorLimits[corridor], fee: bootPolicy.corridorFees[corridor] },
     ]),

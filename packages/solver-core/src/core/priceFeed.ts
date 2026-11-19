@@ -39,6 +39,20 @@ export type Rounding = 'down' | 'up'
 
 const DECIMAL = /^(\d+)(?:\.(\d+))?$/
 
+/** Digits allowed on each side of the point. A feed body may be 1 MiB, and every quote raises ten to the scale. */
+const MAX_PRICE_DIGITS = 36
+
+const quoted = (value: unknown): string => {
+  let text: string
+  try {
+    text = JSON.stringify(value) ?? String(value)
+  } catch {
+    // A bigint, or a cycle: the refusal must not be lost to a TypeError from formatting it.
+    text = String(value)
+  }
+  return text.length > 64 ? `${text.slice(0, 64)}… (${text.length} characters)` : text
+}
+
 /**
  * Read a price from a feed value, exactly.
  *
@@ -52,12 +66,17 @@ const DECIMAL = /^(\d+)(?:\.(\d+))?$/
  */
 export const priceFrom = (value: unknown): Price => {
   const text = typeof value === 'number' ? String(value) : typeof value === 'string' ? value.trim() : null
-  if (text === null) throw new Error(`price must be a number or a numeric string, got ${JSON.stringify(value)}`)
+  if (text === null) throw new Error(`price must be a number or a numeric string, got ${quoted(value)}`)
+  const tooLong = () =>
+    new Error(`price must have at most ${MAX_PRICE_DIGITS} digits each side of the point, got ${quoted(text)}`)
+  // Before the regex too, so a megabyte value is neither scanned nor captured.
+  if (text.length > 2 * MAX_PRICE_DIGITS + 1) throw tooLong()
   const match = DECIMAL.exec(text)
-  if (!match) throw new Error(`price must be a plain decimal, got ${JSON.stringify(text)}`)
+  if (!match) throw new Error(`price must be a plain decimal, got ${quoted(text)}`)
   const [, whole = '', fraction = ''] = match
+  if (whole.length > MAX_PRICE_DIGITS || fraction.length > MAX_PRICE_DIGITS) throw tooLong()
   const mantissa = BigInt(whole + fraction)
-  if (mantissa <= 0n) throw new Error(`price must be positive, got ${JSON.stringify(text)}`)
+  if (mantissa <= 0n) throw new Error(`price must be positive, got ${quoted(text)}`)
   return { mantissa, scale: fraction.length }
 }
 

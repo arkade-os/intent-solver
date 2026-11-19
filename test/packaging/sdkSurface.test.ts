@@ -135,6 +135,7 @@ describe('the solver SDK surface', () => {
     const descriptor: CorridorDescriptor = {
       pair: 'arkade:BTC->example:BTC',
       envStem: 'EXAMPLE',
+      contractVersion: 'example-v1',
       payoutRail: 'arkade',
       states: { live: ['open'], exposed: [], delivered: ['done'] },
     }
@@ -180,6 +181,7 @@ describe('serving a corridor this build never compiled against', () => {
   const descriptor: CorridorDescriptor = {
     pair: 'arkade:BTC->example:BTC',
     envStem: 'EXAMPLE',
+    contractVersion: 'example-v1',
     payoutRail: 'arkade',
     states: { live: ['open'], exposed: [], delivered: ['done'] },
   }

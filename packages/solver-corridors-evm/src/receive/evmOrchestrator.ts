@@ -154,6 +154,7 @@ export type EvmReceiveQuoteRefusal =
   | 'invalid_payout_address'
   | 'amount_out_of_range'
   | 'fee_consumes_swap'
+  | 'payout_below_dust'
   | 'duplicate_swap'
   | 'provider_at_capacity'
   | 'price_unavailable'
@@ -395,6 +396,7 @@ export class EvmReceiveSwapService {
     }
     const payoutSats = payoutSatsFor(grossSats, fee)
     if (payoutSats <= 0) return { accepted: false, reason: 'fee_consumes_swap' }
+    if (payoutSats < (arkade.minOutputSats ?? 0)) return { accepted: false, reason: 'payout_below_dust' }
 
     const spokenFor = await Promise.all([
       store.findLiveByPaymentHash(request.paymentHash),

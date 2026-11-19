@@ -33,6 +33,7 @@
 
 import { parkVia, type Corridor, type CorridorReader } from '@arkade-os/solver-core/core/corridor.js'
 import type { CorridorDescriptor } from '@arkade-os/solver-core/core/corridorDescriptor.js'
+import { RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_V3 } from '@arkade-os/solver-core/core/rfqContract.js'
 import { diagnose, phaseOfStates, type AdminSwap } from '@arkade-os/solver-core/core/swapView.js'
 import type { CorridorRfqOutcome as RfqOutcome, QuoteOptions } from '@arkade-os/solver-core/core/corridor.js'
 import { rfqRefusalPayload } from '../wire/payloads.js'
@@ -94,6 +95,9 @@ const ASSET_RFQ_STATES: CorridorDescriptor<AssetRfqSwapState>['states'] = {
   delivered: ['filled'],
 }
 
+/** Every contract version the asset RFQ corridor builds, baseline first. */
+export const ASSET_RFQ_CONTRACT_VERSIONS = [RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_V3] as const
+
 export const assetRfqDescriptor = (
   market: ReadableAssetRfqMarket,
   direction: AssetRfqDirection,
@@ -102,6 +106,9 @@ export const assetRfqDescriptor = (
   return {
     pair: assetRfqPairFor(legs.from, legs.to),
     envStem: assetRfqEnvStem(market, direction),
+    contractVersion: RFQ_ASSET_SWAP_V2,
+    // v2 baseline for old wallets; v3 (the #1147 fix) opt-in via negotiation.
+    contractVersions: ASSET_RFQ_CONTRACT_VERSIONS,
     // Both legs are Arkade, so the payout always comes out of the Arkade float
     // — whether it is paid in sats or in an asset.
     payoutRail: 'arkade',
@@ -238,6 +245,7 @@ export const respondToAssetRfqRequest = async (
     makerPkScript: request.profile.maker_pk_script,
     makerPublicKey: request.profile.maker_public_key,
     requesterKey: options?.requesterKey,
+    contractVersion: options?.contractVersion,
   })
   if (outcome.accepted) {
     // Off the OUTCOME, not the service: the serialiser wraps `quote` alone, and nothing revalidates this

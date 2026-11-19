@@ -13,6 +13,14 @@ import { schnorr } from '@noble/curves/secp256k1.js'
 import { bytesToHex } from '@noble/hashes/utils.js'
 import { giveSatsFor, payoutSatsFor } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import type { OpenRfq } from '@arkade-os/solver-core/core/openRfq.js'
+import {
+  RFQ_ASSET_SWAP_V2,
+  RFQ_ASSET_SWAP_V3,
+  RFQ_CONTRACT_VERSIONS,
+  RFQ_EVM_RECEIVE_V1,
+  RFQ_EVM_SEND_V1,
+  RFQ_LIGHTNING_SEND_V2,
+} from '@arkade-os/solver-core/core/rfqContract.js'
 
 const asset = 'ab'.repeat(34)
 const btc = 'arkade:bitcoin/slip44:0'
@@ -47,10 +55,11 @@ const source = () => ({
   },
   bootPolicy: {
     evmCorridors: evmPolicies,
+    rfqContractVersions: [...RFQ_CONTRACT_VERSIONS] as string[],
     corridorFees: { 'arkade:BTC->lightning:BTC': fee, 'lightning:BTC->arkade:BTC': fee },
     corridorLimits: { 'arkade:BTC->lightning:BTC': bounds, 'lightning:BTC->arkade:BTC': bounds },
   },
-  policy: { evmCorridors: evmPolicies },
+  policy: { evmCorridors: evmPolicies, rfqContractVersions: [...RFQ_CONTRACT_VERSIONS] as string[] },
   corridors: { get: vi.fn(() => ({})) },
   assetRfqMarkets: [
     {
@@ -284,6 +293,7 @@ describe('public price previews', () => {
   it('prices boot EVM terms when unrelated live settings expose pending fee or limit overrides', async () => {
     const services = source()
     services.policy = {
+      ...services.policy,
       evmCorridors: evmPolicies.map((policy) => ({
         ...policy,
         fee: { bps: 0, flatSats: 0 },
@@ -301,6 +311,58 @@ describe('public price previews', () => {
     expect(await preview(open(`${btc}~eip155:1/erc20:${token.address}`, '200000'))).toBeUndefined()
     services.policy.evmCorridors = []
     expect(await preview(open(`${btc}~eip155:1/erc20:${token.address}`, '10000'))).toBeUndefined()
+  })
+
+  it('declines each route whose settlement contract version rfq.contractVersions disables', async () => {
+    const tokenId = `arkade:bitcoin/asset:${asset}`
+    const evm = `eip155:1/erc20:${token.address}`
+    const ln = 'bolt11:bitcoin/slip44:0'
+    const priced = async (versions: string[], pair: string, amount: string) => {
+      const services = source()
+      services.policy = { ...services.policy, rfqContractVersions: versions }
+      return openRfqPreview(services as unknown as Services, {
+        fetchPrice: async () => ({ mantissa: 100000n, scale: 0 }),
+        now: () => 1800000000,
+      })(open(pair, amount))
+    }
+    const all = [...RFQ_CONTRACT_VERSIONS]
+    const without = (...dropped: string[]) => all.filter((entry) => !dropped.includes(entry))
+
+    expect(await priced(all, `${btc}~${tokenId}`, '100000')).toBeDefined()
+    expect(await priced(all, `${btc}~${evm}`, '10000')).toBeDefined()
+    expect(await priced(all, `${btc}~${ln}`, '10000')).toBeDefined()
+
+    expect(await priced(without(RFQ_ASSET_SWAP_V2), `${btc}~${tokenId}`, '100000')).toBeDefined()
+    expect(await priced(without(RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_V3), `${btc}~${tokenId}`, '100000')).toBeUndefined()
+    expect(await priced(without(RFQ_EVM_SEND_V1), `${btc}~${evm}`, '10000')).toBeUndefined()
+    expect(await priced(without(RFQ_EVM_RECEIVE_V1), `${evm}~${btc}`, '10000000')).toBeUndefined()
+    expect(await priced(without(RFQ_EVM_RECEIVE_V1), `${btc}~${evm}`, '10000')).toBeDefined()
+    expect(await priced(without(RFQ_LIGHTNING_SEND_V2), `${btc}~${ln}`, '10000')).toBeUndefined()
+    expect(await priced(without(RFQ_LIGHTNING_SEND_V2), `${ln}~${btc}`, '10000')).toBeDefined()
+  })
+
+  it('drops an EVM direction from the inline card when its contract version is disabled', () => {
+    // A flat receive fee is unrepresentable in ERC20 input units, so the fixture's own
+    // receive leg never publishes; zero it to isolate the contract-version filter.
+    const representable = evmPolicies.map((policy) =>
+      policy.direction === 'receive' ? { ...policy, fee: { bps: 30, flatSats: 0 } } : policy,
+    )
+    const marketsWith = (versions: readonly string[]) => {
+      const services = source()
+      services.bootPolicy = { ...services.bootPolicy, evmCorridors: representable, rfqContractVersions: [...versions] }
+      services.policy = { ...services.policy, evmCorridors: representable }
+      return evmCardMarketsOf(services as unknown as CardSource)
+    }
+    const all = marketsWith(RFQ_CONTRACT_VERSIONS)
+    expect(all.publishable[0]?.send).toBeDefined()
+    expect(all.publishable[0]?.receive).toBeDefined()
+
+    const sendOnly = marketsWith(RFQ_CONTRACT_VERSIONS.filter((version) => version !== RFQ_EVM_RECEIVE_V1))
+    expect(sendOnly.publishable[0]?.send).toBeDefined()
+    expect(sendOnly.publishable[0]?.receive).toBeUndefined()
+    expect(sendOnly.omitted.join(' ')).toContain(
+      `contract version ${RFQ_EVM_RECEIVE_V1} is not in rfq.contractVersions`,
+    )
   })
 
   it('leaves time to choose when collection uses the entire thirty-second window', async () => {

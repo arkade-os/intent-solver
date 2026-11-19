@@ -41,6 +41,8 @@ export interface QuotedOfferIntent {
   makerPublicKey: string
   depositTxid: string | null
   depositVout: number | null
+  /** The negotiated contract version; null is the baseline, asset-swap-v2. */
+  contractVersion: string | null
 }
 
 export interface QuotedOfferSettleDeps {
@@ -78,7 +80,7 @@ export const quotedOfferSettleFor = (
     // Derived, never read off the row. The row's terms are what was quoted and
     // its script is what the client was told; if the two have stopped agreeing,
     // spending the row's script would spend a covenant these terms do not open.
-    const derived = derive(termsOf(intent))
+    const derived = derive(termsOf(intent), intent.contractVersion ?? undefined)
     if (derived.pkScript.toLowerCase() !== intent.offerPkScript.toLowerCase()) {
       throw new Error(`the recorded terms derive ${derived.pkScript}, not the offer script ${intent.offerPkScript}`)
     }

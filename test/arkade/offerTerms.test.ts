@@ -13,7 +13,7 @@
 import { describe, it, expect } from 'vitest'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { asset } from '@arkade-os/sdk'
-import { offerVtxoScript } from '@arkade-os/swap/protocol'
+import { assetSwapContractVersion, offerVtxoScript } from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
 import {
   offerExitDelay,
@@ -22,6 +22,7 @@ import {
   xOnlyPubkey,
   type QuotedOfferTerms,
 } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
+import { RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_V3 } from '@arkade-os/solver-core/core/rfqContract.js'
 
 const xonly = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
 const SERVER = xonly(2)
@@ -56,6 +57,7 @@ describe('offerScriptFrom', () => {
         exitDelay: EXIT,
       },
       SERVER,
+      'asset-swap-v2',
     )
     expect(derive(terms()).pkScript).toBe(hex.encode(direct.pkScript))
     expect(derive(terms()).address).toBe(direct.address('tark', SERVER).encode())
@@ -109,6 +111,38 @@ describe('offerScriptFrom', () => {
     expect(offerScriptFrom({ ...derivation, serverPubkey: xonly(9) })(terms()).pkScript).not.toBe(
       derive(terms()).pkScript,
     )
+  })
+})
+
+describe('contract version', () => {
+  const sdk = (contractVersion: string): string =>
+    hex.encode(
+      offerVtxoScript(
+        {
+          wantAmount: 1_000n,
+          wantAsset: asset.AssetId.fromString(USDA),
+          makerPkScript: hex.decode(MAKER_SCRIPT),
+          makerPublicKey: MAKER_KEY,
+          emulatorPubkey: EMULATOR,
+          exitDelay: EXIT,
+        },
+        SERVER,
+        assetSwapContractVersion(contractVersion),
+      ).pkScript,
+    )
+
+  it('refuses a version the SDK cannot derive instead of falling back to v2', () => {
+    expect(() => derive(terms(), 'asset-swap-v9')).toThrow(/unknown contract version/)
+  })
+
+  it('derives v2 for the baseline and v3 only when it is named', () => {
+    expect(derive(terms()).pkScript).toBe(sdk(RFQ_ASSET_SWAP_V2))
+    expect(derive(terms(), RFQ_ASSET_SWAP_V2).pkScript).toBe(sdk(RFQ_ASSET_SWAP_V2))
+    expect(derive(terms(), RFQ_ASSET_SWAP_V3).pkScript).toBe(sdk(RFQ_ASSET_SWAP_V3))
+  })
+
+  it('puts a v3 deposit at a different address than a v2 one', () => {
+    expect(derive(terms(), RFQ_ASSET_SWAP_V3).pkScript).not.toBe(derive(terms()).pkScript)
   })
 })
 

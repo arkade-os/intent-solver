@@ -9,9 +9,15 @@
  * capabilities, and an absent capability means a DOCUMENTED degradation rather
  * than a guess. A corridor that cannot answer honestly must not pretend.
  */
+import {
+  RFQ_CONTRACT_VERSION_KEY,
+  RFQ_CONTRACT_VERSION_UNSUPPORTED,
+  RFQ_CONTRACT_VERSIONS_KEY,
+} from '@arkade-os/swap/rfq-contract'
 import type { CorridorDescriptor } from './corridorDescriptor.js'
 import type { PageOptions } from './page.js'
 import type { CorridorLedger, LedgerWindow } from '../analytics/economics.js'
+import { extractRfqId, RFQ_CONTRACT_VERSIONS_FIELD, rfqRefusalPayload } from './rfqProtocol.js'
 
 /** What a corridor hands back from an RFQ. Mirrors `ingress/rfq.ts`'s outcome. */
 export interface CorridorRfqOutcome {
@@ -31,6 +37,8 @@ export interface CorridorRfqOutcome {
  */
 export interface QuoteOptions {
   requesterKey?: string
+  /** The contract version the host negotiated for this quote; absent derives the corridor's baseline. */
+  contractVersion?: string
 }
 
 /**
@@ -277,6 +285,11 @@ export interface CorridorSet extends Iterable<Corridor> {
   replace(corridors: readonly Corridor[]): void
 }
 
+export interface CorridorSetOptions {
+  /** Contract versions this deployment serves. Absent serves every corridor's own version. */
+  readonly supportedContractVersions?: ReadonlySet<string>
+}
+
 /**
  * Every corridor this deployment has a STORE for, serving or not.
  *
@@ -302,12 +315,18 @@ export interface CorridorReaderSet extends Iterable<CorridorReader> {
  * IS the dispatch, and an unknown pair is a routine client request to refuse
  * rather than a build fault.
  */
-export const createCorridorSet = (corridors: readonly Corridor[]): CorridorSet => {
+const negotiated = new WeakSet<Corridor>()
+
+export const createCorridorSet = (corridors: readonly Corridor[], options: CorridorSetOptions = {}): CorridorSet => {
+  const supported = options.supportedContractVersions
   let byPair = new Map<string, Corridor>()
   const index = (list: readonly Corridor[]): void => {
     const next = new Map<string, Corridor>()
     const stems = new Map<string, string>()
-    for (const corridor of list) {
+    // `rebuild` replaces with corridors another set already negotiated under the newer policy.
+    for (const corridor of list.map((each) =>
+      negotiated.has(each) ? each : negotiatingContractVersion(each, supported),
+    )) {
       const { pair, envStem } = corridor.descriptor
       if (next.has(pair)) throw new Error(`duplicate corridor pair: ${pair}`)
       const claimed = stems.get(envStem)
@@ -327,6 +346,72 @@ export const createCorridorSet = (corridors: readonly Corridor[]): CorridorSet =
     [Symbol.iterator]: () => byPair.values(),
   }
 }
+
+/**
+ * Contract version negotiation (docs/rfq-protocol.md § 4.1), gating only the quote path. A request without
+ * `contract_versions` predates negotiation: it reaches the corridor untouched and its quote stays
+ * byte-identical. The field is stripped before the corridor's strict schema and echoed only if asked.
+ */
+const negotiatingContractVersion = (corridor: Corridor, supported: ReadonlySet<string> | undefined): Corridor => {
+  const { pair, contractVersion: baseline } = corridor.descriptor
+  // What this corridor can build (baseline alone unless it declares more), kept to what the deployment serves.
+  const buildable = corridor.descriptor.contractVersions ?? [baseline]
+  const servedVersions = buildable.filter((v) => supported === undefined || supported.has(v))
+  const baselineServed = servedVersions.includes(baseline)
+  const quote: Corridor['quote'] = async (payload, options) => {
+    const rfqId = extractRfqId(payload)
+    const asked = typeof payload === 'object' && payload !== null && RFQ_CONTRACT_VERSIONS_KEY in payload
+    if (!asked) {
+      if (baselineServed) return corridor.quote(payload, options)
+      return {
+        kind: 'refused',
+        payload: rfqRefusalPayload(rfqId, 'unsupported_pair'),
+        detail: `${pair} speaks contract version ${baseline}, which rfq.contractVersions disables`,
+      }
+    }
+    const { [RFQ_CONTRACT_VERSIONS_KEY]: listed, ...rest } = payload as Record<string, unknown>
+    const parsed = RFQ_CONTRACT_VERSIONS_FIELD.safeParse(listed)
+    if (!parsed.success) {
+      return {
+        kind: 'invalid',
+        payload: rfqRefusalPayload(rfqId, 'unsupported_payload'),
+        detail: `${RFQ_CONTRACT_VERSIONS_KEY} is malformed`,
+      }
+    }
+    // The client's most-preferred version this corridor serves — its order is the preference.
+    const chosen = parsed.data.find((v) => servedVersions.includes(v))
+    if (chosen === undefined) {
+      return {
+        kind: 'refused',
+        payload: rfqRefusalPayload(rfqId, 'unsupported_payload', {
+          error_code: RFQ_CONTRACT_VERSION_UNSUPPORTED,
+          field: RFQ_CONTRACT_VERSIONS_KEY,
+        }),
+        detail: `${pair} serves ${servedVersions.join(', ') || 'no contract version'}; ${RFQ_CONTRACT_VERSIONS_KEY} names none of them`,
+      }
+    }
+    const outcome = await corridor.quote(rest, { ...options, contractVersion: chosen })
+    return outcome.kind === 'quote'
+      ? { ...outcome, payload: { ...outcome.payload, [RFQ_CONTRACT_VERSION_KEY]: chosen } }
+      : outcome
+  }
+  const wrapped = withQuote(corridor, quote)
+  negotiated.add(wrapped)
+  return wrapped
+}
+
+/**
+ * `corridor` with its quote path replaced. Not `{ ...corridor, quote }`: a spread drops a class-based
+ * corridor's prototype methods, and binding to the original keeps its `#private` fields reachable.
+ */
+export const withQuote = (corridor: Corridor, quote: Corridor['quote']): Corridor =>
+  new Proxy(corridor, {
+    get: (target, prop) => {
+      if (prop === 'quote') return quote
+      const value: unknown = Reflect.get(target, prop)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
 
 /**
  * The same indexing for readers, which is every corridor with a store.

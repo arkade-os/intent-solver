@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { execFileSync } from 'node:child_process'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -17,6 +18,12 @@ import {
   NON_TERMINAL as LN_RECV_LIVE,
 } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
 import { OnchainSendMachine } from '@arkade-os/solver-corridors/machines/onchainSend.js'
+import {
+  RFQ_CONTRACT_VERSIONS,
+  RFQ_LIGHTNING_RECEIVE_V2,
+  RFQ_LIGHTNING_SEND_V2,
+  RFQ_ONCHAIN_SEND_V2,
+} from '@arkade-os/solver-core/core/rfqContract.js'
 
 const CORRIDORS_DIR = fileURLToPath(new URL('../../packages/solver-corridors/src/corridors/', import.meta.url))
 const MACHINES_DIR = fileURLToPath(new URL('../../packages/solver-corridors/src/machines/', import.meta.url))
@@ -25,6 +32,7 @@ const STATE_MACHINE = fileURLToPath(new URL('../../packages/solver-core/src/core
 const stub = (pair: string, envStem: string): CorridorDescriptor => ({
   pair,
   envStem,
+  contractVersion: 'test-v1',
   payoutRail: 'arkade',
   states: { live: ['quoted'], exposed: [], delivered: ['settled'] },
 })
@@ -77,6 +85,19 @@ describe('the corridor registry', () => {
       const overlap = descriptor.states.delivered.filter((state) => descriptor.states.live.includes(state))
       expect({ pair: descriptor.pair, overlap }).toEqual({ pair: descriptor.pair, overlap: [] })
     }
+  })
+})
+
+describe('RFQ contract versions on the built-in corridors', () => {
+  it('names the version each BTC corridor speaks', () => {
+    expect(descriptorFor('arkade:BTC->lightning:BTC').contractVersion).toBe(RFQ_LIGHTNING_SEND_V2)
+    expect(descriptorFor('lightning:BTC->arkade:BTC').contractVersion).toBe(RFQ_LIGHTNING_RECEIVE_V2)
+    expect(descriptorFor('arkade:BTC->onchain:BTC').contractVersion).toBe(RFQ_ONCHAIN_SEND_V2)
+  })
+
+  it('ships every built-in descriptor version in the default allowlist', () => {
+    const shipped = new Set<string>(RFQ_CONTRACT_VERSIONS)
+    expect(ALL_DESCRIPTORS.filter((descriptor) => !shipped.has(descriptor.contractVersion))).toEqual([])
   })
 })
 
@@ -170,13 +191,39 @@ describe('the descriptor modules', () => {
     expect(DESCRIPTOR_MODULES.filter((name) => !here.includes(name))).toEqual([])
   })
 
-  it('value-import only the state machines, so config stays free of native bindings', () => {
+  it('value-import only dependency-free modules, so config stays free of native bindings', () => {
     const offenders = DESCRIPTOR_MODULES.flatMap((name) =>
       valueImports(readFileSync(join(CORRIDORS_DIR, name), 'utf8'))
-        .filter((specifier) => !/^\.\.\/machines\/[A-Za-z]+\.js$/.test(specifier))
+        .filter(
+          (specifier) =>
+            !/^\.\.\/machines\/[A-Za-z]+\.js$/.test(specifier) &&
+            specifier !== '@arkade-os/solver-core/core/rfqContract.js',
+        )
         .map((specifier) => `${name} value-imports ${specifier}`),
     )
     expect(offenders.sort()).toEqual([])
+  })
+
+  it('the RFQ version constants only load the dependency-free swap entry point', () => {
+    const source = readFileSync(
+      fileURLToPath(new URL('../../packages/solver-core/src/core/rfqContract.ts', import.meta.url)),
+      'utf8',
+    )
+    const entryPoint = '@arkade-os/swap/rfq-contract'
+    expect(valueImports(source)).toEqual([entryPoint])
+
+    const entryUrl = execFileSync(
+      process.execPath,
+      ['--input-type=module', '--eval', 'console.log(import.meta.resolve(process.argv[1]))', entryPoint],
+      { cwd: new URL('../../packages/solver-core/', import.meta.url), encoding: 'utf8' },
+    ).trim()
+    const modules = new Set([entryUrl])
+    for (const file of modules) {
+      for (const specifier of valueImports(readFileSync(new URL(file), 'utf8'))) {
+        expect(specifier, file).toMatch(/^\.\//)
+        modules.add(new URL(specifier, file).href)
+      }
+    }
   })
 
   it('reach only the dependency-free helper through the state machines', () => {

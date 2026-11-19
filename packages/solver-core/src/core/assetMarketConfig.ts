@@ -338,6 +338,166 @@ export const validateFeed = (rawFeedUrl: string, pricePath: string, options: Ass
   }
 }
 
+/**
+ * A market as JSON: the console API's body and the config document's `markets` entry. `null` is the BTC leg.
+ * Bounds and flat fees travel as DECIMAL STRINGS: `JSON.parse` has already rounded anything past 2^53.
+ */
+export interface AssetMarketBody {
+  base?: unknown
+  quote?: unknown
+  baseDecimals?: unknown
+  quoteDecimals?: unknown
+  feedUrl?: unknown
+  pricePath?: unknown
+  toleranceBps?: unknown
+  feeBps?: unknown
+  sellBaseFeeFlat?: unknown
+  buyBaseFeeFlat?: unknown
+  sellBaseFeeBps?: unknown
+  buyBaseFeeBps?: unknown
+  sellBase?: unknown
+  buyBase?: unknown
+  enabled?: unknown
+  symbol?: unknown
+  servesOffer?: unknown
+  servesRfq?: unknown
+  rfqSellBase?: unknown
+  rfqBuyBase?: unknown
+  carrierMode?: unknown
+}
+
+const leg = (label: string, value: unknown): string | null => {
+  if (value === null || value === undefined) return null
+  if (typeof value !== 'string') throw new Error(`${label} must be an asset id string or null for BTC`)
+  const trimmed = value.trim()
+  // "BTC" is what an operator types; null is the sats leg's identity everywhere else, so one pair cannot be stored twice.
+  if (trimmed === '' || trimmed.toUpperCase() === 'BTC') return null
+  return trimmed
+}
+
+const int = (label: string, value: unknown): number => {
+  if (typeof value !== 'number' || !Number.isInteger(value)) throw new Error(`${label} must be an integer`)
+  return value
+}
+
+const optionalInt = (label: string, value: unknown): number | undefined =>
+  value === undefined || value === null ? undefined : int(label, value)
+
+// ABSENT takes the default; anything else must be a real boolean. Coerced, the string "true" —
+// the truthiest spelling a client has — reads as false and silently CLOSES a direction.
+const bool = (label: string, value: unknown, fallback: boolean): boolean => {
+  if (value === undefined) return fallback
+  if (typeof value !== 'boolean') throw new Error(`${label} must be true or false`)
+  return value
+}
+
+const atomic = (label: string, value: unknown): bigint => {
+  if (value === undefined || value === null) return 0n
+  if (typeof value !== 'string' || !/^[0-9]+$/.test(value)) {
+    throw new Error(`${label} must be a decimal string of atomic units`)
+  }
+  return BigInt(value)
+}
+
+const bounds = (label: string, value: unknown): AssetMarketBounds | null => {
+  if (value === null || value === undefined) return null
+  if (typeof value !== 'object') throw new Error(`${label} must be an object with min and max, or null`)
+  const { min, max } = value as { min?: unknown; max?: unknown }
+  // BOTH OR NEITHER: a lone maximum leaves the floor at zero, which fills dust; a lone minimum leaves the ceiling open.
+  if (typeof min !== 'string' || typeof max !== 'string') {
+    throw new Error(`${label}.min and ${label}.max must both be decimal strings of atomic units`)
+  }
+  if (!/^[0-9]+$/.test(min) || !/^[0-9]+$/.test(max)) {
+    throw new Error(`${label}.min and ${label}.max must be decimal integers of atomic units`)
+  }
+  return { min: BigInt(min), max: BigInt(max) }
+}
+
+const CARRIER_MODES: readonly CarrierMode[] = ['inherit', 'off', 'priced']
+
+const carrierMode = (value: unknown): CarrierMode => {
+  if (value === undefined || value === null) return 'inherit'
+  if (!CARRIER_MODES.includes(value as CarrierMode)) {
+    throw new Error(`carrierMode must be one of ${CARRIER_MODES.join(', ')}`)
+  }
+  return value as CarrierMode
+}
+
+/** The body as a market, or an Error naming the field that was wrong. Structure only: see {@link validateAssetMarket}. */
+export const assetMarketFrom = (body: AssetMarketBody): AssetMarketConfig => ({
+  ...DEFAULT_SERVING,
+  symbol: body.symbol === undefined || body.symbol === null ? null : String(body.symbol).trim().toUpperCase() || null,
+  servesOffer: bool('servesOffer', body.servesOffer, false),
+  // Enabled unless explicitly switched off, matching `enabled` below: configuring a market IS the opt-in.
+  servesRfq: bool('servesRfq', body.servesRfq, true),
+  rfqSellBase: bool('rfqSellBase', body.rfqSellBase, true),
+  rfqBuyBase: bool('rfqBuyBase', body.rfqBuyBase, true),
+  carrierMode: carrierMode(body.carrierMode),
+  base: leg('base', body.base),
+  quote: leg('quote', body.quote),
+  baseDecimals: int('baseDecimals', body.baseDecimals),
+  quoteDecimals: int('quoteDecimals', body.quoteDecimals),
+  feedUrl: typeof body.feedUrl === 'string' ? body.feedUrl.trim() : '',
+  // Absent means "derive it from the feed URL"; it must not become the string "undefined" and reach a feed.
+  pricePath: body.pricePath === undefined || body.pricePath === null ? '' : String(body.pricePath).trim(),
+  toleranceBps: int('toleranceBps', body.toleranceBps),
+  feeBps: int('feeBps', body.feeBps),
+  sellBaseFeeFlat: atomic('sellBaseFeeFlat', body.sellBaseFeeFlat),
+  buyBaseFeeFlat: atomic('buyBaseFeeFlat', body.buyBaseFeeFlat),
+  sellBaseFeeBps: optionalInt('sellBaseFeeBps', body.sellBaseFeeBps),
+  buyBaseFeeBps: optionalInt('buyBaseFeeBps', body.buyBaseFeeBps),
+  sellBase: bounds('sellBase', body.sellBase),
+  buyBase: bounds('buyBase', body.buyBase),
+  enabled: body.enabled === undefined ? true : body.enabled === true,
+})
+
+// Wider than the sentry SECRET_KEY on purpose: price APIs name their key access_key, api-key or plain key.
+const FEED_SECRET = /key|token|secret|auth|pass|sign|credential|session/i
+
+/** Whether a feed URL carries a credential: userinfo, or a query parameter named like one. */
+export const feedCredential = (feedUrl: string): boolean => {
+  const url = URL.parse(feedUrl)
+  if (url === null) return /@|[?&][^=&#]*(key|token|secret|auth|pass|sign|credential|session)/i.test(feedUrl)
+  return (
+    url.username !== '' || url.password !== '' || [...url.searchParams.keys()].some((name) => FEED_SECRET.test(name))
+  )
+}
+
+/** A message that may quote `feedUrl`, with the URL taken out when it carries a credential. */
+export const withoutFeedCredential = (message: string, feedUrl: string): string => {
+  if (feedUrl.trim() === '' || !feedCredential(feedUrl.trim())) return message
+  // Errors quote a feed trimmed, and through JSON.stringify, which escapes a quote or backslash the URL holds.
+  const forms = [...new Set([feedUrl, feedUrl.trim()])]
+    .flatMap((url) => [JSON.stringify(url).slice(1, -1), url])
+    .sort((a, b) => b.length - a.length)
+  return forms.reduce((text, form) => text.split(form).join('<feed URL>'), message)
+}
+
+/** The inverse of {@link assetMarketFrom}. */
+export const assetMarketJson = (market: AssetMarketConfig) => ({
+  base: market.base,
+  quote: market.quote,
+  baseDecimals: market.baseDecimals,
+  quoteDecimals: market.quoteDecimals,
+  feedUrl: market.feedUrl,
+  pricePath: market.pricePath,
+  toleranceBps: market.toleranceBps,
+  feeBps: market.feeBps,
+  sellBaseFeeFlat: String(market.sellBaseFeeFlat ?? 0n),
+  buyBaseFeeFlat: String(market.buyBaseFeeFlat ?? 0n),
+  sellBaseFeeBps: market.sellBaseFeeBps ?? null,
+  buyBaseFeeBps: market.buyBaseFeeBps ?? null,
+  sellBase: market.sellBase === null ? null : { min: String(market.sellBase.min), max: String(market.sellBase.max) },
+  buyBase: market.buyBase === null ? null : { min: String(market.buyBase.min), max: String(market.buyBase.max) },
+  enabled: market.enabled,
+  symbol: market.symbol,
+  servesOffer: market.servesOffer,
+  servesRfq: market.servesRfq,
+  rfqSellBase: market.rfqSellBase,
+  rfqBuyBase: market.rfqBuyBase,
+  carrierMode: market.carrierMode,
+})
+
 /** The unordered pair `ops/assetOffers.ts` matches an offer's legs against. `null` is BTC. */
 export interface AssetMarketPair {
   readonly a: string | null

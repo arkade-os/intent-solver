@@ -8,13 +8,14 @@ import { z } from 'zod'
 import { ALL_DESCRIPTORS } from '@arkade-os/solver-corridors/corridors/index.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { resolveDbLayout } from '@arkade-os/solver-corridors/db/layout.js'
+import { feedCredential } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { parseEvmTokens } from '@arkade-os/solver-core/core/evmCorridorConfig.js'
 import { messageOf } from '@arkade-os/solver-core/util/poll.js'
 import { swapDbPath } from '../config.js'
 import { parseAssetRfqTokens } from '../ops/assetRfqMarkets.js'
-import { lightningRailFor } from '../ops/rails.js'
+import { lightningRailFor, lightningRailNames } from '../ops/rails.js'
 import { redactMnemonics, SECRET_KEY } from '../ops/sentry.js'
-import { DECIMAL, documentSchema, type SolverDocument } from './document.js'
+import { DECIMAL, documentSchema, jsonPath, type SolverDocument } from './document.js'
 import { BTC_FAMILY, CORRIDOR_FIELDS, corridorKnob, EVM_FIELDS, legacyEnvName, PATHS, SECRET_KNOBS } from './knobs.js'
 import { legacyEnvNames, loadConfig, type LoadOptions } from './load.js'
 
@@ -58,7 +59,7 @@ const decodeAt = (segments: readonly string[], raw: string): unknown => {
   return raw
 }
 
-const setAt = (doc: Record<string, unknown>, segments: readonly string[], value: unknown): void => {
+export const setAt = (doc: Record<string, unknown>, segments: readonly string[], value: unknown): void => {
   let node = doc
   for (const key of segments.slice(0, -1)) node = (node[key] ??= {}) as Record<string, unknown>
   node[segments.at(-1)!] = value
@@ -76,12 +77,12 @@ export const envToDocument = (
     if (raw !== undefined) setAt(doc, segments, decodeAt(segments, raw))
   }
 
-  for (const [path, knob, encode] of PATHS) {
+  for (const [path, knob, encode, decode] of PATHS) {
     // A deployment's old file holds the legacy name; the regtest env files hold the id.
     const raw = read(knob) ?? read(legacyEnvName(knob))
     if (raw === undefined) continue
     const segments = path.split('.')
-    setAt(doc, segments, encode ? encode(true) === raw : decodeAt(segments, raw))
+    setAt(doc, segments, decode ? decode(raw) : encode ? encode(true) === raw : decodeAt(segments, raw))
   }
 
   const backend = read('LN_BACKEND')
@@ -231,6 +232,50 @@ export const documentForLog = (doc: unknown, env: NodeJS.ProcessEnv): string | n
     2,
   )
   return unnamed ? null : text
+}
+
+const placeholder = (at: readonly (string | number)[]): string =>
+  `<${at
+    .join('_')
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/\W+/g, '_')
+    .toUpperCase()}>`
+
+const SECRET_PATHS = new Set(PATHS.flatMap(([path, knob]) => (SECRET_KNOBS.has(knob) ? [path] : [])))
+const SECRET_EVM_FIELDS = new Set(
+  Object.entries(EVM_FIELDS).flatMap(([field, knob]) => (SECRET_KNOBS.has(knob) ? [field] : [])),
+)
+
+/**
+ * The document with each credential as a `<PATH>` placeholder the loader refuses, so a copy cannot boot until
+ * every one is filled back in. SECRET_KNOBS are placed by position, under any EVM chain label and whatever a
+ * profile did to the loaded copy; a rail's own block is reachable only by key name and value shape, and every
+ * URL in it counts, as an RPC URL's key can sit in its path.
+ */
+export const redactDocument = (doc: unknown): unknown => {
+  const rails = new Set(lightningRailNames())
+  const walk = (node: unknown, at: readonly (string | number)[]): unknown => {
+    const key = String(at.at(-1) ?? '')
+    const evmSecret = at.length === 4 && at[0] === 'rails' && at[1] === 'evm' && SECRET_EVM_FIELDS.has(key)
+    // A record's key is a name the operator chose (an asset, corridor, chain or rail), not a field to judge.
+    const recordKey =
+      at.length === 2
+        ? at[0] === 'assets' || at[0] === 'corridors'
+        : at.length === 3 && at[0] === 'rails' && (at[1] === 'evm' || at[1] === 'lightning')
+    const secretName = !recordKey && (SECRET_FIELD.test(key) || /priceFeed$/i.test(key))
+    const named = SECRET_PATHS.has(jsonPath(at)) || evmSecret || secretName
+    const inRail = at[0] === 'rails' && at[1] === 'lightning' && rails.has(String(at[2]))
+    // The console shows a market's feed in clear, so only a credential in it is held back, not any query string.
+    const marketFeed = at.length === 3 && at[0] === 'markets' && key === 'feedUrl'
+    const shaped =
+      typeof node === 'string' &&
+      (marketFeed ? feedCredential(node) : credentialShaped(node) || (inRail && /^[a-z][a-z0-9+.-]*:\/\//i.test(node)))
+    if ((named && node !== null) || shaped) return placeholder(at)
+    if (Array.isArray(node)) return node.map((item, index) => walk(item, [...at, index]))
+    if (node === null || typeof node !== 'object') return node
+    return Object.fromEntries(Object.entries(node).map(([name, value]) => [name, walk(value, [...at, name])]))
+  }
+  return walk(doc, [])
 }
 
 /** The export for a deployment started under the old variables, for its log. */

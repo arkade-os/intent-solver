@@ -509,6 +509,7 @@ export const registerPnlRoutes = (app: Hono, deps: AdminDeps): void => {
     const sentWithdrawals = withdrawalRows.filter((withdrawal) => withdrawal.state === 'sent')
     const completedRebalances = rebalanceRows.filter((transfer) => transfer.state === 'completed')
     return c.json({
+      btcRail: Boolean(deps.services.ln),
       window: { since: window.since, until: window.until, label: window.label },
       balance: {
         ...ledger,

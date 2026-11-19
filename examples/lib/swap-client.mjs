@@ -18,7 +18,14 @@ import { schnorr } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
 import { finalizeEvent } from 'nostr-tools/pure'
 import { getConversationKey, encrypt, decrypt } from 'nostr-tools/nip44'
-import { CovenantSwapScript, decodeInvoice, findLockups, scriptHashFromPaymentHash, relativeDelayFrom, secondsForBlockRung } from '../../packages/solver-app/dist/index.js'
+import {
+  CovenantSwapScript,
+  decodeInvoice,
+  findLockups,
+  scriptHashFromPaymentHash,
+  relativeDelayFrom,
+  secondsForBlockRung,
+} from '../../packages/solver-app/dist/index.js'
 import { assertFundable, expectQuote, newRfqId, requestQuote, verifyLockupAddress } from './rfq-core.mjs'
 
 export * from './rfq-core.mjs'
@@ -277,7 +284,14 @@ export const sendToLightning = async ({
   emit('quoted', quote)
 
   const emulatorKey = emulatorPubkey ?? (await fetchEmulatorPubkey(emulatorUrl))
-  const lockup = deriveLockup({ quote, invoice: decoded, refundAddress, arkade, emulatorPubkey: emulatorKey, clientRefundPubkey })
+  const lockup = deriveLockup({
+    quote,
+    invoice: decoded,
+    refundAddress,
+    arkade,
+    emulatorPubkey: emulatorKey,
+    clientRefundPubkey,
+  })
   // Two candidates in, one match out — see deriveLockup's own doc comment for
   // why there are two. `matchedAddress` is one of `lockup.candidates`, by
   // construction: verifyLockupAddress only ever returns a candidate it was

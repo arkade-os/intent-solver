@@ -34,7 +34,7 @@ import { covenantCosignerKey } from './cosigner.js'
 import { RestEmulatorProvider } from '@arkade-os/sdk'
 import { hex } from '@scure/base'
 import { Address, OutScript } from '@scure/btc-signer'
-import { corridorSetFromDeps, readerSetFromDeps } from './corridorSet.js'
+import { corridorSetFromDeps, readerSetFromDeps, servedContractVersions } from './corridorSet.js'
 import type { Config } from '../config.js'
 import type { PricingStrategy } from '@arkade-os/solver-core/core/pricing.js'
 import { onchainCorridorPricing, onchainFeeRateSampler } from './onchainPricing.js'
@@ -56,6 +56,7 @@ import { probeTimelockClock } from '@arkade-os/solver-rails-evm/evm/timelockCloc
 import { assertEvmClaimTraceSupport } from '@arkade-os/solver-rails-evm/evm/claimTraceProbe.js'
 import { createEvmBroadcaster, nonceSourceFor } from '@arkade-os/solver-rails-evm/evm/broadcast.js'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
+import { clampedBefore } from '@arkade-os/solver-core/core/limits.js'
 import { addressFromPrivateKey } from '@arkade-os/solver-rails-evm/evm/transaction.js'
 import { EvmSendSwapService } from '@arkade-os/solver-corridors-evm/send/evmOrchestrator.js'
 import { EvmReceiveSwapService } from '@arkade-os/solver-corridors-evm/receive/evmOrchestrator.js'
@@ -149,13 +150,12 @@ export interface Services {
   /**
    * The ENVIRONMENT's configuration, exactly as `loadConfig()` read it.
    *
-   * Deliberately not the effective policy — see {@link Services.policy}. This
-   * is the ceiling `validateOverride` measures against, so an override can
-   * always be relaxed back toward what the environment permits.
+   * Deliberately not the effective policy — see {@link Services.policy}. An
+   * override is reverted to it, and may not enable a corridor it disables.
    */
   config: Config
   /**
-   * What this process actually quotes: {@link Services.config} narrowed by the
+   * What this process actually quotes: {@link Services.config} with the
    * console's stored overrides. {@link Services.replacePolicy} moves this.
    *
    * The services were constructed from these values and nothing re-reads them,
@@ -536,7 +536,9 @@ export const createServices = async (
     // `config`, not `policy`: neither field is override-able, and `policy` is not resolved until below this.
     offerMarkets: config.offerMarkets,
     tokens: config.assetRfqTokens,
+    markets: config.documentMarkets,
   })
+  for (const line of adminStore.seededMarkets) log(`market — ${line}`)
   for (const line of adminStore.repairedServing) log(`market serving repaired — ${line}`)
   // Empty sinks make `post` a no-op, so a deployment that configures nothing
   // gets today's behaviour exactly: no timer, no network call, no failure.
@@ -701,27 +703,34 @@ export const createServices = async (
     service.onTickSuccess = (id) => tickErrors.clear(id)
     service.shouldSkipTick = (id) => tickErrors.shouldSkip(id)
   }
-  /**
-   * What this process will ACTUALLY quote: the environment, narrowed by any
-   * overrides the console has stored.
-   *
-   * Read once, here, and never again — the services below are handed their
-   * policy at construction and nothing re-reads it, which is exactly why a
-   * settings change needs a restart to take effect.
-   *
-   * `config` stays the ENVIRONMENT's values and is what `Services.config`
-   * carries. The distinction is load-bearing: `validateOverride` uses it as
-   * the ceiling an override may not widen past, so if it were the already
-   * narrowed policy an operator could only ever ratchet limits downward and
-   * could never restore what the environment actually allows.
-   *
-   * `applyOverrides` is pure and can only narrow limits and the exposure cap,
-   * cannot enable a corridor the environment disabled, and bounds fees to the
-   * same range `config.ts` validates — so this can lower the amount at risk
-   * but never raise it above what the deployment already permitted.
-   */
   const bootOverrides = await adminStore.getOverrides()
   const policy = applyOverrides(config, bootOverrides)
+  const rangesOf = (of: Config) => ({
+    ...of.corridorLimits,
+    ...Object.fromEntries(of.evmCorridors.map((evm) => [evm.corridor, evm.limits])),
+  })
+  const liveRanges = rangesOf(policy)
+  const unclamped = clampedBefore(config.network, config.limits, rangesOf(config))
+  if (unclamped.length > 0) {
+    // stderr, so it outlives a boot log nobody reads: these bounds were capped until this release.
+    console.warn(
+      `[${new Date().toISOString()}] WARNING limits — ${unclamped.length} configured bound(s) were capped by releases before this and now apply as set: ` +
+        `${unclamped.map(({ corridor, field }) => `${corridor ?? 'deployment'}.${field}`).join(', ')}; re-check them against limits.maxExposedSats`,
+    )
+  }
+  for (const { corridor, field, now, was } of unclamped) {
+    const [bound, before] = field === 'maxSats' ? ['max', 'at most'] : ['min', 'at least']
+    const live = (corridor === null ? policy.limits : liveRanges[corridor]!)[field]
+    log(
+      `limits — the config sets ${corridor ?? 'the deployment (limits.maxSwapSats)'} ${bound} to ${now} sats; releases before this allowed ${before} ${was}` +
+        (live === now ? '' : `; a console override makes it ${live}`),
+    )
+  }
+  if (unclamped.length > 0) {
+    log(
+      `limits — admission caps the total in flight at ${policy.maxExposedSats} sats (limits.maxExposedSats or its console override; unset, 3 × the deployment max)`,
+    )
+  }
 
   const assetThresholds = new Map<string, bigint>(
     config.assetRfqTokens.flatMap((token) =>
@@ -886,6 +895,7 @@ export const createServices = async (
         chargesDeliveredCarrier: policy.offerChargesDeliveredCarrier,
         minFillAmount: policy.offerMinFillAmount,
         maxFillAmount: policy.offerMaxFillAmount,
+        contractVersions: new Set(policy.offerContractVersions),
         // AVAILABLE, never total, and read fresh per decision. @see offerInventory.ts
         balance: () => arkade.wallet.getBalance(),
         outputsAt: (offerPkScript) => offerOutputsAt(arkade, offerPkScript),
@@ -895,7 +905,11 @@ export const createServices = async (
         serverPubkey: arkade.wallet.arkServerPublicKey,
         // THE SPEND. Wired here because this is where the wallet and the
         // emulator meet; every guard on it lives in `arkade/offerSettle.ts`.
-        settle: offerSettleFor({ ctx: arkade, emulatorUrl: config.emulatorUrl }),
+        settle: offerSettleFor({
+          ctx: arkade,
+          emulatorUrl: config.emulatorUrl,
+          contractVersions: new Set(policy.offerContractVersions),
+        }),
         approvalGate: gateFor('arkade offer fill'),
         onError: (id, error) => log(`offer ${id} failed:`, error instanceof Error ? error.message : String(error)),
         // Not a failure either: nothing was submitted, so the row waits a sweep.
@@ -953,6 +967,7 @@ export const createServices = async (
     solverPubkey: hex.encode(await arkade.identity.xOnlyPublicKey()),
     quoteValiditySeconds: policy.assetQuoteValiditySeconds,
     dustSats: arkade.dustSats,
+    minOutputSats: arkade.dustSats > arkade.vtxoMinSats ? arkade.dustSats : arkade.vtxoMinSats,
     deriveOffer: offerScriptFrom(assetRfqDerivation),
     depositAt: async (offerPkScript, depositLeg) =>
       largestOfferOutpoint(await liveOfferOutpoints(arkade, offerPkScript), depositLeg),
@@ -1498,6 +1513,7 @@ export const createServices = async (
       evmCorridors: livePolicy.evmCorridors,
       assetRfqService,
       assetRfqStore,
+      rfqContractVersions: servedContractVersions(livePolicy.rfqContractVersions, extraCorridors),
       railUp: rail?.probe ? () => railWatch?.up() ?? false : undefined,
     }
     return {

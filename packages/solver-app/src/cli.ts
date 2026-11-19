@@ -1230,6 +1230,8 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     )
     let bidder: InstanceType<typeof OpenRfqBidder> | undefined
     let bids: BidRecorder | undefined
+    // No corridor gate here: this bidder covers every card market, so a null `service` or a disabled
+    // contract version disqualifies one route and not the lot. `openRfqPreview` refuses per route.
     if (config.openRfqMaxBidsPerMinute > 0) {
       bids = createBidTail()
       bidder = new OpenRfqBidder({

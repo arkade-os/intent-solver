@@ -4,6 +4,9 @@ import { convertAmount, convertQuoteToBase, type Price } from '@arkade-os/solver
 import type { OpenRfq, OpenRfqPrice } from '@arkade-os/solver-core/core/openRfq.js'
 import type { SolverCard } from '@arkade-os/solver-core/core/registryCard.js'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
+import { RFQ_EVM_RECEIVE_V1, RFQ_EVM_SEND_V1, rfqContractEnabled } from '@arkade-os/solver-core/core/rfqContract.js'
+import { descriptorFor } from '@arkade-os/solver-corridors/corridors/index.js'
+import { ASSET_RFQ_CONTRACT_VERSIONS } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
 import type { Services } from './services.js'
 
 export const openRfqPairs = (card: SolverCard): string[] =>
@@ -43,11 +46,16 @@ export const openRfqPreview = (
     const to = toId ? legacyLeg(toId, source) : undefined
     if (!from || !to) return undefined
     const pair = `${from}->${to}`
+    // `createCorridorSet` gates the QUOTE path only, so a disabled corridor is still in the set and would
+    // price here — a bid the directed RFQ then refuses. Any one version serves: negotiation picks among them.
+    const served = (...versions: readonly string[]): boolean =>
+      versions.some((version) => rfqContractEnabled(source.policy.rfqContractVersions, version))
     if (!source.corridors.get(pair)) return undefined
     const amount = BigInt(open.amount)
     let fromAmount: bigint
     let toAmount: bigint
     if (from.startsWith('arkade:') && to.startsWith('arkade:')) {
+      if (!served(...ASSET_RFQ_CONTRACT_VERSIONS)) return undefined
       const legs = { from: from === 'arkade:BTC' ? null : from.slice(7), to: to === 'arkade:BTC' ? null : to.slice(7) }
       const market = source.assetRfqMarkets.find(
         (market) =>
@@ -70,6 +78,7 @@ export const openRfqPreview = (
       fromAmount = result.fromAmount
       toAmount = result.toAmount
     } else if (isCorridor(pair)) {
+      if (!served(descriptorFor(pair).contractVersion)) return undefined
       if (amount > BigInt(Number.MAX_SAFE_INTEGER)) return undefined
       const fee = source.bootPolicy.corridorFees[pair]
       const limits = source.bootPolicy.corridorLimits[pair]
@@ -98,6 +107,7 @@ export const openRfqPreview = (
       const policy = source.bootPolicy.evmCorridors.find((policy) => policy.enabled && policy.corridor === pair)
       if (!policy || !source.policy.evmCorridors.some((live) => live.corridor === pair && live.enabled))
         return undefined
+      if (!served(policy.direction === 'send' ? RFQ_EVM_SEND_V1 : RFQ_EVM_RECEIVE_V1)) return undefined
       if (policy.direction === 'receive' && amount >= 1n << 256n) return undefined
       const market = source.config.evmMarkets.find((market) => market.token.address === policy.token.address)
       if (!market) return undefined

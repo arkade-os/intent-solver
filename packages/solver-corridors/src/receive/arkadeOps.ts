@@ -65,6 +65,7 @@ export const receiveArkadeOpsFromContext = async (
     solverRefundPkScript,
     delays: ctx.unilateralDelays,
     hrp: ctx.hrp,
+    minOutputSats: Number(ctx.dustSats > ctx.vtxoMinSats ? ctx.dustSats : ctx.vtxoMinSats),
     findLockups: (pkScriptHex) => findLockups(ctx, pkScriptHex),
     findLockupOutpoints: (pkScriptHex) => findLockupOutpoints(ctx, pkScriptHex),
     // NOT `wallet.send`: that lets the SDK choose inputs, and it chooses

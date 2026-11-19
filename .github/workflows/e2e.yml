@@ -219,6 +219,8 @@ jobs:
           POSTGRES_PORT: '29372'
         run: |
           set -eu
+          sed -i 's/DATABASE_ENABLED: "true"/DATABASE_ENABLED: "false"/' docker/compose.base.yml
+          grep -q 'DATABASE_ENABLED: "false"' docker/compose.base.yml
           if [ "$SECONDS_TYPED" = "true" ]; then
             export ARKD_VTXO_TREE_EXPIRY=6144 ARKD_UNILATERAL_EXIT_DELAY=512 \
                    ARKD_PUBLIC_UNILATERAL_EXIT_DELAY=512 ARKD_BOARDING_EXIT_DELAY=2048 \

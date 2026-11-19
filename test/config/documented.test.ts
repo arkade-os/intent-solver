@@ -22,6 +22,7 @@ const readme = readFileSync(join(root, 'README.md'), 'utf8')
 const documentedPaths = (): string[] => [
   ...PATHS.map(([path]) => path),
   'offers.markets',
+  'markets',
   ...[...new Set(Object.values(CORRIDOR_FIELDS).flat())].map((field) => `corridors["<pair>"].${field}`),
   ...Object.keys(EVM_FIELDS).map((field) => `rails.evm.<chain>.${field}`),
   ...['kind', 'chain', 'address', 'decimals', 'priceFeed', 'pricePath', 'assetId', 'approvalThreshold'].map(

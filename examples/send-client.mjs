@@ -49,7 +49,8 @@ try {
     onEvent: (name, data) => {
       if (name === 'decoded') console.log(`sending ${data.amountSats} sats to payment hash ${data.paymentHash}`)
       if (name === 'verified') console.log(`derivation matches solver's address: ${data.address}`)
-      if (name === 'funded') console.log(`funded ${data.amountSats} sats at own derivation, arkadeTxid ${data.fundTxid}`)
+      if (name === 'funded')
+        console.log(`funded ${data.amountSats} sats at own derivation, arkadeTxid ${data.fundTxid}`)
     },
   })
 } catch (error) {

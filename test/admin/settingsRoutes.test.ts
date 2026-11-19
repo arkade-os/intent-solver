@@ -13,6 +13,9 @@ import {
   type AssetMarketConfig,
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { createServicesBody } from '../support/createServicesBody.js'
+import { loadConfig } from '@arkade-os/solver-app/config/load.js'
+
+const inline = (doc: unknown) => ({ env: { SOLVER_CONFIG_JSON: JSON.stringify(doc) } })
 
 const baseConfig = {
   network: 'regtest',
@@ -63,7 +66,11 @@ const build = (overrides: Record<string, string> = {}, over: Record<string, unkn
     bootPolicy: structuredClone(baseConfig),
     bootOverrides: {},
     replacePolicy: vi.fn(),
-    adminStore: { getOverrides: vi.fn(async () => ({ ...stored })), setOverrideWithAudit },
+    adminStore: {
+      getOverrides: vi.fn(async () => ({ ...stored })),
+      listMarkets: vi.fn(async () => []),
+      setOverrideWithAudit,
+    },
     ...over,
   } as never
   return { app: buildAdminApp({ services, startedAt: 1, mode: 'relay' }), setOverrideWithAudit }
@@ -112,6 +119,16 @@ describe('GET /api/settings', () => {
     expect(body.pendingRestart).toContain('LN_SEND_FEE_BPS')
   })
 
+  it('says whether a BTC rail exists', async () => {
+    const read = async (ln: unknown) =>
+      (
+        (await (await build({}, { ln }).app.fetch(new Request('http://admin/api/settings'))).json()) as {
+          btcRail: unknown
+        }
+      ).btcRail
+    expect([await read({}), await read(null)]).toEqual([true, false])
+  })
+
   it('exposes no secrets', async () => {
     const { app } = build()
     const text = await (await app.fetch(new Request('http://admin/api/settings'))).text()
@@ -125,6 +142,49 @@ describe('GET /api/settings', () => {
     }
     expect(body.restartNotice).not.toMatch(/^Stored\. It takes effect when the solver restarts/)
     expect(body.restartNotice).toMatch(/badged pending/i)
+  })
+})
+
+describe('GET /api/config/export', () => {
+  const doc = {
+    network: 'regtest',
+    rails: {
+      arkade: { mnemonic: 'secret words never real', operatorUrl: 'http://arkade.test', emulatorUrl: 'http://e.test' },
+      lightning: { backend: 'fake' },
+    },
+    corridors: { 'arkade:BTC->lightning:BTC': { feeBps: 10, maxSats: 100_000 } },
+  }
+  const exported = (overrides: Record<string, string>, config: unknown = loadConfig(inline(doc))) =>
+    build(overrides, { config }).app.fetch(new Request('http://admin/api/config/export'))
+
+  it('answers the booted document with the stored overrides in, and no credential', async () => {
+    const response = await exported({ LN_SEND_FEE_BPS: '25', LN_SEND_MAX_SATS: '2000000' })
+    expect(response.status).toBe(200)
+    const text = await response.text()
+    expect(text).not.toContain('secret words never real')
+    expect(JSON.parse(text)).toEqual({
+      document: {
+        ...doc,
+        rails: { ...doc.rails, arkade: { ...doc.rails.arkade, mnemonic: '<RAILS_ARKADE_MNEMONIC>' } },
+        corridors: { 'arkade:BTC->lightning:BTC': { enabled: true, feeBps: 25, maxSats: 2_000_000 } },
+      },
+      consoleOnly: [],
+    })
+  })
+
+  it('refuses, saying why, when the booted document no longer loads', async () => {
+    const response = await exported({}, { ...loadConfig(inline(doc)), configDocument: { ...doc, network: 'nowhere' } })
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({
+      error: 'unexportable',
+      message: expect.stringMatching(/cannot hold what this console runs: .*network/),
+    })
+  })
+
+  it('refuses when the solver was not started from a document', async () => {
+    const response = await exported({}, { ...baseConfig, configDocument: null })
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({ error: 'no_document' })
   })
 })
 

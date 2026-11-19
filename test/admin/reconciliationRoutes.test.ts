@@ -143,6 +143,7 @@ describe('GET /api/reconciliation', () => {
   it('shows balance changes, checkpoint gaps, withdrawals, and per-swap fees in one payload', async () => {
     const { response, body, adminStore } = await build()
     expect(response.status).toBe(200)
+    expect(body.btcRail).toBe(true)
     expect(body.balance.changeSats).toBe(450)
     expect(body.balance.windowCount).toBe(5)
     expect(body.balance.incompleteCount).toBe(1)

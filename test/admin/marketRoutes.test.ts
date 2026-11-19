@@ -19,6 +19,7 @@ import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
 import { assetMarketKey, assetMarketPolicy, DEFAULT_SERVING } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { assetRfqMarketsFrom } from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
 import { priceFrom } from '@arkade-os/solver-core/core/priceFeed.js'
+import * as simpleMarket from '../../packages/solver-app/src/admin/static/simpleMarket.js'
 
 const USDT = 'aa'.repeat(34)
 const KEY = assetMarketKey(null, USDT)
@@ -36,7 +37,10 @@ const consoleForm = () => {
   const end = appSource.indexOf('/* ==== asset markets — END')
   if (start === -1 || end === -1) throw new Error('the market form moved out of the slice this guard reads')
   try {
-    return new Function(`${appSource.slice(start, end)}\nreturn { blankMarket, draftFrom, marketBody }`)() as {
+    return new Function(
+      ...Object.keys(simpleMarket),
+      `${appSource.slice(start, end)}\nreturn { blankMarket, draftFrom, marketBody }`,
+    )(...Object.values(simpleMarket)) as {
       blankMarket: () => Record<string, unknown>
       draftFrom: (row: Record<string, unknown>) => Record<string, unknown>
       marketBody: (draft: Record<string, unknown>) => Record<string, unknown>
@@ -471,6 +475,7 @@ describe('the serving fields an operator can only set from here', () => {
     const draft = {
       ...blankMarket(),
       quote: USDT,
+      quoteDecimals: '6',
       symbol: 'USDA',
       feedUrl: 'https://feed.test/price',
       pricePath: '/price',
@@ -479,9 +484,26 @@ describe('the serving fields an operator can only set from here', () => {
     }
     expect((await put(app, marketBody(draft))).status).toBe(200)
     const rows = await adminStore.listMarkets()
-    expect(rows[0]).toMatchObject({ servesRfq: true, servesOffer: false })
+    expect(rows[0]).toMatchObject({ servesRfq: true, servesOffer: false, carrierMode: 'priced' })
     const rfq = assetRfqMarketsFrom(assetMarketPolicy(rows).pricing, { dustSats: 330n, pricedByDefault: false })
     expect(rfq.map((market) => market.symbol)).toEqual(['USDA'])
+    await adminStore.close()
+  })
+
+  it('refuses a console draft whose decimals nobody filled, rather than storing 0', async () => {
+    const { app, adminStore } = await build()
+    const { blankMarket, marketBody } = consoleForm()
+    const draft = {
+      ...blankMarket(),
+      quote: USDT,
+      symbol: 'USDA',
+      feedUrl: 'https://feed.test/price',
+      pricePath: '/price',
+    }
+    const res = await put(app, marketBody(draft))
+    expect(res.status).toBe(400)
+    expect(((await res.json()) as { message: string }).message).toMatch(/quoteDecimals/)
+    expect(await adminStore.listMarkets()).toEqual([])
     await adminStore.close()
   })
 })
@@ -543,6 +565,17 @@ describe('a console save round-trips what the API handed it', () => {
 
   it('leaves the stored market unchanged, per-direction spread included', async () => {
     const { app, adminStore } = await saved()
+    const [before] = (await list(app)).markets
+    const { draftFrom, marketBody } = consoleForm()
+    expect((await put(app, marketBody(draftFrom(before!)))).status).toBe(200)
+    expect(editable((await list(app)).markets[0]!)).toEqual(editable(before!))
+    await adminStore.close()
+  })
+
+  it('leaves a market whose asset is the base unchanged too', async () => {
+    const { app, adminStore } = await build()
+    const reversed = { base: USDT, quote: null, sellBase: { min: '10', max: '20' }, buyBase: { min: '1', max: '2' } }
+    await put(app, body({ ...reversed, sellBaseFeeBps: 0, buyBaseFeeBps: 900, ...SERVING }))
     const [before] = (await list(app)).markets
     const { draftFrom, marketBody } = consoleForm()
     expect((await put(app, marketBody(draftFrom(before!)))).status).toBe(200)

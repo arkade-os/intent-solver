@@ -1,7 +1,7 @@
 # The outbound approach — a provider with zero listening ports
 
 This is the end-state transport: the provider (solver) runs behind NAT with no
-public endpoint and no open ports. It does not accept connections — it *opens*
+public endpoint and no open ports. It does not accept connections — it _opens_
 one, to a relay, and reads swap requests off it. Every side effect the container
 has is outbound: quote ingestion (relay), Lightning payment, the Arkade claim,
 the covenant refund, and lockup polling are all connections the provider itself
@@ -21,12 +21,12 @@ an outbound relay connection changes the transport and nothing downstream.
 
 ## The pieces
 
-| Piece | Role | Direction |
-|---|---|---|
-| relay | pub/sub broker (Nostr, or any broker) | both parties dial IN to it |
-| `cli relay` | provider: relay ingress + the watch loop, one process | outbound only |
-| `examples/send-client-relay.mjs` | reference client | outbound only |
-| `scripts/mock-relay.mjs` | a ~60-line dev broker for local runs | — |
+| Piece                            | Role                                                  | Direction                  |
+| -------------------------------- | ----------------------------------------------------- | -------------------------- |
+| relay                            | pub/sub broker (Nostr, or any broker)                 | both parties dial IN to it |
+| `cli relay`                      | provider: relay ingress + the watch loop, one process | outbound only              |
+| `examples/send-client-relay.mjs` | reference client                                      | outbound only              |
+| `scripts/mock-relay.mjs`         | a ~60-line dev broker for local runs                  | —                          |
 
 The relay's specific wire protocol lives behind ONE codec seam. The default
 dialect is Nostr (`packages/solver-transport/src/relay/nostr.ts`, `RELAY_PROTOCOL=nostr`): NIP-01
