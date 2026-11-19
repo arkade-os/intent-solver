@@ -118,6 +118,8 @@ export interface ReceiveArkadeOps {
   delays: UnilateralDelays
   /** bech32 prefix for Arkade addresses. */
   hrp: string
+  /** max(dust, vtxoMinAmount): the smallest lockup arkd funds. Left out, the receive quotes check no floor. */
+  minOutputSats?: number
   findLockups(pkScriptHex: string): Promise<FundedOutput[]>
   /**
    * Every outpoint this script has EVER held, spent ones included, with the

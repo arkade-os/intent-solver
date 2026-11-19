@@ -20,7 +20,7 @@
 import { corridorEnabledFrom } from './corridorEnabled.js'
 import { evmCorridorFor, type EvmCorridor } from './corridorPolicy.js'
 import type { Fee } from './corridorPolicy.js'
-import type { Limits } from './limits.js'
+import { withBounds, type Limits } from './limits.js'
 import { STEM_SYMBOL } from './marketKey.js'
 import { defaultPricePath, MAX_DECIMALS, validatePricePath } from './priceFeed.js'
 
@@ -51,7 +51,7 @@ export interface EvmCorridorPolicy {
   corridor: EvmCorridor
   token: EvmToken
   direction: 'send' | 'receive'
-  /** The BTC side, in sats. Inherits the house bound and may only narrow it. */
+  /** The BTC side, in sats. */
   limits: Limits
   /**
    * The TOKEN side, in the token's own atomic units. Absent means unbounded.
@@ -119,10 +119,6 @@ export const evmEnvStem = (token: EvmToken, direction: 'send' | 'receive'): stri
  * Both directions per token, because a deployment that serves a token at all
  * serves it both ways unless a knob says otherwise — the same default the four
  * BTC corridors take.
- *
- * `narrow` is not applied here the way `corridorLimitsFromEnv` applies it: that
- * function inherits from a base and refuses to WIDEN it, and the same rule holds
- * for these, so the caller passes the already-narrowed base in.
  */
 export const evmCorridorPolicies = (
   tokens: readonly EvmToken[],
@@ -151,17 +147,7 @@ export const evmCorridorPolicies = (
         }
         return value
       }
-      const minSats = bound('MIN_SATS')
-      const maxSats = bound('MAX_SATS')
-      // NARROWER ONLY, never wider. A corridor knob that could raise the house
-      // limit would let one token's config quietly widen the blast radius the
-      // deployment-wide bound exists to set.
-      if (minSats !== undefined && minSats < base.minSats) {
-        throw new Error(stem + '_MIN_SATS may not be below the deployment minimum ' + base.minSats)
-      }
-      if (maxSats !== undefined && maxSats > base.maxSats) {
-        throw new Error(stem + '_MAX_SATS may not exceed the deployment maximum ' + base.maxSats)
-      }
+      const limits = withBounds(base, { minSats: bound('MIN_SATS'), maxSats: bound('MAX_SATS') }, stem)
       // Atomic units, so a bigint: an 18-decimal token's bound does not fit a
       // double, and `Number` would silently round the operator's ceiling.
       const units = (suffix: string): bigint | undefined => {
@@ -189,7 +175,7 @@ export const evmCorridorPolicies = (
         corridor: evmCorridorFor(token.address, direction),
         token,
         direction,
-        limits: { minSats: minSats ?? base.minSats, maxSats: maxSats ?? base.maxSats },
+        limits,
         ...(minUnits !== undefined && maxUnits !== undefined ? { tokenLimits: { minUnits, maxUnits } } : {}),
         fee: { bps: component('FEE_BPS', 10_000), flatSats: component('FEE_FLAT_SATS', 1_000_000) },
         // Enabled unless explicitly switched off, matching the four BTC

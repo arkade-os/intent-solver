@@ -120,7 +120,7 @@ export const registerSwapRoutes = (app: Hono, deps: AdminDeps): void => {
     // independently, and a single opaque cursor would have to encode four
     // positions anyway. Null everywhere means the client has seen everything.
     const cursors = Object.fromEntries(pages.map((page) => [page.corridor, page.nextCursor]))
-    return c.json({ swaps, cursors, phases: PHASES })
+    return c.json({ swaps, cursors, phases: PHASES, btcRail: Boolean(deps.services.ln) })
   })
 
   app.get('/api/swaps/:corridor/:id', async (c) => {

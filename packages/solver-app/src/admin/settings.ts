@@ -1,13 +1,7 @@
 /**
  * Runtime settings overrides, layered onto the environment.
  *
- * THE CONSOLE LAYER IS NOT NARROW-ONLY, by deliberate decision. `narrow()` still
- * governs the ENV layers, but an override set here REPLACES the environment's bound in
- * either direction, including upward, and `MAX_EXPOSED_SATS` may be raised as well as
- * lowered.
- *
- * That drops the property the layering was built on — each step only ever reducing the
- * amount at risk — so the environment is a starting point rather than a ceiling. The
+ * An override REPLACES the environment's bound in either direction, `MAX_EXPOSED_SATS` included. The
  * admin API has NO AUTHENTICATION of its own (see `server.ts`; a reverse proxy is
  * expected to supply it), so anything that can reach the admin port can raise this
  * solver's per-swap and total exposure caps. `adminHost` and that proxy stand in front
@@ -24,9 +18,19 @@ import type { Config } from '../config.js'
 import { CORRIDORS, FREE, type Corridor, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { descriptorFor } from '@arkade-os/solver-corridors/corridors/index.js'
 import { MAX_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/send.js'
-import { assetMarketKey } from '@arkade-os/solver-core/core/assetMarketConfig.js'
-import { log } from '@arkade-os/solver-core/util/poll.js'
+import {
+  assetMarketFrom,
+  assetMarketJson,
+  assetMarketKey,
+  validateAssetMarket,
+  withoutFeedCredential,
+  type AssetMarketConfig,
+} from '@arkade-os/solver-core/core/assetMarketConfig.js'
+import { log, messageOf } from '@arkade-os/solver-core/util/poll.js'
 import { lightningRailFor } from '../ops/rails.js'
+import { redactDocument, setAt } from '../config/fromEnv.js'
+import { BTC_FAMILY, CORRIDOR_FIELDS, corridorKnob, PATHS } from '../config/knobs.js'
+import { loadConfig } from '../config/load.js'
 
 export type KnobSource = 'config' | 'override'
 
@@ -280,11 +284,6 @@ export const applyOverrides = (config: Config, overrides: Record<string, string>
       continue
     }
     if (suffix === 'MIN_SATS' || suffix === 'MAX_SATS') {
-      // Assigned, not narrowed. This used to route through `narrow()`, whose
-      // Math.min/Math.max would have clamped a widening value straight back to
-      // the environment's — leaving an override that validated, persisted, and
-      // then did nothing. Dropping the refusal in `validateOverride` without
-      // dropping this would have been exactly that silent no-op.
       const current = corridorLimits[corridor]
       corridorLimits[corridor] =
         suffix === 'MIN_SATS' ? { ...current, minSats: Number(raw) } : { ...current, maxSats: Number(raw) }
@@ -293,9 +292,7 @@ export const applyOverrides = (config: Config, overrides: Record<string, string>
     if (suffix === 'ENABLED') corridorEnabled[corridor] = raw === 'true'
   }
 
-  // `narrow()` made a crossed range impossible; assignment does not. Both
-  // bounds are known here and nowhere earlier, so this is where the pair is
-  // checked. An empty range is not a safety problem — a corridor that admits
+  // An empty range is not a safety problem — a corridor that admits
   // no amount quotes nothing — but it is a silent one, so fall back to the
   // environment's range rather than leave the corridor dark.
   for (const corridor of CORRIDORS) {
@@ -312,6 +309,77 @@ export const applyOverrides = (config: Config, overrides: Record<string, string>
     lockupTimeoutSeconds,
     assetCarrierPricing,
   }
+}
+
+const DOCUMENT_PATHS: ReadonlyMap<string, readonly string[]> = new Map<string, readonly string[]>([
+  ...PATHS.map(([path, knob]) => [knob, path.split('.')] as const),
+  ...CORRIDORS.flatMap((corridor) =>
+    CORRIDOR_FIELDS[BTC_FAMILY[corridor]!].map(
+      (field) => [corridorKnob(stemOf(corridor), field), ['corridors', corridor, field]] as const,
+    ),
+  ),
+])
+
+/** The document would not boot to what the console runs, for a reason other than one the export names. */
+export class UnexportableConfig extends Error {}
+
+export interface ConfigExport {
+  document: unknown
+  /** What stays in the console, each with why: a market the loader would refuse. */
+  consoleOnly: { path: string; reason: string }[]
+}
+
+/**
+ * The document this solver booted from with the stored overrides and the console's markets written in,
+ * credentials as placeholders. Only a value an override moves is written, so the file stays the operator's own.
+ */
+export const exportDocument = (
+  config: Config,
+  overrides: Record<string, string>,
+  markets: readonly AssetMarketConfig[] = [],
+): ConfigExport => {
+  const booted = editableKnobValues(config)
+  const live = editableKnobValues(applyOverrides(config, overrides))
+  const doc = structuredClone(config.configDocument) as Record<string, unknown>
+  for (const key of editableKeys().filter((key) => live[key] !== booted[key])) {
+    const at = DOCUMENT_PATHS.get(key)
+    if (!at) continue // left unwritten, so the reload check below refuses the export by name
+    // A corridor block's presence alone turns it on (`enabled ?? true`), so a block written to says which.
+    if (at[0] === 'corridors') {
+      setAt(doc, ['corridors', at[1]!, 'enabled'], live[`${stemOf(at[1] as Corridor)}_ENABLED`])
+    }
+    setAt(doc, at, live[key])
+  }
+  const leftOut: ConfigExport['consoleOnly'] = []
+  const written: unknown[] = []
+  for (const market of markets) {
+    const entry = assetMarketJson(market)
+    try {
+      validateAssetMarket(assetMarketFrom(entry), { allowPrivateFeedHost: true })
+      written.push(entry)
+    } catch (error) {
+      leftOut.push({
+        path: `market ${assetMarketKey(market.base, market.quote)}`,
+        reason: withoutFeedCredential(messageOf(error), market.feedUrl),
+      })
+    }
+  }
+  if (written.length > 0 || doc.markets !== undefined) doc.markets = written
+  const cannot = 'a config file cannot hold what this console runs'
+  let reloaded: ReturnType<typeof editableKnobValues>
+  try {
+    reloaded = editableKnobValues(loadConfig({ env: { SOLVER_CONFIG_JSON: JSON.stringify(doc) } }))
+  } catch (error) {
+    throw new UnexportableConfig(`${cannot}: ${messageOf(error)}`)
+  }
+  const lost = editableKeys().filter((key) => reloaded[key] !== live[key])
+  if (lost.length > 0) {
+    const each = lost.map(
+      (key) => `${config.configPaths.get(key) ?? key} is ${live[key]} here but would load as ${reloaded[key]}`,
+    )
+    throw new UnexportableConfig(`${cannot}: ${each.join('; ')}`)
+  }
+  return { document: redactDocument(doc), consoleOnly: leftOut }
 }
 
 /**

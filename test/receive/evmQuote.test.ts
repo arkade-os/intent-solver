@@ -251,6 +251,16 @@ describe('refusals', () => {
     expect(await service.quote(request())).toEqual({ accepted: false, reason: 'fee_consumes_swap' })
   })
 
+  it('refuses payout_below_dust, a payout under the smallest lockup arkd funds', async () => {
+    const { deps, service } = await build()
+    const outcome = await service.quote(request())
+    if (!outcome.accepted) throw new Error(`refused: ${outcome.reason}`)
+    const floored = async (minOutputSats: number) =>
+      (await build({ arkade: { ...deps.arkade, minOutputSats } })).service.quote(request())
+    expect(await floored(outcome.swap.payoutSats + 1)).toEqual({ accepted: false, reason: 'payout_below_dust' })
+    expect((await floored(outcome.swap.payoutSats)).accepted).toBe(true)
+  })
+
   it('refuses a duplicate payment hash, here and in another corridor', async () => {
     const { service } = await build()
     expect((await service.quote(request())).accepted).toBe(true)

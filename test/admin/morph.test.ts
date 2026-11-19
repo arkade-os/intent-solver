@@ -4,9 +4,14 @@
  */
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
+import * as simpleMarket from '../../packages/solver-app/src/admin/static/simpleMarket.js'
 
 const source = readFileSync(new URL('../../packages/solver-app/src/admin/static/app.js', import.meta.url), 'utf8')
 const helpers = source.slice(source.indexOf('/* ---- tiny element helper'), source.indexOf('/* ---- api ---'))
+const markets = source.slice(
+  source.indexOf('/* ==== asset markets — BEGIN'),
+  source.indexOf('/* ==== asset markets — END'),
+)
 
 class FakeNode {
   parentNode: FakeElement | null = null
@@ -195,5 +200,114 @@ describe('morph', () => {
     expect(root.childNodes).toHaveLength(2)
     expect(root.childNodes[0]).not.toBe(first)
     expect(root.childNodes[0]!.nodeName).toBe('TABLE')
+  })
+
+  it('labels each body cell from its column past a spanning cell, and a repaint keeps the cells and follows renamed or cleared headings', () => {
+    const { h, morphChildren } = load()
+    const table = (amount = 'amount, sat', age = 'age') =>
+      h(
+        'table',
+        h('thead', h('tr', h('th', 'phase'), h('th', ''), h('th', amount), h('th', age))),
+        h(
+          'tbody',
+          h('tr', h('td', 'open'), h('td', 'dot'), h('td', '42'), h('td', '3m')),
+          h('tr', h('td', 'failed'), h('td', { colspan: 2 }, 'no route'), h('td', '1d')),
+        ),
+      )
+    const cells = (root: FakeElement) => all(root, (node) => node.nodeName === 'TD')
+    const labels = (root: FakeElement) => cells(root).map((cell) => cell.getAttribute('data-label'))
+    const root = h('div')
+    morphChildren(root, h('div', table()))
+    const kept = cells(root)
+    expect(labels(root)).toEqual(['phase', null, 'amount, sat', 'age', 'phase', null, 'age'])
+    morphChildren(root, h('div', table()))
+    cells(root).forEach((cell, i) => expect(cell).toBe(kept[i]))
+    expect(labels(root)).toEqual(['phase', null, 'amount, sat', 'age', 'phase', null, 'age'])
+    morphChildren(root, h('div', table('amount', '')))
+    cells(root).forEach((cell, i) => expect(cell).toBe(kept[i]))
+    expect(labels(root)).toEqual(['phase', null, 'amount', null, 'phase', null, null])
+  })
+})
+
+const all = (node: FakeNode, match: (element: FakeElement) => boolean): FakeElement[] =>
+  node instanceof FakeElement
+    ? [...(match(node) ? [node] : []), ...node.childNodes.flatMap((child) => all(child, match))]
+    : []
+
+describe('the market form repaints in place', () => {
+  const USDA = 'aa'.repeat(34)
+
+  /** A new market with the asset id typed and its lookup held open, while the operator types a fee. */
+  const typingFee = () => {
+    let land: (label: unknown) => void = () => {}
+    let root: FakeElement | null = null
+    const document = {
+      activeElement: null as FakeElement | null,
+      createElement: (tag: string) => new FakeElement(tag),
+      createTextNode: (text: string) => new FakeText(text),
+      querySelector: (selector: string) =>
+        selector === 'section.market-form' && root
+          ? (all(root, (node) => node.className.split(' ').includes('market-form'))[0] ?? null)
+          : null,
+    }
+    const api = (path: string) =>
+      new Promise((resolve) => {
+        if (path.startsWith('/api/assets/')) land = resolve
+      })
+    const state = { data: { markets: { carrier: { sats: '330' }, markets: [] }, settings: { knobs: [] } } }
+    const params = ['document', 'Node', 'api', 'shortId', 'ago', 'sats', 'state', 'render', 'load', 'fail']
+    const env = new Function(
+      ...params,
+      'setTimeout',
+      'clearTimeout',
+      ...Object.keys(simpleMarket),
+      `${helpers}\n${markets}\nmarketDraft = blankMarket()\nreturn { h, morphChildren, marketsView }`,
+    )(
+      document,
+      FakeNode,
+      api,
+      String,
+      () => '1s',
+      String,
+      state,
+      () => {},
+      async () => {},
+      () => {},
+      () => 0,
+      () => {},
+      ...Object.values(simpleMarket),
+    ) as {
+      h: (spec: string, ...rest: unknown[]) => FakeElement
+      morphChildren: (live: FakeElement, next: FakeElement) => void
+      marketsView: () => FakeElement
+    }
+    root = env.h('div')
+    env.morphChildren(root, env.h('div', env.marketsView()))
+    const labelled = (label: string) => all(root!, (node) => node.getAttribute('aria-label') === label)
+    const [asset] = labelled('asset id')
+    asset!.value = USDA
+    asset!.fire('input')
+    const [fee] = labelled('fee bps')
+    document.activeElement = fee!
+    fee!.value = '7'
+    fee!.fire('input')
+    return { fee: fee!, labelled, land: async (label: unknown) => (land(label), await new Promise(setImmediate)) }
+  }
+
+  it('keeps the field being typed in while a lookup reveals rows above it', async () => {
+    const { fee, labelled, land } = typingFee()
+    expect(labelled('symbol')[0]!.hasAttribute('hidden')).toBe(true)
+    await land({ assetId: USDA })
+    expect(labelled('symbol')[0]!.hasAttribute('hidden')).toBe(false)
+    expect(labelled('asset decimals')[0]!.parentNode!.hasAttribute('hidden')).toBe(false)
+    expect(labelled('fee bps')).toEqual([fee])
+    expect(fee.value).toBe('7')
+  })
+
+  it('fills a looked-up value into the fields that are not focused', async () => {
+    const { fee, labelled, land } = typingFee()
+    await land({ assetId: USDA, ticker: 'usda', decimals: 6 })
+    expect(labelled('USDA decimals').map((input) => input.value)).toEqual(['6', '6'])
+    expect(fee.value).toBe('7')
   })
 })

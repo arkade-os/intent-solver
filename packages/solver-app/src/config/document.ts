@@ -5,6 +5,8 @@
  * once the document is flattened, by the same readers the environment used.
  */
 import { z } from 'zod'
+import { OFFER_CONTRACT_VERSIONS } from '@arkade-os/solver-core/core/offerContract.js'
+import { RFQ_CONTRACT_VERSION_ID } from '@arkade-os/solver-core/core/rfqContract.js'
 
 const UNKNOWN_KEY = 'unknown key'
 
@@ -19,6 +21,18 @@ const str = z.string()
 const num = z.number()
 const bool = z.boolean()
 const strings = z.array(z.string())
+const offerContractVersion = z.enum(OFFER_CONTRACT_VERSIONS, {
+  errorMap: () => ({ message: `must be one of ${OFFER_CONTRACT_VERSIONS.join(', ')}` }),
+})
+const offerContractVersions = z
+  .array(offerContractVersion)
+  .min(1)
+  .refine((values) => new Set(values).size === values.length, { message: 'must not repeat a version' })
+const rfqContractVersion = z.string().regex(RFQ_CONTRACT_VERSION_ID, 'must be a version name or content hash')
+const rfqContractVersions = z
+  .array(rfqContractVersion)
+  .min(1)
+  .refine((values) => new Set(values).size === values.length, { message: 'must not repeat a version' })
 
 const section = <T extends z.ZodRawShape>(shape: T) => z.object(shape).partial().strict()
 
@@ -79,6 +93,33 @@ const asset = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('arkade'), assetId: str, approvalThreshold: decimal.optional() }).strict(),
 ])
 
+const atomicBounds = z.object({ min: decimal, max: decimal }).strict().nullable()
+
+/** One console market, in the shape the markets API speaks. */
+const market = section({
+  base: str.nullable(),
+  quote: str.nullable(),
+  baseDecimals: num,
+  quoteDecimals: num,
+  feedUrl: str,
+  pricePath: str,
+  toleranceBps: num,
+  feeBps: num,
+  sellBaseFeeFlat: decimal,
+  buyBaseFeeFlat: decimal,
+  sellBaseFeeBps: num.nullable(),
+  buyBaseFeeBps: num.nullable(),
+  sellBase: atomicBounds,
+  buyBase: atomicBounds,
+  enabled: bool,
+  symbol: str.nullable(),
+  servesOffer: bool,
+  servesRfq: bool,
+  rfqSellBase: bool,
+  rfqBuyBase: bool,
+  carrierMode: z.enum(['inherit', 'off', 'priced']),
+})
+
 const corridorTerms = section({
   enabled: bool,
   minSats: num,
@@ -115,15 +156,20 @@ const buildSchema = (railNames: readonly string[]) =>
       }),
     }),
     assets: z.record(str, asset),
+    markets: z.array(market),
     limits: section({ maxSwapSats: num, maxExposedSats: num, approvalThresholdSats: num }),
     corridors: z.record(str, corridorTerms),
     offers: section({
       markets: strings,
+      contractVersions: offerContractVersions,
       minFillAmount: decimal,
       maxFillAmount: decimal,
       chargeCarrier: bool,
       carrierPricing: bool,
       quoteValiditySeconds: num,
+    }),
+    rfq: section({
+      contractVersions: rfqContractVersions,
     }),
     relay: section({
       url: str,
@@ -146,9 +192,9 @@ const buildSchema = (railNames: readonly string[]) =>
     diagnostics: section({ latency: bool }),
   })
 
-export type SolverDocument = z.infer<ReturnType<typeof buildSchema>>
+export type SolverDocument = z.output<ReturnType<typeof buildSchema>>
 
-export const documentSchema = (railNames: readonly string[]): z.ZodType<SolverDocument> => buildSchema(railNames)
+export const documentSchema = (railNames: readonly string[]) => buildSchema(railNames)
 
 const IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/
 

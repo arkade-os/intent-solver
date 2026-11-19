@@ -42,6 +42,22 @@ describe('parseDocument', () => {
     )
   })
 
+  it('accepts only the offer contract versions the runtime knows', () => {
+    expect(() => parseDocument({ offers: { contractVersions: ['offer-v1', 'offer-v2'] } }, [])).not.toThrow()
+    expect(() => parseDocument({ offers: { contractVersions: ['offer-v1', 'offer-v3'] } }, [])).toThrow(
+      'offers.contractVersions[1]: must be one of offer-v1, offer-v2',
+    )
+  })
+
+  it('accepts RFQ contract version names or content hashes', () => {
+    expect(() =>
+      parseDocument({ rfq: { contractVersions: ['asset-swap-v2', 'sha256:' + 'ab'.repeat(32)] } }, []),
+    ).not.toThrow()
+    expect(() => parseDocument({ rfq: { contractVersions: ['bad version'] } }, [])).toThrow(
+      'rfq.contractVersions[0]: must be a version name or content hash',
+    )
+  })
+
   it('refuses a wrong type and says which', () => {
     expect(() => parseDocument({ limits: { maxSwapSats: '5000' } }, [])).toThrow('limits.maxSwapSats: must be a number')
   })

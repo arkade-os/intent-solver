@@ -9,18 +9,18 @@ this copy remains the provider-repo reference wired to its tests.)
 
 Two layers, split on purpose:
 
-| module | depends on | role |
-|---|---|---|
-| [`rfq-core.mjs`](../examples/lib/rfq-core.mjs) | nothing but web APIs (`fetch`, `WebSocket`, `crypto`) | the portable protocol core: messages, transports, time gates, the compare-only address check. Lift as-is into any JS runtime; translate first when porting to another language |
-| [`swap-client.mjs`](../examples/lib/swap-client.mjs) | `rfq-core` + this repo's build (`pnpm build`) + `@arkade-os/sdk` | the Arkade side: local script derivation, funding, on-chain settlement watching, and the one-call `sendToLightning` |
+| module                                               | depends on                                                       | role                                                                                                                                                                           |
+| ---------------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| [`rfq-core.mjs`](../examples/lib/rfq-core.mjs)       | nothing but web APIs (`fetch`, `WebSocket`, `crypto`)            | the portable protocol core: messages, transports, time gates, the compare-only address check. Lift as-is into any JS runtime; translate first when porting to another language |
+| [`swap-client.mjs`](../examples/lib/swap-client.mjs) | `rfq-core` + this repo's build (`pnpm build`) + `@arkade-os/sdk` | the Arkade side: local script derivation, funding, on-chain settlement watching, and the one-call `sendToLightning`                                                            |
 
 ## The model: RFQ negotiation, then non-interactive filling
 
 The only interactive part of a swap is the quote. After that, for every
 HTLC-class pair, filling is **non-interactive**:
 
-- the **client** (trader / intent submitter) accepts a quote by *funding its
-  own locally-derived contract* — there is no accept message — and may then
+- the **client** (trader / intent submitter) accepts a quote by _funding its
+  own locally-derived contract_ — there is no accept message — and may then
   go offline;
 - the **solver** observes the funding on-chain and fills; the
   preimage appears publicly in its claim witness as the receipt;
@@ -40,9 +40,7 @@ There is no `rfq_fill` — see `rfq-protocol.md` § 7.2.)
 ```js
 import { createArkadeContext } from './packages/solver-app/dist/index.js' // this repo's build
 import { configFromKnobs } from './packages/solver-app/dist/config.js'
-import {
-  httpTransport, relayTransport, sendToLightning, pollStatus, lockupSpent,
-} from './examples/lib/swap-client.mjs'
+import { httpTransport, relayTransport, sendToLightning, pollStatus, lockupSpent } from './examples/lib/swap-client.mjs'
 
 const config = configFromKnobs(process.env) // the client wallet, from its env file
 const arkade = await createArkadeContext(config.arkade)
@@ -56,7 +54,7 @@ const transport = httpTransport('http://localhost:8787')
 
 const swap = await sendToLightning({
   transport,
-  arkade,                          // YOUR Arkade connection
+  arkade, // YOUR Arkade connection
   emulatorUrl: config.emulatorUrl, // YOUR emulator endpoint — never the solver's word
   bolt11,
   onEvent: (name, data) => console.log(name, data),
@@ -119,11 +117,11 @@ with** as `clientRefundPubkey`; anything else recreates that trap.
 
 ## Errors to branch on
 
-| error | meaning | action |
-|---|---|---|
-| `SwapRefusal` (`.reason` from the closed set, § 10 of the spec) | the solver declined | show reason; retry later or elsewhere |
-| `AddressMismatch` (`.derived`, `.quoted`) | the solver's address ≠ your derivation | **never fund**; drop this solver |
-| plain `Error` with `.reason` `'invoice_expired' \| 'quote_expired' \| 'insufficient_headroom'` | a funding gate failed | request a fresh quote / fresh invoice |
+| error                                                                                          | meaning                                | action                                |
+| ---------------------------------------------------------------------------------------------- | -------------------------------------- | ------------------------------------- |
+| `SwapRefusal` (`.reason` from the closed set, § 10 of the spec)                                | the solver declined                    | show reason; retry later or elsewhere |
+| `AddressMismatch` (`.derived`, `.quoted`)                                                      | the solver's address ≠ your derivation | **never fund**; drop this solver      |
+| plain `Error` with `.reason` `'invoice_expired' \| 'quote_expired' \| 'insufficient_headroom'` | a funding gate failed                  | request a fresh quote / fresh invoice |
 
 Unknown refusal reasons are a generic decline — do not infer retry semantics.
 
@@ -144,11 +142,17 @@ For a POC that wants the steps individually, or its own derivation stack:
 
 ```js
 import {
-  newRfqId, buildSendRequest, requestQuote,     // messages
-  httpTransport, relayTransport,                // transports (fetch/WebSocket injectable)
-  verifyLockupAddress, assertFundable,          // guardrails
-  pollStatus, TERMINAL_STATES,                  // observation
-  SwapRefusal, AddressMismatch,                 // typed failures
+  newRfqId,
+  buildSendRequest,
+  requestQuote, // messages
+  httpTransport,
+  relayTransport, // transports (fetch/WebSocket injectable)
+  verifyLockupAddress,
+  assertFundable, // guardrails
+  pollStatus,
+  TERMINAL_STATES, // observation
+  SwapRefusal,
+  AddressMismatch, // typed failures
 } from './examples/lib/rfq-core.mjs'
 ```
 

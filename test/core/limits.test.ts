@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { MIN_ROUTING_FEE_CAP_SATS, maxRoutingFeeSats, resolveLimits } from '@arkade-os/solver-core/core/limits.js'
+import {
+  clampedBefore,
+  MIN_ROUTING_FEE_CAP_SATS,
+  maxRoutingFeeSats,
+  resolveLimits,
+} from '@arkade-os/solver-core/core/limits.js'
 import { NETWORKS } from '@arkade-os/solver-core/core/networks.js'
 
 describe('resolveLimits', () => {
@@ -17,17 +22,13 @@ describe('resolveLimits', () => {
     expect(resolveLimits('bitcoin', { minSats: 800 }).minSats).toBe(800)
   })
 
-  it('refuses to let configuration widen the mainnet cap', () => {
-    // The gate that matters: a misconfiguration must not be able to raise the
-    // amount of real money a single swap can lose.
-    expect(resolveLimits('bitcoin', { maxSats: 10_000_000 }).maxSats).toBe(NETWORKS.bitcoin.limits.maxSats)
-    expect(resolveLimits('bitcoin', { minSats: 1 }).minSats).toBe(NETWORKS.bitcoin.limits.minSats)
+  it('lets configuration set a range past the mainnet default, in either direction', () => {
+    expect(resolveLimits('bitcoin', { maxSats: 10_000_000 }).maxSats).toBe(10_000_000)
+    expect(resolveLimits('bitcoin', { minSats: 1 }).minSats).toBe(1)
   })
 
-  it('applies the same narrowing rule on test networks', () => {
-    // Not a separate, less-exercised branch: the mainnet path uses the code that
-    // every other network exercises.
-    expect(resolveLimits('mutinynet', { maxSats: 999_999_999 }).maxSats).toBe(1_000_000)
+  it('applies the same rule on test networks', () => {
+    expect(resolveLimits('mutinynet', { maxSats: 999_999_999 }).maxSats).toBe(999_999_999)
     expect(resolveLimits('regtest', { maxSats: 5_000 }).maxSats).toBe(5_000)
   })
 
@@ -44,6 +45,30 @@ describe('resolveLimits', () => {
 
   it('rejects an override that leaves no usable range', () => {
     expect(() => resolveLimits('bitcoin', { minSats: 900, maxSats: 700 })).toThrow(/empty/)
+  })
+})
+
+describe('clampedBefore', () => {
+  const net = NETWORKS.bitcoin.limits
+
+  it('names nothing a deployment inside the old ranges sets', () => {
+    expect(clampedBefore('bitcoin', net, { a: { minSats: 1_000, maxSats: 20_000 } })).toEqual([])
+  })
+
+  it('names each bound the old clamps moved, the deployment into the network and a corridor into the deployment', () => {
+    const deployment = { minSats: net.minSats, maxSats: 30_000 }
+    expect(
+      clampedBefore('bitcoin', deployment, {
+        wide: { minSats: 100, maxSats: 40_000 },
+        inherits: deployment,
+      }),
+    ).toEqual([
+      { corridor: 'wide', field: 'minSats', now: 100, was: net.minSats },
+      { corridor: 'wide', field: 'maxSats', now: 40_000, was: 30_000 },
+    ])
+    expect(clampedBefore('bitcoin', { minSats: net.minSats, maxSats: 100_000 }, {})).toEqual([
+      { corridor: null, field: 'maxSats', now: 100_000, was: net.maxSats },
+    ])
   })
 })
 

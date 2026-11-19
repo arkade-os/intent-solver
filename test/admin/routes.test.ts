@@ -270,6 +270,19 @@ describe('GET /api/backends', () => {
   })
 })
 
+describe('btcRail', () => {
+  it.each(['/api/overview', '/api/wallet', '/api/diagnostics', '/api/swaps'])(
+    '%s says whether a BTC rail exists',
+    async (path) => {
+      const railed = await get(path)
+      const railless = await get(path, { ln: null, onchain: null })
+      expect([railed.status, railless.status]).toEqual([200, 200])
+      expect(((await railed.json()) as { btcRail: unknown }).btcRail).toBe(true)
+      expect(((await railless.json()) as { btcRail: unknown }).btcRail).toBe(false)
+    },
+  )
+})
+
 describe('GET /api/overview', () => {
   it('can read risk and policy without probing remote balances', async () => {
     const lightning = vi.fn().mockRejectedValue(new Error('must not probe lightning'))

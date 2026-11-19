@@ -44,16 +44,47 @@ const contrast = (a: string, b: string): number => {
   return (hi! + 0.05) / (lo! + 0.05)
 }
 
-/** Every `--token: #hex` inside the block a selector opens. */
-const tokensIn = (selector: string): Record<string, string> => {
+const blockOf = (selector: string): string => {
   const start = css.indexOf(selector)
   if (start === -1) throw new Error(`no ${selector} block in styles.css`)
-  const block = css.slice(start, css.indexOf('}', start))
+  return css.slice(start, css.indexOf('}', start))
+}
+
+/** Every `--token: #hex` inside the block a selector opens. */
+const tokensIn = (selector: string): Record<string, string> => {
   const tokens: Record<string, string> = {}
-  for (const [, name, value] of block.matchAll(/--([a-z-]+):\s*(#[0-9a-fA-F]{6})/g)) {
+  for (const [, name, value] of blockOf(selector).matchAll(/--([a-z-]+):\s*(#[0-9a-fA-F]{6})/g)) {
     tokens[name!] = value!
   }
   return tokens
+}
+
+const over = (top: string, share: number, bottom: string): string =>
+  '#' +
+  [1, 3, 5]
+    .map((i) => {
+      const [t, b] = [top, bottom].map((hex) => parseInt(hex.slice(i, i + 2), 16))
+      return Math.round(share * t! + (1 - share) * b!)
+        .toString(16)
+        .padStart(2, '0')
+    })
+    .join('')
+
+/** `glass/<light>`: `--raised` at the thinner of `--glass`'s two stops over that light at its brightest. */
+const colourOf = (tokens: Record<string, string>, selector: string, name: string): string => {
+  if (!name.startsWith('glass/')) return tokens[name]!
+  const block = blockOf(selector)
+  const alpha = block.match(/--glass-alpha:\s*(\d+(?:\.\d+)?)%/)?.[1]
+  const gradient = block.match(/--glass:\s*linear-gradient\(([\s\S]*?)\);/)?.[1]
+  if (!gradient) throw new Error(`no --glass gradient in ${selector}`)
+  const shares = [...gradient.matchAll(/var\(--raised\)\s+(var\(--glass-alpha\)|\d+(?:\.\d+)?%)/g)].map(([, stop]) => {
+    const percent = Number(stop === 'var(--glass-alpha)' ? alpha : stop!.slice(0, -1))
+    if (!(percent >= 0 && percent <= 100))
+      throw new Error(`--glass stop ${stop} in ${selector} is not a share from 0 to 100%`)
+    return percent / 100
+  })
+  if (shares.length !== 2) throw new Error(`expected two --glass stops in ${selector}, found ${shares.length}`)
+  return over(tokens['raised']!, Math.min(...shares), tokens[name.slice('glass/'.length)]!)
 }
 
 /**
@@ -86,7 +117,30 @@ const PAIRS: readonly (readonly [fg: string, bg: string, where: string])[] = [
   ['text', 'exposed-bg', 'the restart banner'],
   ['text-dim', 'exposed-bg', 'the values in the restart banner'],
   ['focus', 'ground', 'focus ring against the page'],
+  ['focus', 'raised', 'focus ring inside a card or dialog'],
   ['text', 'line', 'the pressed segment of a segmented control'],
+  ['accent-ink', 'ground', 'a link on the page'],
+  ['accent-ink', 'raised', 'a link in a card or dialog'],
+  ['on-accent', 'accent', 'the primary button label'],
+  ['text', 'lens-solid', 'the chosen view or tab without transparency'],
+  ['text-dim', 'lens-solid', "the chosen tab's count without transparency"],
+  // Amber and coral text stay on solid surfaces, so neither appears on glass.
+  ...(['glow-a', 'glow-b'] as const).flatMap((light) =>
+    (
+      [
+        ['text', 'a heading or the chosen view'],
+        ['text-dim', 'a label or a view in the navigation'],
+        ['text-faint', 'a notice or a hint'],
+        ['accent-ink', 'a link'],
+        ['focus', 'a focus ring'],
+      ] as const
+    ).map(([fg, what]) => [fg, `glass/${light}`, `${what} on glass over the backdrop's brightest light`] as const),
+  ),
+  // Page titles and section headings sit on the backdrop itself, read here at each light's brightest.
+  ['text', 'glow-a', 'a page title on the backdrop'],
+  ['text', 'glow-b', 'a page title on the backdrop'],
+  ['text-dim', 'glow-a', 'a section heading or control label on the backdrop'],
+  ['text-dim', 'glow-b', 'a section heading or control label on the backdrop'],
 ]
 
 const AA = 4.5
@@ -98,14 +152,15 @@ describe.each([
   const tokens = tokensIn(selector)
 
   it('defines every token the console renders', () => {
-    const needed = new Set(PAIRS.flatMap(([fg, bg]) => [fg, bg]))
+    const parts = (name: string) => (name.startsWith('glass/') ? ['raised', name.slice('glass/'.length)] : [name])
+    const needed = new Set(PAIRS.flatMap(([fg, bg]) => [fg, ...parts(bg)]))
     for (const name of needed) {
       expect(tokens[name], `${theme} is missing --${name}`).toMatch(/^#[0-9a-fA-F]{6}$/)
     }
   })
 
   it.each(PAIRS)('reads at AA: --%s on --%s (%s)', (fg, bg, where) => {
-    const ratio = contrast(tokens[fg]!, tokens[bg]!)
+    const ratio = contrast(tokens[fg]!, colourOf(tokens, selector, bg))
     expect(
       ratio,
       `--${fg} on --${bg} (${where}) is ${ratio.toFixed(2)}:1 in ${theme}, under the ${AA}:1 AA floor`,

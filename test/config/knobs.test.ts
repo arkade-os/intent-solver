@@ -206,6 +206,20 @@ describe('documentToKnobs — assets', () => {
     })
     expect(knobs.OFFER_MARKETS).toBe(`BTC/${USDA_ID},BTC/${'ab'.repeat(34)}`)
   })
+
+  it('flattens the accepted offer contract versions', () => {
+    const { knobs, pathOf } = documentToKnobs({ offers: { contractVersions: ['offer-v1', 'offer-v2'] } })
+    expect(knobs.OFFER_CONTRACT_VERSIONS).toBe('offer-v1,offer-v2')
+    expect(pathOf.get('OFFER_CONTRACT_VERSIONS')).toBe('offers.contractVersions')
+  })
+
+  it('flattens the accepted RFQ contract versions', () => {
+    const { knobs, pathOf } = documentToKnobs({
+      rfq: { contractVersions: ['asset-swap-v2', 'evm-send-v1'] },
+    })
+    expect(knobs.RFQ_CONTRACT_VERSIONS).toBe('asset-swap-v2,evm-send-v1')
+    expect(pathOf.get('RFQ_CONTRACT_VERSIONS')).toBe('rfq.contractVersions')
+  })
 })
 
 describe('documentToKnobs — rail block', () => {

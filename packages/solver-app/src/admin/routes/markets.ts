@@ -34,12 +34,12 @@
 
 import type { Hono } from 'hono'
 import {
+  assetMarketFrom,
+  assetMarketJson,
   assetMarketKey,
   validateAssetMarket,
-  DEFAULT_SERVING,
-  type AssetMarketBounds,
+  type AssetMarketBody,
   type AssetMarketConfig,
-  type CarrierMode,
 } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { createPriceFeed, type FetchPrice } from '@arkade-os/solver-core/price/feed.js'
 import { createGuardedFetch } from '@arkade-os/solver-core/price/guardedFetch.js'
@@ -61,161 +61,13 @@ export const MARKETS_LIVE_NOTICE =
   'deliberate and no money moves, but the maker is not told why their offer went unfilled. ' +
   'RFQ swaps already quoted are unaffected: they keep the amounts stored on the swap row.'
 
-/**
- * The wire shape. `null` is the BTC leg, matching the packet and the store.
- *
- * Bounds arrive as DECIMAL STRINGS, never JSON numbers: an atomic-unit bound is
- * a bigint and `JSON.parse` has already destroyed anything past 2^53 by the time
- * a handler sees it — silently, and in the direction that widens a ceiling.
- */
-export interface MarketBody {
-  base?: unknown
-  quote?: unknown
-  baseDecimals?: unknown
-  quoteDecimals?: unknown
-  feedUrl?: unknown
-  pricePath?: unknown
-  toleranceBps?: unknown
-  feeBps?: unknown
-  sellBaseFeeFlat?: unknown
-  buyBaseFeeFlat?: unknown
-  sellBaseFeeBps?: unknown
-  buyBaseFeeBps?: unknown
-  sellBase?: unknown
-  buyBase?: unknown
-  enabled?: unknown
-  symbol?: unknown
-  servesOffer?: unknown
-  servesRfq?: unknown
-  rfqSellBase?: unknown
-  rfqBuyBase?: unknown
-  carrierMode?: unknown
-}
+export type MarketBody = AssetMarketBody
 
-class BadRequest extends Error {}
+export const marketFrom = assetMarketFrom
 
-const leg = (label: string, value: unknown): string | null => {
-  if (value === null || value === undefined) return null
-  if (typeof value !== 'string') throw new BadRequest(`${label} must be an asset id string or null for BTC`)
-  const trimmed = value.trim()
-  // `"BTC"` is what the operator types and what the market key prints, but the
-  // stored identity of the sats leg is null everywhere else in this codebase.
-  // Normalised here rather than admitted as a second spelling, which would let
-  // one pair be stored twice.
-  if (trimmed === '' || trimmed.toUpperCase() === 'BTC') return null
-  return trimmed
-}
-
-const int = (label: string, value: unknown): number => {
-  if (typeof value !== 'number' || !Number.isInteger(value)) throw new BadRequest(`${label} must be an integer`)
-  return value
-}
-
-const optionalInt = (label: string, value: unknown): number | undefined =>
-  value === undefined || value === null ? undefined : int(label, value)
-
-// ABSENT takes the default; anything else must be a real boolean. Coerced, the string "true" —
-// the truthiest spelling a client has — reads as false and silently CLOSES a direction.
-const bool = (label: string, value: unknown, fallback: boolean): boolean => {
-  if (value === undefined) return fallback
-  if (typeof value !== 'boolean') throw new BadRequest(`${label} must be true or false`)
-  return value
-}
-
-const atomic = (label: string, value: unknown): bigint => {
-  if (value === undefined || value === null) return 0n
-  if (typeof value !== 'string' || !/^[0-9]+$/.test(value)) {
-    throw new BadRequest(`${label} must be a decimal string of atomic units`)
-  }
-  return BigInt(value)
-}
-
-const bounds = (label: string, value: unknown): AssetMarketBounds | null => {
-  if (value === null || value === undefined) return null
-  if (typeof value !== 'object') throw new BadRequest(`${label} must be an object with min and max, or null`)
-  const { min, max } = value as { min?: unknown; max?: unknown }
-  // BOTH OR NEITHER, the rule `evmCorridorConfig.ts` states for a token's unit
-  // bounds: one alone reads as a bound and is not one. A lone maximum leaves the
-  // floor at zero, which fills dust; a lone minimum leaves the ceiling open,
-  // which is the bound the operator thought they were setting.
-  if (typeof min !== 'string' || typeof max !== 'string') {
-    throw new BadRequest(`${label}.min and ${label}.max must both be decimal strings of atomic units`)
-  }
-  if (!/^[0-9]+$/.test(min) || !/^[0-9]+$/.test(max)) {
-    throw new BadRequest(`${label}.min and ${label}.max must be decimal integers of atomic units`)
-  }
-  return { min: BigInt(min), max: BigInt(max) }
-}
-
-const CARRIER_MODES: readonly CarrierMode[] = ['inherit', 'off', 'priced']
-
-const carrierMode = (value: unknown): CarrierMode => {
-  if (value === undefined || value === null) return 'inherit'
-  if (!CARRIER_MODES.includes(value as CarrierMode)) {
-    throw new BadRequest(`carrierMode must be one of ${CARRIER_MODES.join(', ')}`)
-  }
-  return value as CarrierMode
-}
-
-/** The request body as a market, or a `BadRequest` naming the field that was wrong. */
-export const marketFrom = (body: MarketBody): AssetMarketConfig => ({
-  ...DEFAULT_SERVING,
-  symbol: body.symbol === undefined || body.symbol === null ? null : String(body.symbol).trim().toUpperCase() || null,
-  servesOffer: bool('servesOffer', body.servesOffer, false),
-  // Enabled unless explicitly switched off, matching `enabled` below: configuring a market IS the opt-in.
-  servesRfq: bool('servesRfq', body.servesRfq, true),
-  rfqSellBase: bool('rfqSellBase', body.rfqSellBase, true),
-  rfqBuyBase: bool('rfqBuyBase', body.rfqBuyBase, true),
-  carrierMode: carrierMode(body.carrierMode),
-  base: leg('base', body.base),
-  quote: leg('quote', body.quote),
-  baseDecimals: int('baseDecimals', body.baseDecimals),
-  quoteDecimals: int('quoteDecimals', body.quoteDecimals),
-  feedUrl: typeof body.feedUrl === 'string' ? body.feedUrl.trim() : '',
-  // Absent means "derive it from the feed URL", which `validateAssetMarket`
-  // then refuses for a provider whose shape is not known. An absent pointer must
-  // not become the string "undefined" and reach a feed as a JSON pointer.
-  pricePath: body.pricePath === undefined || body.pricePath === null ? '' : String(body.pricePath).trim(),
-  toleranceBps: int('toleranceBps', body.toleranceBps),
-  feeBps: int('feeBps', body.feeBps),
-  sellBaseFeeFlat: atomic('sellBaseFeeFlat', body.sellBaseFeeFlat),
-  buyBaseFeeFlat: atomic('buyBaseFeeFlat', body.buyBaseFeeFlat),
-  sellBaseFeeBps: optionalInt('sellBaseFeeBps', body.sellBaseFeeBps),
-  buyBaseFeeBps: optionalInt('buyBaseFeeBps', body.buyBaseFeeBps),
-  sellBase: bounds('sellBase', body.sellBase),
-  buyBase: bounds('buyBase', body.buyBase),
-  // Enabled unless explicitly switched off, matching the corridors: configuring
-  // a market IS the opt-in.
-  enabled: body.enabled === undefined ? true : body.enabled === true,
-})
-
-/**
- * Bigints do not survive `JSON.stringify`, which throws on them rather than
- * quietly narrowing — so every bound leaves as the decimal string it arrived as.
- */
 export const marketJson = (row: AssetMarketRow) => ({
   marketKey: row.marketKey,
-  base: row.base,
-  quote: row.quote,
-  baseDecimals: row.baseDecimals,
-  quoteDecimals: row.quoteDecimals,
-  feedUrl: row.feedUrl,
-  pricePath: row.pricePath,
-  toleranceBps: row.toleranceBps,
-  feeBps: row.feeBps,
-  sellBaseFeeFlat: String(row.sellBaseFeeFlat ?? 0n),
-  buyBaseFeeFlat: String(row.buyBaseFeeFlat ?? 0n),
-  sellBaseFeeBps: row.sellBaseFeeBps ?? null,
-  buyBaseFeeBps: row.buyBaseFeeBps ?? null,
-  sellBase: row.sellBase === null ? null : { min: String(row.sellBase.min), max: String(row.sellBase.max) },
-  buyBase: row.buyBase === null ? null : { min: String(row.buyBase.min), max: String(row.buyBase.max) },
-  enabled: row.enabled,
-  symbol: row.symbol,
-  servesOffer: row.servesOffer,
-  servesRfq: row.servesRfq,
-  rfqSellBase: row.rfqSellBase,
-  rfqBuyBase: row.rfqBuyBase,
-  carrierMode: row.carrierMode,
+  ...assetMarketJson(row),
   createdAt: row.createdAt,
   updatedAt: row.updatedAt,
 })

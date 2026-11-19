@@ -63,4 +63,18 @@ describe('solver-config.schema.json', () => {
     const schema = read('solver-config.schema.json')
     expect(schema.properties.offers.properties.minFillAmount).toMatchObject({ type: 'string', pattern: '^\\d+$' })
   })
+
+  it('requires each contract version list to be unique', () => {
+    const schema = read('solver-config.schema.json')
+    expect(schema.properties.offers.properties.contractVersions).toMatchObject({ uniqueItems: true })
+    expect(schema.properties.offers.properties.contractVersions.items).toMatchObject({
+      type: 'string',
+      enum: ['offer-v1', 'offer-v2'],
+    })
+    expect(schema.properties.rfq.properties.contractVersions).toMatchObject({ uniqueItems: true })
+    expect(schema.properties.rfq.properties.contractVersions.items).toMatchObject({
+      type: 'string',
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$',
+    })
+  })
 })

@@ -10,11 +10,12 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { base64 } from '@scure/base'
-import { narrow, resolveLimits, type Limits } from '@arkade-os/solver-core/core/limits.js'
+import { resolveLimits, withBounds, type Limits } from '@arkade-os/solver-core/core/limits.js'
 import { DEFAULT_LOCKUP_TIMEOUT, MAX_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/send.js'
 import { MAX_BIP68_BLOCKS, MAX_BIP68_SECONDS, relativeDelayFrom } from '@arkade-os/solver-core/core/timelocks.js'
 import { corridorEnabledFrom } from '@arkade-os/solver-core/core/corridorEnabled.js'
 import { FREE, type Corridor, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
+import type { AssetMarketConfig } from '@arkade-os/solver-core/core/assetMarketConfig.js'
 import { ALL_DESCRIPTORS } from '@arkade-os/solver-corridors/corridors/index.js'
 import { MAX_ASSET_QUOTE_VALIDITY_SECONDS } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import {
@@ -32,6 +33,8 @@ import type { ArkadeWalletConfig } from '@arkade-os/solver-arkade/arkade/wallet.
 import type { AdPublishMode } from '@arkade-os/solver-transport/relay/adPublisher.js'
 import { isLoopback, parseSentryDsn, type SentryOptions } from './ops/sentry.js'
 import { loadEvmChainConfig, type EvmChainConfig } from '@arkade-os/solver-rails-evm/evm/config.js'
+import { OFFER_CONTRACT_VERSIONS, type OfferContractVersion } from '@arkade-os/solver-core/core/offerContract.js'
+import { RFQ_CONTRACT_VERSION_ID, type RfqContractVersion } from '@arkade-os/solver-core/core/rfqContract.js'
 
 /** The network a deployment that sets nothing runs as. */
 const DEFAULT_NETWORK = 'regtest'
@@ -98,6 +101,44 @@ const requiredBigintFromEnv = (env: Knobs, name: string): bigint => {
   return BigInt(raw)
 }
 
+const contractVersionsFromEnv = (
+  name: string,
+  raw: string | undefined,
+  knownVersions: readonly string[],
+  fallback: readonly string[],
+): readonly string[] => {
+  if (!raw?.trim()) return fallback
+  const entries = raw.split(',').map((entry) => entry.trim())
+  const known = new Set<string>(knownVersions)
+  const unknown = entries.filter((entry) => !known.has(entry))
+  if (unknown.length > 0) {
+    throw new Error(
+      `${name} must list a supported contract version (${knownVersions.join(', ')}), ` +
+        `comma-separated; got ${unknown.map((entry) => JSON.stringify(entry)).join(', ')}`,
+    )
+  }
+  if (new Set(entries).size !== entries.length) {
+    throw new Error(`${name} must not repeat a version`)
+  }
+  return entries
+}
+
+const rfqContractVersionsFromEnv = (raw: string | undefined): readonly RfqContractVersion[] | null => {
+  if (!raw?.trim()) return null
+  const entries = raw.split(',').map((entry) => entry.trim())
+  const invalid = entries.filter((entry) => !RFQ_CONTRACT_VERSION_ID.test(entry))
+  if (invalid.length > 0) {
+    throw new Error(
+      'RFQ_CONTRACT_VERSIONS must list version names or content hashes, comma-separated; ' +
+        `got ${invalid.map((entry) => JSON.stringify(entry)).join(', ')}`,
+    )
+  }
+  if (new Set(entries).size !== entries.length) {
+    throw new Error('RFQ_CONTRACT_VERSIONS must not repeat a version')
+  }
+  return entries
+}
+
 export interface LndConfig {
   /** `host:port` of the LND node's gRPC listener. */
   socket: string
@@ -140,12 +181,11 @@ export interface Config {
   /** Boot anyway when undrained onchain-receive rows (a corridor #292 removed) remain; see services.ts. */
   allowUndrainedOnchainReceive: boolean
   /**
-   * Per-corridor amount range, each already narrowed by `limits`.
+   * Per-corridor amount range: `limits`, with each bound the corridor sets in its place.
    *
    * A corridor's costs are its own: an onchain leg pays miner fees a Lightning
    * leg does not, and an operator with thin onchain liquidity wants that
-   * corridor capped tighter without shrinking the other three. Every entry is
-   * `limits` or narrower — see {@link narrow}.
+   * corridor capped tighter without shrinking the other three.
    */
   corridorLimits: Record<Corridor, Limits>
   /**
@@ -222,6 +262,9 @@ export interface Config {
   /**
    * Asset-swap markets this solver TAKES offers on (`OFFER_MARKETS`).
    *
+   * @deprecated Packet-style offers are kept for existing deployments. RFQ is
+   * the recommended path for new asset-swap integrations.
+   *
    * Empty is the whole offer-packet path off, and is the default: nothing
    * subscribes, nothing is decided, nothing is spent. Not a corridor — both legs
    * are on Arkade and the maker's covenant obliges the fill to pay them, so
@@ -246,6 +289,24 @@ export interface Config {
    */
   offerMinFillAmount: bigint
   offerMaxFillAmount: bigint
+  /**
+   * Offer contract versions this deployment accepts on the packet path.
+   *
+   * @deprecated Packet-style offers are kept for existing deployments.
+   */
+  offerContractVersions: readonly OfferContractVersion[]
+  /**
+   * Contract versions this deployment serves across every RFQ method.
+   *
+   * One allowlist rather than one per corridor: each corridor declares the
+   * version it speaks, and the host refuses its quote path when that string is
+   * absent. Adding a method or a new contract revision adds a name here; it
+   * does not add another config shape.
+   *
+   * Null is unset: this build's defaults, plus each injected corridor's own
+   * version, so a consumer corridor keeps quoting where nothing was configured.
+   */
+  rfqContractVersions: readonly RfqContractVersion[] | null
   /**
    * `OFFER_CHARGE_CARRIER`. Off by default: the MAKER prices this path and the
    * card has no field to tell them the carrier exists, so charging would refuse
@@ -467,6 +528,10 @@ export interface Config {
   configPaths: ReadonlyMap<string, string>
   /** A registered rail's own block of the document, for that rail to validate. */
   lightningRailBlock: unknown | null
+  /** The document as the operator wrote it, before any profile; absent when none was read. */
+  configDocument?: unknown
+  /** The document's `markets`, each created once in the console's store when no row holds its pair. */
+  documentMarkets?: readonly AssetMarketConfig[]
   /**
    * Whether this solver advertises itself on Nostr (kind 38859).
    *
@@ -611,12 +676,6 @@ const lnBackendFromEnv = (env: Knobs, servesBtc: boolean): string | null => {
 /**
  * A per-corridor amount range for each of the three corridors.
  *
- * Layered rather than independent: each corridor narrows the range `limits`
- * already produced, so a corridor knob can only ever reduce what
- * `MAX_SWAP_SATS` and the network default already allowed. An operator cannot
- * widen one corridor past the deployment-wide cap by reaching for a
- * more-specific knob, which is the failure this ordering exists to prevent.
- *
  * Absent knobs mean "same as everything else", so a deployment that never sets
  * one behaves exactly as it did before per-corridor ranges existed.
  */
@@ -631,7 +690,7 @@ const corridorLimitsFromEnv = (env: Knobs, base: Limits): Record<Corridor, Limit
       }
       return value
     }
-    return [pair, narrow(base, { minSats: bound('MIN_SATS'), maxSats: bound('MAX_SATS') }, stem)] as const
+    return [pair, withBounds(base, { minSats: bound('MIN_SATS'), maxSats: bound('MAX_SATS') }, stem)] as const
   })
   return Object.fromEntries(entries) as Record<Corridor, Limits>
 }
@@ -1001,6 +1060,13 @@ export const configFromKnobs = (env: Knobs): Config => {
   const offerMaxFillAmount = offerMarkets.length > 0 ? requiredBigintFromEnv(env, 'OFFER_MAX_FILL_AMOUNT') : 0n
   const offerChargesDeliveredCarrier = env.OFFER_CHARGE_CARRIER?.trim() === 'true'
   const assetCarrierPricing = env.ASSET_CARRIER_PRICING?.trim() === 'true'
+  const offerContractVersions = contractVersionsFromEnv(
+    'OFFER_CONTRACT_VERSIONS',
+    env.OFFER_CONTRACT_VERSIONS,
+    OFFER_CONTRACT_VERSIONS,
+    OFFER_CONTRACT_VERSIONS,
+  )
+  const rfqContractVersions = rfqContractVersionsFromEnv(env.RFQ_CONTRACT_VERSIONS)
   // Refused at boot rather than per offer: inverted bounds refuse every offer,
   // which is indistinguishable from a quiet market and would be diagnosed as
   // one. `evaluateOfferFill` compares against both, so it cannot report this.
@@ -1014,8 +1080,6 @@ export const configFromKnobs = (env: Knobs): Config => {
   return {
     network: raw,
     profile,
-    // resolveLimits refuses to widen, so an override here can only ever make the
-    // amount at risk smaller.
     limits,
     corridorLimits,
     corridorFees: corridorFeesFromEnv(env),
@@ -1023,8 +1087,6 @@ export const configFromKnobs = (env: Knobs): Config => {
     onchainFeeRateRefreshMs,
     onchainFeeRateStaleMs,
     corridorEnabled,
-    // Reads the ALREADY-NARROWED house limits, so a per-token knob inherits a
-    // bound an override may have tightened rather than the raw environment's.
     evmCorridors: evmCorridorPolicies(parseEvmTokens(env.EVM_TOKENS), limits, (name) => env[name]),
     // Loaded here rather than at first quote so a token whose price cannot be
     // resolved stops the deployment instead of advertising a pair it will then
@@ -1033,6 +1095,8 @@ export const configFromKnobs = (env: Knobs): Config => {
     offerMarkets,
     offerMinFillAmount,
     offerMaxFillAmount,
+    offerContractVersions,
+    rfqContractVersions,
     offerChargesDeliveredCarrier,
     assetCarrierPricing,
     // Read here so a malformed list refuses at boot beside every other knob.

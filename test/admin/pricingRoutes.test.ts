@@ -3,12 +3,27 @@
  * last one: a sample must equal what a real quote returns for the same inputs.
  */
 import { describe, it, expect, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
 import { AdminStore } from '@arkade-os/solver-app/admin/db.js'
 import { marketFrom } from '@arkade-os/solver-app/admin/routes/markets.js'
 import { priceFrom } from '@arkade-os/solver-core/core/priceFeed.js'
 import { resolveAssetQuote } from '@arkade-os/solver-core/core/assetRfq.js'
 import { carrierBreakEven } from '@arkade-os/solver-core/core/pricingPreview.js'
+import * as simpleMarket from '../../packages/solver-app/src/admin/static/simpleMarket.js'
+
+const appSource = readFileSync(new URL('../../packages/solver-app/src/admin/static/app.js', import.meta.url), 'utf8')
+/** The console's own row-to-draft and draft-to-wire mapping, run from app.js as marketRoutes.test.ts does. */
+const consoleForm = () => {
+  const start = appSource.indexOf('/* ==== asset markets — BEGIN')
+  const block = appSource.slice(start, appSource.indexOf('/* ==== asset markets — END'))
+  return new Function(...Object.keys(simpleMarket), `${block}\nreturn { draftFrom, marketBody }`)(
+    ...Object.values(simpleMarket),
+  ) as {
+    draftFrom: (row: Record<string, unknown>) => Record<string, unknown>
+    marketBody: (draft: Record<string, unknown>) => Record<string, unknown>
+  }
+}
 
 const USDX = 'dd'.repeat(34)
 const FEED = 'https://feed.test/price'
@@ -418,6 +433,85 @@ describe('POST /api/pricing/preview — asset markets', () => {
     })
     expect(body.invalid).toMatchObject([{ key: 'feeBps' }])
     expect(body.feed).toMatchObject({ state: 'resolved', mantissa: '100000' })
+    await adminStore.close()
+  })
+})
+
+describe('POST /api/pricing/preview — a named amount', () => {
+  type Sample = { ok: boolean; amount: string; fromAmount?: string; toAmount?: string }
+
+  const saved = async () => {
+    const { app, adminStore } = await build()
+    await save(app, marketBody())
+    const ask = async (side: 'from' | 'to', amount?: unknown) =>
+      (await preview(app, { target: 'market', market: marketBody(), direction: 'sell_base', side, amount })).body
+    return { ask, adminStore }
+  }
+
+  it.each(['from', 'to'] as const)('prices one %s amount exactly as the ladder does', async (side) => {
+    const { ask, adminStore } = await saved()
+    const rung = ((await ask(side)).samples as Sample[]).find((sample) => sample.ok)!
+    expect((await ask(side, rung.amount)).samples).toEqual([rung])
+    expect(rung[side === 'from' ? 'fromAmount' : 'toAmount']).toBe(rung.amount)
+    await adminStore.close()
+  })
+
+  it('keeps the ladder when no amount is named, and every other field either way', async () => {
+    const { ask, adminStore } = await saved()
+    const { samples: ladder, ...rest } = await ask('from')
+    const { samples: single, ...restAtAmount } = await ask('from', '5000')
+    expect((ladder as Sample[]).map((sample) => sample.amount)).toEqual([
+      '33',
+      '331',
+      '1000',
+      '10000',
+      '100000',
+      '100833',
+      '1008330',
+    ])
+    expect(single).toMatchObject([{ amount: '5000', ok: true }])
+    expect(restAtAmount).toEqual(rest)
+    await adminStore.close()
+  })
+
+  it.each(['0', '000', '1.5', '-1', '', 1000, null, '1'.repeat(79)])(
+    'refuses amount %j, still showing the feed',
+    async (amount) => {
+      const { ask, adminStore } = await saved()
+      const body = await ask('from', amount)
+      expect(body.invalid).toMatchObject([{ key: 'amount' }])
+      expect(body.samples).toEqual([])
+      expect(body.feed).toMatchObject({ state: 'resolved' })
+      await adminStore.close()
+    },
+  )
+
+  it.each([
+    // FROM names sats while the bound is on the USDX payout, which one BTC overshoots.
+    ['from', '100000000'],
+    ['to', '100000001'],
+  ] as const)('returns an out-of-bounds %s amount as the resolver’s refusal, unfiltered', async (side, amount) => {
+    const { ask, adminStore } = await saved()
+    expect((await ask(side, amount)).samples).toEqual([{ amount, ok: false, reason: 'amount_out_of_range' }])
+    await adminStore.close()
+  })
+
+  it("answers the console's own request: a saved row's draft as the body, an amount it converted", async () => {
+    const { app, adminStore } = await build()
+    await save(app, marketBody())
+    const { markets } = (await (await app.fetch(new Request('http://admin/api/markets'))).json()) as {
+      markets: Record<string, unknown>[]
+    }
+    const form = consoleForm()
+    const amount = simpleMarket.toAtomic('0.0001', 8)!
+    const market = form.marketBody(form.draftFrom(markets[0]!))
+    const { body } = await preview(app, { target: 'market', market, direction: 'sell_base', side: 'from', amount })
+    expect(body.feed).toMatchObject({ state: 'resolved' })
+    expect(body.samples).toEqual([expect.objectContaining({ amount, ok: true, fromAmount: amount })])
+    const [sample] = body.samples as Record<string, unknown>[]
+    for (const key of ['toAmount', 'spreadFee', 'flatFee', 'carrierCharged', 'carrierReturned']) {
+      expect(typeof sample![key], key).toBe('string')
+    }
     await adminStore.close()
   })
 })

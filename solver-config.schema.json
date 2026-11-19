@@ -245,6 +245,150 @@
         ]
       }
     },
+    "markets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "base": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "quote": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "baseDecimals": {
+            "type": "number"
+          },
+          "quoteDecimals": {
+            "type": "number"
+          },
+          "feedUrl": {
+            "type": "string"
+          },
+          "pricePath": {
+            "type": "string"
+          },
+          "toleranceBps": {
+            "type": "number"
+          },
+          "feeBps": {
+            "type": "number"
+          },
+          "sellBaseFeeFlat": {
+            "description": "decimal string",
+            "type": "string",
+            "pattern": "^\\d+$"
+          },
+          "buyBaseFeeFlat": {
+            "description": "decimal string",
+            "type": "string",
+            "pattern": "^\\d+$"
+          },
+          "sellBaseFeeBps": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "buyBaseFeeBps": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "sellBase": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "min": {
+                    "description": "decimal string",
+                    "type": "string",
+                    "pattern": "^\\d+$"
+                  },
+                  "max": {
+                    "description": "decimal string",
+                    "type": "string",
+                    "pattern": "^\\d+$"
+                  }
+                },
+                "required": [
+                  "min",
+                  "max"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "buyBase": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "min": {
+                    "description": "decimal string",
+                    "type": "string",
+                    "pattern": "^\\d+$"
+                  },
+                  "max": {
+                    "description": "decimal string",
+                    "type": "string",
+                    "pattern": "^\\d+$"
+                  }
+                },
+                "required": [
+                  "min",
+                  "max"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "symbol": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "servesOffer": {
+            "type": "boolean"
+          },
+          "servesRfq": {
+            "type": "boolean"
+          },
+          "rfqSellBase": {
+            "type": "boolean"
+          },
+          "rfqBuyBase": {
+            "type": "boolean"
+          },
+          "carrierMode": {
+            "type": "string",
+            "enum": [
+              "inherit",
+              "off",
+              "priced"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
     "limits": {
       "type": "object",
       "properties": {
@@ -309,6 +453,18 @@
             "type": "string"
           }
         },
+        "contractVersions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "offer-v1",
+              "offer-v2"
+            ]
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
         "minFillAmount": {
           "description": "decimal string",
           "type": "string",
@@ -327,6 +483,21 @@
         },
         "quoteValiditySeconds": {
           "type": "number"
+        }
+      },
+      "additionalProperties": false
+    },
+    "rfq": {
+      "type": "object",
+      "properties": {
+        "contractVersions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "minItems": 1,
+          "uniqueItems": true
         }
       },
       "additionalProperties": false

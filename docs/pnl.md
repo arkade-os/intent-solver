@@ -206,12 +206,12 @@ flat market reads exactly `feeBps` on both legs, but the buying leg is really
 **The zero crossing is exact on both legs at every fee**, which is the part the
 screens actually lean on. On a 30bp market:
 
-| market at fill | mark |
-| --- | --- |
-| +10% | `+1033bp` |
-| flat | `+30bp` |
-| −0.3% | `0bp` — breakeven, the move exactly ate the margin |
-| −1% | `-70bp` |
+| market at fill | mark                                               |
+| -------------- | -------------------------------------------------- |
+| +10%           | `+1033bp`                                          |
+| flat           | `+30bp`                                            |
+| −0.3%          | `0bp` — breakeven, the move exactly ate the margin |
+| −1%            | `-70bp`                                            |
 
 The direction bit (`quote_gives_base`) is what makes it signable: the ratio is
 quote-per-base either way, but paying less quote per base is good when the solver
@@ -222,7 +222,7 @@ The comparison is exact bigint, cross-multiplied — the stored implied price an
 the fill-time observation are carried at their own scales and neither is rescaled
 into the other — and divides once into basis points.
 
-**The fill-time read never blocks a fill.** It runs *after* the `filling ->
+**The fill-time read never blocks a fill.** It runs _after_ the `filling ->
 filled` transition, so a slow feed cannot widen the window in which a crash
 leaves a submitted fill reading `filling` (which `recoverFilling` escalates to
 `stuck`). Every failure — no market, an unreadable feed, a non-positive price —

@@ -94,6 +94,18 @@ const stringOverrides = (
   return invalid.length > 0 ? { ok: false, invalid } : { ok: true, draft: raw as Record<string, string> }
 }
 
+const amountFrom = (raw: unknown): { ok: true; amount: bigint | null } | { ok: false; invalid: DraftRefusal[] } => {
+  if (raw === undefined) return { ok: true, amount: null }
+  // 78 digits holds any uint256, so a longer string is refused before BigInt parses it.
+  if (typeof raw !== 'string' || raw.length > 78 || !/^[0-9]+$/.test(raw) || BigInt(raw) === 0n) {
+    return {
+      ok: false,
+      invalid: [{ key: 'amount', reason: 'amount must be a decimal string of atomic units, above zero' }],
+    }
+  }
+  return { ok: true, amount: BigInt(raw) }
+}
+
 export const registerPricingRoutes = (app: Hono, deps: AdminDeps, feeds: FeedCache, draftFeeds = feeds): void => {
   app.post('/api/pricing/preview', async (c) => {
     let body: Record<string, unknown>
@@ -187,6 +199,8 @@ const marketPreview = async (
   } catch (error) {
     return { invalid: [refusalFor(error)], samples: [], feed }
   }
+  const named = amountFrom(body.amount)
+  if (!named.ok) return { invalid: named.invalid, samples: [], feed }
 
   if (!read) return { invalid: [], samples: [], feed }
   return priceLadder(
@@ -199,6 +213,7 @@ const marketPreview = async (
     parsed.draft.ASSET_CARRIER_PRICING === undefined
       ? deps.services.policy.assetCarrierPricing
       : resolved.config.assetCarrierPricing,
+    named.amount,
   )
 }
 
@@ -240,6 +255,7 @@ const priceLadder = (
   direction: 'sell_base' | 'buy_base',
   side: 'from' | 'to',
   pricedByDefault: boolean,
+  amount: bigint | null,
 ) => {
   const pair: AssetPair =
     direction === 'sell_base' ? { from: market.base, to: market.quote } : { from: market.quote, to: market.base }
@@ -298,7 +314,7 @@ const priceLadder = (
     },
     carrier: { sats: str(dustSats), charged: str(charged), returned: str(returned), priced: carrierSats > 0n },
     feed: resolvedFeed({ price: feed, readAt }),
-    samples: points,
+    samples: amount === null ? points : [at(amount)],
     samplesReason,
     // The other path's question, and only where this deployment serves it —
     // found by searching the production gate rather than inverting it.

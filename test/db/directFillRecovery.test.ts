@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve, dirname, basename } from 'node:path'
 import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
+import { OFFER_CONTRACT_V1 } from '@arkade-os/solver-core/core/offerContract.js'
 
 const deposit = 'aa'.repeat(32)
 const original = 'bb'.repeat(32)
@@ -24,6 +25,7 @@ for (const kind of ['public', 'rfq'] as const) {
             offerTxid: deposit,
             offerVout: 0,
             offerPkScript: script,
+            contractVersion: OFFER_CONTRACT_V1,
             wantAssetId: null,
             wantAmount: 10n,
             offerAssetId: null,
