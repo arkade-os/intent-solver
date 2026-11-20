@@ -13,6 +13,9 @@ export const REFUND_ALONE_MARGIN = 30 * MINUTE
 /** How long a failing refund is retried before an operator is called. */
 export const REFUND_RETRY_WINDOW = 6 * 60 * MINUTE
 
+/** How long a spent payout may show no claim before that counts as missing. */
+export const SPEND_READ_GRACE = 2 * MINUTE
+
 export interface LnReceiveConfig {
   /** The operator accepts paying out even when the refund without the server would open too late. */
   readonly acceptRefundAloneGap: boolean
@@ -54,5 +57,11 @@ export const lnReceivePolicies = (config: LnReceiveConfig): Policies => ({
   onClaimFailed: (_swap, seen) =>
     seen.from.expiresAt !== null && seen.now < seen.from.expiresAt ? OnFailure.Retry : OnFailure.Stuck,
   onRefundFailed: (swap, seen) => (seen.now - swap.to.since < REFUND_RETRY_WINDOW ? OnFailure.Retry : OnFailure.Stuck),
+  // Stuck stops the loop, so a claim that shows up later would never be collected. Wait while collecting is possible.
+  onSpentUnknown: (swap, seen) => {
+    const timesOutAt = seen.from.expiresAt
+    if (seen.now - swap.to.since < SPEND_READ_GRACE) return OnFailure.Wait
+    return timesOutAt !== null && seen.now < timesOutAt ? OnFailure.Wait : OnFailure.Stuck
+  },
   canRelease: () => true,
 })

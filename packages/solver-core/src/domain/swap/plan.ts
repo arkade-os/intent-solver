@@ -62,6 +62,8 @@ export interface Policies {
   canCollect(swap: Swap, seen: Observation): CheckResult
   onClaimFailed(swap: Swap, seen: Observation): Extract<OnFailure, 'retry' | 'stuck'>
   onRefundFailed(swap: Swap, seen: Observation): Extract<OnFailure, 'retry' | 'stuck'>
+  /** `to` was spent and the rail cannot say by whom yet. A claim can show up late, and it carries the preimage. */
+  onSpentUnknown(swap: Swap, seen: Observation): Extract<OnFailure, 'wait' | 'stuck'>
   /** A swap that ended without paying out: whether the client's lock may be handed back now. */
   canRelease(swap: Swap, seen: Observation): boolean
 }
@@ -101,7 +103,7 @@ const toShows = (swap: Swap, seen: Observation, policies: Policies): Decision | 
     const shown = record(swap, Side.To, 'refunded')
     if (shown !== null) return shown
   }
-  if (rail.spent.by === SpentBy.Unknown)
+  if (rail.spent.by === SpentBy.Unknown && policies.onSpentUnknown(swap, seen) === OnFailure.Stuck)
     return fail(SwapOutcome.Stuck, 'the to leg was spent by something we do not recognise')
   // Adopt a lock of ours that landed before any gate runs: after a crash it must not be paid twice.
   if ((to.state === 'pending' || to.state === 'locking') && rail.lock === TxStatus.Landed) {

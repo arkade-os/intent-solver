@@ -68,7 +68,7 @@ export class DriveSwap {
     return { now: now(), from, to, ...rest }
   }
 
-  private async apply(swap: Swap, decision: Decision): Promise<void> {
+  private async apply(swap: Swap, decision: Decision): Promise<unknown> {
     switch (decision.do) {
       case Action.Wait:
         return
@@ -94,9 +94,15 @@ export class DriveSwap {
 
   private async send(swap: Swap, action: SendAction, side: Side): Promise<void> {
     // 1. Write down that we are about to send. Only the worker whose write succeeds goes on to step 2.
-    await this.save(swap, (s, at) => this.markSending(s, action, side, at))
+    const marked = await this.save(swap, (s, at) => this.markSending(s, action, side, at))
     // 2. Send.
     const result = await this.deps.rails[side][action](swap, side)
+    // A lock that was not sent is undone at once, so the route's checks run again instead of waiting for a payout
+    // that will never show. Only if nobody else touched the swap: another worker may be sending by now.
+    if (result.status === SendStatus.NotSent && action === Action.Lock) {
+      await this.save(marked, (s, at) => void s.lockFailed(side, at))
+      return
+    }
     if (result.status !== SendStatus.Sent) return
     // 3. Write down what was sent.
     const reference = { [REFERENCE_KIND[action]]: result.reference }
@@ -135,8 +141,8 @@ export class DriveSwap {
   }
 
   /** Saves only if nobody changed the swap since it was loaded; otherwise throws Conflict. */
-  private async save(loaded: Swap, change: (swap: Swap, at: UnixSeconds) => void): Promise<void> {
-    await this.deps.swaps.update(loaded.id, (current) => {
+  private async save(loaded: Swap, change: (swap: Swap, at: UnixSeconds) => void): Promise<Swap> {
+    return this.deps.swaps.update(loaded.id, (current) => {
       if (current.version !== loaded.version) {
         throw new Conflict(`swap ${loaded.id} changed from version ${loaded.version} to ${current.version}`)
       }

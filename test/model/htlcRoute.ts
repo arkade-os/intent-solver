@@ -52,6 +52,7 @@ export const guarded = (scenario: Scenario): Policies => ({
   canCollect: () => ({ ok: true }),
   onClaimFailed: () => 'retry',
   onRefundFailed: () => 'retry',
+  onSpentUnknown: () => 'stuck',
   canRelease: () => true,
 })
 

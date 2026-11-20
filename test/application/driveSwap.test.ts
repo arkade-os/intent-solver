@@ -18,6 +18,8 @@ class World {
   /** Every write and rail call is counted. Call number `crashAt` throws, before or after it takes effect. */
   calls = 0
   crashAt = 0
+  /** How many times the rail refuses to send a payout before it accepts one. */
+  unsentLocks = 0
   crashAfterEffect = false
 
   effect<T>(run: () => T): T {
@@ -65,17 +67,22 @@ const POLICIES: Policies = {
   canCollect: () => ({ ok: true }),
   onClaimFailed: () => 'retry',
   onRefundFailed: () => 'retry',
+  onSpentUnknown: () => 'stuck',
   canRelease: () => true,
 }
 
 let world: World
 let swaps: SwapEvents
 
-const worker = (): DriveSwap => {
+const worker = (policies: Policies = POLICIES): DriveSwap => {
   const sent = (reference: string): SendResult => ({ status: 'sent', reference: ref(reference) })
   const rail: RailService = {
     status: async (_swap: Swap, side: Side) => world.seen(side),
-    lock: async () => world.effect(() => ((world.payouts += 1), sent('payout'))),
+    lock: async () =>
+      world.effect(() => {
+        if (world.unsentLocks > 0) return ((world.unsentLocks -= 1), { status: 'not_sent' } as const)
+        return ((world.payouts += 1), sent('payout'))
+      }),
     claim: async () => world.effect(() => ((world.collected += 1), sent('collect'))),
     refund: async () => world.effect(() => sent('refund')),
   }
@@ -93,7 +100,7 @@ const worker = (): DriveSwap => {
   }
   return new DriveSwap({
     swaps: stored,
-    policies: POLICIES,
+    policies,
     rails: { from: rail, to: rail },
     context: async () => ({ peer: null, keyCurrent: true, approval: 'not_required', ownInvoice: false }),
     now: () => t(1_500),
@@ -113,6 +120,14 @@ describe('driving a swap', () => {
     expect(swap?.state).toBe('settled')
     expect([world.payouts, world.collected]).toEqual([1, 1])
     expect([swap?.to.reference('funding'), swap?.from.reference('claim')]).toEqual(['payout', 'collect'])
+  })
+
+  it('tries the payout again at once when the rail did not send it', async () => {
+    world.unsentLocks = 1
+    const neverResend: Policies = { ...POLICIES, onLockMissing: () => 'wait' }
+    expect(await worker(neverResend).drive(terms.id)).toBe('wait')
+    expect((await swaps.get(terms.id))?.state).toBe('settled')
+    expect(world.payouts).toBe(1)
   })
 
   it('still settles with one payout after a crash before or after any write or rail call', async () => {

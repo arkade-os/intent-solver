@@ -37,6 +37,7 @@ const POLICIES: Policies = {
   canCollect: () => ({ ok: true }),
   onClaimFailed: () => 'retry',
   onRefundFailed: () => 'retry',
+  onSpentUnknown: () => 'stuck',
   canRelease: () => true,
 }
 const policies = (override: Partial<Policies>): Policies => ({ ...POLICIES, ...override })

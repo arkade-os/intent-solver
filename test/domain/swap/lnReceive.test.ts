@@ -6,11 +6,12 @@ import {
   MIN_SETTLE_WINDOW,
   REFUND_ALONE_MARGIN,
   REFUND_RETRY_WINDOW,
+  SPEND_READ_GRACE,
   SETTLE_SAFETY_MARGIN,
 } from '@arkade-os/solver-core/domain/swap/ln_receive.js'
 import type { LegStatus, Observation } from '@arkade-os/solver-core/domain/swap/observation.js'
 import { Quote } from '@arkade-os/solver-core/domain/swap/quote.js'
-import { REFUND_CENSORSHIP_GRACE } from '@arkade-os/solver-corridors/receive/orchestrator.js'
+import { EMPTY_LOCKUP_GRACE, REFUND_CENSORSHIP_GRACE } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import { btc, quoted, ref, t } from '../support.js'
 
 const NOW = 1_800_000_000
@@ -48,6 +49,7 @@ describe('LN receive rules', () => {
     expect(SETTLE_SAFETY_MARGIN).toBe(legacy.SETTLE_SAFETY_MARGIN)
     expect(REFUND_ALONE_MARGIN).toBe(legacy.UNILATERAL_RECOURSE_MARGIN)
     expect(REFUND_RETRY_WINDOW).toBe(REFUND_CENSORSHIP_GRACE)
+    expect(SPEND_READ_GRACE).toBe(EMPTY_LOCKUP_GRACE)
   })
 
   it('allows and refuses a payout exactly as evaluateReceiveFunding does', () => {
@@ -129,5 +131,18 @@ describe('LN receive rules', () => {
     swap.refunding('to', t(NOW))
     expect(onRefundFailed(swap, seen(NOW + REFUND_RETRY_WINDOW - 1))).toBe('retry')
     expect(onRefundFailed(swap, seen(NOW + REFUND_RETRY_WINDOW))).toBe('stuck')
+  })
+
+  it('waits for a late claim of a spent payout while the Lightning payment can still be collected', () => {
+    const { onSpentUnknown } = lnReceivePolicies({ acceptRefundAloneGap: false })
+    const swap = swapValidUntil(NOW + 100)
+    swap.lock('from', t(NOW - 900), ref('held'))
+    swap.locking('to', t(NOW - 800))
+    swap.lock('to', t(NOW), ref('txid-out'))
+    const timesOut = { expiresAt: t(NOW + 1_000) }
+    expect(onSpentUnknown(swap, seen(NOW + 999, timesOut))).toBe('wait')
+    expect(onSpentUnknown(swap, seen(NOW + 1_000, timesOut))).toBe('stuck')
+    expect(onSpentUnknown(swap, seen(NOW + SPEND_READ_GRACE - 1))).toBe('wait')
+    expect(onSpentUnknown(swap, seen(NOW + SPEND_READ_GRACE))).toBe('stuck')
   })
 })
