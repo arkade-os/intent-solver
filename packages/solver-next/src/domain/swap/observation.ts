@@ -55,6 +55,21 @@ export interface LegStatus {
   readonly refund: TxStatus
 }
 
+/** A leg that was not read, or shows nothing. */
+export const NOT_SEEN: LegStatus = {
+  funding: 'none',
+  matured: false,
+  spent: { by: 'nobody' },
+  refundOpen: false,
+  expiresAt: null,
+  refundOpensAt: null,
+  refundAloneDelay: null,
+  lock: 'none',
+  lockReference: null,
+  claim: 'none',
+  refund: 'none',
+}
+
 export const ApprovalStatus = {
   NotRequired: 'not_required',
   Pending: 'pending',

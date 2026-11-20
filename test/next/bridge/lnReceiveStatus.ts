@@ -2,9 +2,8 @@ import { rawDelaySeconds } from '@arkade-os/solver-core/core/timelocks.js'
 import { UnixSeconds } from '@arkade-os/solver-next/domain/shared/time.js'
 import { Preimage } from '@arkade-os/solver-next/domain/swap/hashlock.js'
 import { Reference } from '@arkade-os/solver-next/domain/swap/leg.js'
-import type { LegStatus, SpendStatus } from '@arkade-os/solver-next/domain/swap/observation.js'
+import { NOT_SEEN, type LegStatus, type SpendStatus } from '@arkade-os/solver-next/domain/swap/observation.js'
 import type { Swap } from '@arkade-os/solver-next/domain/swap/swap.js'
-import type { ReceiveBackend } from '@arkade-os/solver-core/ports/lightning.js'
 import type { ReceiveArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 import type { ChainTipProvider } from '@arkade-os/solver-rails/onchain/chainTip.js'
 import { hex } from '@scure/base'
@@ -13,58 +12,6 @@ import type { ReceiveSwapRow } from '@arkade-os/solver-corridors/db/receiveSwaps
 import { adoptFunding } from '@arkade-os/solver-corridors/legs/arkadeLockup.js'
 import type { LockupPreimageReader } from '@arkade-os/solver-corridors/receive/lockupPreimage.js'
 import { receiveCovenantRowFor } from '@arkade-os/solver-corridors/receive/orchestrator.js'
-
-/** A leg that was not read, or shows nothing. */
-export const NOT_SEEN: LegStatus = {
-  funding: 'none',
-  matured: false,
-  spent: { by: 'nobody' },
-  refundOpen: false,
-  expiresAt: null,
-  refundOpensAt: null,
-  refundAloneDelay: null,
-  lock: 'none',
-  lockReference: null,
-  claim: 'none',
-  refund: 'none',
-}
-
-/** The client's held Lightning payment, as our node shows it. */
-export const holdStatus = async (
-  ln: Pick<ReceiveBackend, 'getHoldState'>,
-  row: ReceiveSwapRow,
-  swap: Swap,
-): Promise<LegStatus> => {
-  const hold = await ln.getHoldState(row.paymentHash).catch((error: unknown) => {
-    // Before the payout the read is needed, so its failure is the caller's. After it the node may have dropped
-    // the invoice; the rules then go by the timeout saved with the lock.
-    if (swap.to.state === 'pending') throw error
-    return null
-  })
-  switch (hold?.status) {
-    case undefined:
-    case 'pending':
-    // A status this build does not know is not `armed`, and only `armed` is acted on.
-    case 'unknown':
-      return NOT_SEEN
-    case 'armed':
-      return {
-        ...NOT_SEEN,
-        funding: 'exact',
-        matured: true,
-        expiresAt: hold.expiresAt === null ? null : UnixSeconds.of(hold.expiresAt),
-        lockReference: Reference.of(row.paymentHash),
-      }
-    case 'settled':
-      // Not `funded`: a settled payment is no longer held, and only a held one may be paid out against.
-      return { ...NOT_SEEN, claim: 'landed' }
-    case 'cancelled':
-      // Before the payout a payment that went back is simply not held any more.
-      return swap.to.state === 'pending'
-        ? { ...NOT_SEEN, refund: 'landed' }
-        : { ...NOT_SEEN, spent: { by: 'refund' }, refund: 'landed' }
-  }
-}
 
 export interface LockupStatusDeps {
   readonly arkade: Pick<ReceiveArkadeOps, 'findLockups' | 'findLockupOutpoints' | 'finalizePendingRefund'>

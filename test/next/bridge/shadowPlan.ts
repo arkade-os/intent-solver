@@ -3,7 +3,8 @@ import { UnixSeconds } from '@arkade-os/solver-next/domain/shared/time.js'
 import { lnReceivePolicies } from '@arkade-os/solver-next/domain/swap/ln_receive.js'
 import { plan, type Decision } from '@arkade-os/solver-next/domain/swap/plan.js'
 import { LnReceiveSwaps } from './lnReceiveSwaps.js'
-import { holdStatus, lockupStatus } from './lnReceiveStatus.js'
+import { HeldPayment } from '@arkade-os/solver-next/infrastructure/lightning/held_payment.js'
+import { lockupStatus } from './lnReceiveStatus.js'
 import type { ReceiveSwapRow } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
 import { LockupPreimageReader } from '@arkade-os/solver-corridors/receive/lockupPreimage.js'
 import { ReceiveSwapService, type ReceiveServiceDeps } from '@arkade-os/solver-corridors/receive/orchestrator.js'
@@ -98,7 +99,7 @@ export const shadowPlan = (): { differences: Difference[]; steps: () => number; 
       // Its own reader: the legacy one reports an unrolled lockup once, and the shadow must not use that up.
       const preimages = new LockupPreimageReader(deps.arkade, deps.onchain, () => undefined)
       const [from, to] = await Promise.all([
-        holdStatus(deps.ln, row, swap),
+        new HeldPayment(deps.ln).status(swap),
         lockupStatus({ arkade: deps.arkade, preimages, chainTip: deps.chainTip, now }, row, swap),
       ])
       const seen = {
