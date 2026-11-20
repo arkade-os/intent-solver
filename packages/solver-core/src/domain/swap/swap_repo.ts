@@ -11,7 +11,7 @@ export interface Page {
 export interface SwapRepository {
   // Throws when the rfqId exists or a live swap already holds the same script.
   add(swap: Swap): Promise<void>
-  // Loads, applies `change` and saves in one transaction; throws when another writer got there first.
+  // Loads, applies `change`, saves. Not a transaction: the save fails when another writer got there first.
   update(id: SwapId, change: (swap: Swap) => void | Promise<void>): Promise<Swap>
 
   get(id: SwapId): Promise<Swap | null>

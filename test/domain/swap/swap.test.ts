@@ -248,4 +248,12 @@ describe('swap aggregate', () => {
     expect(() => Hashlock.of('AB'.repeat(32))).toThrow('lowercase hex')
     expect(() => Hashlock.of('ab'.repeat(31))).toThrow('lowercase hex')
   })
+
+  it('says why a stored swap with contradicting legs reads as stuck', () => {
+    const { snapshot } = bothLocked()
+    const odd = Swap.fromSnapshot({ ...snapshot, from: snapshot.from.moveTo('claimed', t(2_000)) }, 1)
+    expect(odd.state).toBe('stuck')
+    expect(odd.outcomeReason).toBe('legs claimed/locked contradict each other')
+    expect(bothLocked().outcomeReason).toBeNull()
+  })
 })

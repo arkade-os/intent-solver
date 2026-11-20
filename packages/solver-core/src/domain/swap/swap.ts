@@ -122,6 +122,11 @@ export class Swap {
   get outcome(): SwapOutcome | null {
     return this.props.outcome
   }
+  /** Why the swap failed. A stored row whose legs contradict each other reads as stuck, and says so here. */
+  get outcomeReason(): string | null {
+    if (this.props.outcome !== null) return this.props.outcomeReason
+    return this.legsState === null ? `legs ${this.from.state}/${this.to.state} contradict each other` : null
+  }
   /** Raised since the load and not stored yet: what a repository appends. */
   get changes(): readonly SwapEvent[] {
     return this.raised
