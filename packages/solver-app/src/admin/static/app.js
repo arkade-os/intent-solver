@@ -4969,7 +4969,8 @@ const durationPanel = (bands) =>
 const fxPanel = (leg) => {
   const worst = [...leg.points].sort((a, b) => (a.driftBps ?? 0) - (b.driftBps ?? 0)).slice(0, 5)
   const name = corridorLabel(leg.leg)
-  const on = corridorLabel(leg.corridor) === name ? '' : ` on ${corridorLabel(leg.corridor)}`
+  const where = corridorLabel(leg.corridor)
+  const on = where === name ? '' : ` on ${where}`
   return h(
     'section.panel',
     h(
