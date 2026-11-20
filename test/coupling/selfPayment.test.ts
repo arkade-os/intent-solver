@@ -72,7 +72,6 @@ const CLIENT_REFUND_ADDRESS = clientAddress(7)
 
 /** The client's preimage: they pick it, and only they know it until they claim. */
 /** The sealed packet the client hands us; opaque to this test. */
-const CLAIM_PACKET = 'ZWFsZWQtY2lwaGVydGV4dA=='
 
 const P = new Uint8Array(32).fill(42)
 const paymentHash = hex.encode(sha256(P))
@@ -259,7 +258,7 @@ describe('self-payment refresh, both legs', () => {
       amountSats: 50_000,
       payoutAddress: CLIENT_PAYOUT_ADDRESS,
       payoutPubkey: clientPayoutPubkey,
-      claimPacket: CLAIM_PACKET,
+      claimPacket: null,
     })
     if (!receiveQuote.accepted) throw new Error(`receive quote refused: ${receiveQuote.reason}`)
     const receiveRow = receiveQuote.swap
@@ -356,7 +355,7 @@ describe('self-payment refresh, both legs', () => {
       amountSats: 50_000,
       payoutAddress: CLIENT_PAYOUT_ADDRESS,
       payoutPubkey: clientPayoutPubkey,
-      claimPacket: CLAIM_PACKET,
+      claimPacket: null,
     })
     if (!receiveQuote.accepted) throw new Error(`receive quote refused: ${receiveQuote.reason}`)
     const sendQuote = await sendService.quote(receiveQuote.swap.invoice, CLIENT_REFUND_ADDRESS, {
@@ -405,7 +404,7 @@ describe('self-payment refresh, both legs', () => {
       amountSats: 50_000,
       payoutAddress: CLIENT_PAYOUT_ADDRESS,
       payoutPubkey: clientPayoutPubkey,
-      claimPacket: CLAIM_PACKET,
+      claimPacket: null,
     })
     if (!receiveQuote.accepted) throw new Error(`receive quote refused: ${receiveQuote.reason}`)
     const sendQuote = await sendService.quote(receiveQuote.swap.invoice, CLIENT_REFUND_ADDRESS, {
@@ -431,7 +430,7 @@ describe('self-payment refresh, both legs', () => {
       amountSats: 50_000,
       payoutAddress: CLIENT_PAYOUT_ADDRESS,
       payoutPubkey: clientPayoutPubkey,
-      claimPacket: CLAIM_PACKET,
+      claimPacket: null,
     })
     if (!receiveQuote.accepted) throw new Error(`receive quote refused: ${receiveQuote.reason}`)
 
@@ -489,7 +488,7 @@ describe('self-payment refresh, both legs', () => {
       amountSats: 50_000,
       payoutAddress: CLIENT_PAYOUT_ADDRESS,
       payoutPubkey: clientPayoutPubkey,
-      claimPacket: CLAIM_PACKET,
+      claimPacket: null,
     })
     // Remove the guard and this is accepted, these two ticks run in this
     // order, and `fundCalls` becomes 1: the 50k payout moves against a 1k

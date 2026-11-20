@@ -40,8 +40,6 @@ const row: ReceiveSwapRow = {
   arkadeLockupTxid: null,
   arkadeLockupVout: null,
   arkadeLockupValue: null,
-  revealedAt: null,
-  stampedAt: null,
   settleAttemptedAt: null,
   preimage: null,
   refundArkTxid: null,
@@ -105,7 +103,7 @@ describe('LightningReceiveRfqRequest', () => {
     ).toBe(false)
   })
 
-  it('accepts a request that omits claim_packet — a client with no covclaimd claims for itself', () => {
+  it('accepts a request that omits claim_packet', () => {
     const { claim_packet: _packet, ...withoutPacket } = valid.profile
     expect(LightningReceiveRfqRequest.safeParse({ ...valid, profile: withoutPacket }).success).toBe(true)
   })

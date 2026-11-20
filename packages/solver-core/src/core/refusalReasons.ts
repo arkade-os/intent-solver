@@ -44,6 +44,7 @@ type OrchestratorRefusal =
   | 'insufficient_float'
   | 'invalid_refund_address'
   | 'invalid_payout_address'
+  | 'invalid_claim_packet'
   | 'rate_limited'
   | 'coupled_deadline_unsafe'
   | 'coupled_invoice_mismatch'
@@ -179,6 +180,10 @@ export const REFUSAL_EXPLANATIONS: Record<RefusalReason, RefusalExplanation> = {
   invalid_payout_address: {
     meaning: 'The payout address the client asked to be paid at did not decode for this network.',
     whatToDo: 'Nothing. The client supplied an address we could not pay.',
+  },
+  invalid_claim_packet: {
+    meaning: 'The supplied claim packet could not be attached to the Arkade funding transaction.',
+    whatToDo: 'Ask the client for a valid sealed claim packet or have them omit it for a collaborative claim.',
   },
   rate_limited: {
     meaning: 'This requester key exceeded the quote quota for the current window.',

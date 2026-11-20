@@ -163,13 +163,6 @@ export {
   onchainRfqStatusPayload,
   onchainRfqStateFromRow,
 } from '@arkade-os/solver-corridors/wire/onchainPayloads.js'
-export {
-  createCovclaimdClient,
-  CovclaimdError,
-  type CovclaimdClient,
-  type CovclaimdPubKeys,
-  type RevealParams,
-} from '@arkade-os/solver-corridors/receive/covclaimd.js'
 
 // The kind-38859 card publisher. `AdPublishMode` is exported because the exported
 // `Config` carries one, which a consumer could otherwise not name.

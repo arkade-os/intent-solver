@@ -1054,9 +1054,6 @@ describe('findClaimPreimage', () => {
   })
 
   it('checks every outpoint given in one batch, mirroring findLockups checking every output', async () => {
-    // Mirrors a multi-output lockup: OUTPOINT is still sitting there unspent,
-    // `other` is the one covclaimd actually claimed. The reader must find the
-    // preimage via `other` rather than stopping after OUTPOINT looks empty.
     const other = { txid: 'd'.repeat(64), vout: 1 }
     const spendTxForOther = buildSpendTxB64({ spends: other, conditionWitness: [PREIMAGE] })
     const getVtxos = vi.fn(async ({ outpoints }: { outpoints: { txid: string; vout: number }[] }) => ({

@@ -19,7 +19,7 @@
 
 import { beforeAll, afterAll, describe, expect, it } from 'vitest'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
-import { schnorr, secp256k1 } from '@noble/curves/secp256k1.js'
+import { schnorr } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
 import { ReceiveSwapStore } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
 import { SwapStore, type SendSwapRow } from '@arkade-os/solver-corridors/db/swaps.js'
@@ -30,7 +30,7 @@ import { SendSwapService } from '@arkade-os/solver-corridors/send/orchestrator.j
 import { findClaimPreimage, findLockupOutpoints } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { MIN_CLAIM_WINDOW } from '@arkade-os/solver-core/core/send.js'
 import { poll } from '@arkade-os/solver-core/util/poll.js'
-import { newSealedPreimage } from './support/claimPacket.js'
+import { newPreimage } from './support/preimage.js'
 import { clientClaimLockup } from './support/clientClaim.js'
 import { solverInvoice } from './support/counterparty.js'
 import { requireStack } from './support/preflight.js'
@@ -134,18 +134,14 @@ describe('e2e self-payment refresh (lightning:BTC->arkade:BTC coupled to arkade:
       })
 
       // 1. The client quotes the receive corridor and gets OUR bolt11.
-      // No covclaimd on this run: the CLIENT claims, which keeps step 7
-      // deterministic instead of racing a daemon. The packet still travels, so
-      // it is sealed to a throwaway key nobody here holds.
-      const nobody = hex.encode(secp256k1.getPublicKey(secp256k1.utils.randomSecretKey(), true))
-      const sealed = newSealedPreimage(nobody)
+      const secret = newPreimage()
       const payoutAddress = await arkade.ctx.wallet.getAddress()
       const receiveQuote = await receive.quote({
-        paymentHash: sealed.paymentHash,
+        paymentHash: secret.paymentHash,
         amountSats: AMOUNT_SATS,
         payoutAddress,
         payoutPubkey: hex.encode(await arkade.ctx.identity.xOnlyPublicKey()),
-        claimPacket: sealed.packet,
+        claimPacket: null,
       })
       if (!receiveQuote.accepted) throw new Error(`receive quote refused: ${receiveQuote.reason}`)
       const receiveRow = receiveQuote.swap
@@ -194,7 +190,7 @@ describe('e2e self-payment refresh (lightning:BTC->arkade:BTC coupled to arkade:
 
       // 6. And the invoice was retired, so nobody — including a third party the
       //    client might hand the bolt11 to — can pay it now.
-      const retired = await solverInvoice(sealed.paymentHash)
+      const retired = await solverInvoice(secret.paymentHash)
       expect(retired.state).toBe('CANCELED')
 
       // 7. The client claims our payout, revealing P on-chain.
@@ -216,7 +212,7 @@ describe('e2e self-payment refresh (lightning:BTC->arkade:BTC coupled to arkade:
           pkScript: paidOut.pkScript,
           nonInteractiveParameters: paidOut.nonInteractiveParameters ?? false,
         },
-        sealed.preimage,
+        secret.preimage,
       )
       expect(claimTxid).toBeTruthy()
 
@@ -231,7 +227,7 @@ describe('e2e self-payment refresh (lightning:BTC->arkade:BTC coupled to arkade:
         { attempts: 90, intervalMs: 2000, whenExhausted: 'send swap never reached a terminal state' },
       )
       expect(collected.state).toBe('claimed')
-      expect(collected.preimage).toBe(hex.encode(sealed.preimage))
+      expect(collected.preimage).toBe(hex.encode(secret.preimage))
       expect(collected.claimArkTxid).toBeTruthy()
 
       // 9. The receive row must finish too. Its invoice was cancelled back at

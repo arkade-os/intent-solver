@@ -86,6 +86,7 @@ const QUOTE_REFUSALS = [
   'duplicate_swap',
   'fee_consumes_swap',
   'insufficient_float',
+  'invalid_claim_packet',
   'invalid_payout_address',
   'invalid_refund_address',
   'invoice_expired',
@@ -201,6 +202,14 @@ describe('toRfqReason', () => {
     // other reached the same answer by falling through.
     expect(toRfqReason('invalid_payout_address')).toBe('unsupported_payload')
     expect(toRfqReason('invalid_refund_address')).toBe('unsupported_payload')
+  })
+
+  it('reports an invalid claim packet through the existing refusal reason', () => {
+    expect(rfqRefusalPayload(undefined, 'invalid_claim_packet')).toEqual({
+      v: 1,
+      type: 'rfq_refusal',
+      reason: 'unsupported_payload',
+    })
   })
 
   it('retains the coarse reason for an invoice this rail cannot contain', () => {

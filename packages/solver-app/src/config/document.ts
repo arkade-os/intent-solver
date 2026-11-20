@@ -144,7 +144,6 @@ const buildSchema = (railNames: readonly string[]) =>
         emulatorUrl: str,
         esploraUrl: str,
         unilateralExitDelay: num,
-        covclaimdUrl: str,
         poolAutoMint: bool,
         contractRetentionDays: num,
       }),

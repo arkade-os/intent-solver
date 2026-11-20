@@ -38,11 +38,10 @@ import { LndOnchainAdapter } from '@arkade-os/solver-rails-lnd/onchain/lnd/adapt
 import type { OnchainSendBackend } from '@arkade-os/solver-core/ports/onchain.js'
 import { FakeLightningBackend } from '@arkade-os/solver-rails-fake/ln/fake/backend.js'
 import { LndLightningBackendAdapter } from '@arkade-os/solver-rails-lnd/ln/lnd/adapter.js'
-import { createCovclaimdClient, type CovclaimdClient } from '@arkade-os/solver-corridors/receive/covclaimd.js'
 import type { EmulatorInfo } from '@arkade-os/solver-corridors/send/arkadeOps.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { nodeBlockHeight, solverInvoice, solverContainer } from './counterparty.js'
-import { covclaimdUrl, esploraUrl, loadE2eEnv } from './preflight.js'
+import { esploraUrl, loadE2eEnv } from './preflight.js'
 
 /**
  * Wall-clock budgets. E2E swaps wait on a real chain, a real indexer and a
@@ -122,6 +121,7 @@ export const openArkade = async (): Promise<E2eArkade> => {
     isMainnet: profile.isMainnet,
     arkadeHrp: profile.arkadeHrp,
     expectedArkdNetwork: profile.arkdNetwork,
+    esploraUrl: process.env.ARKADE_ESPLORA_URL ?? process.env.ESPLORA_URL,
   })
   // The same rule the service applies: no network profile ships an emulator, so
   // whoever runs this suite supplies one.
@@ -281,6 +281,3 @@ export const holdSettleDeadline = async (paymentHash: string): Promise<number> =
  */
 export const openFakeLightning = (dir: string, network: SwapNetwork): FakeLightningBackend =>
   new FakeLightningBackend(join(dir, 'fake-ln.json'), NETWORKS[network].invoicePrefix)
-
-/** covclaimd, at `COVCLAIMD_URL`. Only the receive corridors need it. */
-export const openCovclaimd = (): CovclaimdClient => createCovclaimdClient(covclaimdUrl())

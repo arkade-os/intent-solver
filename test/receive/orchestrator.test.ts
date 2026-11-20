@@ -7,6 +7,7 @@ import { schnorr } from '@noble/curves/secp256k1.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { base64, hex } from '@scure/base'
 import { ArkAddress } from '@arkade-os/sdk'
+import { appendArkadeScript } from '@arkade-os/swap'
 import {
   EMPTY_LOCKUP_GRACE,
   REFUND_CENSORSHIP_GRACE,
@@ -32,7 +33,6 @@ import { MIN_CLAIM_WINDOW } from '@arkade-os/solver-core/core/send.js'
 import { covenantScriptFromRow } from '@arkade-os/solver-corridors/send/arkadeOps.js'
 import type { ReceiveArkadeOps } from '@arkade-os/solver-corridors/receive/arkadeOps.js'
 import { FundNotSubmittedError } from '@arkade-os/solver-corridors/receive/fundLockup.js'
-import type { CovclaimdClient } from '@arkade-os/solver-corridors/receive/covclaimd.js'
 import type { FundedOutput } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import type { UnrolledSpendRecord, UnrolledSpendStep } from '@arkade-os/solver-arkade/arkade/unrolledSpend.js'
 
@@ -165,31 +165,11 @@ const buildFakeArkade = (): { ops: ReceiveArkadeOps; state: FakeArkadeState } =>
   return { ops, state }
 }
 
-interface FakeCovclaimdState {
-  revealCalls: number
-  shouldFail: boolean
-  lastParams: unknown
-}
-
-const buildFakeCovclaimd = (): { client: CovclaimdClient; state: FakeCovclaimdState } => {
-  const state: FakeCovclaimdState = { revealCalls: 0, shouldFail: false, lastParams: undefined }
-  const client: CovclaimdClient = {
-    getPubKeys: async () => ({ covclaimdPubKey: 'aa', emulatorPubKey: 'bb' }),
-    reveal: async (params) => {
-      state.revealCalls += 1
-      state.lastParams = params
-      if (state.shouldFail) throw new Error('covclaimd unreachable')
-    },
-  }
-  return { client, state }
-}
-
 let dir: string
 let ln: FakeLightningBackend
 let driver: ReturnType<typeof betterSqliteDriver>
 let store: ReceiveSwapStore
 let arkade: ReturnType<typeof buildFakeArkade>
-let covclaimd: ReturnType<typeof buildFakeCovclaimd>
 let service: ReceiveSwapService
 /** L1 spend witnesses by `txid:vout`, as `onchain.findSpendWitness` answers them. */
 let l1Witnesses: Map<string, Uint8Array[]>
@@ -207,7 +187,6 @@ beforeEach(async () => {
   driver = betterSqliteDriver(':memory:')
   store = await ReceiveSwapStore.open(driver, clock)
   arkade = buildFakeArkade()
-  covclaimd = buildFakeCovclaimd()
   l1Witnesses = new Map()
   l1Unreadable = new Set()
   service = new ReceiveSwapService({
@@ -222,7 +201,6 @@ beforeEach(async () => {
         return l1Witnesses.get(`${txid}:${vout}`) ?? null
       },
     },
-    covclaimd: covclaimd.client,
     limits: LIMITS,
     maxExposedSats: 1_000_000,
     totalCommitted: () => store.committedSats(),
@@ -241,7 +219,7 @@ const quoteRequest = (over: Partial<Parameters<ReceiveSwapService['quote']>[0]> 
   amountSats: 5_000,
   payoutAddress: CLIENT_PAYOUT_ADDRESS,
   payoutPubkey: clientPayoutPubkey,
-  claimPacket: 'ZWFsZWQtY2lwaGVydGV4dA==',
+  claimPacket: null,
   ...over,
 })
 
@@ -318,7 +296,6 @@ describe('ReceiveSwapService.quote', () => {
       store,
       ln,
       arkade: arkade.ops,
-      covclaimd: covclaimd.client,
       limits: LIMITS,
       maxExposedSats: 1_000_000,
       totalCommitted: () => store.committedSats(),
@@ -436,7 +413,6 @@ describe('ReceiveSwapService.quote', () => {
       store,
       ln,
       arkade: arkade.ops,
-      covclaimd: covclaimd.client,
       limits: LIMITS,
       maxExposedSats: 1_000,
       totalCommitted: () => store.committedSats(),
@@ -476,7 +452,6 @@ describe('ReceiveSwapService.quote', () => {
         store,
         ln,
         arkade: arkade.ops,
-        covclaimd: covclaimd.client,
         limits: LIMITS,
         maxExposedSats: 60_000,
         totalCommitted: async () => (await sendStore.committedSats()) + (await store.committedSats()),
@@ -501,7 +476,6 @@ describe('ReceiveSwapService.quote', () => {
         store,
         ln,
         arkade: arkade.ops,
-        covclaimd: covclaimd.client,
         limits: LIMITS,
         maxExposedSats: 1_000_000,
         totalCommitted: () => store.committedSats(),
@@ -558,7 +532,6 @@ describe('ReceiveSwapService.quote', () => {
         store,
         ln: port,
         arkade: ops,
-        covclaimd: covclaimd.client,
         limits: LIMITS,
         maxExposedSats: 1_000_000,
         totalCommitted: () => store.committedSats(),
@@ -766,8 +739,6 @@ describe('ReceiveSwapService.quote', () => {
   it('the derived pkScript actually pins to the CLIENT payout destination, not the solver', async () => {
     const outcome = await service.quote(quoteRequest())
     if (!outcome.accepted) throw new Error('expected acceptance')
-    // Independently re-derive the covenant the way a client (or covclaimd)
-    // would: receiver = client's own payout key, client(param) = solver's own
     // key. If the orchestrator's role mapping were swapped (e.g. receiver and
     // client transposed), this would NOT match row.pkScript.
     const independentlyDerived = new CovenantSwapScript({
@@ -793,32 +764,12 @@ describe('ReceiveSwapService.quote', () => {
   })
 
   it('receiveCovenantRowFor reconstructs the EXACT script the quote committed to', async () => {
-    // This is what revealToCovclaimd and whenRefunding actually run at claim
-    // and refund time — unlike the previous test (which re-derives the
-    // script from raw request/dep values independently), this exercises the
-    // real row-mapping function this orchestrator uses, closing a gap a
-    // revert-verify pass found: a fake ReceiveArkadeOps doesn't call
-    // covenantScriptFromRow the way the real receiveArkadeOpsFromContext
-    // does, so a role-mapping bug in receiveCovenantRowFor is otherwise
-    // invisible to every other test in this file.
     const outcome = await service.quote(quoteRequest())
     if (!outcome.accepted) throw new Error('expected acceptance')
     const rebuilt = covenantScriptFromRow(receiveCovenantRowFor(outcome.swap))
     expect(hex.encode(rebuilt.pkScript)).toBe(outcome.swap.pkScript)
   })
 
-  /**
-   * The QUOTE row re-deriving its own script proves nothing about the rows
-   * `revealToCovclaimd` and `whenRefunding` actually see — those only ever run
-   * on a row that has already been through `armed -> funded`, and the clock
-   * has moved on by then. Funding is a separate tick from quoting in every
-   * real deployment, so a row that only re-derives while `now` is frozen is a
-   * row that re-derives only in tests.
-   *
-   * The funded pkScript is an immutable fact about money already on Arkade:
-   * whatever the row carries afterwards, the covenant must still rebuild THAT
-   * script or nothing can ever spend it again.
-   */
   /**
    * The receive half of why `HoldStatus` can afford an `'unknown'` value.
    *
@@ -886,7 +837,6 @@ describe('ReceiveSwapService — an arriving HTLC drives its row', () => {
       store,
       ln: notifying,
       arkade: arkade.ops,
-      covclaimd: covclaimd.client,
       limits: LIMITS,
       maxExposedSats: 1_000_000,
       totalCommitted: () => store.committedSats(),
@@ -919,7 +869,6 @@ describe('ReceiveSwapService — an arriving HTLC drives its row', () => {
       store,
       ln: failing,
       arkade: arkade.ops,
-      covclaimd: covclaimd.client,
       limits: LIMITS,
       maxExposedSats: 1_000_000,
       totalCommitted: () => store.committedSats(),
@@ -1203,7 +1152,6 @@ describe('ReceiveSwapService.tick — concurrent workers: no double-funding', ()
       store,
       ln,
       arkade: arkade.ops,
-      covclaimd: covclaimd.client,
       limits: LIMITS,
       maxExposedSats: 1_000_000,
       totalCommitted: () => store.committedSats(),
@@ -1285,8 +1233,7 @@ describe('ReceiveSwapService.tick — concurrent workers: no double-funding', ()
   })
 })
 
-describe('ReceiveSwapService.tick — reveal to covclaimd', () => {
-  /** covclaimd's three-TLV body: ciphertext, arkade script, and the covclaimd it is sealed to. */
+describe('ReceiveSwapService.tick — funding with a claim packet', () => {
   const tlvClaimPacket = (): Uint8Array => {
     const tlv = (type: number, value: number[]) => [type, (value.length >> 8) & 0xff, value.length & 0xff, ...value]
     return Uint8Array.from([
@@ -1317,38 +1264,57 @@ describe('ReceiveSwapService.tick — reveal to covclaimd', () => {
   )
 
   it.each([
+    ['bare ciphertext', new Uint8Array(93)],
     ['carrying an arkade script', Uint8Array.from([...CIPHERTEXT_TLV, ...tlvBytes(0x02, [0x51, 0x52])])],
     ['carrying nothing else', Uint8Array.from(CIPHERTEXT_TLV)],
-  ])('reveals rather than stamps a packet that names no covclaimd, %s', async (_name, noPubkey) => {
+  ])('refuses an unstampable claim packet before issuing an invoice, %s', async (_name, noPubkey) => {
     const outcome = await service.quote(quoteRequest({ claimPacket: base64.encode(noPubkey) }))
+    expect(outcome).toEqual({ accepted: false, reason: 'invalid_claim_packet' })
+    await expect(ln.getHoldState(paymentHash)).rejects.toThrow()
+    await expect(store.findLiveByPaymentHash(paymentHash)).resolves.toBeNull()
+  })
+
+  it('still settles a legacy quote with unstamped ciphertext through a client claim', async () => {
+    const outcome = await service.quote(quoteRequest())
     if (!outcome.accepted) throw new Error('expected acceptance')
+    await driver.run('UPDATE receive_swap SET claim_packet = ? WHERE id = ?', [
+      base64.encode(new Uint8Array(93)),
+      outcome.swap.id,
+    ])
     ln.armHold(paymentHash, now + 4 * 3600)
 
-    const row = await service.tick(outcome.swap.id)
-
-    expect(row.state).toBe('funded')
-    // Stamping it would hide the tx from every covclaimd's filter.
+    const funded = await service.tick(outcome.swap.id)
+    expect(funded.state).toBe('funded')
     expect(arkade.state.fundCalls[0]?.stamp).toBeUndefined()
-    expect(covclaimd.state.revealCalls).toBe(1)
+
+    arkade.state.outputs = []
+    arkade.state.claimPreimage = P
+    await expect(service.tick(funded.id)).resolves.toMatchObject({ state: 'settled' })
   })
 
   it('completes a client packet with the arkade script the covenant commits to', async () => {
-    const outcome = await service.quote(quoteRequest({ claimPacket: base64.encode(clientPacket()) }))
+    const body = clientPacket()
+    const claimPacket = base64.encode(body)
+    const outcome = await service.quote(quoteRequest({ claimPacket }))
+    expect(outcome.accepted).toBe(true)
     if (!outcome.accepted) throw new Error('expected acceptance')
+    const stored = await store.get(outcome.swap.id)
+    expect(stored.claimPacket).toBe(claimPacket)
+    const covenant = covenantScriptFromRow(receiveCovenantRowFor(stored))
+    const arkadeScript = covenant.nonInteractiveClaimArkadeScript
+    if (!arkadeScript) throw new Error('expected noninteractive claim script')
     ln.armHold(paymentHash, now + 4 * 3600)
 
     const row = await service.tick(outcome.swap.id)
 
     expect(row.state).toBe('funded')
-    const stamped = arkade.state.fundCalls[0]?.stamp?.packet
-    if (!stamped) throw new Error('expected a stamp')
-    // The client's bytes ride through untouched, with 0x02 appended after them.
-    expect(stamped.subarray(0, clientPacket().length)).toEqual(clientPacket())
-    expect(stamped[clientPacket().length]).toBe(0x02)
-    expect(covclaimd.state.revealCalls).toBe(0)
+    expect(arkade.state.fundCalls[0]?.stamp).toEqual({
+      packet: appendArkadeScript(body, arkadeScript),
+      tapTree: covenant.encode(),
+    })
   })
 
-  it('reveals an adopted funding, whatever the packet shape claims', async () => {
+  it('adopts an existing funding output without broadcasting again', async () => {
     const outcome = await service.quote(quoteRequest({ claimPacket: base64.encode(tlvClaimPacket()) }))
     if (!outcome.accepted) throw new Error('expected acceptance')
     ln.armHold(paymentHash, now + 4 * 3600)
@@ -1358,11 +1324,9 @@ describe('ReceiveSwapService.tick — reveal to covclaimd', () => {
 
     expect(row.state).toBe('funded')
     expect(arkade.state.fundCalls).toHaveLength(0)
-    expect(row.stampedAt).toBeNull()
-    expect(covclaimd.state.revealCalls).toBe(1)
   })
 
-  it('stamps the packet into the funding instead of revealing, when the client sends one', async () => {
+  it('stamps a complete client packet into the funding unchanged', async () => {
     const outcome = await service.quote(quoteRequest({ claimPacket: base64.encode(tlvClaimPacket()) }))
     if (!outcome.accepted) throw new Error('expected acceptance')
     ln.armHold(paymentHash, now + 4 * 3600)
@@ -1373,127 +1337,12 @@ describe('ReceiveSwapService.tick — reveal to covclaimd', () => {
     const [call] = arkade.state.fundCalls
     expect(call?.stamp?.packet).toEqual(tlvClaimPacket())
     expect(call?.stamp?.tapTree.length).toBeGreaterThan(0)
-    expect(covclaimd.state.revealCalls).toBe(0)
-  })
-
-  it('reveals once funded, with the script-derived arkadeScript and taptree', async () => {
-    const outcome = await service.quote(quoteRequest())
-    if (!outcome.accepted) throw new Error('expected acceptance')
-    ln.armHold(paymentHash, now + 4 * 3600)
-
-    const row = await service.tick(outcome.swap.id)
-    expect(row.state).toBe('funded')
-    expect(row.revealedAt).toBe(now)
-    expect(covclaimd.state.revealCalls).toBe(1)
-    expect(covclaimd.state.lastParams).toMatchObject({ swapAddress: row.lockupAddress })
-  })
-
-  it('does NOT reveal when the client sent no claim packet — there is nothing to open', async () => {
-    const outcome = await service.quote(quoteRequest({ claimPacket: null }))
-    if (!outcome.accepted) throw new Error('expected acceptance')
-    ln.armHold(paymentHash, now + 4 * 3600)
-
-    const row = await service.tick(outcome.swap.id)
-    expect(row.state).toBe('funded')
-    expect(covclaimd.state.revealCalls).toBe(0)
-    expect(covclaimd.state.lastParams).toBeUndefined()
-    expect(row.revealedAt).toBeNull()
-  })
-
-  it('retries reveal on the next tick after a failure, without re-funding', async () => {
-    covclaimd.state.shouldFail = true
-    const outcome = await service.quote(quoteRequest())
-    if (!outcome.accepted) throw new Error('expected acceptance')
-    ln.armHold(paymentHash, now + 4 * 3600)
-
-    // tick() propagates a reveal() failure rather than swallowing it — an
-    // operator's onTickError hook needs to see covclaimd is unreachable, the
-    // same way any other tick-time fault surfaces (see send/orchestrator.ts's
-    // tickAll doc comment).
-    await expect(service.tick(outcome.swap.id)).rejects.toThrow(/covclaimd unreachable/)
-    const row = await store.get(outcome.swap.id)
-    expect(row.state).toBe('funded')
-    expect(row.revealedAt).toBeNull()
-    expect(covclaimd.state.revealCalls).toBe(1)
-    expect(arkade.state.fundCalls).toHaveLength(1)
-
-    covclaimd.state.shouldFail = false
-    const second = await service.tick(row.id)
-    expect(second.revealedAt).toBe(now)
-    expect(covclaimd.state.revealCalls).toBe(2)
-    // Still exactly one fund() call across both ticks.
-    expect(arkade.state.fundCalls).toHaveLength(1)
-  })
-
-  /**
-   * covclaimd is OPTIONAL. Configured with none, the solver funds the lockup
-   * and then simply waits for the CLIENT to claim it — which the client can,
-   * holding the covenant's `receiver` key. This is the path the corridor
-   * actually depends on today: `covclaimd:v0.0.1-rc.1` accepts a reveal
-   * against this covenant and then silently never claims.
-   */
-  it('funds and waits without a covclaimd, then settles on the client’s own claim', async () => {
-    const solo = new ReceiveSwapService({
-      acceptUnilateralGap: false,
-      store,
-      ln,
-      arkade: arkade.ops,
-      limits: LIMITS,
-      maxExposedSats: 1_000_000,
-      totalCommitted: () => store.committedSats(),
-      admission: new AdmissionControl(),
-      now: clock,
-    })
-    const outcome = await solo.quote(quoteRequest())
-    if (!outcome.accepted) throw new Error('expected acceptance')
-    ln.armHold(paymentHash, now + 4 * 3600)
-
-    const funded = await solo.tick(outcome.swap.id)
-    expect(funded.state).toBe('funded')
-    // Nothing was revealed, and nothing threw for the want of a covclaimd.
-    expect(funded.revealedAt).toBeNull()
-    expect(covclaimd.state.revealCalls).toBe(0)
-    expect(arkade.state.fundCalls).toHaveLength(1)
-
-    // The client claims the lockup itself; the solver reads P off that spend
-    // exactly as it would off covclaimd's.
-    arkade.state.outputs = []
-    arkade.state.claimPreimage = P
-    const settled = await solo.tick(funded.id)
-    expect(settled.state).toBe('settled')
-    expect(settled.preimage).toBe(hex.encode(P))
-  })
-
-  it('still reaches refunding once the deadline passes, even while covclaimd stays down', async () => {
-    covclaimd.state.shouldFail = true
-    const outcome = await service.quote(quoteRequest())
-    if (!outcome.accepted) throw new Error('expected acceptance')
-    ln.armHold(paymentHash, now + 4 * 3600)
-    await expect(service.tick(outcome.swap.id)).rejects.toThrow()
-    const funded = await store.get(outcome.swap.id)
-
-    now = funded.refundLocktime
-    const row = await service.tick(funded.id)
-    expect(row.state).toBe('refunded')
-    expect(arkade.state.refundCalls).toBe(1)
-  })
-
-  it('does not call reveal again once already revealed', async () => {
-    const outcome = await service.quote(quoteRequest())
-    if (!outcome.accepted) throw new Error('expected acceptance')
-    ln.armHold(paymentHash, now + 4 * 3600)
-    await service.tick(outcome.swap.id)
-    expect(covclaimd.state.revealCalls).toBe(1)
-
-    // Nothing claimed yet, still funded — a second tick must not re-reveal.
-    await service.tick(outcome.swap.id)
-    expect(covclaimd.state.revealCalls).toBe(1)
   })
 })
 
 describe('ReceiveSwapService.tick — claim detection and settlement', () => {
   const armAndFund = async () => {
-    const outcome = await service.quote(quoteRequest())
+    const outcome = await service.quote(quoteRequest({ claimPacket: null }))
     if (!outcome.accepted) throw new Error('expected acceptance')
     ln.armHold(paymentHash, now + 4 * 3600)
     return service.tick(outcome.swap.id)
@@ -1503,7 +1352,7 @@ describe('ReceiveSwapService.tick — claim detection and settlement', () => {
     const funded = await armAndFund()
     expect(funded.state).toBe('funded')
 
-    arkade.state.outputs = [] // covclaimd's claim landed
+    arkade.state.outputs = []
     arkade.state.claimPreimage = P
 
     const row = await service.tick(funded.id)
@@ -1876,7 +1725,6 @@ describe('ReceiveSwapService.tick — claim detection and settlement', () => {
       store,
       ln: brokenLn,
       arkade: arkade.ops,
-      covclaimd: covclaimd.client,
       limits: LIMITS,
       maxExposedSats: 1_000_000,
       totalCommitted: () => store.committedSats(),
@@ -1896,7 +1744,6 @@ describe('ReceiveSwapService.tick — claim detection and settlement', () => {
       store,
       ln: brokenLn,
       arkade: arkade.ops,
-      covclaimd: covclaimd.client,
       limits: LIMITS,
       maxExposedSats: 1_000_000,
       totalCommitted: () => store.committedSats(),
@@ -1921,7 +1768,6 @@ describe('ReceiveSwapService.tick — claim detection and settlement', () => {
       store,
       ln: brokenLn,
       arkade: arkade.ops,
-      covclaimd: covclaimd.client,
       limits: LIMITS,
       maxExposedSats: 1_000_000,
       totalCommitted: () => store.committedSats(),
@@ -1936,7 +1782,7 @@ describe('ReceiveSwapService.tick — claim detection and settlement', () => {
 
 describe('ReceiveSwapService.tick — refund path', () => {
   const armAndFund = async () => {
-    const outcome = await service.quote(quoteRequest())
+    const outcome = await service.quote(quoteRequest({ claimPacket: null }))
     if (!outcome.accepted) throw new Error('expected acceptance')
     ln.armHold(paymentHash, now + 4 * 3600)
     return service.tick(outcome.swap.id)
@@ -2318,7 +2164,6 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
       store,
       ln,
       arkade: ops,
-      covclaimd: covclaimd.client,
       limits: LIMITS,
       maxExposedSats: 1_000_000,
       totalCommitted: () => store.committedSats(),
@@ -2449,7 +2294,6 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
         ...arkade.ops,
         findLockups: async (pkScriptHex) => (pkScriptHex === SEND_PKSCRIPT ? sendLockups : arkade.state.outputs),
       },
-      covclaimd: covclaimd.client,
       limits: LIMITS,
       maxExposedSats: 1_000_000,
       totalCommitted: () => store.committedSats(),
@@ -2571,7 +2415,6 @@ describe('ReceiveSwapService.tick — coupled self-payment funding', () => {
         ...arkade.ops,
         findLockups: async (pkScriptHex) => (pkScriptHex === SEND_PKSCRIPT ? sendLockups : arkade.state.outputs),
       },
-      covclaimd: covclaimd.client,
       limits: LIMITS,
       maxExposedSats: 1_000_000,
       totalCommitted: () => store.committedSats(),
@@ -2655,7 +2498,6 @@ describe("ReceiveSwapService — the solver's own recourse window", () => {
       store,
       ln,
       arkade: { ...arkade.ops, delays: { ...DELAYS, unilateralRefundWithoutReceiverDelay } },
-      covclaimd: covclaimd.client,
       limits: LIMITS,
       totalCommitted: () => store.committedSats(),
       admission: new AdmissionControl(),
@@ -2853,7 +2695,6 @@ describe('ReceiveSwapService — block-typed timelocks', () => {
       store,
       ln,
       arkade: { ...arkade.ops, delays: BLOCK_DELAYS },
-      covclaimd: covclaimd.client,
       limits: LIMITS,
       maxExposedSats: 1_000_000,
       totalCommitted: () => store.committedSats(),

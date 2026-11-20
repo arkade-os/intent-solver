@@ -1,5 +1,5 @@
 /**
- * The receive-leg orchestrator: the one place quote/arm/fund/reveal/claim/settle
+ * The receive-leg orchestrator: the one place quote/arm/fund/claim/settle
  * is driven for `lightning:BTC->arkade:BTC` — the RECEIVE mirror of
  * `src/send/orchestrator.ts`. Same two rules apply:
  *
@@ -13,14 +13,12 @@
  * lockup, which inverts the covenant's roles (see `receiveCovenantRowFor`) and makes
  * the provider the party needing its own refund back if the swap fails.
  *
- * The six steps from docs/rfq-protocol.md §7.1.2, mapped onto states:
+ * The steps from docs/rfq-protocol.md §7.1.2, mapped onto states:
  *
  *   issue hold invoice          -> quoted
  *   wait for arm (poll)         -> armed
  *   evaluateReceiveFunding      -> (gate, at the armed->funded edge)
  *   fund the Arkade lockup      -> funded
- *   covclaimd.reveal()          -> (recorded on `funded`; idempotent, so it needs no
- *                                   state of its own to retry from)
  *   watch for the claim, settle -> claimed -> settled
  *
  * plus the failure spine: refused (no exposure), refunding / refunded (the provider's
@@ -30,7 +28,7 @@
 import { randomUUID } from 'node:crypto'
 import type { AdmissionStrategy } from '@arkade-os/solver-core/core/admissionStrategy.js'
 import { ArkAddress } from '@arkade-os/sdk'
-import { base64, hex } from '@scure/base'
+import { hex } from '@scure/base'
 import {
   evaluateReceiveFunding,
   MAX_FINAL_CLTV_BLOCKS,
@@ -58,7 +56,6 @@ import { LockupPreimageReader } from './lockupPreimage.js'
 import { applyUnrolledSpendStep } from '../unrolledSpendStep.js'
 import type { OnchainBackend } from '@arkade-os/solver-core/ports/onchain.js'
 import { FundNotSubmittedError } from './fundLockup.js'
-import type { CovclaimdClient } from './covclaimd.js'
 import type { LightningBackend } from '@arkade-os/solver-core/ports/lightning.js'
 import { EXPOSED, type ReceiveSwapRow, type ReceiveSwapStore } from '../db/receiveSwaps.js'
 import type { SendSwapRow } from '../db/swaps.js'
@@ -186,23 +183,6 @@ export interface ReceiveServiceDeps {
   arkade: ReceiveArkadeOps
   /** Reads `P` off the L1 claim of a lockup the client unrolled. The rail's own wallet in production. */
   onchain?: Pick<OnchainBackend, 'findSpendWitness'>
-  /**
-   * OPTIONAL. When set, the solver hands covclaimd the sealed packet so the
-   * claim can be pushed with the client offline. When absent (or null), the
-   * solver simply waits for the CLIENT to claim the lockup itself — which it
-   * can, holding the covenant's `receiver` key (`receiveCovenantRowFor` maps
-   * `receiverPubkey: row.payoutPubkey`).
-   *
-   * It CAN claim this covenant as of `covclaimd:v0.0.1-rc.5`, proven on regtest by
-   * `test/e2e/covclaimdClaim.e2e.test.ts`. NOT rc.4: that build predates the
-   * emulator's mandatory `PrevArkTx`, so its claim is refused and retried
-   * forever — `docs/runbook.md` § covclaimd carries the floor and the symptom.
-   *
-   * Still optional for deployment reasons rather than capability: `whenFunded` does not
-   * care who spent the lockup — it recovers `P` from whatever witness it finds — so
-   * running without covclaimd costs only the client's need to be online.
-   */
-  covclaimd?: CovclaimdClient | null
   limits: Limits
   /**
    * Whether this deployment accepts funding into the unilateral-gap window — see
@@ -287,11 +267,9 @@ export interface ReceiveQuoteRequest {
   amountSats: number
   /** exact-in (default): the fee comes out of the payout. exact-out: the give is solved up from the corridor's fee. */
   amountSide?: 'from' | 'to'
-  /** The client's Arkade address — where the funds land once covclaimd claims. */
   payoutAddress: string
   /** The client's own x-only key — the covenant's `receiver` role on this leg. */
   payoutPubkey: string
-  /** The client's preimage, ECIES-sealed to covclaimd. Opaque here. */
   claimPacket: string | null
   rfqId?: string
 }
@@ -302,6 +280,7 @@ export type QuoteRefusal =
   | 'fee_consumes_swap'
   | 'payout_below_dust'
   | 'invalid_payout_address'
+  | 'invalid_claim_packet'
   | 'duplicate_swap'
   | 'provider_at_capacity'
   /**
@@ -493,6 +472,9 @@ export class ReceiveSwapService {
           senderPkScript: hex.decode(arkade.solverRefundPkScript),
         },
       })
+      if (request.claimPacket !== null && !claimPacketStamp(request.claimPacket, script)) {
+        return { accepted: false, reason: 'invalid_claim_packet' }
+      }
 
       // `E` is chosen here, not merely inspected at funding time. The final CLTV
       // delta is the one part of the htlc's deadline that is ours to set, and it
@@ -1021,8 +1003,6 @@ export class ReceiveSwapService {
       throw error
     }
     const fundMs = Math.round(performance.now() - fundStarted)
-    // After the broadcast: a crash between leaves it unset and the next pass reveals, which is the safe direction.
-    if (stamp) await store.patch(row.id, { stamped_at: this.now() })
     // Keyed to THIS row's own broadcast, and spend-aware for the same reason
     // adoption above is: a claim landing inside the poll window would empty the
     // spendable view and hide a funding that certainly happened. Matching on
@@ -1078,21 +1058,8 @@ export class ReceiveSwapService {
     const fundedSpendable = outputs.some((o) => o.txid === row.arkadeLockupTxid && o.vout === row.arkadeLockupVout)
 
     if (fundedSpendable) {
-      // The refund-deadline check comes BEFORE the reveal attempt, not after:
-      // revealToCovclaimd can throw (covclaimd unreachable), and if that check
-      // ran second it would never be reached while covclaimd stays down —
-      // silently defeating the whole reason SETTLE_SAFETY_MARGIN exists, which
-      // is that the provider's own refund path must open regardless of
-      // whether settlement is still going well. Past the deadline there is
-      // also no point revealing any more: `whenRefunding`'s own recheck still
-      // catches a claim that lands right at the boundary. Read AFTER the lockup.
       if (await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip)) {
         return store.transition(row.id, 'funded', 'refunding', {})
-      }
-      // No covclaimd to reveal to, or no packet to reveal: nothing to do but
-      // wait for the client's own claim, which reads the same either way.
-      if (row.revealedAt === null && this.deps.covclaimd && row.claimPacket !== null) {
-        await this.revealToCovclaimd(row)
       }
       return false
     }
@@ -1102,7 +1069,7 @@ export class ReceiveSwapService {
     // one that got claimed — a row adopted out of a crashed funding attempt
     // (see `whenArmed`) may have more than one outpoint in its history, and the
     // preimage only has to appear in ONE of their spends for the swap to be
-    // complete. Mirrors `receive/onchainOrchestrator.ts`'s `whenAwaitingClaim`.
+    // complete.
     // Falls back to the recorded outpoint if the historical read comes back
     // empty, so indexer lag never narrows this to less than it was before.
     const historical = await arkade.findLockupOutpoints(row.pkScript)
@@ -1131,30 +1098,6 @@ export class ReceiveSwapService {
     return false
   }
 
-  /** Hand the sealed claim packet to covclaimd. Only called when both a covclaimd and a packet exist. Idempotent to retry — see this file's own top comment. */
-  private async revealToCovclaimd(row: ReceiveSwapRow): Promise<void> {
-    const { store, covclaimd } = this.deps
-    if (!covclaimd || row.claimPacket === null) return
-    // `stampedAt`, NOT the packet shape: an adopted output carries nothing the
-    // shape promises, and skipping the reveal on it strands the swap.
-    if (row.stampedAt !== null) return
-    const script = covenantScriptFromRow(receiveCovenantRowFor(row))
-    if (!script.nonInteractiveClaimArkadeScript) {
-      // Unreachable: every receive-leg row is quoted with the solver's own
-      // key present, so the extended (eight-leaf) script — the one that
-      // builds this leaf — is always what gets built. Guarded so a bad edit
-      // fails loudly rather than silently skipping the reveal.
-      throw new Error(`swap ${row.id}: covenant script has no nonInteractiveClaim leaf to reveal against`)
-    }
-    await covclaimd.reveal({
-      swapAddress: row.lockupAddress,
-      ciphertext: row.claimPacket,
-      arkadeScript: base64.encode(script.nonInteractiveClaimArkadeScript),
-      taptree: hex.encode(script.encode()),
-    })
-    await store.patch(row.id, { revealed_at: this.now() })
-  }
-
   private async whenClaimed(row: ReceiveSwapRow): Promise<boolean> {
     const { store, ln } = this.deps
     if (!row.preimage) {
@@ -1180,7 +1123,7 @@ export class ReceiveSwapService {
     if (coupled) {
       return store.transition(row.id, 'claimed', 'settled', {})
     }
-    // Pre-committed BEFORE the call, mirroring `revealed_at`. `settleHold` is
+    // Pre-committed BEFORE the call. `settleHold` is
     // not reversible and the CAS below it is a separate write, so a process
     // that dies in between leaves no memory that the sats were collected — and
     // the next tick calls `settleHold` again. On a backend that treats a

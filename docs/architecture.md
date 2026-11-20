@@ -79,25 +79,25 @@ sequenceDiagram
     participant N as nostr relay
     participant S as Solver
     participant P as Payer (Lightning)
-    participant C as covclaimd
+    participant A as Arkade
+    participant C as Client's claim service
     U->>N: encrypted RFQ { hash H, dest, ClaimPacket }
     N-->>S: solver reads
     S-->>N: hold invoice for H
     N-->>U: invoice
     U->>P: hand invoice to payer (user OFFLINE from here)
     P->>S: pays → HTLC HELD
-    S->>S: fund covenant VHTLC + ClaimPacket in extension
-    C->>C: decrypt P, push claim (covenant pins payout to the user's script)
+    S->>A: fund covenant VHTLC + ClaimPacket in extension
+    A-->>C: observe the funding extension
+    C->>A: decrypt P and claim to the user's script
     Note over C,U: sats land on the user
-    C-->>S: P public in the claim witness
+    A-->>S: P public in the claim witness
     S->>P: settle held HTLC → solver collects
 ```
 
-The solver carries the ClaimPacket blindly — it is sealed to covclaimd and the
-solver cannot decrypt `P`. The covenant pins the payout to the user's script, so
-neither the solver nor covclaimd can redirect the funds. (That covenant —
-`enforcePayTo` behind a tweaked emulator key — is the exact mechanism this repo
-already uses for send-leg refunds, proven on mainnet and regtest.)
+This flow shows an offline claim. The client chooses the claim service and seals
+the packet to it. The covenant pins that claim to the client's payout script.
+A client can also omit the packet and claim the lockup itself with the receiver key.
 
 ## Diagram vs implementation, element by element
 
@@ -110,7 +110,7 @@ already uses for send-leg refunds, proven on mainnet and regtest.)
 | Send: open claim — ANY solver claims with `P`, keeps deposit      | **Rescoped: spot-market feature**   | Today the claim leaf carries the quoted solver's key, and under RFQ it stays that way. The open-claim leaf belongs to the spot-pair flow; its deposit/fee economics are still to design                                                                                               |
 | Receive: RFQ over relay, both sides outbound-only                 | **Implemented**                     | The relay ingress + outbound WS client carry the `rfq_*` family on all three corridors (the only wire family — the pre-RFQ `ln_send_*` shape was removed unserved)                                                                                                                    |
 | Receive: hold invoice for `H`                                     | **Implemented**                     | `createHoldInvoice`/`getHoldState`/`settleHold` in the LN port + adapters, driven by `packages/solver-corridors/src/receive/orchestrator.ts`                                                                                                                                          |
-| Receive: ClaimPacket sealed to covclaimd; covclaimd pushes claim  | **Implemented, covclaimd optional** | Wire protocol + ECIES documented in `environment.md`; covclaimd is a separate service, deliberately — this provider never accepts a preimage. The client holds the covenant's `receiver` key and can claim its own lockup, so a deployment runs correctly with covclaimd unset        |
+| Receive: client-supplied ClaimPacket carried in the funding extension | **Implemented, packet optional** | Claim services read the packet from Arkade. The client can also claim with its receiver key. See [Lightning receive RFQ](./rfq-protocol.md#712-lightningbtc-arkadebtc--implemented-today) |
 | Receive: covenant pins payout to the user's script                | **Implemented**                     | Same covenant as send-leg refunds; the receive corridors fund through it                                                                                                                                                                                                              |
 | "nostr relay" specifically                                        | **Implemented**                     | The Nostr codec (`packages/solver-transport/src/relay/nostr.ts`) is the default relay dialect: NIP-01 `REQ`/`EVENT`/`CLOSE`, NIP-44-sealed directed traffic, wallet identity as the transport key. The dev broker framing remains behind `RELAY_PROTOCOL=dev` for integration tests   |
 

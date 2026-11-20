@@ -1,19 +1,12 @@
-// The RECEIVE-side reference client for `lightning:BTC->arkade:BTC`: it keeps
-// P, sends H = sha256(P) with P sealed to covclaimd, and claims the lockup.
-//
 // That claim spends the COLLABORATIVE leaf — no CSV, no recovery — so the
 // ordering is the contract: VERIFY SCRIPT -> VERIFY AMOUNT -> SIGN. An address
 // the client did not derive says nothing about who may spend it, and
 // `findLockups` returns EVERY output at a script public since quote time, so
 // only `quote.to_amount` says what was promised.
 
-import { createCipheriv, randomBytes } from 'node:crypto'
 import { ArkAddress } from '@arkade-os/sdk'
-import { secp256k1 } from '@noble/curves/secp256k1.js'
-import { hkdf } from '@noble/hashes/hkdf.js'
 import { sha256 } from '@noble/hashes/sha2.js'
-import { utf8ToBytes } from '@noble/hashes/utils.js'
-import { base64, hex } from '@scure/base'
+import { hex } from '@scure/base'
 import {
   CovenantSwapScript,
   claimSwapScript,
@@ -47,27 +40,7 @@ export class LockupAmountMismatch extends Error {
   }
 }
 
-// Seal `P` to covclaimd, `ephPub(33) || nonce(12) || ciphertext` base64. The
-// mistake nothing local detects: the shared secret is the X coordinate ONLY
-// (RFC 5903 §9) — the compressed point's parity byte is dropped.
-export const sealToCovclaimd = (preimage, covclaimdPubKeyHex) => {
-  const ephemeralPriv = secp256k1.utils.randomSecretKey()
-  const ephemeralPub = secp256k1.getPublicKey(ephemeralPriv, true)
-  const shared = secp256k1.getSharedSecret(ephemeralPriv, hex.decode(covclaimdPubKeyHex), true).slice(1)
-  const key = hkdf(sha256, shared, ephemeralPub, utf8ToBytes('covclaimd/preimage/v1'), 32)
-
-  const nonce = randomBytes(12)
-  const cipher = createCipheriv('aes-256-gcm', key, nonce)
-  cipher.setAAD(ephemeralPub)
-  const sealed = Buffer.concat([cipher.update(preimage), cipher.final(), cipher.getAuthTag()])
-
-  const wire = new Uint8Array(ephemeralPub.length + nonce.length + sealed.length)
-  wire.set(ephemeralPub, 0)
-  wire.set(nonce, ephemeralPub.length)
-  wire.set(sealed, ephemeralPub.length + nonce.length)
-  return base64.encode(wire)
-}
-
+/** @param {{rfqId: string, amountSats: number, paymentHash: string, payoutAddress: string, payoutPubkey: string, claimPacket?: string}} request */
 export const buildReceiveRequest = ({ rfqId, amountSats, paymentHash, payoutAddress, payoutPubkey, claimPacket }) => ({
   v: 1,
   type: 'rfq_request',
@@ -79,7 +52,7 @@ export const buildReceiveRequest = ({ rfqId, amountSats, paymentHash, payoutAddr
     payment_hash: paymentHash,
     payout_address: payoutAddress,
     payout_pubkey: payoutPubkey,
-    claim_packet: claimPacket,
+    ...(claimPacket === undefined ? {} : { claim_packet: claimPacket }),
   },
 })
 

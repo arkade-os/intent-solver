@@ -16,7 +16,6 @@
 (*     receive/arkadeOps.ts    refundWithoutReceiverSwapScript and         *)
 (*                             assertScriptMatchesRow                      *)
 (*     receive/fundLockup.ts   the funding send and its coin reservation   *)
-(*     receive/covclaimd.ts    the optional autonomous claimer             *)
 (*   packages/solver-core/src/                                             *)
 (*     core/receive.ts         MIN_SETTLE_WINDOW, SETTLE_SAFETY_MARGIN,    *)
 (*                             UNILATERAL_RECOURSE_MARGIN (gate (d)),      *)
@@ -99,11 +98,6 @@
 (*    means "a hash-verified P is on disk".  findClaimPreimage never        *)
 (*    returns an unverified witness (arkade/wallet.ts), so a                *)
 (*    separate variable could only disagree with the state.                 *)
-(*  - covclaimd.  `revealed_at` is a data fact, not a state, reveal() is    *)
-(*    idempotent, and the shipped cli.ts passes no covclaimd at all.        *)
-(*    WHO spent the lockup is invisible to whenFunded — it recovers P from  *)
-(*    whatever witness it finds — so covclaimd and the client's own claim   *)
-(*    are one action, `ClientClaims`.                                       *)
 (*  - The reservation ledger (arkade/reservations.ts) and the coin          *)
 (*    selection in fundLockup.ts.  Those are a liveness concern (a settle   *)
 (*    racing a funding fails one with VTXO_ALREADY_SPENT) and a second      *)
@@ -519,7 +513,7 @@ ArmHtlc(s, e) ==
     /\ UNCHANGED << funds, settled, claimReadable, aged, fundedAt, unrolledAt >>
 
 \* THE ADVERSARIAL SPEND.  Either the client's own `claim` leaf (P + receiver +
-\* server) or covclaimd's `nonInteractiveClaim` leaf (server + emulator, pinned
+\* server) or the `nonInteractiveClaim` leaf (server + emulator, pinned
 \* to the client's payout script).  NEITHER CARRIES A TIMELOCK: both are
 \* spendable from the instant the lockup is funded and remain spendable
 \* forever, including after E and after refund_locktime.  That unbounded
@@ -824,10 +818,6 @@ RecordFund(w, s) ==
 
 (***** whenFunded **********************************************************)
 
-\* whenFunded.  The refund-deadline check runs BEFORE the reveal
-\* attempt on purpose: revealToCovclaimd can throw, and a check placed after it
-\* would never be reached while covclaimd stays down, silently defeating the
-\* whole reason SETTLE_SAFETY_MARGIN exists.
 FundedToRefunding(w, s) ==
     /\ Saw(w, s, "funded")
     /\ ~Spent(s)                            \* findLockups returned outputs
@@ -841,10 +831,6 @@ FundedToRefunding(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED << funds, htlcE, settled, claimReadable, fundedAt, unrolledAt >>
 
-\* whenFunded.  Someone spent the lockup and findClaimPreimage
-\* recovered a HASH-VERIFIED P.  This service does not care WHO — the client,
-\* covclaimd, or nobody at all — which is precisely why the corridor is correct
-\* with covclaimd absent.
 FundedSeesClaim(w, s) ==
     /\ Saw(w, s, "funded")
     /\ Spent(s)                             \* findLockups returned []
@@ -960,10 +946,6 @@ SettleHold(w, s) ==
     /\ UNCHANGED << clock, st, conf, serverUp >>
     /\ UNCHANGED << funds, htlcE, claimReadable, aged, fundedAt, unrolledAt >>
 
-\* The crash-recovery retry.  There is no `settled_at` data fact analogous to
-\* `revealed_at`, so a resumed process CANNOT tell "settle not yet attempted"
-\* from "settle already succeeded".  Whether re-settling an already-settled
-\* hold is a no-op or an error is a property of the BACKEND, not of the row.
 SettleRetry(w, s) ==
     /\ Saw(w, s, "claimed")
     /\ settled[s]
@@ -1040,8 +1022,7 @@ RefundAccepted(w, s) ==
     /\ UNCHANGED << clock, st, serverUp >>
     /\ UNCHANGED LrVars
 
-\* refund_ark_txid is written ONLY by this CAS — there is no pre-committed data
-\* fact for the refund push, unlike `revealed_at` for the reveal.  A crash here
+\* refund_ark_txid is written only by this CAS. A crash here
 \* therefore makes an already-refunded swap indistinguishable from an
 \* inexplicable one, and RefundingEmpty parks it in terminal `stuck`.  That is
 \* a bookkeeping loss the code accepts; guessing the other way would be a money
@@ -1386,8 +1367,7 @@ Perms == Permutations(Swaps) \cup Permutations(Workers)
 (*                                       invariant can see, because the    *)
 (*                                       money is fine and only the row    *)
 (*                                       lies.  Fix: a pre-committed       *)
-(*                                       settle_attempted_at, mirroring    *)
-(*                                       revealed_at.                      *)
+(*                                       settle_attempted_at.              *)
 (*                                                                         *)
 (* COVERAGE.  A `-coverage` run of the green cfg fires 24 of the 30        *)
 (* actions (re-measured 2026-08-30 on the gate-(d) model).  The six that   *)

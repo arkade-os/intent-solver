@@ -14,8 +14,7 @@ name: E2E
 # WHAT RUNS lives in `.github/e2e-groups.json`, not here: one matrix leg per
 # GROUP, a group being the corridors that can share one stack configuration.
 # The split is forced by the stack, not chosen for parallelism — an asset in the
-# wallet changes what a sats corridor can spend, covclaimd sweeps lockups out
-# from under a test that wanted to claim them itself, and the Lightning legs
+# wallet changes what a sats corridor can spend, and the Lightning legs
 # need a funded `boltz-lnd` with a channel that only the `boltz` profile opens.
 #
 # A new `test/e2e/*.e2e.test.ts` that names no group would simply run nowhere
@@ -102,7 +101,7 @@ jobs:
               [{ name: "dispatch", files: ($f | split(" ")),
                  profiles: (if $p == "" then "emulator" else $p end),
                  why: "ad-hoc dispatch",
-                 mintAsset: false, lnd: false, covclaimdImage: "",
+                 mintAsset: false, lnd: false,
                  evmChain: false, arkdTimelocks: "seconds" }]')
           else
             # Split and trim in the shell, not in jq: a group name is `[a-z0-9-]`
@@ -192,15 +191,6 @@ jobs:
         timeout-minutes: 20
         run: pnpm build
 
-      # Two env groups, and neither is optional.
-      #
-      # COVCLAIMD_IMAGE is passed rather than left to the compose default:
-      # `regtest.mjs` DROPS the container outright when the variable is empty,
-      # so an unset one silently produces a stack with no daemon in it and a
-      # covclaimd test that fails for a reason it does not name. The TAG lives
-      # in the group file next to the group that wants it, so a version bump is
-      # one edit and not a flag here with a tag there.
-      #
       # The ARKD_* delays are the runbook's documented deployment ("a bare
       # `node regtest.mjs start` produces a stack this service cannot use at
       # all"). Below 512 they are BLOCK counts, and the receive orchestrator
@@ -213,7 +203,6 @@ jobs:
         working-directory: arkade-regtest
         timeout-minutes: 25
         env:
-          COVCLAIMD_IMAGE: ${{ matrix.covclaimdImage }}
           SECONDS_TYPED: ${{ matrix.arkdTimelocks == 'seconds' }}
         run: |
           set -eu
@@ -370,7 +359,7 @@ jobs:
         run: |
           docker ps -a --format 'table {{.Names}}\t{{.Status}}' || true
           for c in bitcoin bitcoin-miner fulcrum mempool_api mempool_web nbxplorer \
-                   arkd-wallet arkd emulator covclaimd boltz boltz-lnd boltz-fulmine \
+                   arkd-wallet arkd emulator boltz boltz-lnd boltz-fulmine \
                    lnd pricefeed lsw-anvil; do
             echo "===== logs: $c ====="
             docker logs --tail 80 "$c" 2>&1 || true

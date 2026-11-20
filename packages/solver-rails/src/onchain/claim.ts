@@ -3,7 +3,7 @@
  * leg's mirror of `src/onchain/refund.ts`. On send, the CLIENT claims and the
  * solver refunds; on receive the roles swap (`buildOnchainHtlc` is fully
  * role-agnostic either way — see `htlc.ts`), and it is the SOLVER doing the
- * claiming, once covclaimd's Arkade-side claim has made `P` public.
+ * claiming, once the Arkade-side claim has made `P` public.
  *
  * Signing goes through the same `OnchainSigner` port as `refund.ts` — no raw
  * key touches orchestrator code here either.

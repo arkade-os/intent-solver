@@ -12,9 +12,8 @@
  * - `quoted`    hold invoice minted on H; nothing armed
  * - `armed`     an incoming HTLC is held against the invoice; `E` known
  * - `funded`    the provider's own Arkade lockup is broadcast — the exposed
- *               state; covclaimd has been (or is being) handed the sealed
- *               claim packet and this watches for its autonomous claim
- * - `claimed`   covclaimd's claim landed on Arkade; `P` extracted and verified
+ *               state; the solver watches for a claim of that lockup
+ * - `claimed`   a claim landed; `P` extracted and verified
  * - `settled`   the held HTLC was settled with `P` — done, provider paid
  * - `refunding` `refund_locktime` passed with no claim observed; pushing the
  *               provider's own covenant refund back to itself (a late-but-valid
@@ -58,14 +57,7 @@ const TRANSITION_COLUMNS = new Set([
  * `stuck` above all, which is the reason that override exists — and has to
  * record the audit fact without a transition.
  */
-const PATCH_COLUMNS = new Set([
-  'revealed_at',
-  'stamped_at',
-  'settle_attempted_at',
-  'arkade_lockup_value',
-  'refund_ark_txid',
-  'unrolled_refund',
-])
+const PATCH_COLUMNS = new Set(['settle_attempted_at', 'arkade_lockup_value', 'refund_ark_txid', 'unrolled_refund'])
 
 export interface ReceiveSwapRow {
   id: string
@@ -95,13 +87,11 @@ export interface ReceiveSwapRow {
   /** `E`: the deadline the held HTLC must be settled by. Null until `armed`. */
   htlcExpiresAt: number | null
 
-  /** The client's Arkade address — where the funds land once covclaimd claims. */
   payoutAddress: string
   /** `payoutAddress` decoded, hex — the `nonInteractiveClaim` leaf's pinned destination. */
   payoutPkScript: string
   /** The client's own x-only key — the covenant's `receiver` role on this leg (their interactive-claim fallback). */
   payoutPubkey: string
-  /** The client's preimage, ECIES-sealed to covclaimd. Opaque here — forwarded verbatim, never decrypted. */
   claimPacket: string | null
 
   /**
@@ -138,16 +128,10 @@ export interface ReceiveSwapRow {
   arkadeLockupTxid: string | null
   arkadeLockupVout: number | null
   arkadeLockupValue: number | null
-  /** Set once `covclaimd.reveal()` has succeeded — a data fact, not a state, so a failed attempt retries without re-funding. */
-  revealedAt: number | null
-  /** Set once THIS service funded a stamped lockup — `claim_packet` says what a
-   *  funding WOULD carry, only this says what an adopted one actually did. */
-  stampedAt: number | null
   /**
    * When `settleHold` was CALLED — pre-committed, BEFORE the call, so a
    * resumed process can tell "not yet attempted" apart from "already
-   * succeeded". Mirrors {@link revealedAt}, and exists for the same reason:
-   * the side effect is not reversible and the row is the only memory of it.
+   * succeeded".
    *
    * @see ReceiveSwapService.whenClaimed
    */
@@ -200,8 +184,6 @@ const RECEIVE_SWAP_COLUMNS = `
   arkade_lockup_txid             TEXT,
   arkade_lockup_vout             INTEGER,
   arkade_lockup_value            INTEGER,
-  revealed_at                    INTEGER,
-  stamped_at                     INTEGER,
   settle_attempted_at            INTEGER,
   preimage                      TEXT,
   refund_ark_txid                TEXT,
@@ -277,8 +259,6 @@ const toRow = (raw: Raw): ReceiveSwapRow => ({
   arkadeLockupTxid: text(raw.arkade_lockup_txid),
   arkadeLockupVout: numberOrNull(raw.arkade_lockup_vout),
   arkadeLockupValue: numberOrNull(raw.arkade_lockup_value),
-  revealedAt: numberOrNull(raw.revealed_at),
-  stampedAt: numberOrNull(raw.stamped_at),
   settleAttemptedAt: numberOrNull(raw.settle_attempted_at),
   preimage: text(raw.preimage),
   refundArkTxid: text(raw.refund_ark_txid),
@@ -382,7 +362,6 @@ export class ReceiveSwapStore extends BaseSwapStore<ReceiveSwapRow, ReceiveSwapS
   private async migrate(): Promise<void> {
     await addColumns(this.driver, 'receive_swap', [
       ['payout_sats', 'INTEGER'],
-      ['stamped_at', 'INTEGER'],
       ['settle_attempted_at', 'INTEGER'],
       ['non_interactive_parameters', 'TEXT'],
       ['fund_started_at', 'INTEGER'],

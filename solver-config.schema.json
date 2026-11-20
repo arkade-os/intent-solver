@@ -31,9 +31,6 @@
             "unilateralExitDelay": {
               "type": "number"
             },
-            "covclaimdUrl": {
-              "type": "string"
-            },
             "poolAutoMint": {
               "type": "boolean"
             },

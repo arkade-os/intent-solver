@@ -33,8 +33,7 @@ const isLoopback = (hostname: string): boolean => {
 
 /**
  * `{PROTOCOL}://{PUBLIC_KEY}@{HOST}{PATH}/{PROJECT_ID}`; the deprecated
- * `:{SECRET_KEY}` half is DISCARDED. Plaintext is refused off-loopback, as
- * `COVCLAIMD_URL` does: it would put the auth key on the wire.
+ * `:{SECRET_KEY}` half is DISCARDED.
  */
 export const parseSentryDsn = (raw: string): SentryDsn => {
   let url: URL
