@@ -3,6 +3,7 @@ import { UnixSeconds } from '@arkade-os/solver-core/domain/shared/time.js'
 import { Preimage } from '@arkade-os/solver-core/domain/swap/hashlock.js'
 import { Reference } from '@arkade-os/solver-core/domain/swap/leg.js'
 import type { LegStatus, SpendStatus } from '@arkade-os/solver-core/domain/swap/observation.js'
+import type { Swap } from '@arkade-os/solver-core/domain/swap/swap.js'
 import type { ReceiveBackend } from '@arkade-os/solver-core/ports/lightning.js'
 import type { ReceiveArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 import type { ChainTipProvider } from '@arkade-os/solver-rails/onchain/chainTip.js'
@@ -28,11 +29,15 @@ const NOTHING: LegStatus = {
 }
 
 /** The client's held Lightning payment, as our node shows it. */
-export const holdStatus = async (ln: Pick<ReceiveBackend, 'getHoldState'>, row: ReceiveSwapRow): Promise<LegStatus> => {
+export const holdStatus = async (
+  ln: Pick<ReceiveBackend, 'getHoldState'>,
+  row: ReceiveSwapRow,
+  swap: Swap,
+): Promise<LegStatus> => {
   const hold = await ln.getHoldState(row.paymentHash).catch((error: unknown) => {
     // Before the payout the read is needed, so its failure is the caller's. After it the node may have dropped
     // the invoice; the rules then go by the timeout saved with the lock.
-    if (row.state === 'quoted' || row.state === 'armed') throw error
+    if (swap.to.state === 'pending') throw error
     return null
   })
   switch (hold?.status) {
@@ -52,7 +57,7 @@ export const holdStatus = async (ln: Pick<ReceiveBackend, 'getHoldState'>, row: 
     case 'settled':
       return { ...NOTHING, funding: 'exact', matured: true, claim: 'landed' }
     case 'cancelled':
-      return { ...NOTHING, spent: { by: 'refund' } }
+      return { ...NOTHING, spent: { by: 'refund' }, refund: 'landed' }
   }
 }
 
@@ -64,14 +69,12 @@ export interface LockupStatusDeps {
 }
 
 /** Our payout on Arkade, as the indexer shows it. */
-export const lockupStatus = async (deps: LockupStatusDeps, row: ReceiveSwapRow): Promise<LegStatus> => {
+// `row` gives the contract as quoted; what happened since is read from the swap, never from the row.
+export const lockupStatus = async (deps: LockupStatusDeps, row: ReceiveSwapRow, swap: Swap): Promise<LegStatus> => {
   const { arkade, preimages, chainTip, now } = deps
   const history = await arkade.findLockupOutpoints(row.pkScript)
-  const recorded =
-    row.arkadeLockupTxid === null || row.arkadeLockupVout === null
-      ? null
-      : { txid: row.arkadeLockupTxid, vout: row.arkadeLockupVout }
-  const lockup = recorded ?? adoptFunding(history, row.payoutSats)
+  const lockup = recordedLockup(swap, history) ?? adoptFunding(history, row.payoutSats)
+  const refund = swap.to.reference('refund')
   const deadlines = {
     refundOpen: await refundDeadlineReached(row.refundLocktime, now, chainTip),
     refundOpensAt: UnixSeconds.of(await refundDeadlineSeconds(row.refundLocktime, now, chainTip, 'read the lockup')),
@@ -86,10 +89,10 @@ export const lockupStatus = async (deps: LockupStatusDeps, row: ReceiveSwapRow):
   const unspent = (await arkade.findLockups(row.pkScript)).some(same) || history.find(same)?.unrolled === true
   // Our refund can land although its response never reached us; arkd still has it and can tell.
   const lostRefund =
-    preimage === null && !unspent && row.refundArkTxid === null && row.state === 'refunding'
+    preimage === null && !unspent && refund === null && swap.to.state === 'refunding'
       ? ((await arkade.finalizePendingRefund?.(receiveCovenantRowFor(row))) ?? null)
       : null
-  const refunded = row.refundArkTxid !== null || lostRefund !== null
+  const refunded = refund !== null || lostRefund !== null
   const spent: SpendStatus =
     preimage !== null
       ? { by: 'claim', preimage: Preimage.of(hex.encode(preimage)) }
@@ -104,4 +107,14 @@ export const lockupStatus = async (deps: LockupStatusDeps, row: ReceiveSwapRow):
     spent,
     refund: !unspent && preimage === null && refunded ? 'landed' : 'none',
   }
+}
+
+type Outpoint = { readonly txid: string; readonly vout: number }
+
+// The reference is `txid:vout` once the output was seen, and a bare txid straight after the payout was sent.
+const recordedLockup = (swap: Swap, history: readonly Outpoint[]): Outpoint | null => {
+  const reference = swap.to.reference('funding')
+  if (reference === null) return null
+  const [txid = '', vout] = reference.split(':')
+  return vout === undefined ? (history.find((o) => o.txid === txid) ?? null) : { txid, vout: Number(vout) }
 }

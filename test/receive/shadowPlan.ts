@@ -100,8 +100,8 @@ export const shadowPlan = (
       // Its own reader: the legacy one reports an unrolled lockup once, and the shadow must not use that up.
       const preimages = new LockupPreimageReader(deps.arkade, deps.onchain, () => undefined)
       const [from, to] = await Promise.all([
-        holdStatus(deps.ln, row),
-        lockupStatus({ arkade: deps.arkade, preimages, chainTip: deps.chainTip, now }, row),
+        holdStatus(deps.ln, row, swap),
+        lockupStatus({ arkade: deps.arkade, preimages, chainTip: deps.chainTip, now }, row, swap),
       ])
       const seen = {
         now: UnixSeconds.of(now()),
