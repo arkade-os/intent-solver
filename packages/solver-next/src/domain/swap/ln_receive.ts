@@ -1,3 +1,4 @@
+import { UnixSeconds } from '../shared/time.js'
 import type { Observation } from './observation.js'
 import { OnFailure, Reason, type CheckResult, type Policies } from './plan.js'
 import type { Swap } from './swap.js'
@@ -17,6 +18,15 @@ export const REFUND_RETRY_WINDOW = 6 * 60 * MINUTE
 
 /** How long a spent payout may show no claim before that counts as missing. */
 export const SPEND_READ_GRACE = 2 * MINUTE
+
+/** After the invoice is no longer payable, this much time is left before our refund opens. */
+export const MIN_CLAIM_WINDOW = 90 * MINUTE
+/** How long the invoice we hand out can be paid for. */
+export const INVOICE_WINDOW = MAX_REFUND_HORIZON - MIN_CLAIM_WINDOW
+/** The longest hold a stock Lightning payer agrees to, in blocks. Past it the invoice cannot be paid. */
+export const MAX_FINAL_CLTV_BLOCKS = 2016
+// A floor for how fast blocks come, not an estimate: assuming slower blocks would count time we may not have.
+const SECONDS_PER_BLOCK = 150
 
 export interface LnReceiveConfig {
   /** The operator accepts paying out even when the refund without the server would open too late. */
@@ -79,3 +89,38 @@ export const lnReceivePolicies = (config: LnReceiveConfig): Policies => ({
   // It times out on its own.
   canRelease: () => false,
 })
+
+/** How long a payer must hold their payment for, at the least, so that every check in `canFill` can pass. */
+export const minHoldSeconds = (refundAloneDelay: number, config: LnReceiveConfig): number =>
+  Math.max(
+    MIN_SETTLE_WINDOW,
+    MAX_REFUND_HORIZON + SETTLE_SAFETY_MARGIN,
+    config.acceptRefundAloneGap ? 0 : refundAloneDelay + REFUND_ALONE_MARGIN,
+  )
+
+export interface QuoteTiming {
+  /** When our refund of the payout opens. The contract is built from it and it never changes. */
+  readonly refundAt: UnixSeconds
+  /** When the invoice stops being payable. */
+  readonly invoiceExpiresAt: UnixSeconds
+  /** The hold the invoice asks its payer for, in blocks. */
+  readonly minFinalCltvBlocks: number
+}
+
+/**
+ * The times a quote commits to, from one reading of the clock. Null when the hold we would have to ask for
+ * is longer than a payer agrees to: such an invoice is never paid, so it is better not to hand it out.
+ */
+export const quoteTiming = (
+  now: UnixSeconds,
+  refundAloneDelay: number,
+  config: LnReceiveConfig,
+): QuoteTiming | null => {
+  const minFinalCltvBlocks = Math.ceil(minHoldSeconds(refundAloneDelay, config) / SECONDS_PER_BLOCK)
+  if (minFinalCltvBlocks > MAX_FINAL_CLTV_BLOCKS) return null
+  return {
+    refundAt: UnixSeconds.of(now + MAX_REFUND_HORIZON),
+    invoiceExpiresAt: UnixSeconds.of(now + INVOICE_WINDOW),
+    minFinalCltvBlocks,
+  }
+}

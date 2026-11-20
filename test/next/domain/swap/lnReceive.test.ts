@@ -2,10 +2,13 @@ import { describe, expect, it } from 'vitest'
 import * as legacy from '@arkade-os/solver-core/core/receive.js'
 import { rawDelaySeconds } from '@arkade-os/solver-core/core/timelocks.js'
 import {
+  INVOICE_WINDOW,
   lnReceivePolicies,
+  MAX_FINAL_CLTV_BLOCKS,
   MAX_REFUND_HORIZON,
   MIN_SETTLE_WINDOW,
   REFUND_ALONE_MARGIN,
+  quoteTiming,
   REFUND_RETRY_WINDOW,
   SPEND_READ_GRACE,
   SETTLE_SAFETY_MARGIN,
@@ -13,7 +16,11 @@ import {
 import type { LegStatus, Observation } from '@arkade-os/solver-next/domain/swap/observation.js'
 import { plan } from '@arkade-os/solver-next/domain/swap/plan.js'
 import { Quote } from '@arkade-os/solver-next/domain/swap/quote.js'
-import { EMPTY_LOCKUP_GRACE, REFUND_CENSORSHIP_GRACE } from '@arkade-os/solver-corridors/receive/orchestrator.js'
+import {
+  DEFAULT_HOLD_INVOICE_WINDOW,
+  EMPTY_LOCKUP_GRACE,
+  REFUND_CENSORSHIP_GRACE,
+} from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import { btc, quoted, ref, t } from '../support.js'
 
 const NOW = 1_800_000_000
@@ -161,5 +168,27 @@ describe('LN receive rules', () => {
       outcome: 'stuck',
       reason: 'funding response lost; refund deadline reached with no lockup adopted — review for a stray lockup',
     })
+  })
+
+  it('commits a quote to the same times and the same hold as the legacy corridor', () => {
+    expect(INVOICE_WINDOW).toBe(DEFAULT_HOLD_INVOICE_WINDOW)
+    expect(MAX_FINAL_CLTV_BLOCKS).toBe(legacy.MAX_FINAL_CLTV_BLOCKS)
+    for (const acceptGap of [false, true]) {
+      // 1536 and 9216 are delays in seconds, 28 one in blocks; the last asks for more than a payer agrees to.
+      for (const delay of [1536, 9216, 28, 400_384]) {
+        const blocks = legacy.minFinalCltvBlocksFor(delay, acceptGap)
+        const timing = quoteTiming(t(NOW), rawDelaySeconds(delay), { acceptRefundAloneGap: acceptGap })
+        if (blocks > legacy.MAX_FINAL_CLTV_BLOCKS) {
+          expect(timing, `${delay} ${acceptGap}`).toBeNull()
+        } else {
+          expect(timing, `${delay} ${acceptGap}`).toEqual({
+            refundAt: NOW + legacy.MAX_REFUND_HORIZON,
+            invoiceExpiresAt: NOW + DEFAULT_HOLD_INVOICE_WINDOW,
+            minFinalCltvBlocks: blocks,
+          })
+        }
+      }
+    }
+    expect(quoteTiming(t(NOW), rawDelaySeconds(400_384), { acceptRefundAloneGap: false })).toBeNull()
   })
 })
