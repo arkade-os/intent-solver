@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { Hashlock } from '@arkade-os/solver-next/domain/swap/hashlock.js'
 import type { Swap } from '@arkade-os/solver-next/domain/swap/swap.js'
-import { HeldPayment } from '@arkade-os/solver-next/infrastructure/lightning/held_payment.js'
+import { HeldPayment } from '@arkade-os/solver-next/application/legs/held_payment.js'
 import { FakeLightningBackend } from '@arkade-os/solver-rails-fake/ln/fake/backend.js'
 import { btc, quoted, ref, SECRET, t } from '../../domain/support.js'
 

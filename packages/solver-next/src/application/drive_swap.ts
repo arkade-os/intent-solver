@@ -6,7 +6,7 @@ import { NOT_SEEN, type Observation } from '../domain/swap/observation.js'
 import { Action, legsToRead, plan, type Decision, type Policies, type Recorded } from '../domain/swap/plan.js'
 import type { Swap } from '../domain/swap/swap.js'
 import type { SwapRepository } from '../domain/swap/swap_repo.js'
-import { SendStatus, type RailService } from '../ports/rail.js'
+import { SendStatus, type RailService } from './rail_service.js'
 
 /** What a decision needs to know besides the two rails. */
 export type SwapContext = Pick<Observation, 'peer' | 'keyCurrent' | 'approval' | 'ownInvoice'>

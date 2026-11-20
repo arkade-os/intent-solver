@@ -13,7 +13,7 @@ import type {
   LockupOutput,
   Outpoint,
 } from '../../ports/arkade.js'
-import { SendStatus, type RailService, type SendResult } from '../../ports/rail.js'
+import { SendStatus, type RailService, type SendResult } from '../rail_service.js'
 
 const NOT_SENT: SendResult = { status: SendStatus.NotSent }
 const UNKNOWN: SendResult = { status: SendStatus.Unknown }

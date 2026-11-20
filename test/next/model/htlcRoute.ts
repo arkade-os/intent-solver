@@ -8,7 +8,7 @@ import { Quote } from '@arkade-os/solver-next/domain/swap/quote.js'
 import { Swap } from '@arkade-os/solver-next/domain/swap/swap.js'
 import type { SwapEvent } from '@arkade-os/solver-next/domain/swap/swap_event.js'
 import { SwapState } from '@arkade-os/solver-next/domain/swap/swap_state.js'
-import type { RailService, SendResult } from '@arkade-os/solver-next/ports/rail.js'
+import type { RailService, SendResult } from '@arkade-os/solver-next/application/rail_service.js'
 import { btc, ref, SECRET, t, terms } from '../domain/support.js'
 import type { Choice, Run } from './explore.js'
 

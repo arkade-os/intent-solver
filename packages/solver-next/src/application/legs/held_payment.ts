@@ -5,7 +5,7 @@ import { Reference, type Side } from '../../domain/swap/leg.js'
 import { NOT_SEEN, type LegStatus } from '../../domain/swap/observation.js'
 import type { Swap } from '../../domain/swap/swap.js'
 import { HoldStatus, type HeldPayments } from '../../ports/lightning.js'
-import { SendStatus, type RailService, type SendResult } from '../../ports/rail.js'
+import { SendStatus, type RailService, type SendResult } from '../rail_service.js'
 
 const NOT_SENT: SendResult = { status: SendStatus.NotSent }
 const UNKNOWN: SendResult = { status: SendStatus.Unknown }

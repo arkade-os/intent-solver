@@ -2,7 +2,7 @@ import { hex } from '@scure/base'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { Hashlock } from '@arkade-os/solver-next/domain/swap/hashlock.js'
 import type { Swap } from '@arkade-os/solver-next/domain/swap/swap.js'
-import { ArkadeLockup } from '@arkade-os/solver-next/infrastructure/arkade/lockup.js'
+import { ArkadeLockup } from '@arkade-os/solver-next/application/legs/arkade_lockup.js'
 import type { ArkadeLockups, LockupContract, LockupOutpoint } from '@arkade-os/solver-next/ports/arkade.js'
 import { btc, quoted, ref, SECRET, t } from '../../domain/support.js'
 

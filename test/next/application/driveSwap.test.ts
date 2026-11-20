@@ -4,7 +4,7 @@ import type { Side } from '@arkade-os/solver-next/domain/swap/leg.js'
 import type { LegStatus } from '@arkade-os/solver-next/domain/swap/observation.js'
 import type { Policies } from '@arkade-os/solver-next/domain/swap/plan.js'
 import type { Swap } from '@arkade-os/solver-next/domain/swap/swap.js'
-import type { RailService, SendResult } from '@arkade-os/solver-next/ports/rail.js'
+import type { RailService, SendResult } from '@arkade-os/solver-next/application/rail_service.js'
 import { quoted, ref, SECRET, t, terms } from '../domain/support.js'
 import { MemorySwaps } from '../support/memorySwaps.js'
 
