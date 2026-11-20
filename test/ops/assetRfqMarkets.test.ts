@@ -266,6 +266,7 @@ describe('assetCardMarketsFromPolicy', () => {
       offerBounds: { min: 0n, max: 0n },
       rfqMarkets: rfq,
       chargesDeliveredCarrier: undefined,
+      rfqCarrierPricedByDefault: false,
     })
     expect(card).toMatchObject({
       sellBase: { min: 0n, max: 0n },
@@ -277,7 +278,12 @@ describe('assetCardMarketsFromPolicy', () => {
 
   /** A maker pricing from the card nets the same charge we do — where we take offers. */
   it('advertises the delivered-carrier charge only when offers are served and it is on', () => {
-    const served = { pricing: [pricing()], offerMarkets: [{ a: null, b: USDA }], offerBounds: { min: 5n, max: 20n } }
+    const served = {
+      pricing: [pricing()],
+      offerMarkets: [{ a: null, b: USDA }],
+      offerBounds: { min: 5n, max: 20n },
+      rfqCarrierPricedByDefault: false,
+    }
     expect(
       assetCardMarketsFromPolicy({ ...served, rfqMarkets: [], chargesDeliveredCarrier: true })[0]!
         .chargesDeliveredCarrier,
@@ -295,8 +301,27 @@ describe('assetCardMarketsFromPolicy', () => {
         offerBounds: { min: 0n, max: 0n },
         rfqMarkets: rfqOnly,
         chargesDeliveredCarrier: true,
+        rfqCarrierPricedByDefault: false,
       })[0]!.chargesDeliveredCarrier,
     ).toBeUndefined()
+  })
+
+  it('advertises the delivered-carrier charge an RFQ-only market prices, by its carrier mode', () => {
+    const flagged = (carrierMode: AssetMarketPricingView['carrierMode'], rfqCarrierPricedByDefault: boolean) =>
+      assetCardMarketsFromPolicy({
+        pricing: [view({ carrierMode })],
+        offerMarkets: [],
+        offerBounds: { min: 0n, max: 0n },
+        // `cli card` builds these with no dust, so a zero carrierSats must not hide a priced mode.
+        rfqMarkets: assetRfqMarketsFrom([view({ carrierMode })], { dustSats: 0n, pricedByDefault: false }),
+        chargesDeliveredCarrier: undefined,
+        rfqCarrierPricedByDefault,
+      })[0]!.chargesDeliveredCarrier
+
+    expect(flagged('priced', false)).toBe(true)
+    expect(flagged('inherit', true)).toBe(true)
+    expect(flagged('inherit', false)).toBeUndefined()
+    expect(flagged('off', true)).toBeUndefined()
   })
 
   it('keeps a direction served by offers when the RFQ policy disables it', () => {
@@ -307,6 +332,7 @@ describe('assetCardMarketsFromPolicy', () => {
       offerBounds: { min: 5n, max: 20n },
       rfqMarkets: rfq,
       chargesDeliveredCarrier: undefined,
+      rfqCarrierPricedByDefault: false,
     })
     expect(card).toMatchObject({
       sellBase: { min: 1n, max: 10n ** 12n },

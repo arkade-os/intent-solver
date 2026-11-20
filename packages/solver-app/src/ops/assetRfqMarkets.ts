@@ -102,10 +102,11 @@ export interface AssetRfqCarrier {
   pricedByDefault: boolean
 }
 
-export const carrierSatsFor = (mode: CarrierMode, carrier: AssetRfqCarrier): bigint => {
-  const priced = mode === 'inherit' ? carrier.pricedByDefault : mode === 'priced'
-  return priced ? carrier.dustSats : 0n
-}
+const carrierPriced = (mode: CarrierMode, pricedByDefault: boolean): boolean =>
+  mode === 'inherit' ? pricedByDefault : mode === 'priced'
+
+export const carrierSatsFor = (mode: CarrierMode, carrier: AssetRfqCarrier): bigint =>
+  carrierPriced(mode, carrier.pricedByDefault) ? carrier.dustSats : 0n
 
 /**
  * A closed direction becomes `{ min: 0n, max: 0n }` — registered, refusing by
@@ -249,6 +250,8 @@ export const assetCardMarketsFromPolicy = (args: {
    * and `/api/card` both publish through here and the CLI silently omitted it once,
    * which prices a maker without a charge we apply — funded, then refused. */
   chargesDeliveredCarrier: boolean | undefined
+  /** `ASSET_CARRIER_PRICING`. Keyed on the mode, not `carrierSats`: `cli card` builds its RFQ markets with no dust. */
+  rfqCarrierPricedByDefault: boolean
 }): AssetCardMarket[] =>
   assetCardMarkets(args.pricing, args.offerBounds).flatMap((market) => {
     const pricing = args.pricing.find(
@@ -258,12 +261,17 @@ export const assetCardMarketsFromPolicy = (args: {
     const rfq = args.rfqMarkets.find((candidate) => candidate.base === market.base && candidate.quote === market.quote)
     if (!servesOffers && !rfq) return []
 
+    // One flag for both paths, so set it when either charges: a preview that
+    // skips a charge we take is refused by the client's floor on every quote.
+    const charges =
+      (servesOffers && args.chargesDeliveredCarrier === true) ||
+      (rfq !== undefined && carrierPriced(pricing.carrierMode, args.rfqCarrierPricedByDefault))
     const sellBase = unionBounds(servesOffers ? market.sellBase : undefined, rfq?.sellBase)
     const buyBase = unionBounds(servesOffers ? market.buyBase : undefined, rfq?.buyBase)
     return [
       {
         ...market,
-        ...(servesOffers && args.chargesDeliveredCarrier === true ? { chargesDeliveredCarrier: true } : {}),
+        ...(charges ? { chargesDeliveredCarrier: true } : {}),
         sellBase,
         buyBase,
         sellBaseFeeFlat: sellBase && sellBase.max > 0n ? market.sellBaseFeeFlat : 0n,
