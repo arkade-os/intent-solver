@@ -912,6 +912,7 @@ export const createServices = async (
         approvalGate: gateFor('arkade offer fill'),
         // A store opened below on purpose (markets resolve before any file); called only after discovery.
         rfqHolds: (pkScript) => assetRfqStore.heldByLiveNegotiation(pkScript),
+        solverPubkey: arkadeOps.providerPubkey,
         onError: (id, error) => log(`offer ${id} failed:`, error instanceof Error ? error.message : String(error)),
         // Not a failure either: nothing was submitted, so the row waits a sweep.
         onDeferred: (id, error) => log(`offer ${id} deferred:`, error instanceof Error ? error.message : String(error)),

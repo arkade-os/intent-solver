@@ -1272,6 +1272,45 @@ describe('an offer an RFQ negotiation already holds', () => {
   })
 })
 
+describe('a directed offer packet', () => {
+  const OURS = 'e1'.repeat(32)
+  const directedTo = (taker: string) => ({ ...found, offer: offer({ taker: hex.decode(taker) }) })
+
+  it('is skipped silently when it names another taker: no row, no refusal, no fill', async () => {
+    const refused: unknown[] = []
+    const settle = vi.fn(async () => 'f'.repeat(64))
+    const { store, service } = await build({
+      solverPubkey: OURS,
+      settle,
+      onRefused: (outpoint, reason) => void refused.push({ outpoint, reason }),
+    })
+
+    expect(await service.consider(directedTo('d2'.repeat(32)))).toEqual({
+      fill: false,
+      reason: 'offer_directed_elsewhere',
+    })
+    await service.tickAll()
+
+    expect(await store.listNonTerminal()).toHaveLength(0)
+    expect(refused).toEqual([])
+    expect(settle).not.toHaveBeenCalled()
+  })
+
+  it('skips every directed offer when this solver key was never wired', async () => {
+    const { service } = await build()
+    expect(await service.consider(directedTo(OURS))).toEqual({ fill: false, reason: 'offer_directed_elsewhere' })
+  })
+
+  it('is considered like any other offer when it names this solver', async () => {
+    const { service } = await build({ solverPubkey: OURS })
+    expect(await service.consider(directedTo(OURS))).toEqual({ fill: true, id: 'fill-1' })
+  })
+
+  it('is wired the identity key the card advertises', () => {
+    expect(servicesSource).toMatch(/rfqHolds: [^\n]+\n\s+solverPubkey: arkadeOps\.providerPubkey,/)
+  })
+})
+
 /** Both remaining timings rejoin the deferral budget: this loop has no
  * action-time deposit gate, and `lost` here cannot be undone. */
 describe('tickAll on a lost race caught before the submission', () => {

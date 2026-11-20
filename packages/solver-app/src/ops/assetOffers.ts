@@ -146,6 +146,8 @@ export interface AssetOfferDeps {
   /** Whether a live asset-RFQ negotiation of ours holds this script: its deposit carries a
    * public offer packet, so it arrives here too, and both paths would race to fill it. */
   rfqHolds?: (offerPkScript: string) => Promise<boolean>
+  /** This solver's x-only key, hex. A directed packet naming another taker is skipped; absent, every one is. */
+  solverPubkey?: string
   onError?: (id: string, error: unknown) => void
   /**
    * A fill put back for a later sweep because the float was pinned or short.
@@ -204,9 +206,11 @@ const termsOf = (row: OfferFillRow): OfferFillInput => ({
 const ourOwnFill = (error: { spentBy?: string }, row: OfferFillRow): boolean =>
   error.spentBy !== undefined && row.fillTxid !== null && error.spentBy === row.fillTxid.toLowerCase()
 
-/** The decision, plus the row id when the intent was recorded. `offer_held_by_rfq` never
- * reaches `onRefused`, so it stays off the `OfferFillRefusal` union forks consume. */
-export type ConsiderOutcome = (OfferFillDecision | { fill: false; reason: 'offer_held_by_rfq' }) & { id?: string }
+/** The decision, plus the row id when the intent was recorded. Neither skip reaches `onRefused`,
+ * so both stay off the `OfferFillRefusal` union forks consume. */
+export type ConsiderOutcome = (
+  OfferFillDecision | { fill: false; reason: 'offer_held_by_rfq' } | { fill: false; reason: 'offer_directed_elsewhere' }
+) & { id?: string }
 
 export class AssetOfferService {
   private readonly newId: () => string
@@ -324,6 +328,10 @@ export class AssetOfferService {
   }
 
   private async considerInner({ offer, txid, vout }: DiscoveredOffer): Promise<ConsiderOutcome> {
+    // Silently, like `offer_held_by_rfq`: another solver's directed deposit is routine traffic.
+    if (offer.taker !== undefined && hex.encode(offer.taker) !== this.deps.solverPubkey) {
+      return { fill: false, reason: 'offer_directed_elsewhere' }
+    }
     const outpoint = `${txid}:${vout}`
     if (!this.deps.serverPubkey && this.contractVersions.size < OFFER_CONTRACT_VERSIONS.length) {
       return this.refuse(
