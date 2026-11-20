@@ -38,6 +38,6 @@ describe('stateCell', () => {
 
   it('wraps inside its table cell instead of widening the column', () => {
     const css = readFileSync(new URL('../../packages/solver-app/src/admin/static/styles.css', import.meta.url), 'utf8')
-    expect(css).toMatch(/td div\.at-risk \{\s*max-width: 56ch;\s*white-space: normal;/)
+    expect(css).toMatch(/td div\.at-risk \{\s*max-width: 56ch;\s*white-space: normal;\s*overflow-wrap: anywhere;/)
   })
 })
