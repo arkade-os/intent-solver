@@ -89,7 +89,7 @@ export const swapFromReceiveRow = (row: ReceiveSwapRow, failedFrom: Lived | null
 }
 
 /** Reads `receive_swap` as swaps. Writes still go through the legacy orchestrator. */
-export class LnReceiveSwaps implements Pick<SwapRepository, 'findByRfqId' | 'findLiveByHash'> {
+export class LnReceiveSwaps implements Pick<SwapRepository, 'findByRfqId' | 'findByHash'> {
   constructor(private readonly store: ReceiveSwapStore) {}
 
   async findByRfqId(rfqId: RfqId): Promise<Swap | null> {
@@ -97,7 +97,7 @@ export class LnReceiveSwaps implements Pick<SwapRepository, 'findByRfqId' | 'fin
     return row === null ? null : this.load(row)
   }
 
-  async findLiveByHash(hashlock: Hashlock): Promise<readonly Swap[]> {
+  async findByHash(hashlock: Hashlock): Promise<readonly Swap[]> {
     const row = await this.store.findLiveByPaymentHash(hashlock)
     return row === null ? [] : [await this.load(row)]
   }

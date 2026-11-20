@@ -8,20 +8,22 @@ export class SpreadPricing {
 
   private constructor(
     readonly fee: Fee,
-    /** Limits on the amount the client gives. */
     readonly limits: Limits,
+    /** Which amount the limits apply to. Lightning send limits the invoice, which is the payout. */
+    readonly limitsOn: QuoteSide,
   ) {}
 
-  static of(fee: Fee, limits: Limits): SpreadPricing {
-    return new SpreadPricing(fee, limits)
+  static of(fee: Fee, limits: Limits, limitsOn: QuoteSide = QuoteSide.From): SpreadPricing {
+    return new SpreadPricing(fee, limits, limitsOn)
   }
 
   // The range is checked before the fee: an amount in range that the fee eats is `fee_consumes_swap`, not out of range.
   // `minOutput` is the smallest output the destination can hold; zero where it has no such floor.
   quote(amount: bigint, side: QuoteSide, minOutput = 0n): PricedQuote {
     const give = side === QuoteSide.To ? this.fee.giveFor(amount) : amount
-    if (this.limits.breach(give) !== null) return PricedQuote.refused(QuoteRefusal.AmountOutOfRange)
     const payout = side === QuoteSide.To ? amount : this.fee.payoutFor(give)
+    const limited = this.limitsOn === QuoteSide.To ? payout : give
+    if (this.limits.breach(limited) !== null) return PricedQuote.refused(QuoteRefusal.AmountOutOfRange)
     if (payout <= 0n) return PricedQuote.refused(QuoteRefusal.FeeConsumesSwap)
     return payout < minOutput ? PricedQuote.refused(QuoteRefusal.PayoutBelowDust) : { ok: true, give, payout }
   }

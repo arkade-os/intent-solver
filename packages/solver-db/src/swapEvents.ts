@@ -1,5 +1,5 @@
 import { UniqueConstraintError, type SqlDriver } from '@arkade-os/solver-core/core/driver.js'
-import { Conflict } from '@arkade-os/solver-core/domain/shared/error.js'
+import { Conflict, RuleViolated } from '@arkade-os/solver-core/domain/shared/error.js'
 import type { SwapId } from '@arkade-os/solver-core/domain/shared/ids.js'
 import { Swap } from '@arkade-os/solver-core/domain/swap/swap.js'
 import type { SwapEvent } from '@arkade-os/solver-core/domain/swap/swap_event.js'
@@ -35,6 +35,9 @@ export interface StoredSwapEvent {
   readonly seq: number
   readonly event: SwapEvent
 }
+
+// D1 binds at most 100 values per statement, and one event takes five.
+const MAX_EVENTS_PER_WRITE = 20
 
 const decoded = (raw: Raw): SwapEvent => decodeSwapEvent(raw.swap_id, raw.type, Number(raw.at), raw.body)
 
@@ -103,6 +106,11 @@ export class SwapEvents implements Pick<SwapRepository, 'add' | 'update' | 'get'
   private async append(swap: Swap): Promise<void> {
     const events = swap.changes
     if (events.length === 0) return
+    if (events.length > MAX_EVENTS_PER_WRITE) {
+      throw new RuleViolated(`swap ${swap.id}: ${events.length} events in one write, at most ${MAX_EVENTS_PER_WRITE}`)
+    }
+    // Refuse now what could not be read back later: one unreadable event would block the swap and every worker.
+    for (const event of events) decodeSwapEvent(swap.id, event.type, event.at, encodeSwapEvent(event))
     const rows = events.map(() => '(?, ?, ?, ?, ?)').join(', ')
     const params = events.flatMap((event, i) => [
       swap.id,

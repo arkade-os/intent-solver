@@ -36,7 +36,6 @@ export class Exposure {
 
   /** `available` null is an unreadable balance, and that refuses. */
   reserveFloat(required: Amount, owed: Amount, available: Amount | null): Exposure | null {
-    positive('float requirement', required)
     if (available === null || owed.plus(this.reservedFloat).plus(required).gt(available)) return null
     return new Exposure(this.reserved, this.reservedFloat.plus(required), this.pools)
   }

@@ -84,6 +84,31 @@ describe('booking a swap', () => {
     expect(bookSwap(quoted, { ...quoted, lost: true }, t(4))).toEqual([])
   })
 
+  it('undoes a write-off when the payout is collected or comes back after all', () => {
+    const lost = { ...paid, lost: true }
+    const soFar = [...bookSwap(quoted, paid, t(2)), ...bookSwap(paid, lost, t(3))]
+    expect(balances([...soFar, ...bookSwap(lost, settled, t(4))])).toEqual({
+      'assets:arkade:btc#btc': 10_000n,
+      'assets:lightning:btc#btc': -9_973n,
+      'income:swap:arkade:btc->lightning:btc#btc': -27n,
+    })
+    const returned = { ...lost, to: { ...lost.to, returned: true } }
+    expect(balances([...soFar, ...bookSwap(lost, returned, t(4))])).toEqual({})
+  })
+
+  it('refuses a history that could never close', () => {
+    const collectedOnly = { ...quoted, from: { ...quoted.from, collected: true } }
+    expect(() => bookSwap(quoted, collectedOnly, t(2))).toThrow('never close')
+    const both = { ...settled, to: { ...settled.to, returned: true } }
+    expect(() => bookSwap(settled, both, t(4))).toThrow('never close')
+  })
+
+  it('books a cost that becomes known later, and none for a swap that never paid out', () => {
+    const free = { ...settled, cost: btc(0n) }
+    expect(bookSwap(free, { ...settled, cost: btc(5n) }, t(4)).map((e) => e.key)).toEqual(['swap:swap-1:cost'])
+    expect(bookSwap(null, { ...quoted, cost: btc(5n) }, t(1))).toEqual([])
+  })
+
   it('keeps a flat fee in the asset given and a spread in the asset paid', () => {
     const cross: SwapBooking = {
       ...quoted,

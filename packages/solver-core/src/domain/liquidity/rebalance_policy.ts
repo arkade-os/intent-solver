@@ -68,6 +68,11 @@ export class RebalancePolicy {
     return this.limits.maxDebit.gte(debit) && this.limits.dailyDebit.gte(debit.plus(debitedToday))
   }
 
+  /** What an automatic transfer may draw from: the source balance minus the reserve. Null when the reserve is not covered. */
+  spendable(sourceBalance: Amount): Amount | null {
+    return sourceBalance.gte(this.limits.reserve) ? sourceBalance.minus(this.limits.reserve) : null
+  }
+
   feesAllowed(net: Amount, debit: Amount): boolean {
     if (net.isZero || !debit.gte(net)) throw new InvalidValue('source debit must cover a positive net credit')
     const fees = debit.minus(net)

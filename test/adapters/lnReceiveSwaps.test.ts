@@ -134,9 +134,9 @@ describe('receive_swap read as a swap', () => {
   it('finds a swap by its request and by its hash, and nothing refused by hash', async () => {
     expect((await swaps.findByRfqId(RfqId.of(RFQ)))?.id).toBe('swap-1')
     expect(await swaps.findByRfqId(RfqId.of('00'.repeat(32)))).toBeNull()
-    expect((await swaps.findLiveByHash(Hashlock.of(HASH))).map((s) => s.id)).toEqual(['swap-1'])
+    expect((await swaps.findByHash(Hashlock.of(HASH))).map((s) => s.id)).toEqual(['swap-1'])
     await store.fail('swap-1', 'quoted', 'gone')
-    expect(await swaps.findLiveByHash(Hashlock.of(HASH))).toEqual([])
+    expect(await swaps.findByHash(Hashlock.of(HASH))).toEqual([])
   })
 })
 

@@ -83,11 +83,15 @@ export class Withdrawal {
     this.props = { ...this.props, fee }
   }
 
-  sent(reference: string): void {
-    if (reference === '' || this.props.fee === null)
+  /** `fee` is for a withdrawal that went out before its fee was recorded, found again from `uncertain`. */
+  sent(reference: string, fee: Amount | null = null): void {
+    const known = fee ?? this.props.fee
+    if (reference === '' || known === null)
       throw this.error(InvalidValue, 'a sent withdrawal needs its fee and reference')
+    if (known.asset !== this.props.amount.asset)
+      throw this.error(InvalidValue, `fee must be in ${this.props.amount.asset}`)
     this.move(WithdrawalState.Sent)
-    this.props = { ...this.props, reference }
+    this.props = { ...this.props, reference, fee: known }
   }
 
   /** It may or may not have gone out; a reference, when there is one, is what an operator checks. */

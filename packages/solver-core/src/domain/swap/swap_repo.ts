@@ -16,8 +16,9 @@ export interface SwapRepository {
 
   get(id: SwapId): Promise<Swap | null>
   findByRfqId(rfqId: RfqId): Promise<Swap | null>
-  // A list: one payment between two of our clients is two live swaps on one hash.
-  findLiveByHash(hashlock: Hashlock): Promise<readonly Swap[]>
+  // Every swap on the hash that was not refused, finished ones included: a hash whose preimage may be public
+  // must never be quoted again. A list, because one payment between two of our clients is two swaps on one hash.
+  findByHash(hashlock: Hashlock): Promise<readonly Swap[]>
   findLiveByScript(script: string): Promise<Swap | null>
   // A list: one transaction can fund several swaps.
   findByFundingTx(funding: Reference): Promise<readonly Swap[]>

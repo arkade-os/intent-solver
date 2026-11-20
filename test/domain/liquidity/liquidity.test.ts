@@ -51,6 +51,12 @@ describe('rebalancing', () => {
     cooldownSeconds: 600,
   }
   const policy = RebalancePolicy.of(limits)
+
+  it('keeps the reserve out of what an automatic transfer may draw', () => {
+    const reserved = RebalancePolicy.of({ ...limits, reserve: btc(50_000n) })
+    expect(reserved.spendable(btc(120_000n))).toEqual(btc(70_000n))
+    expect(reserved.spendable(btc(49_999n))).toBeNull()
+  })
   const target = { minimum: btc(100_000n), target: btc(300_000n) }
   const low = Inventory.of(ARKADE, btc(40_000n), target)
   const lower = Inventory.of(LIGHTNING, btc(10_000n), target)
@@ -120,6 +126,18 @@ describe('transfer', () => {
       debit: btc(100_400n),
     })
 
+  it('takes the funding transaction again while pending, and can finish straight from submitting', () => {
+    const transfer = quote()
+    transfer.submit(t(1_000))
+    transfer.accepted('first')
+    transfer.accepted('replaced')
+    expect(transfer.snapshot).toMatchObject({ state: 'pending', fundingTxid: 'replaced' })
+    const fast = quote()
+    fast.submit(t(1_000))
+    fast.complete(btc(100_000n))
+    expect(fast.state).toBe('completed')
+  })
+
   it('charges on submit and completes once the credit covers the net', () => {
     const transfer = quote()
     expect(transfer.fee).toEqual(btc(400n))
@@ -183,6 +201,14 @@ describe('withdrawal', () => {
     expect(withdrawal.snapshot.reference).toBe('maybe-txid')
     withdrawal.fail()
     expect(withdrawal.state).toBe('failed')
+  })
+
+  it('is marked sent from uncertain once its fee is found', () => {
+    const withdrawal = prepare()
+    withdrawal.uncertain('txid')
+    withdrawal.sent('txid', btc(300n))
+    expect(withdrawal.snapshot).toMatchObject({ state: 'sent', reference: 'txid' })
+    expect(withdrawal.debit).toEqual(btc(50_300n))
   })
 
   it('cannot be sent straight from an uncertain preparation, which has no fee', () => {

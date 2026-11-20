@@ -157,6 +157,18 @@ describe('spread pricing', () => {
   })
 })
 
+describe('limits on the payout', () => {
+  // Lightning send bounds the invoice, as evaluateSendAcceptance does.
+  const pricing = SpreadPricing.of(Fee.of(25, 2n), Limits.of(500n, 50_000n), 'to')
+
+  it('accepts the largest invoice and refuses one below the minimum', () => {
+    expect(pricing.quote(50_000n, 'to')).toMatchObject({ ok: true, payout: 50_000n })
+    expect(pricing.quote(50_001n, 'to')).toEqual({ ok: false, reason: 'amount_out_of_range' })
+    expect(pricing.quote(499n, 'to')).toEqual({ ok: false, reason: 'amount_out_of_range' })
+    expect(pricing.quote(500n, 'to')).toMatchObject({ ok: true })
+  })
+})
+
 describe('the destination floor', () => {
   const pricing = SpreadPricing.of(Fee.of(100, 10n), Limits.of(1n, 1_000_000n))
 

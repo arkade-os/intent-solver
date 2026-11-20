@@ -1,3 +1,4 @@
+import { InvalidValue } from '../shared/error.js'
 import { Amount } from '../shared/amount.js'
 import type { Asset } from '../shared/asset.js'
 import { Endpoint } from '../shared/endpoint.js'
@@ -44,7 +45,7 @@ const closing = ({ route, from, to, income = [] }: SwapBooking): JournalLine[] =
     return [
       JournalLine.debit(Account.swapClearing(given.asset), given),
       ...(fee.isZero ? [] : [JournalLine.credit(Account.swapIncome(route, given.asset), fee)]),
-      JournalLine.credit(Account.trading(given.asset), given.minus(fee)),
+      ...(given.equals(fee) ? [] : [JournalLine.credit(Account.trading(given.asset), given.minus(fee))]),
       JournalLine.debit(Account.trading(paid.asset), paid.plus(spread)),
       ...(spread.isZero ? [] : [JournalLine.credit(Account.swapIncome(route, paid.asset), spread)]),
       JournalLine.credit(Account.swapClearing(paid.asset), paid),
@@ -70,9 +71,19 @@ export const bookSwap = (before: SwapBooking | null, after: SwapBooking, at: Uni
   const book = (fact: string, lines: JournalLine[]): void => {
     if (lines.length > 0) entries.push(JournalEntry.of(`swap:${swapId}:${fact}`, at, lines))
   }
+  if (from.collected && (!to.paidOut || to.returned)) {
+    throw new InvalidValue(`swap ${swapId}: collected with no payout out; these books would never close`)
+  }
   const holdingTo = Account.holding(to.endpoint)
   const clearingTo = Account.swapClearing(to.amount.asset)
 
+  // A written-off payout that is collected or comes back after all: undo the write-off first.
+  if (writtenOff(before) && !writtenOff(after)) {
+    book('recovered', [
+      JournalLine.debit(clearingTo, to.amount),
+      JournalLine.credit(Account.swapExpense(route, to.amount.asset), to.amount),
+    ])
+  }
   if (to.paidOut && !before?.to.paidOut)
     book('paid-out', [JournalLine.debit(clearingTo, to.amount), JournalLine.credit(holdingTo, to.amount)])
   if (to.returned && !before?.to.returned)
@@ -91,7 +102,8 @@ export const bookSwap = (before: SwapBooking | null, after: SwapBooking, at: Uni
       JournalLine.credit(clearingTo, to.amount),
     ])
   }
-  if (cost !== null && !cost.isZero && (before === null || before.cost === null)) {
+  const costBooked = before !== null && before.to.paidOut && before.cost !== null && !before.cost.isZero
+  if (to.paidOut && cost !== null && !cost.isZero && !costBooked) {
     book('cost', [
       JournalLine.debit(Account.swapExpense(route, cost.asset), cost),
       JournalLine.credit(Account.holding(Endpoint.of(to.endpoint.rail, cost.asset)), cost),

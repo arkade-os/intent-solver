@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { Conflict } from '@arkade-os/solver-core/domain/shared/error.js'
+import { Conflict, InvalidValue } from '@arkade-os/solver-core/domain/shared/error.js'
 import { SwapId } from '@arkade-os/solver-core/domain/shared/ids.js'
 import { ContractVersion } from '@arkade-os/solver-core/domain/swap/leg.js'
 import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
+import { decodeSwapEvent } from '@arkade-os/solver-db/swapEventCodec.js'
 import { SwapEvents } from '@arkade-os/solver-db/swapEvents.js'
 import { bothLocked, btc, quoted, ref, SECRET, t, terms, usdt } from '../domain/support.js'
 
@@ -87,5 +88,18 @@ describe('swap events as the source of truth', () => {
     expect(rest.map(({ event }) => `${event.id}:${event.type}`)).toEqual(['swap-1:LegAdvanced'])
     await events.advance('ledger', 1)
     expect(await events.cursor('ledger')).toBe(2)
+  })
+
+  it('refuses to store an event it could not read back', async () => {
+    const swap = quoted()
+    swap.lock('from', t(1_001), '' as ReturnType<typeof ref>)
+    await expect(events.add(swap)).rejects.toThrow(InvalidValue)
+    expect(await events.get(terms.id)).toBeNull()
+  })
+
+  it('reads a body written before a field was added', () => {
+    const old = decodeSwapEvent('swap-1', 'LegAdvanced', 1_001, JSON.stringify({ side: 'from', state: 'locked' }))
+    expect(old).toMatchObject({ references: {}, preimage: null, expiresAt: null })
+    expect(decodeSwapEvent('swap-1', 'OfferFilled', 1_001, '{}')).toMatchObject({ fill: null })
   })
 })

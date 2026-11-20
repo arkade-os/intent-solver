@@ -26,10 +26,10 @@ export const TransferState = {
 
 export type TransferState = ValueOf<typeof TransferState>
 
-// `submitting` can only resolve to pending or to "we do not know": a debit may have left.
+// From `submitting` a debit may have left, so it never goes back to `quoted` or `cancelled`.
 const EDGES: Record<TransferState, readonly TransferState[]> = {
   quoted: ['submitting', 'cancelled'],
-  submitting: ['pending', 'needs_reconciliation'],
+  submitting: ['pending', 'needs_reconciliation', 'completed', 'refunded'],
   // Reconciliation can find the transfer already finished, either way.
   needs_reconciliation: ['pending', 'completed', 'refunded'],
   pending: ['completed', 'refunded'],
@@ -96,7 +96,8 @@ export class Transfer {
   /** The source took it: `fundingTxid` is the proof, and reconciliation arrives here with one too. */
   accepted(fundingTxid: string): void {
     if (fundingTxid === '') throw this.error(InvalidValue, 'an accepted transfer needs its funding transaction')
-    this.move(TransferState.Pending)
+    // Reconciliation reports the transaction on every pass while the transfer is pending.
+    if (this.state !== TransferState.Pending) this.move(TransferState.Pending)
     this.props = { ...this.props, fundingTxid }
   }
 
