@@ -59,7 +59,10 @@ export const holdStatus = async (
       // Not `funded`: a settled payment is no longer held, and only a held one may be paid out against.
       return { ...NOT_SEEN, claim: 'landed' }
     case 'cancelled':
-      return { ...NOT_SEEN, spent: { by: 'refund' }, refund: 'landed' }
+      // Before the payout a payment that went back is simply not held any more.
+      return swap.to.state === 'pending'
+        ? { ...NOT_SEEN, refund: 'landed' }
+        : { ...NOT_SEEN, spent: { by: 'refund' }, refund: 'landed' }
   }
 }
 
