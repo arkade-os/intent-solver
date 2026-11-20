@@ -264,7 +264,8 @@ export const plan = (swap: Swap, seen: Observation, policies: Policies): Decisio
     case 'refunding':
       // Either `to` is still locked while `from` unwinds, or our refund never reached the rail.
       if (swap.to.state === 'locked') return seen.to.refundOpen ? { do: Action.Refund, side: Side.To } : WAIT
-      if (seen.to.refund !== TxStatus.None) return WAIT
+      // Nothing is left to refund once the lockup is spent; what spent it is settled above.
+      if (seen.to.refund !== TxStatus.None || seen.to.spent.by !== SpentBy.Nobody) return WAIT
       return policies.onRefundFailed(swap, seen) === OnFailure.Retry
         ? { do: Action.Refund, side: Side.To }
         : fail(SwapOutcome.Stuck, 'the refund of the to leg never reached the rail')

@@ -1,4 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vitest'
+import { writeFileSync } from 'node:fs'
+import { explained, shadowPlan } from './shadowPlan.js'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -180,6 +182,15 @@ let l1Witnesses: Map<string, Uint8Array[]>
 let l1Unreadable: Set<string>
 
 const LIMITS = { minSats: 1_000, maxSats: 1_000_000 }
+
+// Before every legacy step, `plan` is asked what it would do on the same row and the same fakes.
+const shadow = shadowPlan(() => arkade.state.fundCalls.length)
+afterAll(() => {
+  shadow.stop()
+  if (process.env.SHADOW_PLAN) writeFileSync(process.env.SHADOW_PLAN, JSON.stringify(shadow.differences, null, 2))
+  expect(shadow.steps()).toBeGreaterThan(300)
+  expect(shadow.differences.filter((difference) => explained(difference) === null)).toEqual([])
+})
 
 beforeEach(async () => {
   now = 1_800_000_000
