@@ -27,7 +27,7 @@
 import { selectVirtualCoins, selectCoinsWithAsset, type ExtendedVirtualCoin } from '@arkade-os/sdk'
 import {
   ASSET_CARRIER_SATS,
-  encodeOffer,
+  bindingFromOffer,
   fillOffer,
   NoSpendableDepositError,
   type FillFunding,
@@ -47,7 +47,7 @@ export { ASSET_CARRIER_SATS }
 /**
  * A fill refusal that provably submitted nothing, so a caller holding the row in
  * `filling` may walk it back. Raised only ABOVE `fillOffer` — the call that
- * builds AND submits — at the two coin-selection refusals below and at each
+ * builds AND submits — at the taker check, the two coin-selection refusals below and at each
  * settle adapter's deposit-liveness guard. The other guards stay plain on
  * purpose: they mean the row disagrees with the chain, which needs a human.
  * @see FundNotSubmittedError, the same boundary on receive.
@@ -172,6 +172,18 @@ export const fulfillOffer = async (
   if (offer.wantAsset !== undefined && offer.offerAsset !== undefined) {
     throw new Error('an offer names an asset on exactly one leg, not both')
   }
+  // A directed deposit's `fulfill` needs this wallet's signature. Under the latch the SDK
+  // refuses a foreign taker with an untyped throw, which sticks the row for a fill never sent.
+  if (offer.taker !== undefined) {
+    const ours = hex.encode(await ctx.wallet.identity.xOnlyPublicKey())
+    if (hex.encode(offer.taker) !== ours) {
+      throw new OfferNotSubmittedError(
+        `${deposit.txid}:${deposit.vout} was quoted for taker ${hex.encode(offer.taker)}, not this wallet's ${ours}; nothing was submitted`,
+      )
+    }
+  }
+  // Checked against `swapPkScript` HERE: `fillOffer` compares a binding with nothing.
+  const binding = bindingFromOffer(offer, serverPubkey)
 
   // What the covenant obliges output[0] to carry, and the whole reason the
   // emulator will co-sign.
@@ -226,7 +238,7 @@ export const fulfillOffer = async (
         `another attempt already holds the fill for ${deposit.txid}:${deposit.vout}; nothing was submitted`,
       )
     }
-    return await fillOffer(ctx.wallet, ctx.operatorUrl, hex.encode(encodeOffer(offer)), {
+    return await fillOffer(ctx.wallet, ctx.operatorUrl, binding, {
       // Inputs 1..n, in this order. Every asset a coin carries is declared, not
       // just the two the swap is about: arkd refuses with ASSET_NOT_FOUND when an
       // input owns an asset the packet does not mention, and selection picks for
