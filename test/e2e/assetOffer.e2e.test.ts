@@ -259,6 +259,7 @@ describe('e2e arkade offers — bounds, refused legibly and accepted at the edge
       balance: () => arkade.ctx.wallet.getBalance(),
       outputsAt: (offerPkScript) => offerOutputsAt(arkade.ctx, offerPkScript),
       serverPubkey: arkade.ctx.wallet.arkServerPublicKey,
+      solverPubkey: hex.encode(await arkade.ctx.identity.xOnlyPublicKey()),
       onRefused: (at, reason, detail) => void refusals.push({ outpoint: at, reason, detail }),
     })
     const outcome = await service.consider({ offer: discovered, ...outpoint })

@@ -46,9 +46,9 @@ export interface CorridorDescriptor<State extends string = string> {
    * be opt-in per request instead.
    */
   readonly contractVersion: RfqContractVersion
-  /** Every contract version this corridor can BUILD, most preferred first and baseline
-   * included; absent means the baseline alone. Negotiation serves the client's
-   * top member the deployment also enables. */
+  /** Every contract version this corridor can BUILD, most preferred first; absent means the
+   * baseline alone. Negotiation serves the client's top member the deployment also enables.
+   * Leaving the baseline out refuses every request that does not negotiate. */
   readonly contractVersions?: readonly RfqContractVersion[]
   /** Which rail's balance funds this corridor's payout — the destination leg. */
   readonly payoutRail: PayoutRail

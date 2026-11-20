@@ -122,8 +122,7 @@
       "lightning-send-v2",
       "lightning-receive-v2",
       "onchain-send-v2",
-      "asset-swap-v2",
-      "asset-swap-v3",
+      "asset-swap-directed",
       "evm-send-v1",
       "evm-receive-v1"
     ]

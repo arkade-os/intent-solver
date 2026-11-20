@@ -144,6 +144,7 @@ const derivation = (): OfferDerivation => ({
   emulatorPubkey: emulatorXOnly(),
   hrp: arkade.profile.arkadeHrp,
   exitDelay: offerExitDelay(arkade.ctx.advertisedExitDelay),
+  taker: hex.decode(makerPublicKey),
 })
 
 const offerFrom = (terms: OfferTerms): Omit<Offer, 'swapPkScript'> => {

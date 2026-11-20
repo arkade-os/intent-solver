@@ -22,19 +22,16 @@ import { WebSocketServer } from 'ws'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { ArkAddress, asset, isVtxoSpent, Transaction } from '@arkade-os/sdk'
 import { relayTransport, requestArkadeSwap, type Offer } from '@arkade-os/swap/protocol'
+import { attesting } from '@arkade-os/swap/advanced'
 import { base64, hex } from '@scure/base'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
+import { RFQ_ASSET_SWAP_DIRECTED } from '@arkade-os/solver-core/core/rfqContract.js'
 import { GiveUp, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
 import { createCorridorReaderSet, createCorridorSet } from '@arkade-os/solver-core/core/corridor.js'
 import type { AssetLeg } from '@arkade-os/solver-core/core/assetRfq.js'
 import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
 import { ASSET_CARRIER_SATS, fulfillOffer } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
-import {
-  offerExitDelay,
-  offerFromTerms,
-  offerScriptFrom,
-  type OfferDerivation,
-} from '@arkade-os/solver-arkade/arkade/offerTerms.js'
+import { offerExitDelay, offerScriptFrom, type OfferDerivation } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
 import {
   AssetRfqSwapService,
   type AssetRfqMarket,
@@ -71,6 +68,10 @@ const ARKD_URL = process.env.ARKADE_OPERATOR_URL ?? 'http://localhost:7070'
  * tests never share a subscription either.
  */
 const relayClientKey = (): string => hex.encode(schnorr.getPublicKey(randomBytes(32)))
+
+/** The in-process solver answers as `makerPublicKey`, and the client binds that responder as the taker. */
+const requestTransport = () =>
+  attesting(relayTransport(relayUrl, { solverPubkey: makerPublicKey, clientPubkey: relayClientKey() }), makerPublicKey)
 
 /** Enough for deposits in both directions plus carriers and change. */
 const NEEDED_SATS = 150_000
@@ -207,6 +208,7 @@ const derivation = (): OfferDerivation => ({
   emulatorPubkey: emulatorXOnly(),
   hrp: arkade.profile.arkadeHrp,
   exitDelay: offerExitDelay(arkade.ctx.advertisedExitDelay),
+  taker: hex.decode(makerPublicKey),
 })
 
 const termsOf = (row: AssetRfqSwapRow): OfferTerms => ({
@@ -259,8 +261,9 @@ const balance = async (): Promise<ReadonlyMap<AssetLeg, bigint>> =>
 const settle = async (row: AssetRfqSwapRow): Promise<string> => {
   const deposit = await depositAt(row.offerPkScript)
   if (!deposit) throw new Error(`nothing live at ${row.offerPkScript} to fill`)
+  // The shipped derivation, so a directed row carries the taker its tree compiles from.
   const offer: Offer = {
-    ...offerFromTerms(termsOf(row), emulatorXOnly(), offerExitDelay(arkade.ctx.advertisedExitDelay)),
+    ...offerScriptFrom(derivation())(termsOf(row), row.contractVersion ?? undefined).offer,
     swapPkScript: hex.decode(row.offerPkScript),
   }
   return fulfillOffer(arkade.ctx, arkade.emulator.url, offer, {
@@ -342,7 +345,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
     async () => {
       const { ingress, store, tickAll } = await harness()
       try {
-        const transport = relayTransport(relayUrl, { solverPubkey: makerPublicKey, clientPubkey: relayClientKey() })
+        const transport = requestTransport()
         const amount = depositSats(20_000)
         const rfqId = randomBytes(32).toString('hex')
         const swap = await requestArkadeSwap(arkade.ctx.wallet, transport, {
@@ -365,7 +368,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
         expect(funded.depositTxid).toBe(fundingTxid)
 
         const filled = await driveTo(tickAll, store, id, 'filled')
-        expect(filled.contractVersion).toBe('asset-swap-v3')
+        expect(filled.contractVersion).toBe(RFQ_ASSET_SWAP_DIRECTED)
         expect(filled.fillTxid).toMatch(/^[0-9a-f]{64}$/)
         expect(await depositSpent(filled.offerPkScript)).toBe('spent')
 
@@ -400,7 +403,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
       // dust floor) and these amounts stay an order of magnitude above it.
       const { ingress, store, tickAll } = await harness()
       try {
-        const transport = relayTransport(relayUrl, { solverPubkey: makerPublicKey, clientPubkey: relayClientKey() })
+        const transport = requestTransport()
         // Bound to `assetId`: the balance this asserts must be the asset the
         // request and `wallet.send` below actually move.
         const held = await heldAsset(assetId)
@@ -463,7 +466,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
       // corridor's own API, never through a real caller.
       const { ingress, store, tickAll } = await harness()
       try {
-        const transport = relayTransport(relayUrl, { solverPubkey: makerPublicKey, clientPubkey: relayClientKey() })
+        const transport = requestTransport()
 
         const wantUnits = BigInt(1200 + randomInt(1, 300))
         const buy = await requestArkadeSwap(arkade.ctx.wallet, transport, {
@@ -523,7 +526,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
       expect(published, 'the fixture must differ from the constant or this proves nothing').not.toBe(ASSET_CARRIER_SATS)
       const { ingress, store, tickAll } = await harness({ carrierSats: published })
       try {
-        const transport = relayTransport(relayUrl, { solverPubkey: makerPublicKey, clientPubkey: relayClientKey() })
+        const transport = requestTransport()
 
         const swap = await requestArkadeSwap(arkade.ctx.wallet, transport, {
           amount: BigInt(1200 + randomInt(1, 300)),
@@ -574,7 +577,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
   const payoutsFor = async (over: Partial<AssetRfqMarket>) => {
     const { ingress, store } = await harness(over)
     try {
-      const transport = relayTransport(relayUrl, { solverPubkey: makerPublicKey, clientPubkey: relayClientKey() })
+      const transport = requestTransport()
       const sell = await requestArkadeSwap(arkade.ctx.wallet, transport, {
         amount: 20_000n,
         rfqId: randomBytes(32).toString('hex'),
@@ -626,7 +629,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
     async () => {
       const { ingress, store, pairSell } = await harness()
       try {
-        const transport = relayTransport(relayUrl, { solverPubkey: makerPublicKey, clientPubkey: relayClientKey() })
+        const transport = requestTransport()
         const rfqId = randomBytes(32).toString('hex')
         await expect(
           transport.requestQuote({
@@ -637,8 +640,10 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
             amount_side: 'from',
             amount: '5000',
             profile: {},
+            // Negotiated, or the refusal would be for that and never reach the profile.
+            contract_versions: [RFQ_ASSET_SWAP_DIRECTED],
           }),
-        ).rejects.toMatchObject({ name: 'SwapRefusal' })
+        ).rejects.toMatchObject({ name: 'SwapRefusal', reason: 'unsupported_payload' })
 
         // A payout alone under dust now quotes: the maker's carrier comes back on
         // top, lifting output 0 clear of what arkd would reject.
@@ -664,7 +669,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
       // `assetRfqCorridor.e2e.test.ts`. This asserts the relay status face.
       const { ingress, store, tickAll } = await harness()
       try {
-        const transport = relayTransport(relayUrl, { solverPubkey: makerPublicKey, clientPubkey: relayClientKey() })
+        const transport = requestTransport()
         const amount = depositSats(4_000)
         const rfqId = randomBytes(32).toString('hex')
         const swap = await requestArkadeSwap(arkade.ctx.wallet, transport, {

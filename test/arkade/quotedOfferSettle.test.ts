@@ -13,17 +13,19 @@ import { describe, it, expect, vi } from 'vitest'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
 import { offerExitDelay, offerScriptFrom } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
-import { RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_V3 } from '@arkade-os/solver-core/core/rfqContract.js'
+import { RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_DIRECTED } from '@arkade-os/solver-core/core/rfqContract.js'
 import { quotedOfferSettleFor, type QuotedOfferIntent } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
 import type { OfferOutpoint } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
 import { OfferNotSubmittedError, type fulfillOffer } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 
 const xonly = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
+const TAKER = xonly(5)
 const derivation = {
   serverPubkey: xonly(2),
   emulatorPubkey: xonly(4),
   hrp: 'tark',
   exitDelay: offerExitDelay(605_184),
+  taker: TAKER,
 }
 const USDA = '11'.repeat(34)
 const MAKER_SCRIPT = '5120' + 'cc'.repeat(32)
@@ -139,7 +141,7 @@ describe('quotedOfferSettleFor', () => {
   })
 
   it.each([
-    ['v3', RFQ_ASSET_SWAP_V3],
+    ['directed', RFQ_ASSET_SWAP_DIRECTED],
     ['v2', RFQ_ASSET_SWAP_V2],
     ['NULL (baseline)', null],
   ])('settles a %s row on the tree its version derives', async (_label, contractVersion) => {
@@ -149,15 +151,51 @@ describe('quotedOfferSettleFor', () => {
     expect(hex.encode(fulfill.mock.calls[0]![2].swapPkScript)).toBe(row.offerPkScript)
   })
 
-  it('derives a v3 row at a different script than a v2 one', () => {
-    expect(intent({ contractVersion: RFQ_ASSET_SWAP_V3 }).offerPkScript).not.toBe(intent().offerPkScript)
+  it('names the taker on a directed offer only', async () => {
+    const { settle, fulfill } = settleWith([funded()])
+    await settle(intent({ contractVersion: RFQ_ASSET_SWAP_DIRECTED }))
+    await settle(intent({ contractVersion: RFQ_ASSET_SWAP_V2 }))
+    expect(fulfill.mock.calls[0]![2].taker).toEqual(TAKER)
+    expect(fulfill.mock.calls[1]![2].taker).toBeUndefined()
+  })
+
+  it('refuses a stored asset-swap-v3 row as unsupported, before reading the chain', async () => {
+    const outpointsAt = vi.fn(async () => [funded()])
+    const fulfill = vi.fn<typeof fulfillOffer>(async () => 'fill'.padEnd(64, '0'))
+    const settle = quotedOfferSettleFor({ ctx: {} as never, emulatorUrl: '', derivation, outpointsAt, fulfill })
+    await expect(settle({ ...intent(), contractVersion: 'asset-swap-v3' })).rejects.toThrow(
+      /unsupported contract version asset-swap-v3/,
+    )
+    expect(outpointsAt).not.toHaveBeenCalled()
+    expect(fulfill).not.toHaveBeenCalled()
+  })
+
+  it('refuses a directed row quoted under a taker key this solver no longer holds', async () => {
+    const fulfill = vi.fn<typeof fulfillOffer>(async () => 'fill'.padEnd(64, '0'))
+    const rotated = quotedOfferSettleFor({
+      ctx: {} as never,
+      emulatorUrl: 'http://emulator.test',
+      derivation: { ...derivation, taker: xonly(6) },
+      outpointsAt: async () => [funded()],
+      fulfill,
+    })
+    await expect(rotated(intent({ contractVersion: RFQ_ASSET_SWAP_DIRECTED }))).rejects.toThrow(
+      /derive .*, not the offer script/,
+    )
+    expect(fulfill).not.toHaveBeenCalled()
+  })
+
+  it('derives a directed row at a different script than a v2 one', () => {
+    expect(intent({ contractVersion: RFQ_ASSET_SWAP_DIRECTED }).offerPkScript).not.toBe(intent().offerPkScript)
   })
 
   it('refuses a row whose stored script does not match its stored version', async () => {
     const { settle, fulfill } = settleWith([funded()])
-    const v3Script = intent({ contractVersion: RFQ_ASSET_SWAP_V3 }).offerPkScript
-    await expect(settle({ ...intent(), offerPkScript: v3Script })).rejects.toThrow(/derive .*, not the offer script/)
-    await expect(settle({ ...intent(), contractVersion: RFQ_ASSET_SWAP_V3 })).rejects.toThrow(
+    const directedScript = intent({ contractVersion: RFQ_ASSET_SWAP_DIRECTED }).offerPkScript
+    await expect(settle({ ...intent(), offerPkScript: directedScript })).rejects.toThrow(
+      /derive .*, not the offer script/,
+    )
+    await expect(settle({ ...intent(), contractVersion: RFQ_ASSET_SWAP_DIRECTED })).rejects.toThrow(
       /derive .*, not the offer script/,
     )
     expect(fulfill).not.toHaveBeenCalled()

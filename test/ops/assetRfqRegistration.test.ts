@@ -9,12 +9,16 @@
  * rfq_id" about a live one.
  */
 
-import { describe, it, expect } from 'vitest'
-import { corridorSetFromDeps, readerSetFromDeps } from '@arkade-os/solver-app/ops/corridorSet.js'
+import { describe, it, expect, vi } from 'vitest'
+import {
+  corridorSetFromDeps,
+  readerSetFromDeps,
+  servedContractVersions,
+} from '@arkade-os/solver-app/ops/corridorSet.js'
 import { recoverReadableMarkets } from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
-import { AssetRfqSwapService } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
-import { RFQ_ASSET_SWAP_V2 } from '@arkade-os/solver-core/core/rfqContract.js'
+import { AssetRfqSwapService, type AssetRfqDeps } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
+import { RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_DIRECTED } from '@arkade-os/solver-core/core/rfqContract.js'
 
 const ASSET_A = `${'aa'.repeat(32)}0100`
 const ASSET_B = `${'bb'.repeat(32)}0000`
@@ -40,7 +44,7 @@ const market = (assetId: string, symbol: string) => ({
  */
 const base = () => ({ store: null as never, onchainStore: null as never })
 
-const built = async () => {
+const built = async (over: Partial<AssetRfqDeps> = {}) => {
   const store = await AssetRfqSwapStore.open(':memory:')
   const service = new AssetRfqSwapService({
     store,
@@ -53,6 +57,7 @@ const built = async () => {
     depositAt: async () => null,
     balance: async () => new Map(),
     settle: async () => 'tx',
+    ...over,
   })
   return { store, service }
 }
@@ -72,7 +77,7 @@ describe('corridorSetFromDeps — the serving set', () => {
     await store.close()
   })
 
-  it('refuses a quote when this method contract version is disabled', async () => {
+  it('refuses the directed covenant when an operator list names only v2 and v3', async () => {
     const { store, service } = await built()
     const pair = `arkade:BTC->arkade:${ASSET_A}`
     const set = corridorSetFromDeps({
@@ -80,12 +85,13 @@ describe('corridorSetFromDeps — the serving set', () => {
       assetRfqService: service,
       assetRfqStore: store,
       assetRfqMarkets: [market(ASSET_A, 'USDA')],
-      rfqContractVersions: new Set(['some-other-version']),
+      rfqContractVersions: new Set(['asset-swap-v2', 'asset-swap-v3']),
     })
-    const outcome = await set.get(pair)!.quote({ v: 1, type: 'rfq_request', rfq_id: 'a'.repeat(64) })
+    const outcome = await set
+      .get(pair)!
+      .quote({ v: 1, type: 'rfq_request', rfq_id: 'a'.repeat(64), contract_versions: [RFQ_ASSET_SWAP_DIRECTED] })
     expect(outcome.kind).toBe('refused')
-    expect(outcome.payload).toMatchObject({ type: 'rfq_refusal', reason: 'unsupported_pair' })
-    expect(outcome.detail).toContain(RFQ_ASSET_SWAP_V2)
+    expect(outcome.payload).toMatchObject({ reason: 'unsupported_payload', error_code: 'contract_version_unsupported' })
     await store.close()
   })
 
@@ -124,6 +130,76 @@ describe('corridorSetFromDeps — the serving set', () => {
         assetRfqMarkets: [market(ASSET_A, 'USDA'), market(ASSET_B, 'USDA')],
       }),
     ).toThrow(/duplicate corridor env stem/)
+    await store.close()
+  })
+})
+
+describe('asset RFQ negotiates the directed covenant and nothing else', () => {
+  const PAIR = `arkade:BTC->arkade:${ASSET_A}`
+  const RFQ_ID = 'a'.repeat(64)
+  const request = (over: Record<string, unknown> = {}) => ({
+    v: 1,
+    type: 'rfq_request',
+    rfq_id: RFQ_ID,
+    pair: PAIR,
+    amount_side: 'from',
+    amount: '100000000',
+    profile: { maker_pk_script: `5120${'c'.repeat(64)}`, maker_public_key: 'b'.repeat(64) },
+    ...over,
+  })
+
+  /** Served as an unset `rfq.contractVersions` serves it: the build defaults. */
+  const serving = async () => {
+    const derived: (string | undefined)[] = []
+    const { store, service } = await built({
+      balance: async () => new Map([[ASSET_A, 10n ** 18n]]),
+      deriveOffer: (_terms, version) => {
+        derived.push(version)
+        return { pkScript: `5120${'d'.repeat(64)}`, address: 'ark1q' }
+      },
+    })
+    const set = corridorSetFromDeps({
+      ...base(),
+      assetRfqService: service,
+      assetRfqStore: store,
+      assetRfqMarkets: [market(ASSET_A, 'USDA')],
+      rfqContractVersions: servedContractVersions(null, []),
+    })
+    return { store, derived, corridor: set.get(PAIR)! }
+  }
+
+  it('refuses a request that does not negotiate, and says which version it needs', async () => {
+    const { store, derived, corridor } = await serving()
+    const outcome = await corridor.quote(request())
+    expect(outcome).toMatchObject({ kind: 'refused', payload: { reason: 'unsupported_pair' } })
+    expect(outcome.detail).toMatch(/negotiation/)
+    expect(outcome.detail).toContain(RFQ_ASSET_SWAP_DIRECTED)
+    expect(derived).toEqual([])
+    expect(await store.findByRfqId(RFQ_ID)).toBeNull()
+    await store.close()
+  })
+
+  it('refuses a client that can derive only v3 and v2', async () => {
+    const { store, derived, corridor } = await serving()
+    const outcome = await corridor.quote(request({ contract_versions: ['asset-swap-v3', 'asset-swap-v2'] }))
+    expect(outcome).toMatchObject({
+      kind: 'refused',
+      payload: {
+        reason: 'unsupported_payload',
+        error_code: 'contract_version_unsupported',
+        field: 'contract_versions',
+      },
+    })
+    expect(derived).toEqual([])
+    await store.close()
+  })
+
+  it('quotes the directed covenant, derives that tree, records it and names it', async () => {
+    const { store, derived, corridor } = await serving()
+    const outcome = await corridor.quote(request({ contract_versions: [RFQ_ASSET_SWAP_DIRECTED] }))
+    expect(outcome).toMatchObject({ kind: 'quote', payload: { contract_version: RFQ_ASSET_SWAP_DIRECTED } })
+    expect(derived).toEqual([RFQ_ASSET_SWAP_DIRECTED])
+    expect((await store.findByRfqId(RFQ_ID))?.contractVersion).toBe(RFQ_ASSET_SWAP_DIRECTED)
     await store.close()
   })
 })
@@ -192,6 +268,57 @@ describe('a market that stopped serving keeps its readers, never its corridors',
     expect(corridors.get(`arkade:BTC->arkade:${ASSET_A}`)).toBeUndefined()
     expect(corridors.get(`arkade:${ASSET_A}->arkade:BTC`)).toBeUndefined()
     expect(corridors.size).toBe(0)
+    await store.close()
+  })
+})
+
+/** mutinynet holds two such rows, both `refused`. */
+describe('a stored asset-swap-v3 row, which this build no longer derives', () => {
+  it('stays inert at boot, in the sweep, the watch loop, the status route and the console', async () => {
+    const deriveOffer = vi.fn(() => ({ pkScript: `5120${'d'.repeat(64)}`, address: 'ark1q' }))
+    const depositAt = vi.fn(async () => null)
+    const settle = vi.fn(async () => 'tx')
+    const { store, service } = await built({ deriveOffer, depositAt, settle })
+    const pair = `arkade:BTC->arkade:${ASSET_A}`
+    await store.insertQuote({
+      id: 'swap-v3',
+      rfqId: 'c'.repeat(64),
+      pair,
+      fromAssetId: null,
+      fromAmount: 100_000_000n,
+      toAssetId: ASSET_A,
+      toAmount: 99_500_000n,
+      makerPkScript: `5120${'c'.repeat(64)}`,
+      makerPublicKey: 'b'.repeat(64),
+      offerPkScript: `5120${'f'.repeat(64)}`,
+      offerAddress: 'ark1qv3',
+      solverPubkey: 'e'.repeat(64),
+      validUntil: 2_000,
+      contractVersion: 'asset-swap-v3',
+    })
+    await store.fail('swap-v3', 'quoted', 'quote expired before the deposit was observed')
+
+    const served = [market(ASSET_A, 'USDA')]
+    const corridors = corridorSetFromDeps({
+      ...base(),
+      assetRfqService: service,
+      assetRfqStore: store,
+      assetRfqMarkets: served,
+    })
+    const readable = recoverReadableMarkets(served, await store.listNonTerminal())
+    const reader = readerSetFromDeps({ ...base(), assetRfqStore: store, assetRfqMarkets: readable }).get(pair)!
+    for (const corridor of corridors) await corridor.tickAll()
+
+    expect(await reader.findRecoverable()).toEqual([])
+    expect(await reader.statusFor('c'.repeat(64))).toMatchObject({
+      type: 'rfq_status',
+      profile: { offer_address: 'ark1qv3' },
+    })
+    expect((await reader.page({})).swaps).toHaveLength(1)
+    expect((await reader.detail('swap-v3'))?.raw).toMatchObject({ contractVersion: 'asset-swap-v3', state: 'refused' })
+    expect(deriveOffer).not.toHaveBeenCalled()
+    expect(depositAt).not.toHaveBeenCalled()
+    expect(settle).not.toHaveBeenCalled()
     await store.close()
   })
 })

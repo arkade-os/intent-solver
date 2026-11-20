@@ -63,6 +63,11 @@ describe('the four Arkade seams', () => {
     expect(body()).toContain('deriveOffer: offerScriptFrom(assetRfqDerivation)')
   })
 
+  it('compiles the directed taker from the key the quote names as solver_pubkey', () => {
+    expect(body()).toContain('taker: hex.decode(arkadeOps.providerPubkey)')
+    expect(body()).toMatch(/markets: assetRfqMarkets,\n\s+solverPubkey: arkadeOps\.providerPubkey,/)
+  })
+
   it('gives the derivation and the settle the SAME keys', () => {
     // Two derivations would let the address a client is quoted and the covenant
     // a fill spends drift apart, which strands the deposit.

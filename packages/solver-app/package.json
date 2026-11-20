@@ -18,8 +18,8 @@
     "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
-    "@arkade-os/swap": "0.1.8",
-    "@arkade-os/sdk": "0.5.8",
+    "@arkade-os/swap": "0.1.11",
+    "@arkade-os/sdk": "0.5.11",
     "@arkade-os/solver-arkade": "workspace:*",
     "@arkade-os/solver-core": "workspace:*",
     "@arkade-os/solver-corridors": "workspace:*",
