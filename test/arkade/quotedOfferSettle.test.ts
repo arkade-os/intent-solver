@@ -16,7 +16,7 @@ import { offerExitDelay, offerScriptFrom } from '@arkade-os/solver-arkade/arkade
 import { RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_V3 } from '@arkade-os/solver-core/core/rfqContract.js'
 import { quotedOfferSettleFor, type QuotedOfferIntent } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
 import type { OfferOutpoint } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
-import type { fulfillOffer } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
+import { OfferNotSubmittedError, type fulfillOffer } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 
 const xonly = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
 const derivation = {
@@ -167,6 +167,15 @@ describe('quotedOfferSettleFor', () => {
     const { settle, fulfill } = settleWith([funded({ vout: 4 })])
     await expect(settle(intent())).rejects.toThrow(/is no longer live at/)
     expect(fulfill).not.toHaveBeenCalled()
+  })
+
+  it('types that refusal as unsubmitted, so a lost race walks back instead of paging', async () => {
+    const { settle } = settleWith([funded({ vout: 4 })])
+    const error = await settle(intent()).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(error).toBeInstanceOf(OfferNotSubmittedError)
   })
 
   it('never falls back to another outpoint at the same script', async () => {

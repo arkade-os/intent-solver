@@ -15,7 +15,11 @@
 import { describe, it, expect, vi } from 'vitest'
 import { base64, hex } from '@scure/base'
 import { schnorr } from '@noble/curves/secp256k1.js'
-import { fulfillOffer, OfferNotSubmittedError } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
+import {
+  fulfillOffer,
+  OfferNotSubmittedError,
+  OfferSubmitRejectedError,
+} from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 
@@ -325,5 +329,227 @@ describe('the asset packet fulfillOffer submits', () => {
     } finally {
       state.submitError = undefined
     }
+  })
+})
+
+/** The bodies are arkd's own shape, `vtxo_outpoints` included. @see outpointsIn */
+const SUBMIT_PREFIX = 'Failed to submit tx to emulator: '
+
+describe('a submission arkd refused as already spent', () => {
+  const refusalBody = (outpoints: string[], over: Record<string, unknown> = {}) =>
+    JSON.stringify({
+      code: 3,
+      message: 'VTXO_ALREADY_SPENT (6): vtxo(s) already spent',
+      details: [
+        {
+          '@type': 'type.googleapis.com/ark.v1.ErrorDetails',
+          code: 6,
+          name: 'VTXO_ALREADY_SPENT',
+          message: 'vtxo(s) already spent',
+          metadata: { vtxo_outpoint: outpoints[0] ?? '', vtxo_outpoints: `[${outpoints.join(' ')}]` },
+          ...over,
+        },
+      ],
+    })
+
+  const submitting = async (body: string, coins: ReturnType<typeof fundingCoin>[], at: ReturnType<typeof deposit>) => {
+    state.arkTx = undefined
+    const spending = ctx(coins)
+    state.submitError = new Error(`Failed to submit tx to emulator: ${body}`)
+    try {
+      const outcome = await fulfillOffer(
+        spending,
+        'http://emulator.test',
+        offerFor({ offerAsset: asset.AssetId.fromString(ASSET_B) }),
+        at,
+      ).then(
+        () => null,
+        (error: unknown) => error,
+      )
+      return { outcome, spending, sent: state.submitError }
+    } finally {
+      state.submitError = undefined
+    }
+  }
+
+  const deposit = (assets?: { assetId: string; amount: bigint }[]) => {
+    const coin = { ...mintCoin(60_000), ...(assets ? { assets } : {}) }
+    state.vtxos = [coin]
+    return { txid: coin.txid, vout: coin.vout, value: coin.value }
+  }
+
+  /** Row d13acd93's stored `failure_reason`, byte for byte; its deposit reads
+   * `isSpent: true, spentBy: 76ff78fd…` at the public indexer. */
+  const INCIDENT_BODY =
+    'Failed to submit tx to emulator: {"code":3,"message":"VTXO_ALREADY_SPENT (6): vtxo(s) already spent","details":[{"@type":"type.googleapis.com/ark.v1.ErrorDetails","code":6,"name":"VTXO_ALREADY_SPENT","message":"VTXO_ALREADY_SPENT (6): vtxo(s) already spent","metadata":{"vtxo_outpoint":"7da3508518eb5fec43370d26fb85e2fe105796f1869d183e16a38dbe41e05730:0","vtxo_outpoints":"[7da3508518eb5fec43370d26fb85e2fe105796f1869d183e16a38dbe41e05730:0]"}}]}'
+  const INCIDENT_DEPOSIT = '7da3508518eb5fec43370d26fb85e2fe105796f1869d183e16a38dbe41e05730:0'
+
+  it('parses the stored body from row d13acd93 verbatim, Go-slice metadata and all', async () => {
+    const at = deposit([{ assetId: ASSET_B, amount: 900n }])
+    const { outcome } = await submitting(INCIDENT_BODY.slice(SUBMIT_PREFIX.length), [fundingCoin(80_000)], at)
+
+    expect(outcome).toBeInstanceOf(OfferSubmitRejectedError)
+    // Read out of `[<txid>:0]`, unquoted.
+    expect(outcome).toMatchObject({ spentOutpoints: [INCIDENT_DEPOSIT] })
+    expect(outcome).toMatchObject({ depositSpent: false })
+  })
+
+  it('calls it the deposit when that stored body names the outpoint we were given', async () => {
+    const at = deposit([{ assetId: ASSET_B, amount: 900n }])
+    // Only the txid swapped: the SDK needs a deposit whose prevout it can resolve.
+    const body = INCIDENT_BODY.slice(SUBMIT_PREFIX.length).replaceAll(INCIDENT_DEPOSIT.split(':')[0] as string, at.txid)
+    const { outcome } = await submitting(body, [fundingCoin(80_000)], at)
+
+    expect(outcome).toMatchObject({ depositSpent: true, spentOutpoints: [`${at.txid}:0`] })
+  })
+
+  it('refuses to build the fill when the deposit is gone, and says nothing was sent', async () => {
+    // After the latch, before any submission — and no claim the deposit is spent.
+    state.arkTx = undefined
+    state.vtxos = []
+    const at = { txid: 'c'.repeat(64), vout: 0, value: 900 }
+    const spending = ctx([fundingCoin(80_000)])
+    const latched: string[] = []
+
+    const outcome = await fulfillOffer(
+      spending,
+      'http://emulator.test',
+      offerFor({ offerAsset: asset.AssetId.fromString(ASSET_B) }),
+      at,
+      {
+        markSubmitting: async () => {
+          latched.push('latched')
+          return true
+        },
+      },
+    ).then(
+      () => null,
+      (error: unknown) => error,
+    )
+
+    expect(outcome).toBeInstanceOf(OfferSubmitRejectedError)
+    // The latch HAD flipped, which is why the 'selecting' walk-back cannot serve.
+    expect(latched).toEqual(['latched'])
+    expect(outcome).toMatchObject({ depositSpent: false, spentOutpoints: [] })
+    expect(state.arkTx).toBeUndefined()
+    expect(spending.reservations.reserved().size).toBe(0)
+  })
+
+  it('names the DEPOSIT when that is the outpoint arkd refused over', async () => {
+    const at = deposit([{ assetId: ASSET_B, amount: 900n }])
+    const outpoint = `${at.txid}:${at.vout}`
+    const { outcome, spending } = await submitting(refusalBody([outpoint]), [fundingCoin(80_000)], at)
+
+    expect(outcome).toBeInstanceOf(OfferSubmitRejectedError)
+    expect(outcome).toMatchObject({ depositSpent: true, spentOutpoints: [outpoint.toLowerCase()] })
+    expect(spending.reservations.reserved().size).toBe(0)
+  })
+
+  it('says the deposit is NOT spent when one of our own coins is the one named', async () => {
+    const at = deposit([{ assetId: ASSET_B, amount: 900n }])
+    const coin = fundingCoin(80_000)
+    const outpoint = `${coin.txid}:${coin.vout}`
+    const { outcome } = await submitting(refusalBody([outpoint]), [coin], at)
+
+    expect(outcome).toBeInstanceOf(OfferSubmitRejectedError)
+    expect(outcome).toMatchObject({ depositSpent: false, spentOutpoints: [outpoint.toLowerCase()] })
+  })
+
+  it('reads every outpoint out of the space-separated slice, not just the first', async () => {
+    const at = deposit([{ assetId: ASSET_B, amount: 900n }])
+    const coin = fundingCoin(80_000)
+    const theirs = `${'9'.repeat(64)}:3`
+    const { outcome } = await submitting(refusalBody([theirs, `${at.txid}:${at.vout}`]), [coin], at)
+
+    expect(outcome).toMatchObject({
+      depositSpent: true,
+      spentOutpoints: [theirs, `${at.txid}:${at.vout}`.toLowerCase()],
+    })
+  })
+
+  /** The deposit named BESIDE a coin of ours is also what a fill of ours that
+   * landed looks like. @see spec/tla OfferFill_RejectedProof.cfg */
+  it('refuses to classify the deposit and one of our own coins named TOGETHER', async () => {
+    const at = deposit([{ assetId: ASSET_B, amount: 900n }])
+    const coin = fundingCoin(80_000)
+    const body = refusalBody([`${at.txid}:${at.vout}`, `${coin.txid}:${coin.vout}`])
+    const { outcome, sent } = await submitting(body, [coin], at)
+
+    expect(outcome).toBe(sent)
+    expect(outcome).not.toBeInstanceOf(OfferSubmitRejectedError)
+  })
+
+  it('leaves another arkd refusal exactly as it was', async () => {
+    const at = deposit([{ assetId: ASSET_B, amount: 900n }])
+    const body = refusalBody([`${at.txid}:${at.vout}`], { code: 11, name: 'ASSET_NOT_FOUND' })
+    const { outcome, sent } = await submitting(body, [fundingCoin(80_000)], at)
+
+    expect(outcome).toBe(sent)
+    expect(outcome).not.toBeInstanceOf(OfferSubmitRejectedError)
+  })
+
+  it('leaves a body it cannot parse alone, because an unreadable refusal proves nothing', async () => {
+    const at = deposit([{ assetId: ASSET_B, amount: 900n }])
+    const { outcome, sent } = await submitting('<html>502 Bad Gateway</html>', [fundingCoin(80_000)], at)
+
+    expect(outcome).toBe(sent)
+    expect(outcome).not.toBeInstanceOf(OfferSubmitRejectedError)
+  })
+
+  it('leaves a VTXO_ALREADY_SPENT carrying no outpoint alone: nothing identifies what was spent', async () => {
+    const at = deposit([{ assetId: ASSET_B, amount: 900n }])
+    const { outcome, sent } = await submitting(refusalBody([]), [fundingCoin(80_000)], at)
+
+    expect(outcome).toBe(sent)
+    expect(outcome).not.toBeInstanceOf(OfferSubmitRejectedError)
+  })
+})
+
+/** The same probe one step lower, where `resolveDeposit` refuses to build. */
+describe('the deposit-gone probe under the latch', () => {
+  const DEPOSIT_TXID = 'c'.repeat(64)
+  const gone = (vtxos: unknown[]) => ({ getVtxos: async () => ({ vtxos: vtxos as never }) })
+
+  const building = async (probe?: { getVtxos: () => Promise<{ vtxos: never }> }) => {
+    state.arkTx = undefined
+    state.vtxos = []
+    const at = { txid: DEPOSIT_TXID, vout: 0, value: 900 }
+    const spending = ctx([fundingCoin(80_000)])
+    const outcome = await fulfillOffer(
+      spending,
+      'http://emulator.test',
+      offerFor({ offerAsset: asset.AssetId.fromString(ASSET_B) }),
+      at,
+      { markSubmitting: async () => true, ...(probe ? { probe } : {}) },
+    ).then(
+      () => null,
+      (error: unknown) => error,
+    )
+    return { outcome, at, spending }
+  }
+
+  it('claims the deposit spent when the indexer names a foreign spender', async () => {
+    const { outcome } = await building(
+      gone([{ txid: DEPOSIT_TXID, vout: 0, isSpent: true, spentBy: 'e5'.repeat(32), isUnrolled: false }]),
+    )
+    expect(outcome).toMatchObject({
+      depositSpent: true,
+      spentOutpoints: [`${DEPOSIT_TXID}:0`],
+      spentBy: 'e5'.repeat(32),
+    })
+  })
+
+  it('withholds the claim when the indexer names no spender', async () => {
+    const { outcome, spending } = await building(
+      gone([{ txid: DEPOSIT_TXID, vout: 0, isSpent: true, spentBy: '', isUnrolled: false }]),
+    )
+    expect(outcome).toBeInstanceOf(OfferSubmitRejectedError)
+    expect(outcome).toMatchObject({ depositSpent: false, spentOutpoints: [] })
+    expect(spending.reservations.reserved().size).toBe(0)
+  })
+
+  it('withholds the claim when no indexer is wired', async () => {
+    const { outcome } = await building()
+    expect(outcome).toMatchObject({ depositSpent: false, spentOutpoints: [] })
   })
 })

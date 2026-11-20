@@ -187,6 +187,13 @@ what the anchors are for.
 that predates the column). A walk-back and the sweep's recovery move only a
 `selecting` row and clear the phase; anything else is escalated to `stuck`.
 
+A `submitting` row has one exception, and only because arkd answered: a
+submission it REFUSED with `VTXO_ALREADY_SPENT` accepts nothing, so that row
+provably never spent. It ends terminal when the refusal named the deposit
+(someone else took it) and walks back to re-select when it named one of our own
+coins. The proof is the whole licence — `_RejectedProof` is what happens
+without it.
+
 ```mermaid
 stateDiagram-v2
     state "filling · selecting" as selecting
@@ -199,6 +206,8 @@ stateDiagram-v2
     selecting --> stuck: fail [plain throw, or the budget is spent]
     submitting --> filled: Finish [after Submit]
     submitting --> stuck: fail [fillOffer threw] / Recover [crash]
+    submitting --> refused: ResolveRejected [arkd refused, deposit spent]
+    submitting --> ready: ResolveRejected [arkd refused, our own coin spent]
     legacy --> stuck: Recover [an older version may have sent]
     ready --> refused: Expire
     filled --> [*]
@@ -215,6 +224,15 @@ walking back a phase-less row (`_LegacyReverted`, with `_Upgrade` green).
 claim and the walk-back leaves the row `filling` forever (`FillingResolves`).
 `_LateTypedControl` stays green: once the walk-back requires `selecting`, a
 typed refusal raised after the submission finds nothing to move.
+
+`_RejectedProof` is the new one, and it prices the classification: claim a
+rejection over a submission arkd may have TAKEN — which is what matching on the
+message prose, or on an outpoint list naming the deposit beside one of our own
+coins, amounts to — and `NoDoubleFill` falls. `_RejectedGuardControl` is green
+and that is itself the finding: dropping `fill_phase = 'submitting'` from the
+two rejected exits is NOT observable, because the latch already decides who can
+reach a rejection, so unlike `_RevertGuard` one phase earlier that guard is
+symmetry rather than necessity.
 
 The cfgs carry `EXPECTED RESULT` headers that the tla-model skill's `sweep`
 also reads; run them from this directory like any other module, or sweep a

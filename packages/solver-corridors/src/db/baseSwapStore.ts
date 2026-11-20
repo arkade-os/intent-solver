@@ -370,9 +370,9 @@ export abstract class BaseSwapStore<Row, State extends string> {
    * `stuck` rather than a generic failure when money is already exposed: those
    * need a human, and flattening them into "failed" hides that.
    */
-  async fail(id: string, from: State, reason: string): Promise<void> {
+  async fail(id: string, from: State, reason: string): Promise<boolean> {
     const to = (this.shape.exposed.includes(from) ? 'stuck' : 'refused') as State
-    await this.transition(id, from, to, { failure_reason: reason })
+    return this.transition(id, from, to, { failure_reason: reason })
   }
 
   /**

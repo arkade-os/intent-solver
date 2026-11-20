@@ -10,11 +10,12 @@
  * because a mismatch found afterwards is a spend rather than a refusal.
  *
  * A throw leaves the row `stuck`, which is what a row disagreeing with the chain
- * needs: a human.
+ * needs: a human. Its deposit's own liveness is the exception — a lost race is
+ * no disagreement — so that one is typed. @see OfferNotSubmittedError
  */
 import { hex } from '@scure/base'
 import type { ArkadeContext } from './wallet.js'
-import { fulfillOffer, type FulfillOptions } from './offerFulfill.js'
+import { fulfillOffer, OfferNotSubmittedError, type FulfillOptions } from './offerFulfill.js'
 import { heldOf } from './offerFill.js'
 import { liveOfferOutpoints, type OfferOutpoint } from './offerOutpoints.js'
 import {
@@ -87,8 +88,12 @@ export const quotedOfferSettleFor = (
 
     const live = await outpointsAt(intent.offerPkScript)
     const deposit = live.find((o) => o.txid === intent.depositTxid && o.vout === intent.depositVout)
+    // ABOVE `fulfill`, so nothing is sent. NOT terminal: one absent read is weaker than arkd's
+    // refusal, and § 9's gate re-reads next tick and ends the row itself when it is really gone.
     if (!deposit) {
-      throw new Error(`${intent.depositTxid}:${intent.depositVout} is no longer live at ${intent.offerPkScript}`)
+      throw new OfferNotSubmittedError(
+        `${intent.depositTxid}:${intent.depositVout} is no longer live at ${intent.offerPkScript}; nothing was submitted`,
+      )
     }
 
     // The outpoint the row was moved to `funded` on, re-measured. Identical

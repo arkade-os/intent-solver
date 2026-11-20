@@ -25,11 +25,19 @@
  *   because this is the function that spends.
  */
 import { selectVirtualCoins, selectCoinsWithAsset, type ExtendedVirtualCoin } from '@arkade-os/sdk'
-import { ASSET_CARRIER_SATS, encodeOffer, fillOffer, type FillFunding, type Offer } from '@arkade-os/swap/protocol'
+import {
+  ASSET_CARRIER_SATS,
+  encodeOffer,
+  fillOffer,
+  NoSpendableDepositError,
+  type FillFunding,
+  type Offer,
+} from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
 import { type ArkadeContext } from './wallet.js'
 import { outpointKey } from './lockupFunding.js'
 import { offerIsConsistent } from './offerConsistency.js'
+import { depositSpentBy, type DepositSpendProbe } from './depositSpend.js'
 
 /** The dust carrier output[0] takes when the maker is paid in an ASSET, not sats.
  * Re-exported from the SDK rather than restated: it is a covenant constant, and a
@@ -38,10 +46,11 @@ export { ASSET_CARRIER_SATS }
 
 /**
  * A fill refusal that provably submitted nothing, so a caller holding the row in
- * `filling` may walk it back. Raised ONLY at the two coin-selection refusals
- * below, both above `fillOffer` — the call that builds AND submits. The other
- * guards here stay plain on purpose: they mean the row disagrees with the chain,
- * which needs a human. @see FundNotSubmittedError, the same boundary on receive.
+ * `filling` may walk it back. Raised only ABOVE `fillOffer` — the call that
+ * builds AND submits — at the two coin-selection refusals below and at each
+ * settle adapter's deposit-liveness guard. The other guards stay plain on
+ * purpose: they mean the row disagrees with the chain, which needs a human.
+ * @see FundNotSubmittedError, the same boundary on receive.
  */
 export class OfferNotSubmittedError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
@@ -50,7 +59,73 @@ export class OfferNotSubmittedError extends Error {
   }
 }
 
+/** A fill that provably reached no chain from BELOW the latch — arkd refusing it, or the SDK
+ * refusing to build it. `depositSpent` is the stronger claim on top: arkd NAMED the deposit as
+ * already spent. NOT a subclass of {@link OfferNotSubmittedError}, whose walk-back no-ops here,
+ * so the callers' existing arms would catch it and stick the row. */
+export class OfferSubmitRejectedError extends Error {
+  /** Named by a probe, never by arkd's refusal. The row's owner rules out our own
+   * fill before ending the row on it. @see depositSpentBy */
+  readonly spentBy?: string
+  constructor(
+    message: string,
+    readonly spentOutpoints: readonly string[],
+    readonly depositSpent: boolean,
+    options?: { cause?: unknown; spentBy?: string },
+  ) {
+    super(message, options)
+    this.name = 'OfferSubmitRejectedError'
+    this.spentBy = options?.spentBy
+  }
+}
+
+/** Names no culprit (another taker, the maker's `cancel`, our other watcher): the RFQ
+ * path publishes it to the client verbatim. */
+export const DEPOSIT_SPENT_REASON = 'the deposit was already spent by another transaction; this fill sent nothing'
+
+const SUBMIT_FAILURE_PREFIX = 'Failed to submit tx to emulator: '
+
+/** arkd flattens metadata through `fmt.Sprintf("%v", …)`, so `vtxo_outpoints` arrives as a
+ * Go slice, `[txid:0 txid:1]`, unquoted. A JSON array parses too. */
+const outpointsIn = (metadata: Record<string, unknown> | undefined): string[] => {
+  const many = metadata?.vtxo_outpoints
+  const listed = Array.isArray(many)
+    ? many.map((entry) => String(entry))
+    : typeof many === 'string'
+      ? many.replace(/^\[|\]$/g, '').split(/[\s,]+/)
+      : []
+  const cleaned = listed.map((entry) => entry.trim().toLowerCase()).filter((entry) => entry !== '')
+  if (cleaned.length > 0) return cleaned
+  const one = metadata?.vtxo_outpoint
+  return typeof one === 'string' && one.trim() !== '' ? [one.trim().toLowerCase()] : []
+}
+
+/** Null for anything but a parsed `VTXO_ALREADY_SPENT` entry: it is read off the structured
+ * detail, never the prose, which is a format string in arkd. */
+const spentOutpointsIn = (error: unknown): string[] | null => {
+  if (!(error instanceof Error) || !error.message.startsWith(SUBMIT_FAILURE_PREFIX)) return null
+  let body: unknown
+  try {
+    body = JSON.parse(error.message.slice(SUBMIT_FAILURE_PREFIX.length))
+  } catch {
+    return null
+  }
+  const details = (body as { details?: unknown } | null)?.details
+  if (!Array.isArray(details)) return null
+  for (const detail of details) {
+    const entry = detail as { code?: unknown; name?: unknown; metadata?: Record<string, unknown> } | null
+    // BOTH: arkd sets the two off one registry entry, and codes 4, 7, 8 and 9
+    // carry this very metadata shape for entirely different facts.
+    if (entry?.name !== 'VTXO_ALREADY_SPENT' || Number(entry?.code) !== 6) continue
+    const outpoints = outpointsIn(entry?.metadata)
+    if (outpoints.length > 0) return outpoints
+  }
+  return null
+}
+
 export interface FulfillOptions {
+  /** Overrides the wallet's own indexer for the spend probe. @see depositSpentBy */
+  probe?: DepositSpendProbe
   /**
    * Claimed immediately before the submission: `false` means another attempt
    * holds the row and nothing may be sent. A throw is left untyped — a failed
@@ -174,6 +249,38 @@ export const fulfillOffer = async (
       // it. It only ever names the client's own key anyway; the covenant here is
       // rebuilt from the offer's, and a mismatch fails loudly against
       // `swapPkScript` rather than silently.
+    }).catch(async (error: unknown) => {
+      // `resolveDeposit`, inside `fillOffer` nine lines above its only `send()`: nothing was
+      // built, let alone sent. Absence is no proof, so ask the indexer; uncertainty leaves
+      // `depositSpent` false and the caller walks the row back.
+      if (error instanceof NoSpendableDepositError) {
+        const outpoint = outpointKey(deposit.txid, deposit.vout)
+        const spentBy = await depositSpentBy(options?.probe ?? ctx.wallet?.indexerProvider, deposit)
+        throw new OfferSubmitRejectedError(
+          spentBy === null
+            ? `the deposit ${outpoint} was not spendable when the fill was built; nothing was submitted`
+            : `the deposit ${outpoint} was spent by ${spentBy}; nothing was submitted`,
+          spentBy === null ? [] : [outpoint],
+          spentBy !== null,
+          { cause: error, ...(spentBy === null ? {} : { spentBy }) },
+        )
+      }
+      const spent = spentOutpointsIn(error)
+      // Rethrown as it was: unclassified keeps meaning "outcome unknown".
+      if (spent === null) throw error
+      const depositSpent = spent.includes(outpointKey(deposit.txid, deposit.vout).toLowerCase())
+      // THE SHAPE THAT PROVES NOTHING: arkd lists every already-spent input, so
+      // the deposit named BESIDE a coin of ours is also what a fill of ours that
+      // landed looks like. @see spec/tla OfferFill_RejectedProof.cfg
+      const oursToo = funding.some((coin) => spent.includes(outpointKey(coin.txid, coin.vout).toLowerCase()))
+      if (depositSpent && oursToo) throw error
+      // Any other shape sent nothing, whichever input it named; only a named deposit ends the row.
+      throw new OfferSubmitRejectedError(
+        `arkd refused the fill: ${spent.join(', ')} already spent; nothing was submitted`,
+        spent,
+        depositSpent,
+        { cause: error },
+      )
     })
   } finally {
     // Freed on failure too, where nothing else would release the pin.

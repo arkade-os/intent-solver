@@ -14,10 +14,15 @@ import {
   MAX_FILL_DEFERRALS,
   type AssetOfferDeps,
 } from '@arkade-os/solver-app/ops/assetOffers.js'
-import { OfferNotSubmittedError } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
+import {
+  DEPOSIT_SPENT_REASON,
+  OfferNotSubmittedError,
+  OfferSubmitRejectedError,
+} from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { approvalGateFor } from '@arkade-os/solver-app/ops/approvals.js'
 import type { SwapApprovalRequest } from '@arkade-os/solver-app/admin/db.js'
 import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
+import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
 import { priceFrom } from '@arkade-os/solver-core/core/priceFeed.js'
 import { encodeOffer, OFFER_PACKET_TYPE, offerVtxoScript, type Offer } from '@arkade-os/swap/protocol'
@@ -1102,5 +1107,327 @@ describe('the approval gate on offer fills', () => {
     await service.consider(found)
     expect(await service.tickAll()).toBe(1)
     expect(settle).toHaveBeenCalledTimes(1)
+  })
+})
+
+/** The fake `settle` latches before it throws, or the walk-backs no-op. */
+describe('tickAll classifies a fill arkd rejected as already spent', () => {
+  const rejecting = async (error: () => Error, over: Partial<AssetOfferDeps> = {}) => {
+    const errors: { id: string; error: unknown }[] = []
+    const deferred: { id: string; error: unknown }[] = []
+    const settle = vi.fn(async (_row: unknown, options?: { markSubmitting?: () => Promise<boolean> }) => {
+      await options?.markSubmitting?.()
+      throw error()
+    })
+    const built = await build({
+      settle: settle as unknown as AssetOfferDeps['settle'],
+      onError: (id, e) => void errors.push({ id, error: e }),
+      onDeferred: (id, e) => void deferred.push({ id, error: e }),
+      ...over,
+    })
+    await built.service.consider(found)
+    return { ...built, settle, errors, deferred }
+  }
+
+  const spent = (outpoints: string[], depositSpent: boolean) =>
+    new OfferSubmitRejectedError(
+      `arkd refused the fill: ${outpoints.join(', ')} already spent`,
+      outpoints,
+      depositSpent,
+    )
+
+  it('marks the row lost — not stuck — when the offer deposit was spent elsewhere', async () => {
+    const { store, service, errors } = await rejecting(() => spent([`${'a'.repeat(64)}:0`], true))
+    expect(await service.tickAll()).toBe(0)
+    expect(await store.findById('fill-1')).toMatchObject({
+      state: 'lost',
+      fillTxid: null,
+      failureReason: DEPOSIT_SPENT_REASON,
+    })
+    expect(errors).toEqual([])
+  })
+
+  it('stays silent when another writer moved the row before the exit lands', async () => {
+    const errors: unknown[] = []
+    let store!: Awaited<ReturnType<typeof build>>['store']
+    const built = await build({
+      settle: async (_row, options) => {
+        await options?.markSubmitting?.()
+        await store.fail('fill-1', 'filling', 'parked by recovery')
+        throw spent([`${'a'.repeat(64)}:0`], true)
+      },
+      onError: (_id, e) => void errors.push(e),
+    })
+    store = built.store
+    await built.service.consider(found)
+    expect(await built.service.tickAll()).toBe(0)
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'stuck', failureReason: 'parked by recovery' })
+    expect(errors).toEqual([])
+  })
+
+  it('walks the row back to fillable when one of OUR coins was the one spent', async () => {
+    const { store, service, deferred, errors } = await rejecting(() => spent([`${'9'.repeat(64)}:1`], false))
+    expect(await service.tickAll()).toBe(0)
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'fillable', fillTxid: null, failureReason: null })
+    expect(deferred).toHaveLength(1)
+    expect(errors).toEqual([])
+  })
+
+  it('fills it on a later sweep once the coin race is over', async () => {
+    let racing = true
+    const { store, service } = await build({
+      settle: async (_row, options) => {
+        await options?.markSubmitting?.()
+        if (racing) throw spent([`${'9'.repeat(64)}:1`], false)
+        return '0xfill'
+      },
+    })
+    await service.consider(found)
+    await service.tickAll()
+    racing = false
+    expect(await service.tickAll()).toBe(1)
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'filled', fillTxid: '0xfill' })
+  })
+
+  it('spends the same retry budget, so a coin race cannot loop forever', async () => {
+    const { store, service } = await rejecting(() => spent([`${'9'.repeat(64)}:1`], false))
+    for (let sweep = 0; sweep < MAX_FILL_DEFERRALS; sweep += 1) await service.tickAll()
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'fillable' })
+    await service.tickAll()
+    const row = await store.findById('fill-1')
+    expect(row).toMatchObject({ state: 'stuck' })
+    expect(row!.failureReason).toMatch(/retries exhausted/)
+  })
+
+  it('still sticks every other submission failure', async () => {
+    const { store, service } = await rejecting(
+      () => new Error('Failed to submit tx to emulator: something else entirely'),
+    )
+    await service.tickAll()
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'stuck' })
+  })
+})
+
+describe('an offer an RFQ negotiation already holds', () => {
+  it('is skipped silently, with no row and no refusal recorded', async () => {
+    const refused: unknown[] = []
+    const { store, service } = await build({
+      rfqHolds: async () => true,
+      onRefused: (outpoint, reason, detail) => void refused.push({ outpoint, reason, detail }),
+    })
+    expect(await service.consider(found)).toEqual({ fill: false, reason: 'offer_held_by_rfq' })
+    expect(await store.findById('fill-1')).toBeUndefined()
+    expect(refused).toEqual([])
+  })
+
+  it('asks about the offer script the packet names', async () => {
+    const asked: string[] = []
+    const { service } = await build({
+      rfqHolds: async (pkScript) => {
+        asked.push(pkScript)
+        return true
+      },
+    })
+    await service.consider(found)
+    expect(asked).toEqual([SCRIPT_HEX])
+  })
+
+  it('is considered normally once the negotiation is no longer live', async () => {
+    const { store, service } = await build({ rfqHolds: async () => false })
+    expect(await service.consider(found)).toEqual({ fill: true, id: 'fill-1' })
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'fillable' })
+  })
+
+  it('is considered normally when nothing was wired at all', async () => {
+    const { service } = await build()
+    expect(await service.consider(found)).toEqual({ fill: true, id: 'fill-1' })
+  })
+
+  it('reads liveness from the RFQ machine, so a filled negotiation releases the script', async () => {
+    const rfq = await AssetRfqSwapStore.open(betterSqliteDriver(':memory:'))
+    await rfq.insertQuote({
+      id: 'rfq-1',
+      rfqId: 'a'.repeat(64),
+      pair: `arkade:${USDT}->arkade:BTC`,
+      fromAssetId: USDT,
+      fromAmount: 900n,
+      toAssetId: null,
+      toAmount: 1_000n,
+      makerPkScript: `5120${'c'.repeat(64)}`,
+      makerPublicKey: 'b'.repeat(64),
+      offerPkScript: SCRIPT_HEX,
+      offerAddress: 'ark1qoffer',
+      solverPubkey: 'e'.repeat(64),
+      validUntil: 2_000,
+    })
+    const { service } = await build({ rfqHolds: (pkScript) => rfq.heldByLiveNegotiation(pkScript) })
+    expect(await service.consider(found)).toEqual({ fill: false, reason: 'offer_held_by_rfq' })
+
+    await rfq.transition('rfq-1', 'quoted', 'funded')
+    await rfq.transition('rfq-1', 'funded', 'filling', { fill_phase: 'selecting' })
+    await rfq.transition('rfq-1', 'filling', 'filled')
+    expect(await rfq.findLiveByOfferScript(SCRIPT_HEX)).toBeDefined()
+    expect(await service.consider(found)).toEqual({ fill: true, id: 'fill-1' })
+    await rfq.close()
+  })
+})
+
+/** Both remaining timings rejoin the deferral budget: this loop has no
+ * action-time deposit gate, and `lost` here cannot be undone. */
+describe('tickAll on a lost race caught before the submission', () => {
+  const INCIDENT_DEPOSIT = '7da3508518eb5fec43370d26fb85e2fe105796f1869d183e16a38dbe41e05730:0'
+
+  const throwing = async (error: () => Error, latch = false) => {
+    const errors: { id: string; error: unknown }[] = []
+    const deferred: { id: string; error: unknown }[] = []
+    const settle = vi.fn(async (_row: unknown, options?: { markSubmitting?: () => Promise<boolean> }) => {
+      if (latch) await options?.markSubmitting?.()
+      throw error()
+    })
+    const built = await build({
+      settle: settle as unknown as AssetOfferDeps['settle'],
+      onError: (id, e) => void errors.push({ id, error: e }),
+      onDeferred: (id, e) => void deferred.push({ id, error: e }),
+    })
+    await built.service.consider(found)
+    return { ...built, settle, errors, deferred }
+  }
+
+  it('defers the adapter liveness refusal instead of parking it stuck', async () => {
+    const { store, service, deferred, errors } = await throwing(
+      () => new OfferNotSubmittedError(`${INCIDENT_DEPOSIT} is no longer live at ${SCRIPT_HEX}; nothing was submitted`),
+    )
+    expect(await service.tickAll()).toBe(0)
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'fillable', failureReason: null })
+    expect(deferred).toHaveLength(1)
+    expect(errors).toEqual([])
+  })
+
+  it('defers the SDK pre-send refusal from under the latch', async () => {
+    const { store, service, deferred } = await throwing(
+      () => new OfferSubmitRejectedError('the deposit was not spendable when the fill was built', [], false),
+      true,
+    )
+    expect(await service.tickAll()).toBe(0)
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'fillable', fillPhase: null })
+    expect(deferred).toHaveLength(1)
+  })
+
+  it('still ends lost — not stuck — when arkd named the incident outpoint as spent', async () => {
+    const { store, service, errors } = await throwing(
+      () =>
+        new OfferSubmitRejectedError(
+          `arkd refused the fill: ${INCIDENT_DEPOSIT} already spent`,
+          [INCIDENT_DEPOSIT],
+          true,
+        ),
+      true,
+    )
+    expect(await service.tickAll()).toBe(0)
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'lost', failureReason: DEPOSIT_SPENT_REASON })
+    expect(errors).toEqual([])
+  })
+
+  it('exhausts the budget into stuck, since absence from a list never proves the deposit gone', async () => {
+    const { store, service } = await throwing(
+      () => new OfferNotSubmittedError(`${INCIDENT_DEPOSIT} is no longer live; nothing was submitted`),
+    )
+    for (let sweep = 0; sweep < MAX_FILL_DEFERRALS; sweep += 1) await service.tickAll()
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'fillable' })
+    await service.tickAll()
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'stuck' })
+  })
+})
+
+/** The payoff: an offer another taker took ends `lost` on the first sweep. */
+describe('tickAll on a deposit the indexer proves spent', () => {
+  const SPENDER = 'f1'.repeat(32)
+
+  const settling = async (error: () => Error, latch: boolean) => {
+    const errors: { id: string; error: unknown }[] = []
+    const settle = vi.fn(async (_row: unknown, options?: { markSubmitting?: () => Promise<boolean> }) => {
+      if (latch) await options?.markSubmitting?.()
+      throw error()
+    })
+    const built = await build({
+      settle: settle as unknown as AssetOfferDeps['settle'],
+      onError: (id, e) => void errors.push({ id, error: e }),
+    })
+    await built.service.consider(found)
+    return { ...built, errors }
+  }
+
+  const proven = () =>
+    new OfferSubmitRejectedError(
+      `${'a'.repeat(64)}:0 was spent by ${SPENDER}; nothing was submitted`,
+      [`${'a'.repeat(64)}:0`],
+      true,
+      {
+        spentBy: SPENDER,
+      },
+    )
+
+  it.each([
+    ['above the latch, at selecting', false],
+    ['under the latch, at submitting', true],
+  ] as const)('ends lost on the first sweep %s', async (_where, latch) => {
+    const { store, service, errors } = await settling(proven, latch)
+    expect(await service.tickAll()).toBe(0)
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'lost', failureReason: DEPOSIT_SPENT_REASON })
+    expect(errors).toEqual([])
+  })
+
+  /** A spender that IS our fill means a filled row would be misread as lost. */
+  it('refuses to call it lost when the named spender is our own fill', async () => {
+    const { store, service } = await build({
+      settle: async (_row, options) => {
+        await options?.markSubmitting?.()
+        throw new OfferSubmitRejectedError('spent by us', [`${'a'.repeat(64)}:0`], true, { spentBy: '0xfill' })
+      },
+    })
+    await service.consider(found)
+    await store.transition('fill-1', 'fillable', 'filling', { fill_phase: 'selecting', fill_txid: '0xfill' })
+    await store.revertUnsubmitted('fill-1')
+    await service.tickAll()
+    expect((await store.findById('fill-1'))?.state).not.toBe('lost')
+  })
+})
+
+/** The exhausted tail is the last place a lost CAS could still alert. */
+describe('tickAll at the end of the retry budget', () => {
+  it('stays silent when another writer parked the row before the tail lands', async () => {
+    const errors: unknown[] = []
+    let store!: Awaited<ReturnType<typeof build>>['store']
+    let sweeps = 0
+    const built = await build({
+      settle: async () => {
+        sweeps += 1
+        // On the sweep that spends the budget, recovery gets there first.
+        if (sweeps > MAX_FILL_DEFERRALS) await store.fail('fill-1', 'filling', 'parked by recovery')
+        throw new OfferNotSubmittedError('no spendable coins to pay the maker 1000 sats')
+      },
+      onError: (_id, e) => void errors.push(e),
+    })
+    store = built.store
+    await built.service.consider(found)
+    for (let sweep = 0; sweep <= MAX_FILL_DEFERRALS; sweep += 1) await built.service.tickAll()
+
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'stuck', failureReason: 'parked by recovery' })
+    expect(errors).toEqual([])
+  })
+
+  it('still alerts when this attempt is the one that parks it', async () => {
+    const errors: unknown[] = []
+    const { store, service } = await build({
+      settle: async () => {
+        throw new OfferNotSubmittedError('no spendable coins to pay the maker 1000 sats')
+      },
+      onError: (_id, e) => void errors.push(e),
+    })
+    await service.consider(found)
+    for (let sweep = 0; sweep <= MAX_FILL_DEFERRALS; sweep += 1) await service.tickAll()
+
+    expect((await store.findById('fill-1'))?.failureReason).toMatch(/retries exhausted/)
+    expect(errors).toHaveLength(1)
   })
 })

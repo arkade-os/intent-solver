@@ -25,6 +25,7 @@ import { base64, hex } from '@scure/base'
 import { offerSettleFor, type OfferFillIntent } from '@arkade-os/solver-arkade/arkade/offerSettle.js'
 import type { OfferOutpoint } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
 import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { OfferNotSubmittedError, OfferSubmitRejectedError } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { OFFER_CONTRACT_V1, OFFER_CONTRACT_V2 } from '@arkade-os/solver-core/core/offerContract.js'
 
 const USD = '41bcbb06921a0e9f6fe4f1b003b878cbb43d9ca3f6d14cab7940090458765a390000'
@@ -258,6 +259,15 @@ describe('offerSettleFor — it refuses before it spends', () => {
     expect(fulfill).not.toHaveBeenCalled()
   })
 
+  it('types the liveness refusal as unsubmitted, so a lost race is retried not parked', async () => {
+    const { settle } = build(raw, { outpointsAt: async () => [] })
+    const error = await settle(intentFor(published, raw)).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(error).toBeInstanceOf(OfferNotSubmittedError)
+  })
+
   it('when a SATS deposit has already been spent', async () => {
     const sats = offer({ offerAsset: undefined, wantAsset: asset.AssetId.fromString(USD) })
     const satsRaw = fundingTx(sats)
@@ -272,5 +282,76 @@ describe('offerSettleFor — it refuses before it spends', () => {
     await settle(intentFor(published, raw))
     const deposit = (fulfill.mock.calls[0]! as unknown as unknown[])[3] as Record<string, unknown>
     expect(deposit.assetAmount).toBe(1_200n)
+  })
+})
+
+/** `lost` waits on the indexer naming a spender; everything else walks back. */
+describe('offerSettleFor — the deposit-gone probe', () => {
+  const published = offer()
+  const raw = fundingTx(published)
+  const vtxo = (over: Record<string, unknown> = {}) => ({
+    txid: txidOf(raw),
+    vout: 0,
+    value: DEPOSIT_SATS,
+    script: 'ab'.repeat(34),
+    createdAt: new Date(0),
+    isUnrolled: false,
+    isSpent: true,
+    spentBy: 'f1'.repeat(32),
+    ...over,
+  })
+
+  const probing = (vtxos: unknown[]) =>
+    build(raw, { outpointsAt: async () => [], probe: { getVtxos: async () => ({ vtxos: vtxos as never }) } })
+
+  it('ends terminal when the indexer names a foreign spender', async () => {
+    const { settle, fulfill } = probing([vtxo()])
+    const error = await settle(intentFor(published, raw)).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(error).toBeInstanceOf(OfferSubmitRejectedError)
+    expect(error).toMatchObject({ depositSpent: true, spentBy: 'f1'.repeat(32) })
+    expect(fulfill).not.toHaveBeenCalled()
+  })
+
+  it('matches the outpoint whatever case the indexer writes its txid in', async () => {
+    const { settle } = probing([vtxo({ txid: txidOf(raw).toUpperCase() })])
+    const error = await settle(intentFor(published, raw)).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(error).toMatchObject({ depositSpent: true, spentBy: 'f1'.repeat(32) })
+  })
+
+  it.each([
+    ['the outpoint is not spent', [{ isSpent: false, spentBy: '' }]],
+    ['the spend names nobody', [{ spentBy: '' }]],
+    ['the indexer knows nothing of it', []],
+  ] as const)('keeps the walk-back when %s', async (_why, over) => {
+    const { settle } = probing(over.length === 0 ? [] : [vtxo(over[0] as Record<string, unknown>)])
+    const error = await settle(intentFor(published, raw)).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(error).toBeInstanceOf(OfferNotSubmittedError)
+    expect(error).not.toBeInstanceOf(OfferSubmitRejectedError)
+  })
+
+  it('keeps the walk-back when the probe throws, so a dead indexer ends nothing', async () => {
+    const { settle } = build(raw, {
+      outpointsAt: async () => [],
+      probe: {
+        getVtxos: async () => {
+          throw new Error('indexer unreachable')
+        },
+      },
+    })
+    await expect(settle(intentFor(published, raw))).rejects.toBeInstanceOf(OfferNotSubmittedError)
+  })
+
+  it('keeps the walk-back when no indexer is wired at all', async () => {
+    const { settle } = build(raw, { outpointsAt: async () => [] })
+    await expect(settle(intentFor(published, raw))).rejects.toBeInstanceOf(OfferNotSubmittedError)
   })
 })

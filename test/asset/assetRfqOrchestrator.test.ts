@@ -19,7 +19,11 @@ import { fileURLToPath } from 'node:url'
 import { approvalGateFor } from '@arkade-os/solver-app/ops/approvals.js'
 import type { SwapApprovalRequest } from '@arkade-os/solver-app/admin/db.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
-import { OfferNotSubmittedError } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
+import {
+  DEPOSIT_SPENT_REASON,
+  OfferNotSubmittedError,
+  OfferSubmitRejectedError,
+} from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { IMPLIED_PRICE_HEADROOM } from '@arkade-os/solver-core/core/assetRfq.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 import {
@@ -977,5 +981,244 @@ describe('replaceMarkets', () => {
       accepted: false,
       reason: 'unsupported_pair',
     })
+  })
+})
+
+/** The fake `settle` latches before it throws, or the walk-backs no-op. */
+describe('a fill arkd rejected as already spent', () => {
+  const funded = async (over: Partial<AssetRfqDeps> = {}) => {
+    const built = await harness({ depositAt: async () => deposit(), ...over })
+    await built.service.quote(request())
+    await built.service.tick('swap-1')
+    return built
+  }
+
+  const rejecting =
+    (error: () => Error) => async (_row: unknown, options?: { markSubmitting?: () => Promise<boolean> }) => {
+      await options?.markSubmitting?.()
+      throw error()
+    }
+
+  const spent = (outpoints: string[], depositSpent: boolean) =>
+    new OfferSubmitRejectedError(
+      `arkd refused the fill: ${outpoints.join(', ')} already spent`,
+      outpoints,
+      depositSpent,
+    )
+
+  it('refuses the row with a neutral reason when the DEPOSIT was spent elsewhere', async () => {
+    const errors: unknown[] = []
+    const { service, store } = await funded({
+      settle: rejecting(() => spent([`${'ff'.repeat(32)}:0`], true)),
+      onError: (_id, error) => void errors.push(error),
+    })
+    await service.tick('swap-1')
+    expect(await store.get('swap-1')).toMatchObject({
+      state: 'refused',
+      fillTxid: null,
+      failureReason: DEPOSIT_SPENT_REASON,
+    })
+    expect((await store.get('swap-1')).failureReason).not.toMatch(/taker/i)
+    expect(errors).toEqual([])
+  })
+
+  it('stays silent when another writer moved the row before the exit lands', async () => {
+    const errors: unknown[] = []
+    let store!: Awaited<ReturnType<typeof funded>>['store']
+    const built = await funded({
+      settle: async (_row: unknown, options?: { markSubmitting?: () => Promise<boolean> }) => {
+        await options?.markSubmitting?.()
+        await store.fail('swap-1', 'filling', 'parked by recovery')
+        throw spent([`${'ff'.repeat(32)}:0`], true)
+      },
+      onError: (_id, error) => void errors.push(error),
+    })
+    store = built.store
+    await built.service.tick('swap-1')
+    expect(await store.get('swap-1')).toMatchObject({ state: 'stuck', failureReason: 'parked by recovery' })
+    expect(errors).toEqual([])
+  })
+
+  it('walks the row back to funded when one of OUR coins was the one spent', async () => {
+    const deferred: string[] = []
+    const { service, store } = await funded({
+      settle: rejecting(() => spent([`${'99'.repeat(32)}:1`], false)),
+      onDeferred: (id) => void deferred.push(id),
+    })
+    await service.tick('swap-1')
+    expect(await store.get('swap-1')).toMatchObject({ state: 'funded', fillTxid: null, failureReason: null })
+    expect(deferred).toEqual(['swap-1'])
+  })
+
+  it('fills on the next tick once the coin race is over, submitting exactly once', async () => {
+    let racing = true
+    const settled: string[] = []
+    const { service, store } = await funded({
+      settle: async (row, options) => {
+        await options?.markSubmitting?.()
+        if (racing) throw spent([`${'99'.repeat(32)}:1`], false)
+        settled.push(row.id)
+        return 'fa'.repeat(32)
+      },
+    })
+    await service.tick('swap-1')
+    racing = false
+    await service.tick('swap-1')
+    expect(settled).toEqual(['swap-1'])
+    expect(await store.get('swap-1')).toMatchObject({ state: 'filled', fillTxid: 'fa'.repeat(32) })
+  })
+
+  it('still sticks every other failure, because only a rejection proves nothing was sent', async () => {
+    const { service, store } = await funded({
+      settle: rejecting(() => new Error('Failed to submit tx to emulator: something else entirely')),
+    })
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).state).toBe('stuck')
+  })
+})
+
+/** Both remaining timings sit above the submission, so the row walks back and
+ * § 9's gate ends it from its OWN fresh read. */
+describe('a lost race caught before the submission', () => {
+  const INCIDENT_DEPOSIT = '7da3508518eb5fec43370d26fb85e2fe105796f1869d183e16a38dbe41e05730:0'
+
+  const fundedThen = async (settle: AssetRfqDeps['settle'], laterDeposits: (ObservedDeposit | null)[]) => {
+    let reads = 0
+    const built = await harness({
+      depositAt: async () => {
+        const seen = reads === 0 ? deposit() : (laterDeposits[reads - 1] ?? null)
+        reads += 1
+        return seen
+      },
+      settle,
+    })
+    await built.service.quote(request())
+    await built.service.tick('swap-1')
+    return built
+  }
+
+  it('walks back the adapter liveness refusal, then finishes refused on the next tick', async () => {
+    const { service, store } = await fundedThen(async () => {
+      throw new OfferNotSubmittedError(
+        `${INCIDENT_DEPOSIT} is no longer live at ${OFFER_SCRIPT}; nothing was submitted`,
+      )
+    }, [deposit(), null])
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).state).toBe('funded')
+
+    await service.tick('swap-1')
+    const row = await store.get('swap-1')
+    expect(row.state).toBe('refused')
+    expect(row.failureReason).toMatch(/deposit_short/)
+    expect(row.fillTxid).toBeNull()
+  })
+
+  it('walks back the SDK pre-send refusal from under the latch, then finishes refused', async () => {
+    const { service, store } = await fundedThen(
+      async (_row, options) => {
+        await options?.markSubmitting?.()
+        throw new OfferSubmitRejectedError('the deposit was not spendable when the fill was built', [], false)
+      },
+      [deposit(), null],
+    )
+    await service.tick('swap-1')
+    expect(await store.get('swap-1')).toMatchObject({ state: 'funded', fillPhase: null })
+
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).state).toBe('refused')
+  })
+
+  it('fills instead when the deposit was only briefly unreadable', async () => {
+    let blipped = false
+    const { service, store } = await fundedThen(
+      async (row, options) => {
+        if (!blipped) {
+          blipped = true
+          throw new OfferNotSubmittedError(`${INCIDENT_DEPOSIT} is no longer live; nothing was submitted`)
+        }
+        await options?.markSubmitting?.()
+        return `fa${row.id.length}`.padEnd(64, 'b')
+      },
+      [deposit(), deposit()],
+    )
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).state).toBe('filled')
+  })
+
+  it('ends refused with the neutral reason when arkd named the incident outpoint', async () => {
+    const { service, store } = await fundedThen(
+      async (_row, options) => {
+        await options?.markSubmitting?.()
+        throw new OfferSubmitRejectedError(
+          `arkd refused the fill: ${INCIDENT_DEPOSIT} already spent`,
+          [INCIDENT_DEPOSIT],
+          true,
+        )
+      },
+      [deposit()],
+    )
+    await service.tick('swap-1')
+    expect(await store.get('swap-1')).toMatchObject({ state: 'refused', failureReason: DEPOSIT_SPENT_REASON })
+  })
+})
+
+/** The two remaining places a lost CAS could still alert on the RFQ path. */
+describe('a tick whose exit another writer already took', () => {
+  const funded = async (over: Partial<AssetRfqDeps> = {}) => {
+    const built = await harness({ depositAt: async () => deposit(), ...over })
+    await built.service.quote(request())
+    await built.service.tick('swap-1')
+    return built
+  }
+
+  it('stays silent on the unclassified tail', async () => {
+    const errors: unknown[] = []
+    let store!: Awaited<ReturnType<typeof funded>>['store']
+    const built = await funded({
+      settle: async () => {
+        await store.fail('swap-1', 'filling', 'parked by recovery')
+        throw new Error('the emulator said something nobody classified')
+      },
+      onError: (_id, error) => void errors.push(error),
+    })
+    store = built.store
+    await built.service.tick('swap-1')
+    expect(await store.get('swap-1')).toMatchObject({ state: 'stuck', failureReason: 'parked by recovery' })
+    expect(errors).toEqual([])
+  })
+
+  it('still alerts on the unclassified tail when this tick parks it', async () => {
+    const errors: unknown[] = []
+    const { service, store } = await funded({
+      settle: async () => {
+        throw new Error('the emulator said something nobody classified')
+      },
+      onError: (_id, error) => void errors.push(error),
+    })
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).state).toBe('stuck')
+    expect(errors).toHaveLength(1)
+  })
+
+  /** The `depositSpent = false` walk-back, which had no lost-CAS test. */
+  it('stays silent when the walk-back loses to another writer', async () => {
+    const deferred: string[] = []
+    const errors: unknown[] = []
+    let store!: Awaited<ReturnType<typeof funded>>['store']
+    const built = await funded({
+      settle: async (_row: unknown, options?: { markSubmitting?: () => Promise<boolean> }) => {
+        await options?.markSubmitting?.()
+        await store.fail('swap-1', 'filling', 'parked by recovery')
+        throw new OfferSubmitRejectedError('one of our coins went', [`${'99'.repeat(32)}:1`], false)
+      },
+      onDeferred: (id) => void deferred.push(id),
+      onError: (_id, error) => void errors.push(error),
+    })
+    store = built.store
+    await built.service.tick('swap-1')
+    expect(await store.get('swap-1')).toMatchObject({ state: 'stuck', failureReason: 'parked by recovery' })
+    expect(deferred).toEqual([])
+    expect(errors).toEqual([])
   })
 })
