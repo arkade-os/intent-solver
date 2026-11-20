@@ -31,7 +31,7 @@ const seen = (override: Partial<Observation> = {}): Observation => ({
 const POLICIES: Policies = {
   canFill: () => ({ ok: true }),
   acceptsOverfunding: false,
-  onLockFailed: () => 'stick',
+  onLockFailed: () => 'stuck',
   onLockMissing: () => 'wait',
   canCollect: () => ({ ok: true }),
   onClaimFailed: () => 'retry',
@@ -127,9 +127,9 @@ describe('plan: paying out', () => {
     expect(plan(swap, seen(), POLICIES)).toEqual({ do: 'wait' })
     expect(plan(swap, seen(), policies({ onLockMissing: () => 'retry' }))).toEqual({ do: 'lock', side: 'to' })
     expect(plan(swap, seen(), policies({ onLockMissing: () => 'refuse' }))).toMatchObject({ do: 'abandon' })
-    expect(plan(swap, seen(), policies({ onLockMissing: () => 'stick' }))).toMatchObject({ outcome: 'stuck' })
+    expect(plan(swap, seen(), policies({ onLockMissing: () => 'stuck' }))).toMatchObject({ outcome: 'stuck' })
     const pending = seen({ to: { ...NOTHING, lock: 'pending' } })
-    expect(plan(swap, pending, policies({ onLockMissing: () => 'stick' }))).toEqual({ do: 'wait' })
+    expect(plan(swap, pending, policies({ onLockMissing: () => 'stuck' }))).toEqual({ do: 'wait' })
   })
 
   it('sticks on a spend of our lock it does not recognise', () => {
@@ -168,7 +168,7 @@ describe('plan: collecting', () => {
     const at = (claim: LegSeen['claim']) => seen({ to: claimedBy, from: { ...NOTHING, claim } })
     expect(plan(swap, at('none'), POLICIES)).toEqual({ do: 'claim', side: 'from' })
     expect(plan(swap, at('failed'), POLICIES)).toEqual({ do: 'claim', side: 'from' })
-    expect(plan(swap, at('failed'), policies({ onClaimFailed: () => 'stick' }))).toMatchObject({ outcome: 'stuck' })
+    expect(plan(swap, at('failed'), policies({ onClaimFailed: () => 'stuck' }))).toMatchObject({ outcome: 'stuck' })
     expect(plan(swap, at('pending'), POLICIES)).toEqual({ do: 'wait' })
     expect(plan(swap, at('landed'), POLICIES)).toEqual({ do: 'record', side: 'from', state: 'claimed' })
   })
@@ -199,7 +199,7 @@ describe('plan: unwinding', () => {
     expect(plan(swap, seen({ to: { ...NOTHING, refund: 'pending' } }), POLICIES)).toEqual({ do: 'wait' })
     expect(plan(swap, seen({ to: { ...NOTHING, refund: 'failed' } }), POLICIES)).toEqual({ do: 'refund', side: 'to' })
     expect(
-      plan(swap, seen({ to: { ...NOTHING, refund: 'failed' } }), policies({ onRefundFailed: () => 'stick' })),
+      plan(swap, seen({ to: { ...NOTHING, refund: 'failed' } }), policies({ onRefundFailed: () => 'stuck' })),
     ).toMatchObject({
       outcome: 'stuck',
     })

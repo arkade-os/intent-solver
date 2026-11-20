@@ -3,10 +3,10 @@ export interface Choice {
   run(): void
 }
 
-/** One execution, rebuilt from scratch for every path: a running worker cannot be copied, only replayed. */
+/** One execution. It is rebuilt and replayed for every path, because a running worker cannot be copied. */
 export interface Run {
   choices(): Choice[]
-  /** Two runs with the same fingerprint have the same future. */
+  /** Equal fingerprints mean equal states, so the second one is not explored again. */
   fingerprint(): string
   /** The name of a violated invariant, or null. */
   violated(): string | null
@@ -17,7 +17,7 @@ export interface Explored {
   readonly violation: { readonly invariant: string; readonly trace: readonly string[] } | null
 }
 
-// Everything in a run is in memory, so every worker reaches its next gate before this resolves.
+// A run is all in memory, so by the time this resolves every worker is waiting at its next gate.
 const settle = (): Promise<void> => new Promise((resolve) => setImmediate(resolve))
 
 const replay = async (start: () => Run, trace: readonly string[]): Promise<Run> => {
@@ -32,7 +32,7 @@ const replay = async (start: () => Run, trace: readonly string[]): Promise<Run> 
   return run
 }
 
-/** Every interleaving, depth first, stopping at the first violated invariant. */
+/** Tries every order of choices, depth first. Stops at the first broken invariant. */
 export const explore = async (start: () => Run, maxStates = 200_000): Promise<Explored> => {
   const seen = new Set<string>()
   const stack: string[][] = [[]]

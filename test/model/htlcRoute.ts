@@ -1,4 +1,4 @@
-import { DriveSwap, type RouteDriver } from '@arkade-os/solver-core/application/drive_swap.js'
+import { DriveSwap } from '@arkade-os/solver-core/application/drive_swap.js'
 import { Conflict } from '@arkade-os/solver-core/domain/shared/error.js'
 import type { SwapId } from '@arkade-os/solver-core/domain/shared/ids.js'
 import type { Side } from '@arkade-os/solver-core/domain/swap/leg.js'
@@ -8,11 +8,11 @@ import { Quote } from '@arkade-os/solver-core/domain/swap/quote.js'
 import { Swap } from '@arkade-os/solver-core/domain/swap/swap.js'
 import type { SwapEvent } from '@arkade-os/solver-core/domain/swap/swap_event.js'
 import { SwapState } from '@arkade-os/solver-core/domain/swap/swap_state.js'
-import type { RailService, Sent } from '@arkade-os/solver-core/ports/rail.js'
+import type { RailService, SendResult } from '@arkade-os/solver-core/ports/rail.js'
 import { btc, ref, SECRET, t, terms } from '../domain/support.js'
 import type { Choice, Run } from './explore.js'
 
-/** Small integers: only the ORDER of the deadlines matters, as in the TLA+ models this replaces. */
+/** Times are small integers. Only their order matters, as in the TLA+ models. */
 export interface Scenario {
   readonly maxClock: number
   readonly quoteUntil: number
@@ -31,12 +31,12 @@ type Spender = 'nobody' | 'us' | 'client'
 
 const BASE = 1_000
 const SWAP: SwapId = terms.id
-const SENT = (reference: string): Sent => ({ dispatch: 'sent', reference: ref(reference) })
-const NOT_SENT: Sent = { dispatch: 'not_sent' }
+const SENT = (reference: string): SendResult => ({ status: 'sent', reference: ref(reference) })
+const NOT_SENT: SendResult = { status: 'not_sent' }
 
-/** The route's own rules, as a real route would write them. */
+/** The rules of the route under test. */
 export const guarded = (scenario: Scenario): Policies => ({
-  // Our way back must open before the client's, and we must not pay out once theirs has.
+  // Pay out only if our refund opens before the client's refund, and the client's has not opened yet.
   canFill: (_swap, seen) => {
     const { expiresAt } = seen.from
     const { refundOpensAt } = seen.to
@@ -45,9 +45,9 @@ export const guarded = (scenario: Scenario): Policies => ({
     return refundOpensAt < expiresAt ? { ok: true } : { ok: false, reason: 'our refund opens too late' }
   },
   acceptsOverfunding: false,
-  onLockFailed: () => 'stick',
-  // Never at once: a call that is still in flight looks exactly like one that was never made.
-  // And never where the rail may show a payout late, because then waiting proves nothing.
+  onLockFailed: () => 'stuck',
+  // Do not resend at once: another worker's send may still be running.
+  // Do not resend at all if the rail can show a payout late: then a missing payout may still appear.
   onLockMissing: (swap, seen) => (!scenario.laggingIndexer && seen.now > swap.to.since ? 'retry' : 'wait'),
   canCollect: () => ({ ok: true }),
   onClaimFailed: () => 'retry',
@@ -154,15 +154,12 @@ export const start = (scenario: Scenario) => (): Run => {
           true,
         ),
     }
-    const route: RouteDriver = {
+    return new DriveSwap({
+      now,
       policies,
       watchers: { from: { observe: async (_s, side) => seen(side) }, to: { observe: async (_s, side) => seen(side) } },
       services: { from: service, to: service },
-      circumstances: async () => ({ peer: null, keyCurrent: true, approval: 'not_required', ownInvoice: false }),
-    }
-    return new DriveSwap({
-      now,
-      route,
+      context: async () => ({ peer: null, keyCurrent: true, approval: 'not_required', ownInvoice: false }),
       swaps: {
         get: () =>
           gate(worker, 'read', () => {
@@ -197,7 +194,7 @@ export const start = (scenario: Scenario) => (): Run => {
       gated.reject(error)
     }
   }
-  // A dead process: its memory is gone and whatever it was waiting for never comes back.
+  // The worker dies: it forgets everything and never gets the answer it was waiting for.
   const kill = (worker: number, gated: Gate, afterEffect: boolean): void => {
     crashes -= 1
     waiting.delete(worker)
@@ -221,7 +218,7 @@ export const start = (scenario: Scenario) => (): Run => {
             if (gated.moves)
               choices.push({ label: `w${worker}:${gated.label}:lost`, run: () => kill(worker, gated, true) })
           }
-          // Workers are interchangeable: a later one starts only once every earlier one is busy.
+          // Workers are identical, so worker 1 starts only when worker 0 is busy. Fewer duplicate paths.
         } else if (!busy.has(worker) && [...Array(worker).keys()].every((w) => busy.has(w))) {
           if (!SwapState.isTerminal(load().state) || !settledOrWaiting()) {
             choices.push({ label: `w${worker}:start`, run: () => begin(worker) })
@@ -236,7 +233,7 @@ export const start = (scenario: Scenario) => (): Run => {
         choices.push({ label: 'client:refund', run: () => void (deposit = 'client') })
       }
       if (visible < payouts) choices.push({ label: 'indexer:catch-up', run: () => void (visible = payouts) })
-      // The solver keeps up: time passes only when it has nothing to do (assumption A2 of the TLA+ models).
+      // Time moves only when the solver has nothing to do (assumption A2 in the TLA+ models).
       if (clock < scenario.maxClock && idle() && settledOrWaiting()) {
         choices.push({ label: 'tick', run: () => void (clock += 1) })
       }

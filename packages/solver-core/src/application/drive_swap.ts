@@ -1,119 +1,122 @@
 import { Conflict, RuleViolated } from '../domain/shared/error.js'
 import type { SwapId } from '../domain/shared/ids.js'
 import type { UnixSeconds } from '../domain/shared/time.js'
+import type { Preimage } from '../domain/swap/hashlock.js'
 import { FactKind, Side, type LegState } from '../domain/swap/leg.js'
 import type { Observation } from '../domain/swap/observation.js'
-import { Act, plan, type Decision, type Policies } from '../domain/swap/plan.js'
+import { Action, plan, type Decision, type Policies } from '../domain/swap/plan.js'
 import type { Swap } from '../domain/swap/swap.js'
 import type { SwapRepository } from '../domain/swap/swap_repo.js'
-import { Dispatch, type RailService, type RailWatcher, type Sent } from '../ports/rail.js'
+import { SendStatus, type RailService, type RailWatcher } from '../ports/rail.js'
 
-/** What a decision needs beyond the two rails. */
-export type Circumstances = Pick<Observation, 'peer' | 'keyCurrent' | 'approval' | 'ownInvoice'>
+/** What a decision needs to know besides the two rails. */
+export type SwapContext = Pick<Observation, 'peer' | 'keyCurrent' | 'approval' | 'ownInvoice'>
 
-/** Everything that makes one route differ from another; the loop below is the same for all of them. */
-export interface RouteDriver {
+/** A route is its rules and its two rails. The steps below are the same for every route. */
+export interface DriveSwapDeps {
+  readonly swaps: Pick<SwapRepository, 'get' | 'update'>
   readonly policies: Policies
   readonly watchers: Readonly<Record<Side, RailWatcher>>
   readonly services: Readonly<Record<Side, RailService>>
-  circumstances(swap: Swap): Promise<Circumstances>
-}
-
-export interface DriveSwapDeps {
-  readonly swaps: Pick<SwapRepository, 'get' | 'update'>
-  readonly route: RouteDriver
+  readonly context: (swap: Swap) => Promise<SwapContext>
   readonly now: () => UnixSeconds
 }
 
-/** `lost`: another worker moved the swap first. Ordinary, and nothing was sent. */
-export const LOST = 'lost'
-export type Step = Act | typeof LOST
+/** Another worker changed the swap first, so this one did nothing. */
+export const SKIPPED = 'skipped'
+export type StepResult = Action | typeof SKIPPED
 
-type Moving = typeof Act.Lock | typeof Act.Claim | typeof Act.Refund
+type SendAction = typeof Action.Lock | typeof Action.Claim | typeof Action.Refund
 
-const INTENT: Record<Moving, { readonly state: LegState; readonly fact: FactKind }> = {
-  lock: { state: 'locking', fact: FactKind.Funding },
-  claim: { state: 'claiming', fact: FactKind.Claim },
-  refund: { state: 'refunding', fact: FactKind.Refund },
-}
+const SENDING_STATE: Record<SendAction, LegState> = { lock: 'locking', claim: 'claiming', refund: 'refunding' }
+const REFERENCE_KIND: Record<SendAction, FactKind> = { lock: 'funding', claim: 'claim', refund: 'refund' }
 
-// A swap may take a few decisions in a row; more than this is a plan that never settles.
 const MAX_STEPS = 32
 
 export class DriveSwap {
   constructor(private readonly deps: DriveSwapDeps) {}
 
-  /** Decide and act until there is nothing to do right now. */
-  async drive(id: SwapId): Promise<Step> {
+  /** Repeat `step` until there is nothing to do right now. */
+  async drive(id: SwapId): Promise<StepResult> {
     for (let i = 0; i < MAX_STEPS; i++) {
-      const step = await this.step(id)
-      if (step === Act.Wait || step === LOST) return step
+      const result = await this.step(id)
+      if (result === Action.Wait || result === SKIPPED) return result
     }
-    throw new RuleViolated(`swap ${id}: still deciding after ${MAX_STEPS} steps`)
+    throw new RuleViolated(`swap ${id}: still not finished after ${MAX_STEPS} steps`)
   }
 
-  /** One decision, carried out. Keeps nothing between calls: a crash anywhere is resumed from the store. */
-  async step(id: SwapId): Promise<Step> {
-    const { swaps, route } = this.deps
-    const swap = await swaps.get(id)
+  /** Load the swap, look at both rails, decide one thing, do it. Nothing is remembered between calls. */
+  async step(id: SwapId): Promise<StepResult> {
+    const swap = await this.deps.swaps.get(id)
     if (swap === null) throw new RuleViolated(`swap ${id} does not exist`)
-    const [from, to, circumstances] = await Promise.all([
-      route.watchers.from.observe(swap, Side.From),
-      route.watchers.to.observe(swap, Side.To),
-      route.circumstances(swap),
-    ])
-    const decision = plan(swap, { now: this.deps.now(), from, to, ...circumstances }, route.policies)
+    const decision = plan(swap, await this.observe(swap), this.deps.policies)
     try {
-      await this.carryOut(swap, decision)
+      await this.apply(swap, decision)
     } catch (error) {
-      if (error instanceof Conflict) return LOST
+      if (error instanceof Conflict) return SKIPPED
       throw error
     }
     return decision.do
   }
 
-  private async carryOut(swap: Swap, decision: Decision): Promise<void> {
+  private async observe(swap: Swap): Promise<Observation> {
+    const { watchers, context, now } = this.deps
+    const [from, to, rest] = await Promise.all([
+      watchers.from.observe(swap, Side.From),
+      watchers.to.observe(swap, Side.To),
+      context(swap),
+    ])
+    return { now: now(), from, to, ...rest }
+  }
+
+  private async apply(swap: Swap, decision: Decision): Promise<void> {
     switch (decision.do) {
-      case Act.Wait:
+      case Action.Wait:
         return
-      case Act.Record:
-        return this.change(swap, (s, at) => this.record(s, decision.side, decision.state, at, decision.preimage))
-      case Act.Lock:
-      case Act.Claim:
-      case Act.Refund:
-        return this.move(swap, decision.do, decision.side)
-      case Act.Unlock:
-        return this.change(swap, (s, at) => void s.lockFailed(Side.To, at))
-      case Act.Abandon:
-        return this.change(swap, (s, at) => {
+      case Action.Record:
+        return this.save(swap, (s, at) => this.setLegState(s, decision.side, decision.state, at, decision.preimage))
+      case Action.Lock:
+      case Action.Claim:
+      case Action.Refund:
+        return this.send(swap, decision.do, decision.side)
+      case Action.Unlock:
+        return this.save(swap, (s, at) => void s.lockFailed(Side.To, at))
+      case Action.Abandon:
+        return this.save(swap, (s, at) => {
           s.lockFailed(Side.To, at)
           s.fail('refused', decision.reason, at)
         })
-      case Act.Fill:
-        return this.change(swap, (s, at) => void s.fillOffer(at, s.to.reference(FactKind.Funding) ?? undefined))
-      case Act.Fail:
-        return this.change(swap, (s, at) => void s.fail(decision.outcome, decision.reason, at))
+      case Action.Fill:
+        return this.save(swap, (s, at) => void s.fillOffer(at, s.to.reference(FactKind.Funding) ?? undefined))
+      case Action.Fail:
+        return this.save(swap, (s, at) => void s.fail(decision.outcome, decision.reason, at))
     }
   }
 
-  // The write is what gives ONE worker the right to act: whoever loses it must not reach the rail.
-  private async move(swap: Swap, act: Moving, side: Side): Promise<void> {
-    const { state, fact } = INTENT[act]
-    await this.change(swap, (s, at) => {
-      if (s[side].state !== state) return void this.record(s, side, state, at)
-      // Already recorded, so this is a second attempt. A lock that left no reference is withdrawn and
-      // recorded again, which is a write to win; one that left a reference can only be sent again as is.
-      if (act === Act.Lock && s[side].reference(fact) === null) {
-        s.lockFailed(side, at)
-        s.locking(side, at)
-      }
-    })
-    const sent: Sent = await this.deps.route.services[side][act](swap, side)
-    if (sent.dispatch !== Dispatch.Sent) return
-    await this.deps.swaps.update(swap.id, (s) => void s.reference(side, { [fact]: sent.reference }, this.deps.now()))
+  private async send(swap: Swap, action: SendAction, side: Side): Promise<void> {
+    // 1. Write down that we are about to send. Only the worker whose write succeeds goes on to step 2.
+    await this.save(swap, (s, at) => this.markSending(s, action, side, at))
+    // 2. Send.
+    const result = await this.deps.services[side][action](swap, side)
+    if (result.status !== SendStatus.Sent) return
+    // 3. Write down what was sent.
+    const reference = { [REFERENCE_KIND[action]]: result.reference }
+    await this.deps.swaps.update(swap.id, (s) => void s.reference(side, reference, this.deps.now()))
   }
 
-  private record(swap: Swap, side: Side, state: LegState, at: UnixSeconds, preimage?: Swap['preimage']): void {
+  private markSending(swap: Swap, action: SendAction, side: Side, at: UnixSeconds): void {
+    const leg = swap[side]
+    if (leg.state !== SENDING_STATE[action]) return this.setLegState(swap, side, SENDING_STATE[action], at)
+    // The leg is already marked, so this is a second try. Step 1 still has to be a write, or two workers
+    // could both send. A lock with no reference is cancelled and marked again. A claim or a refund spends
+    // one output, so sending it twice is harmless; a lock that has a reference is the same transaction again.
+    if (action === Action.Lock && leg.reference(FactKind.Funding) === null) {
+      swap.lockFailed(side, at)
+      swap.locking(side, at)
+    }
+  }
+
+  private setLegState(swap: Swap, side: Side, state: LegState, at: UnixSeconds, preimage?: Preimage): void {
     switch (state) {
       case 'locking':
         return void swap.locking(side, at)
@@ -128,17 +131,17 @@ export class DriveSwap {
       case 'refunded':
         return void swap.refund(side, at)
       case 'pending':
-        throw new RuleViolated(`swap ${swap.id}: a leg is never recorded back to pending`)
+        throw new RuleViolated(`swap ${swap.id}: a leg is never set back to pending this way`)
     }
   }
 
-  // Applies only to the version the decision was made on: a decision about an older swap is void.
-  private async change(planned: Swap, apply: (swap: Swap, at: UnixSeconds) => void): Promise<void> {
-    await this.deps.swaps.update(planned.id, (fresh) => {
-      if (fresh.version !== planned.version) {
-        throw new Conflict(`swap ${planned.id} moved from version ${planned.version} to ${fresh.version}`)
+  /** Saves only if nobody changed the swap since it was loaded; otherwise throws Conflict. */
+  private async save(loaded: Swap, change: (swap: Swap, at: UnixSeconds) => void): Promise<void> {
+    await this.deps.swaps.update(loaded.id, (current) => {
+      if (current.version !== loaded.version) {
+        throw new Conflict(`swap ${loaded.id} changed from version ${loaded.version} to ${current.version}`)
       }
-      apply(fresh, this.deps.now())
+      change(current, this.deps.now())
     })
   }
 }

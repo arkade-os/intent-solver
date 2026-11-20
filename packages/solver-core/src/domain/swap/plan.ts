@@ -5,7 +5,7 @@ import { ApprovalSeen, FundingSeen, Spender, TxSeen, type Observation } from './
 import type { Swap } from './swap.js'
 import { SwapOutcome } from './swap_state.js'
 
-export const Act = {
+export const Action = {
   Wait: 'wait',
   // The rail already shows it: record it on the leg.
   Record: 'record',
@@ -22,19 +22,19 @@ export const Act = {
   Fail: 'fail',
 } as const
 
-export type Act = ValueOf<typeof Act>
+export type Action = ValueOf<typeof Action>
 
 export type Decision =
-  | { readonly do: typeof Act.Wait | typeof Act.Unlock | typeof Act.Fill }
-  | { readonly do: typeof Act.Record; readonly side: Side; readonly state: LegState; readonly preimage?: Preimage }
-  | { readonly do: typeof Act.Lock | typeof Act.Claim | typeof Act.Refund; readonly side: Side }
-  | { readonly do: typeof Act.Abandon; readonly reason: string }
-  | { readonly do: typeof Act.Fail; readonly outcome: SwapOutcome; readonly reason: string }
+  | { readonly do: typeof Action.Wait | typeof Action.Unlock | typeof Action.Fill }
+  | { readonly do: typeof Action.Record; readonly side: Side; readonly state: LegState; readonly preimage?: Preimage }
+  | { readonly do: typeof Action.Lock | typeof Action.Claim | typeof Action.Refund; readonly side: Side }
+  | { readonly do: typeof Action.Abandon; readonly reason: string }
+  | { readonly do: typeof Action.Fail; readonly outcome: SwapOutcome; readonly reason: string }
 
 export const Recovery = {
   Retry: 'retry',
   Refuse: 'refuse',
-  Stick: 'stick',
+  Stuck: 'stuck',
   Wait: 'wait',
 } as const
 
@@ -60,19 +60,19 @@ export interface Policies {
   onLockMissing(swap: Swap, seen: Observation): Recovery
   /** Whether `from` may still be collected, e.g. once its own refund has opened. */
   canCollect(swap: Swap, seen: Observation): Verdict
-  onClaimFailed(swap: Swap, seen: Observation): Extract<Recovery, 'retry' | 'stick'>
-  onRefundFailed(swap: Swap, seen: Observation): Extract<Recovery, 'retry' | 'stick'>
+  onClaimFailed(swap: Swap, seen: Observation): Extract<Recovery, 'retry' | 'stuck'>
+  onRefundFailed(swap: Swap, seen: Observation): Extract<Recovery, 'retry' | 'stuck'>
   /** A swap that ended without paying out: whether the client's lock may be handed back now. */
   canRelease(swap: Swap, seen: Observation): boolean
 }
 
-const WAIT: Decision = { do: Act.Wait }
-const fail = (outcome: SwapOutcome, reason: string): Decision => ({ do: Act.Fail, outcome, reason })
+const WAIT: Decision = { do: Action.Wait }
+const fail = (outcome: SwapOutcome, reason: string): Decision => ({ do: Action.Fail, outcome, reason })
 
 // Never offer a record the aggregate would refuse: it would throw on every tick.
 const record = (swap: Swap, side: Side, state: LegState, preimage?: Preimage): Decision | null => {
   if (!swap.accepts(side, state)) return null
-  return preimage === undefined ? { do: Act.Record, side, state } : { do: Act.Record, side, state, preimage }
+  return preimage === undefined ? { do: Action.Record, side, state } : { do: Action.Record, side, state, preimage }
 }
 
 /** The invoice is our own, so this Lightning leg is settled by the peer swap, never by a payment. */
@@ -82,7 +82,7 @@ const toShows = (swap: Swap, seen: Observation, policies: Policies): Decision | 
   const { to } = swap
   const rail = seen.to
   if (swap.isOffer) {
-    if (to.state === 'locking' && rail.lock === TxSeen.Landed) return { do: Act.Fill }
+    if (to.state === 'locking' && rail.lock === TxSeen.Landed) return { do: Action.Fill }
   } else {
     const secret = coupled(to, seen)
       ? (seen.peer?.preimage ?? null)
@@ -110,19 +110,20 @@ const toShows = (swap: Swap, seen: Observation, policies: Policies): Decision | 
   }
   if (to.state === 'locking' && rail.lock === TxSeen.Failed) {
     const verdict = policies.onLockFailed(swap, seen)
-    if (verdict === Recovery.Retry) return { do: Act.Unlock }
-    if (verdict === Recovery.Refuse) return { do: Act.Abandon, reason: 'the payout failed and nothing left our side' }
+    if (verdict === Recovery.Retry) return { do: Action.Unlock }
+    if (verdict === Recovery.Refuse)
+      return { do: Action.Abandon, reason: 'the payout failed and nothing left our side' }
     return fail(SwapOutcome.Stuck, 'the lock on the to leg failed')
   }
   if (to.state === 'locking' && rail.lock === TxSeen.None) {
     const verdict = policies.onLockMissing(swap, seen)
-    if (verdict === Recovery.Retry) return { do: Act.Lock, side: Side.To }
-    if (verdict === Recovery.Refuse) return { do: Act.Abandon, reason: 'the payout was never sent' }
-    if (verdict === Recovery.Stick) return fail(SwapOutcome.Stuck, 'the payout was recorded but never reached the rail')
+    if (verdict === Recovery.Retry) return { do: Action.Lock, side: Side.To }
+    if (verdict === Recovery.Refuse) return { do: Action.Abandon, reason: 'the payout was never sent' }
+    if (verdict === Recovery.Stuck) return fail(SwapOutcome.Stuck, 'the payout was recorded but never reached the rail')
   }
   if (to.state === 'refunding' && rail.refund === TxSeen.Failed) {
     return policies.onRefundFailed(swap, seen) === Recovery.Retry
-      ? { do: Act.Refund, side: Side.To }
+      ? { do: Action.Refund, side: Side.To }
       : fail(SwapOutcome.Stuck, 'the refund of the to leg failed')
   }
   return null
@@ -159,7 +160,7 @@ const fromShows = (swap: Swap, seen: Observation, policies: Policies): Decision 
     // `none` is a claim that never reached the rail, e.g. a crash after the intent was recorded.
     if (rail.claim === TxSeen.Failed || rail.claim === TxSeen.None) {
       return rail.claim === TxSeen.None || policies.onClaimFailed(swap, seen) === Recovery.Retry
-        ? { do: Act.Claim, side: Side.From }
+        ? { do: Action.Claim, side: Side.From }
         : fail(SwapOutcome.Stuck, 'the claim of the from leg failed')
     }
   }
@@ -171,14 +172,14 @@ const whenFunded = (swap: Swap, seen: Observation, policies: Policies): Decision
   const verdict = policies.canFill(swap, seen)
   if (!verdict.ok) return fail(SwapOutcome.Refused, verdict.reason)
   if (seen.approval === ApprovalSeen.Pending || coupled(swap.to, seen)) return WAIT
-  return { do: Act.Lock, side: Side.To }
+  return { do: Action.Lock, side: Side.To }
 }
 
 const whenFilled = (swap: Swap, seen: Observation, policies: Policies): Decision => {
   // No Lightning settle exists when the payer was our own client: the peer swap carries the collateral.
   if (coupled(swap.from, seen)) return record(swap, Side.From, 'claimed') ?? WAIT
   const verdict = policies.canCollect(swap, seen)
-  return verdict.ok ? { do: Act.Claim, side: Side.From } : fail(SwapOutcome.Stuck, verdict.reason)
+  return verdict.ok ? { do: Action.Claim, side: Side.From } : fail(SwapOutcome.Stuck, verdict.reason)
 }
 
 /** A swap that ended without paying out still holds the client's lock: hand it back. */
@@ -193,7 +194,7 @@ const whenOver = (swap: Swap, seen: Observation, policies: Policies): Decision =
   if (from.state === 'refunding' && seen.from.refund === TxSeen.Landed)
     return record(swap, Side.From, 'refunded') ?? WAIT
   if (from.state === 'locked' && from.canMoveTo('refunding') && policies.canRelease(swap, seen)) {
-    return { do: Act.Refund, side: Side.From }
+    return { do: Action.Refund, side: Side.From }
   }
   return WAIT
 }
@@ -216,11 +217,11 @@ export const plan = (swap: Swap, seen: Observation, policies: Policies): Decisio
       return whenFilled(swap, seen, policies)
     case 'filling':
     case 'awaiting_claim':
-      return seen.to.refundOpen && swap.to.canMoveTo('refunding') ? { do: Act.Refund, side: Side.To } : WAIT
+      return seen.to.refundOpen && swap.to.canMoveTo('refunding') ? { do: Action.Refund, side: Side.To } : WAIT
     case 'refunding':
       // Either `to` is still locked while `from` unwinds, or our refund never reached the rail.
-      if (swap.to.state === 'locked') return seen.to.refundOpen ? { do: Act.Refund, side: Side.To } : WAIT
-      return seen.to.refund === TxSeen.None ? { do: Act.Refund, side: Side.To } : WAIT
+      if (swap.to.state === 'locked') return seen.to.refundOpen ? { do: Action.Refund, side: Side.To } : WAIT
+      return seen.to.refund === TxSeen.None ? { do: Action.Refund, side: Side.To } : WAIT
     case 'settling':
       return WAIT
   }

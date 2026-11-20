@@ -8,22 +8,22 @@ export interface RailWatcher {
   observe(swap: Swap, side: Side): Promise<LegSeen>
 }
 
-/** `unknown` is not `not_sent`: something may have left, so the leg must not be tried again blindly. */
-export const Dispatch = {
+export const SendStatus = {
   Sent: 'sent',
   NotSent: 'not_sent',
   Unknown: 'unknown',
 } as const
 
-export type Dispatch = ValueOf<typeof Dispatch>
+export type SendStatus = ValueOf<typeof SendStatus>
 
-export type Sent =
-  | { readonly dispatch: typeof Dispatch.Sent; readonly reference: Reference }
-  | { readonly dispatch: Exclude<Dispatch, 'sent'> }
+/** `unknown` means something may have left, so the same thing must not simply be sent again. */
+export type SendResult =
+  | { readonly status: typeof SendStatus.Sent; readonly reference: Reference }
+  | { readonly status: typeof SendStatus.NotSent | typeof SendStatus.Unknown }
 
 /** Moves value. Called only AFTER the leg was recorded as `locking` / `claiming` / `refunding`. */
 export interface RailService {
-  lock(swap: Swap, side: Side): Promise<Sent>
-  claim(swap: Swap, side: Side): Promise<Sent>
-  refund(swap: Swap, side: Side): Promise<Sent>
+  lock(swap: Swap, side: Side): Promise<SendResult>
+  claim(swap: Swap, side: Side): Promise<SendResult>
+  refund(swap: Swap, side: Side): Promise<SendResult>
 }

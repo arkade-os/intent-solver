@@ -13,14 +13,14 @@ const SHIPPED: Scenario = {
   policies: guarded,
 }
 
-describe('a hashlocked route, every interleaving', { timeout: 120_000 }, () => {
-  it('holds its invariants with two workers, a crash anywhere, and a client who acts whenever they like', async () => {
+describe('hashlocked route: all interleavings', { timeout: 120_000 }, () => {
+  it('keeps every invariant with two workers, one crash and a free client', async () => {
     const result = await explore(start(SHIPPED))
     expect(result.violation).toBeNull()
     expect(result.states).toBeGreaterThan(1_000)
   })
 
-  it('loses money once the refund margin is not checked', async () => {
+  it('breaks NoNetLoss when the refund margin is not checked', async () => {
     const late = { ...SHIPPED, payoutRefundAt: 4, clientRefundAt: 3 }
     const unguarded: Scenario = { ...late, policies: (s) => ({ ...guarded(s), canFill: () => ({ ok: true }) }) }
     expect((await explore(start(unguarded))).violation?.invariant).toBe('NoNetLoss')
@@ -32,11 +32,11 @@ describe('a hashlocked route, every interleaving', { timeout: 120_000 }, () => {
     policies: (s) => ({ ...guarded(s), onLockMissing: () => 'retry' }),
   })
 
-  it('pays twice when a missing payout is sent again at once, while the first call is in flight', async () => {
+  it('breaks NoDoubleFund when a missing payout is resent at once', async () => {
     expect((await explore(start(impatient(SHIPPED)))).violation?.invariant).toBe('NoDoubleFund')
   })
 
-  it('pays twice when a payout the indexer has not shown yet is sent again, however long it waited', async () => {
+  it('breaks NoDoubleFund when a missing payout is resent on a rail with a slow indexer', async () => {
     const lagging = { ...SHIPPED, laggingIndexer: true }
     const patient: Scenario = {
       ...lagging,
