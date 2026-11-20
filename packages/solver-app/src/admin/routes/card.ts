@@ -4,7 +4,8 @@ import {
   buildSolverCard,
   publishableAssetMarkets,
   signSolverCard,
-  unpublishableCorridors,
+  publishableEvmMarkets,
+  type EvmCardMarket,
   type SolverCard,
 } from '@arkade-os/solver-core/core/registryCard.js'
 import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
@@ -15,7 +16,7 @@ import type { AdminDeps } from '../server.js'
 import { assetCardMarketsFromPolicy } from '../../ops/assetRfqMarkets.js'
 import { descriptorFor } from '@arkade-os/solver-corridors/corridors/index.js'
 import { ASSET_RFQ_CONTRACT_VERSIONS } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
-import { rfqContractEnabled } from '@arkade-os/solver-core/core/rfqContract.js'
+import { RFQ_EVM_RECEIVE_V1, RFQ_EVM_SEND_V1, rfqContractEnabled } from '@arkade-os/solver-core/core/rfqContract.js'
 
 /** `RELAY_URL` then `SOLVER_CARD_RELAYS`. */
 export const advertisedRelays = (relayUrl: string | null, extra: readonly string[]): string[] =>
@@ -57,25 +58,80 @@ const assetMarketsOf = (source: CardSource, rfqServed = assetRfqServed(source)) 
     source.config.network,
   )
 
-export const cardOmissions = (source: CardSource): string[] => [
-  ...CORRIDORS.filter(
-    (corridor) =>
-      source.bootPolicy.corridorEnabled[corridor] &&
-      !rfqContractEnabled(source.bootPolicy.rfqContractVersions, descriptorFor(corridor).contractVersion),
-  ).map(
-    (corridor) =>
-      `${corridor} is enabled but omitted: contract version ${descriptorFor(corridor).contractVersion} is not in rfq.contractVersions`,
-  ),
-  ...(source.assetRfqMarkets.length === 0 || assetRfqServed(source)
-    ? []
-    : [`asset RFQ markets are omitted: none of ${ASSET_RFQ_CONTRACT_VERSIONS.join(', ')} is in rfq.contractVersions`]),
-  // LIVE unlike the corridor map: `rebuild` builds the corridor set from `livePolicy.evmCorridors`.
-  ...unpublishableCorridors(
-    source.policy.evmCorridors.filter((corridor) => corridor.enabled).map((corridor) => corridor.corridor),
-  ),
-  // As if an asset-swap contract version were on, so a market's own fault still shows beside the contract-version note above.
-  ...assetMarketsOf(source, true).omitted,
-]
+const evmContractVersionOf = (direction: 'send' | 'receive'): string =>
+  direction === 'send' ? RFQ_EVM_SEND_V1 : RFQ_EVM_RECEIVE_V1
+
+export const evmCardMarketsOf = (source: CardSource) => {
+  const markets: EvmCardMarket[] = []
+  const unavailable: string[] = []
+  const chainId = source.config.evmChain?.chainId
+  const served = (policy: { direction: 'send' | 'receive' }): boolean =>
+    rfqContractEnabled(source.bootPolicy.rfqContractVersions, evmContractVersionOf(policy.direction))
+  if (chainId !== undefined) {
+    for (const market of source.config.evmMarkets ?? []) {
+      const policies = source.bootPolicy.evmCorridors.filter(
+        (policy) =>
+          policy.enabled &&
+          served(policy) &&
+          policy.token.address === market.token.address &&
+          source.policy.evmCorridors.some((live) => live.corridor === policy.corridor && live.enabled),
+      )
+      if (!policies.length) continue
+      const send = policies.find((policy) => policy.direction === 'send')
+      const receive = policies.find((policy) => policy.direction === 'receive')
+      markets.push({ ...market, chainId, ...(send ? { send } : {}), ...(receive ? { receive } : {}) })
+    }
+  }
+  for (const policy of source.policy.evmCorridors) {
+    // Per DIRECTION, not per token: one direction surviving used to silence the
+    // other's reason, which a contract version disabling exactly one makes routine.
+    if (
+      policy.enabled &&
+      !markets.some((market) => market.token.address === policy.token?.address && Boolean(market[policy.direction]))
+    ) {
+      const boot = source.bootPolicy.evmCorridors.find((entry) => entry.corridor === policy.corridor && entry.enabled)
+      unavailable.push(
+        !served(policy)
+          ? `${policy.corridor} is enabled but omitted: contract version ${evmContractVersionOf(policy.direction)} is not in rfq.contractVersions`
+          : `${policy.corridor} cannot be advertised: ${boot ? 'its EVM chain or price-feed metadata is missing' : 'enabling this EVM direction is pending restart'}`,
+      )
+    }
+  }
+  const result = publishableEvmMarkets(markets, source.config.network)
+  return { publishable: result.publishable, omitted: [...unavailable, ...result.omitted] }
+}
+
+export const cardOmissions = (source: CardSource): string[] => {
+  const evm = evmCardMarketsOf(source)
+  const inlineOnly = source.policy.evmCorridors
+    .filter(
+      (policy) =>
+        policy.enabled &&
+        evm.publishable.some(
+          (market) => market.token.address === policy.token?.address && Boolean(market[policy.direction]),
+        ),
+    )
+    .map((policy) => `${policy.corridor} requires the open-RFQ inline card; the legacy published card stays version 0`)
+  return [
+    ...CORRIDORS.filter(
+      (corridor) =>
+        source.bootPolicy.corridorEnabled[corridor] &&
+        !rfqContractEnabled(source.bootPolicy.rfqContractVersions, descriptorFor(corridor).contractVersion),
+    ).map(
+      (corridor) =>
+        `${corridor} is enabled but omitted: contract version ${descriptorFor(corridor).contractVersion} is not in rfq.contractVersions`,
+    ),
+    ...(source.assetRfqMarkets.length === 0 || assetRfqServed(source)
+      ? []
+      : [
+          `asset RFQ markets are omitted: none of ${ASSET_RFQ_CONTRACT_VERSIONS.join(', ')} is in rfq.contractVersions`,
+        ]),
+    ...evm.omitted,
+    ...inlineOnly,
+    // As if an asset-swap contract version were on, so a market's own fault still shows beside the contract-version note above.
+    ...assetMarketsOf(source, true).omitted,
+  ]
+}
 
 /**
  * One builder for `/api/card`, `cli card` and the kind-38859 publisher.
@@ -87,6 +143,7 @@ export const cardOmissions = (source: CardSource): string[] => [
 export const deploymentCard = async (
   source: CardSource,
   name = source.config.solverName ?? undefined,
+  options: { includeEvm?: boolean } = {},
 ): Promise<SolverCard> => {
   const { config, bootPolicy } = source
   const trimmed = name?.trim()
@@ -120,6 +177,7 @@ export const deploymentCard = async (
       relays: advertisedRelays(config.relayUrl, config.cardRelays),
       corridors: served,
       assetMarkets: assetMarketsOf(source).publishable,
+      ...(options.includeEvm ? { evmMarkets: evmCardMarketsOf(source).publishable } : {}),
     }),
     (digest) => source.arkade.identity.signMessage(digest, 'schnorr'),
   )

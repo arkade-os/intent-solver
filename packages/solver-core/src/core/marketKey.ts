@@ -1,11 +1,4 @@
-/**
- * The § 2 corridor/asset vocabulary and the canonical market key
- * (docs/rfq-protocol.md § 2) — wire-contract data, in one place: the market
- * key is the on-wire subscription tag both sides of § 4.6 must derive
- * identically, and the asset ids are the ones the registry card publishes.
- * Drift between this table and a published card is a subscription that
- * silently misses every open RFQ.
- */
+/** Canonical registry-market keys and asset identifiers (docs/rfq-protocol.md § 2). */
 
 /** The § 2 corridor registry. A pair naming anything else is a config error. */
 const CORRIDORS = new Set(['arkade', 'lightning', 'onchain', 'ethereum'])
@@ -14,11 +7,7 @@ const CORRIDORS = new Set(['arkade', 'lightning', 'onchain', 'ethereum'])
  * An Arkade asset id on the wire: `txid` (32 bytes) then `gidx` (u16), hex —
  * the SDK's `AssetId.toString()` form. 68 characters.
  *
- * LOWERCASE ONLY, § 2's identity rule verbatim (`^(btc|[0-9a-f]{68})$`). Hex is
- * case-insensitive, so normalising here is tempting — and wrong, because
- * `decideOpenRfqBid` compares `open.pair !== servedPair` byte for byte. An upper-case
- * pair would then derive the RIGHT market key, arrive at our subscription, and be
- * skipped as "unserved pair": a silent miss whose stated reason is a lie.
+ * LOWERCASE ONLY, § 2's identity rule verbatim (`^(btc|[0-9a-f]{68})$`).
  */
 export const ASSET_ID_HEX = /^[0-9a-f]{68}$/
 export const ASSET_ID_HEX_LENGTH = 68

@@ -65,7 +65,6 @@ import { streamOfferTxs } from '@arkade-os/solver-arkade/arkade/offerStream.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { lockupSource, runContractLifecycle } from '@arkade-os/solver-arkade/arkade/contractLifecycle.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
-import { RFQ_PAIR_SEND } from '@arkade-os/solver-corridors/wire/payloads.js'
 import { assetRfqPairFor } from '@arkade-os/solver-corridors/wire/assetRfqPayloads.js'
 import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { assetMarketPolicy } from '@arkade-os/solver-core/core/assetMarketConfig.js'
@@ -86,7 +85,6 @@ import { AdminStore } from './admin/db.js'
 import { applyOverrides } from './admin/settings.js'
 import { GiveUp, json, log, messageOf, nowSeconds, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
 import { recordRfqRefusals } from './admin/rfqRefusals.js'
-import { RFQ_LIGHTNING_SEND_V2, rfqContractEnabled } from '@arkade-os/solver-core/core/rfqContract.js'
 import { createBidTail, recordBidsIn, type BidRecorder } from './admin/bids.js'
 import type { AdPublisher } from '@arkade-os/solver-transport/relay/adPublisher.js'
 import type { Services } from './ops/services.js'
@@ -1154,7 +1152,11 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
     if (!config.relayUrl) throw new GiveUp('relay.url is not set')
     const services = await createServices(config, { rebalance: 'active' })
     const { webSocketRelayConnection, isRelayFault } = await import('@arkade-os/solver-transport/relay/connection.js')
-    const { RelayIngress, OpenRfqBidder } = await import('@arkade-os/solver-transport/ingress/relay.js')
+    const { RelayIngress } = await import('@arkade-os/solver-transport/ingress/relay.js')
+    const { OpenRfqBidder } = await import('@arkade-os/solver-transport/ingress/openRfq.js')
+    const { tokenBucket } = await import('@arkade-os/solver-core/core/openRfq.js')
+    const { deploymentCard } = await import('./admin/routes/card.js')
+    const { openRfqPairs, openRfqPreview } = await import('./ops/openRfq.js')
     const latencyDiagnostics = config.latencyDiagnostics
     if (latencyDiagnostics && services.receiveService) {
       services.receiveService.onQuoteTiming = (sample) => log('receive_quote_timing', json(sample))
@@ -1216,28 +1218,20 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
       'as',
       services.providerPubkey,
     )
-    // Whether to bid at all is decided HERE, once: a zero rate means the
-    // bidder simply does not exist. So does a disabled Lightning-send
-    // corridor — the bidder only ever bids on that one pair, and a bid on a
-    // corridor that then refuses the directed RFQ is worse than no bid.
-    let bidder
+    let bidder: InstanceType<typeof OpenRfqBidder> | undefined
     let bids: BidRecorder | undefined
-    if (
-      config.openRfqMaxBidsPerMinute > 0 &&
-      services.service &&
-      rfqContractEnabled(services.policy.rfqContractVersions, RFQ_LIGHTNING_SEND_V2)
-    ) {
+    // No corridor gate here: this bidder covers every card market, so a null `service` or a disabled
+    // contract version disqualifies one route and not the lot. `openRfqPreview` refuses per route.
+    if (config.openRfqMaxBidsPerMinute > 0) {
       bids = createBidTail()
       bidder = new OpenRfqBidder({
         connection,
         providerPubkey: services.providerPubkey,
-        pair: RFQ_PAIR_SEND,
-        // The bidder serves exactly one pair, so it gets that corridor's own
-        // range and fee — not the deployment-wide ones, which would have it
-        // bidding on amounts the corridor will refuse to quote.
-        limits: services.policy.corridorLimits['arkade:BTC->lightning:BTC'],
-        fee: services.policy.corridorFees['arkade:BTC->lightning:BTC'],
+        pairs: async () => openRfqPairs(await deploymentCard(services, undefined, { includeEvm: true })),
+        card: () => deploymentCard(services, undefined, { includeEvm: true }),
+        preview: openRfqPreview(services),
         maxBidsPerMinute: config.openRfqMaxBidsPerMinute,
+        bidBucket: tokenBucket(config.openRfqMaxBidsPerMinute, Date.now()),
         onBid: recordBidsIn(bids),
         onError,
       })
@@ -1247,7 +1241,6 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
 
     // Undefined under `off`: nothing is constructed, so nothing can publish.
     const { startAdPublishing } = await import('@arkade-os/solver-transport/relay/adPublisher.js')
-    const { deploymentCard } = await import('./admin/routes/card.js')
     const ads = startAdPublishing({
       mode: config.nostrAdPublish,
       connection,

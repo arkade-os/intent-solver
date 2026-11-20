@@ -28,6 +28,7 @@ export interface RelayEvent {
    * docs/rfq-protocol.md § 4.6). Undefined for directed traffic.
    */
   topic?: string
+  replyTo?: string
   /**
    * A stored, replaceable document (Nostr's addressable range, keyed by author,
    * kind and `d` tag) — the kind-38859 solver card. Ignored when `recipient` is

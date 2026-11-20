@@ -49,6 +49,10 @@ import {
 import { rfqStateFromRow, rfqStatusPayload } from '@arkade-os/solver-corridors/wire/payloads.js'
 import { covenantScriptFromRow } from '@arkade-os/solver-corridors/send/arkadeOps.js'
 import { rawDelaySeconds, relativeDelayFrom, secondsForBlockRung } from '@arkade-os/solver-core/core/timelocks.js'
+import { giveSatsFor } from '@arkade-os/solver-core/core/corridorPolicy.js'
+import { RFQ_CONTRACT_VERSIONS } from '@arkade-os/solver-core/core/rfqContract.js'
+import { openRfqPreview } from '@arkade-os/solver-app/ops/openRfq.js'
+import type { Services } from '@arkade-os/solver-app/ops/services.js'
 
 /**
  * The CLTV terms, with no route hint and an enforcing backend unless stated.
@@ -534,6 +538,94 @@ describe('the solver spread', () => {
     const outcome = await svc.quote(INVOICE, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
     expect(outcome.accepted).toBe(false)
     if (!outcome.accepted) expect(outcome.reason).toBe('provider_at_capacity')
+  })
+})
+
+describe('an open-RFQ bid', () => {
+  const FEE = { bps: 30, flatSats: 0 }
+  const LIMITS = { minSats: 500, maxSats: 100_000 }
+  const SEND = 'arkade:BTC->lightning:BTC'
+  let hashes = 0
+
+  const sendService = (backend: FakeLn = ln) =>
+    new SendSwapService({
+      store,
+      ln: backend,
+      arkade,
+      limits: LIMITS,
+      invoicePrefix: 'bc',
+      maxExposedSats: 1_000_000,
+      totalCommitted: () => store.committedSats(),
+      admission: new AdmissionControl(),
+      now: () => clock,
+      fee: FEE,
+    })
+
+  const bidFor = async (svc: SendSwapService, amount: number, side: 'from' | 'to') => {
+    const source = {
+      config: { network: 'bitcoin' },
+      bootPolicy: { corridorFees: { [SEND]: FEE }, corridorLimits: { [SEND]: LIMITS } },
+      policy: { rfqContractVersions: [...RFQ_CONTRACT_VERSIONS] },
+      corridors: { get: () => ({}) },
+      service: svc,
+    }
+    const bid = await openRfqPreview(source as unknown as Services, { now: () => clock })({
+      v: 1,
+      type: 'rfq_open',
+      open_id: 'cd'.repeat(32),
+      pair: 'arkade:bitcoin/slip44:0->bolt11:bitcoin/slip44:0',
+      amount: String(amount),
+      amount_side: side,
+      bids_until: clock + 5,
+    })
+    if (!bid) throw new Error('no bid')
+    return { from: Number(bid.from_amount), to: Number(bid.to_amount) }
+  }
+
+  // The directed close for the bid's invoice, judged as the client's `quoteBid` judges it.
+  const closeKeeps = async (svc: SendSwapService, bid: { from: number; to: number }) => {
+    const invoice = forgeInvoice({
+      network: 'bc',
+      amountSats: bid.to,
+      paymentHash: new Uint8Array(32).fill(++hashes),
+      timestamp: INVOICE_TIMESTAMP,
+      expirySeconds: 43_200,
+      minFinalCltvBlocks: 180,
+    })
+    const close = await svc.quote(invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+    if (!close.accepted) throw new Error(`close refused: ${close.reason}`)
+    return close.swap.amountSats <= bid.from
+  }
+
+  for (const side of ['to', 'from'] as const) {
+    for (const amount of [2_100, 50_000]) {
+      it(`is never beaten by its close while routing stays under the cap (${side} ${amount})`, async () => {
+        const svc = sendService()
+        const cap = maxRoutingFeeSats(amount)
+        for (const estimate of [
+          null,
+          { feeSats: 0 },
+          { feeSats: Math.ceil(cap / 2) },
+          { feeSats: cap },
+          { feeSats: cap, billableFeeSats: 0 },
+        ]) {
+          ln.feeEstimate = estimate
+          expect(await closeKeeps(svc, await bidFor(svc, amount, side)), JSON.stringify(estimate)).toBe(true)
+        }
+      })
+    }
+  }
+
+  it('loses to a close whose routing estimate passes the cap, which the client then refuses', async () => {
+    const svc = sendService()
+    ln.feeEstimate = { feeSats: maxRoutingFeeSats(50_000) + 1 }
+    expect(await closeKeeps(svc, await bidFor(svc, 50_000, 'to'))).toBe(false)
+  })
+
+  it('bids the configured fee alone on a backend that cannot estimate routing', () => {
+    const svc = sendService(Object.assign(new FakeLn(), { estimateSendFee: undefined }))
+    expect(svc.previewAmounts(2_100, 'to')).toEqual({ fromAmount: giveSatsFor(2_100, FEE), toAmount: 2_100 })
+    expect(svc.previewAmounts(499, 'to')).toBeUndefined()
   })
 })
 

@@ -113,6 +113,18 @@ describe('networkFeePricing', () => {
     expect(spike).toBeLessThan(calm)
   })
 
+  it('prices its ceiling at the cap, which no sample can undercut', () => {
+    for (const rate of [null, 0, 10, 80, 10_000]) {
+      const live = at(rate)
+      expect(live.payoutFor({ pair: PAIR, giveSats: 100_000 })).toBeGreaterThanOrEqual(
+        live.ceiling!.payoutFor({ pair: PAIR, giveSats: 100_000 }),
+      )
+      expect(live.giveFor({ pair: PAIR, payoutSats: 40_000 })).toBeLessThanOrEqual(
+        live.ceiling!.giveFor({ pair: PAIR, payoutSats: 40_000 }),
+      )
+    }
+  })
+
   it('REPLACES the configured flat rather than adding to it', () => {
     // `Fee.flatSats` already means "the chain cost this corridor pays"; adding
     // a live estimate on top bills it twice.
