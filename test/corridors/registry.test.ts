@@ -27,7 +27,7 @@ import {
 
 const CORRIDORS_DIR = fileURLToPath(new URL('../../packages/solver-corridors/src/corridors/', import.meta.url))
 const MACHINES_DIR = fileURLToPath(new URL('../../packages/solver-corridors/src/machines/', import.meta.url))
-const CORE_SRC = fileURLToPath(new URL('../../packages/solver-core/src/', import.meta.url))
+const STATE_MACHINE = fileURLToPath(new URL('../../packages/solver-core/src/core/stateMachine.ts', import.meta.url))
 
 const stub = (pair: string, envStem: string): CorridorDescriptor => ({
   pair,
@@ -235,9 +235,6 @@ describe('the descriptor modules', () => {
         .map((specifier) => `${name} value-imports ${specifier}`),
     )
     expect(offenders.sort()).toEqual([])
-    const reached = ['core/stateMachine.ts', 'domain/shared/state_machine.ts', 'domain/shared/error.ts'].map((file) =>
-      valueImports(readFileSync(join(CORE_SRC, file), 'utf8')),
-    )
-    expect(reached).toEqual([['../domain/shared/state_machine.js'], ['./error.js'], []])
+    expect(valueImports(readFileSync(STATE_MACHINE, 'utf8'))).toEqual([])
   })
 })

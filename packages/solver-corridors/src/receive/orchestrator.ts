@@ -30,6 +30,7 @@ import type { AdmissionStrategy } from '@arkade-os/solver-core/core/admissionStr
 import { ArkAddress } from '@arkade-os/sdk'
 import { hex } from '@scure/base'
 import {
+  evaluateReceiveFunding,
   MAX_FINAL_CLTV_BLOCKS,
   MAX_REFUND_HORIZON,
   minFinalCltvBlocksFor,
@@ -42,15 +43,6 @@ import type { Limits } from '@arkade-os/solver-core/core/limits.js'
 import { FREE, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { fixedFeePricing, type PricingStrategy } from '@arkade-os/solver-core/core/pricing.js'
 import { RFQ_PAIR_RECEIVE } from '../wire/lightningReceivePayloads.js'
-import type { UnixSeconds } from '@arkade-os/solver-core/domain/shared/time.js'
-import { assertAbsoluteLocktime, rawDelaySeconds } from '@arkade-os/solver-core/core/timelocks.js'
-import { lnReceivePolicies } from '@arkade-os/solver-core/domain/swap/ln_receive.js'
-import type { LegStatus } from '@arkade-os/solver-core/domain/swap/observation.js'
-import { Action, plan, type Decision, type Policies } from '@arkade-os/solver-core/domain/swap/plan.js'
-import type { Swap } from '@arkade-os/solver-core/domain/swap/swap.js'
-import { swapFromReceiveRow } from '../adapters/lnReceiveSwaps.js'
-import { holdStatus, NOT_SEEN } from '../adapters/lnReceiveStatus.js'
-import { receiveCovenantRowFor } from './covenantRow.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { satsOutputs } from '@arkade-os/solver-arkade/arkade/wallet.js'
@@ -137,7 +129,36 @@ export const EMPTY_LOCKUP_GRACE = 120
  */
 export const REFUND_CENSORSHIP_GRACE = 6 * 60 * 60
 
-export { receiveCovenantRowFor }
+/**
+ * Maps this leg's row onto the shape `covenantScriptFromRow`
+ * (`src/send/arkadeOps.ts`) needs — the receive-leg counterpart of
+ * `src/send/onchainOrchestrator.ts`'s `covenantRowFor`.
+ *
+ * A ROLE INVERSION, not a rename: on this leg the CLIENT ultimately claims (they
+ * generated `P`), so they play the covenant's `receiver`; the PROVIDER funds the
+ * lockup and needs the "needs nobody" refund, so it plays `client`. The three delay
+ * fields are NOT part of the inversion — they are operator-derived
+ * (`deriveUnilateralDelays`) and mean the same thing whoever holds which key.
+ *
+ * Also consumed by `arkade/vtxoLifecycle.ts`'s `liveLockupRows`, aliased there against
+ * the other receive corridor's same-named function.
+ */
+export const receiveCovenantRowFor = (row: ReceiveSwapRow): CovenantScriptRow => ({
+  id: row.id,
+  receiverPubkey: row.payoutPubkey,
+  serverPubkey: row.serverPubkey,
+  paymentHash: row.paymentHash,
+  refundLocktime: row.refundLocktime,
+  claimDelay: row.claimDelay,
+  emulatorPubkey: row.emulatorPubkey,
+  refundPkScript: row.solverRefundPkScript,
+  pkScript: row.pkScript,
+  clientRefundPubkey: row.solverPubkey,
+  refundWithoutReceiverDelay: row.refundWithoutReceiverDelay,
+  refundDelay: row.refundDelay,
+  receiverPkScript: row.payoutPkScript,
+  nonInteractiveParameters: row.nonInteractiveParameters,
+})
 
 export interface ReceiveServiceDeps {
   quoteLimiter?: RateLimiter
@@ -665,42 +686,15 @@ export class ReceiveSwapService {
     }
   }
 
-  /** The lockup leg before anything was paid out: nothing on Arkade yet, only the deadlines of the contract. */
-  private unfunded(row: ReceiveSwapRow, refundDeadline: number): LegStatus {
-    return {
-      ...NOT_SEEN,
-      refundOpensAt: refundDeadline as UnixSeconds,
-      refundAloneDelay: rawDelaySeconds(row.refundWithoutReceiverDelay),
-    }
-  }
-
-  // What `plan` says for this row. The rules live there and in `lnReceivePolicies`; the methods below carry them out.
-  private decide(swap: Swap, from: LegStatus, to: LegStatus = NOT_SEEN): Decision {
-    const seen = {
-      now: this.now() as UnixSeconds,
-      from,
-      to,
-      peer: null,
-      keyCurrent: true,
-      approval: 'not_required',
-      ownInvoice: false,
-    } as const
-    // The operator's consent is read now, not at start: withdrawing it stops funding on the next tick.
-    const policies: Policies = lnReceivePolicies({ acceptRefundAloneGap: this.deps.acceptUnilateralGap })
-    return plan(swap, seen, policies)
-  }
-
   private async whenQuoted(row: ReceiveSwapRow): Promise<boolean> {
     const { store, ln, arkade } = this.deps
-    const swap = swapFromReceiveRow(row)
-    const decision = this.decide(swap, await holdStatus(ln, row, swap))
+    const state = await ln.getHoldState(row.paymentHash)
     // A REAL htlc always wins, and is checked first. Coupling must never
     // override one: a row funded against a send lockup while an htlc it is
     // obliged to settle is also live owes two payouts on one preimage.
-    if (decision.do === Action.Record) {
-      const expiresAt = decision.expiresAt ?? null
-      const armed = await store.transition(row.id, 'quoted', 'armed', { htlc_expires_at: expiresAt })
-      if (armed) await this.noteCltvHeadroom(row, expiresAt)
+    if (state.status === 'armed') {
+      const armed = await store.transition(row.id, 'quoted', 'armed', { htlc_expires_at: state.expiresAt })
+      if (armed) await this.noteCltvHeadroom(row, state.expiresAt)
       return armed
     }
 
@@ -770,7 +764,7 @@ export class ReceiveSwapService {
       return store.transition(row.id, 'quoted', 'armed', { htlc_expires_at: null })
     }
 
-    if (decision.do === Action.Fail) {
+    if (this.now() >= row.invoiceExpiresAt) {
       // Retire the invoice as well as the row. The row is ours and the
       // invoice is the BACKEND's: failing one does not touch the other, so
       // without this the mint outlives the quote and sits on the node until
@@ -867,8 +861,7 @@ export class ReceiveSwapService {
         this.deps.chainTip,
         DEADLINE_SECONDS_PURPOSE,
       )
-      const lost = this.decide(swapFromReceiveRow(row), NOT_SEEN, this.unfunded(row, deadline))
-      if (lost.do === Action.Fail) {
+      if (this.now() >= deadline) {
         await store.transition(row.id, 'armed', 'stuck', {
           failure_reason:
             'funding response lost; refund deadline reached with no lockup adopted — review for a stray lockup',
@@ -881,9 +874,8 @@ export class ReceiveSwapService {
     // observation, nor sampled beside the adoption scan. Only 'armed' status's E is
     // trusted; any other status (cancelled, or a backend quirk) is treated as
     // "nothing real to fund against" for this gate.
-    const swap = swapFromReceiveRow(row)
-    const held = await holdStatus(ln, row, swap)
-    const htlcExpiresAt = held.expiresAt
+    const fresh = await ln.getHoldState(row.paymentHash)
+    const htlcExpiresAt = fresh.status === 'armed' ? fresh.expiresAt : null
     // A coupled row has no `E` to bound anything against: nothing armed this
     // invoice and nothing will. `evaluateReceiveFunding`'s gates (b) and (c)
     // both measure the Arkade deadline against that `E`, so neither can be
@@ -937,26 +929,36 @@ export class ReceiveSwapService {
         return false
       }
     } else {
-      // The deadline the lockup script already commits to — checked here, not
-      // recomputed. See the note on `refundLocktime` in `quote` above.
-      //
-      // Resolved to seconds, because this gate orders it against `E`, which is
-      // Lightning's and is wall-clock whatever unit our covenant uses.
-      const deadline = await refundDeadlineSeconds(
-        row.refundLocktime,
-        this.now,
-        this.deps.chainTip,
-        DEADLINE_SECONDS_PURPOSE,
-      )
-      // The four checks are `canFill` in `lnReceivePolicies`. The delay comes from the ROW, not from live
-      // config: the covenant was built from the snapshot, so a rotated operator delay must not change it.
-      const decision = this.decide(swap, held, this.unfunded(row, deadline))
-      if (decision.do === Action.Fail) {
-        await store.fail(row.id, 'armed', decision.reason)
+      const decision = evaluateReceiveFunding({
+        invoiceExpiresAt: row.invoiceExpiresAt,
+        htlcExpiresAt,
+        // The deadline the lockup script already commits to — checked here, not
+        // recomputed. See the note on `refundLocktime` in `quote` above.
+        //
+        // Resolved to seconds, because this gate orders it against `E`, which is
+        // Lightning's and is wall-clock whatever unit our covenant uses.
+        refundLocktime: await refundDeadlineSeconds(
+          row.refundLocktime,
+          this.now,
+          this.deps.chainTip,
+          DEADLINE_SECONDS_PURPOSE,
+        ),
+        // Read from the ROW, not from live config: the covenant was built from
+        // the snapshot, so a rotated operator delay must not change what this
+        // gate reasons about.
+        unilateralRefundWithoutReceiverDelay: row.refundWithoutReceiverDelay,
+        // From LIVE config, deliberately unlike the delay above it. That one is
+        // a covenant parameter and must match the script the money sits in; this
+        // is a policy the operator holds now, and an operator who has withdrawn
+        // consent should stop funding into the window on the next tick rather
+        // than on the next quote.
+        acceptUnilateralGap: this.deps.acceptUnilateralGap,
+        now: this.now(),
+      })
+      if (!decision.fund) {
+        await store.fail(row.id, 'armed', `refused to fund: ${decision.reason}`)
         return false
       }
-      if (decision.do !== Action.Lock) return false
-      assertAbsoluteLocktime(deadline)
     }
 
     // The adoption read above closes the CRASH case; only the lease closes the

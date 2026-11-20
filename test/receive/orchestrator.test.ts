@@ -1,6 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vitest'
-import { writeFileSync } from 'node:fs'
-import { explained, shadowPlan } from './shadowPlan.js'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -18,9 +16,6 @@ import {
   type CoupledSendRow,
 } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import { ReceiveSwapStore } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
-import { LnReceiveSwaps } from '@arkade-os/solver-corridors/adapters/lnReceiveSwaps.js'
-import { LnReceiveMachine } from '@arkade-os/solver-corridors/machines/lnReceive.js'
-import { SwapState } from '@arkade-os/solver-core/domain/swap/swap_state.js'
 import { SwapStore } from '@arkade-os/solver-corridors/db/swaps.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
@@ -183,15 +178,6 @@ let l1Unreadable: Set<string>
 
 const LIMITS = { minSats: 1_000, maxSats: 1_000_000 }
 
-// Before every legacy step, `plan` is asked what it would do on the same row and the same fakes.
-const shadow = shadowPlan(() => arkade.state.fundCalls.length)
-afterAll(() => {
-  shadow.stop()
-  if (process.env.SHADOW_PLAN) writeFileSync(process.env.SHADOW_PLAN, JSON.stringify(shadow.differences, null, 2))
-  expect(shadow.steps()).toBeGreaterThan(300)
-  expect(shadow.differences.filter((difference) => explained(difference) === null)).toEqual([])
-})
-
 beforeEach(async () => {
   now = 1_800_000_000
   dir = mkdtempSync(join(tmpdir(), 'receive-orchestrator-'))
@@ -224,14 +210,6 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
-  // Every row a scenario leaves behind must read back as a swap the legacy flags agree with.
-  const swaps = new LnReceiveSwaps(store)
-  for (const row of await store.findByStates(LnReceiveMachine.states)) {
-    const swap = await swaps.load(row)
-    expect(SwapState.isTerminal(swap.state), `${row.id} ${row.state}`).toBe(LnReceiveMachine.isTerminal(row.state))
-    const inFlight = row.state === 'armed' && swap.to.state === 'locking'
-    if (!inFlight) expect(swap.exposed, `${row.id} ${row.state}`).toBe(LnReceiveMachine.isExposed(row.state))
-  }
   await store.close()
   rmSync(dir, { recursive: true, force: true })
 })

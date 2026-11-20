@@ -175,6 +175,8 @@ const PACKAGE_LAYER: Record<string, Layer> = {
    * core keeps the binding out, and every dependent may still reach the driver.
    */
   'solver-db': 'core',
+  // The rewritten engine. It imports core's driver port and nothing else of ours.
+  'solver-next': 'core',
   'solver-rails-lnd': 'rail',
   'solver-rails-fake': 'rail',
   'solver-rails-evm': 'rail',
@@ -201,6 +203,7 @@ const LAYER_OF_SPECIFIER: Record<string, Layer> = {
   '@arkade-os/solver-rails': 'rail',
   '@arkade-os/solver-rails-esplora': 'core',
   '@arkade-os/solver-db': 'core',
+  '@arkade-os/solver-next': 'core',
   '@arkade-os/solver-rails-lnd': 'rail',
   '@arkade-os/solver-rails-fake': 'rail',
   '@arkade-os/solver-rails-evm': 'rail',
