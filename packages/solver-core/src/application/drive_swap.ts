@@ -7,7 +7,7 @@ import type { Observation } from '../domain/swap/observation.js'
 import { Action, plan, type Decision, type Policies } from '../domain/swap/plan.js'
 import type { Swap } from '../domain/swap/swap.js'
 import type { SwapRepository } from '../domain/swap/swap_repo.js'
-import { SendStatus, type RailService, type RailWatcher } from '../ports/rail.js'
+import { SendStatus, type RailService } from '../ports/rail.js'
 
 /** What a decision needs to know besides the two rails. */
 export type SwapContext = Pick<Observation, 'peer' | 'keyCurrent' | 'approval' | 'ownInvoice'>
@@ -16,8 +16,7 @@ export type SwapContext = Pick<Observation, 'peer' | 'keyCurrent' | 'approval' |
 export interface DriveSwapDeps {
   readonly swaps: Pick<SwapRepository, 'get' | 'update'>
   readonly policies: Policies
-  readonly watchers: Readonly<Record<Side, RailWatcher>>
-  readonly services: Readonly<Record<Side, RailService>>
+  readonly rails: Readonly<Record<Side, RailService>>
   readonly context: (swap: Swap) => Promise<SwapContext>
   readonly now: () => UnixSeconds
 }
@@ -60,10 +59,10 @@ export class DriveSwap {
   }
 
   private async observe(swap: Swap): Promise<Observation> {
-    const { watchers, context, now } = this.deps
+    const { rails, context, now } = this.deps
     const [from, to, rest] = await Promise.all([
-      watchers.from.observe(swap, Side.From),
-      watchers.to.observe(swap, Side.To),
+      rails.from.status(swap, Side.From),
+      rails.to.status(swap, Side.To),
       context(swap),
     ])
     return { now: now(), from, to, ...rest }
@@ -97,7 +96,7 @@ export class DriveSwap {
     // 1. Write down that we are about to send. Only the worker whose write succeeds goes on to step 2.
     await this.save(swap, (s, at) => this.markSending(s, action, side, at))
     // 2. Send.
-    const result = await this.deps.services[side][action](swap, side)
+    const result = await this.deps.rails[side][action](swap, side)
     if (result.status !== SendStatus.Sent) return
     // 3. Write down what was sent.
     const reference = { [REFERENCE_KIND[action]]: result.reference }

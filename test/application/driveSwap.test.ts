@@ -4,7 +4,7 @@ import type { Side } from '@arkade-os/solver-core/domain/swap/leg.js'
 import type { LegStatus } from '@arkade-os/solver-core/domain/swap/observation.js'
 import type { Policies } from '@arkade-os/solver-core/domain/swap/plan.js'
 import type { Swap } from '@arkade-os/solver-core/domain/swap/swap.js'
-import type { RailService, RailWatcher, SendResult } from '@arkade-os/solver-core/ports/rail.js'
+import type { RailService, SendResult } from '@arkade-os/solver-core/ports/rail.js'
 import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
 import { SwapEvents } from '@arkade-os/solver-db/swapEvents.js'
 import { quoted, ref, SECRET, t, terms } from '../domain/support.js'
@@ -72,9 +72,9 @@ let world: World
 let swaps: SwapEvents
 
 const worker = (): DriveSwap => {
-  const watcher: RailWatcher = { observe: async (_swap: Swap, side: Side) => world.seen(side) }
   const sent = (reference: string): SendResult => ({ status: 'sent', reference: ref(reference) })
-  const service: RailService = {
+  const rail: RailService = {
+    status: async (_swap: Swap, side: Side) => world.seen(side),
     lock: async () => world.effect(() => ((world.payouts += 1), sent('payout'))),
     claim: async () => world.effect(() => ((world.collected += 1), sent('collect'))),
     refund: async () => world.effect(() => sent('refund')),
@@ -94,8 +94,7 @@ const worker = (): DriveSwap => {
   return new DriveSwap({
     swaps: stored,
     policies: POLICIES,
-    watchers: { from: watcher, to: watcher },
-    services: { from: service, to: service },
+    rails: { from: rail, to: rail },
     context: async () => ({ peer: null, keyCurrent: true, approval: 'not_required', ownInvoice: false }),
     now: () => t(1_500),
   })

@@ -130,7 +130,8 @@ export const start = (scenario: Scenario) => (): Run => {
     })
 
   const workerFor = (worker: number): DriveSwap => {
-    const service: RailService = {
+    const rail: RailService = {
+      status: async (_swap, side) => seen(side),
       lock: () =>
         gate(
           worker,
@@ -161,8 +162,7 @@ export const start = (scenario: Scenario) => (): Run => {
     return new DriveSwap({
       now,
       policies,
-      watchers: { from: { observe: async (_s, side) => seen(side) }, to: { observe: async (_s, side) => seen(side) } },
-      services: { from: service, to: service },
+      rails: { from: rail, to: rail },
       context: async () => ({ peer: null, keyCurrent: true, approval: 'not_required', ownInvoice: false }),
       swaps: {
         get: () =>

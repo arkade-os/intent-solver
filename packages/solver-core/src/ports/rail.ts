@@ -3,11 +3,6 @@ import type { LegStatus } from '../domain/swap/observation.js'
 import type { Reference, Side } from '../domain/swap/leg.js'
 import type { Swap } from '../domain/swap/swap.js'
 
-/** Reads a rail and changes nothing, so it may be called from anywhere, as often as needed. */
-export interface RailWatcher {
-  observe(swap: Swap, side: Side): Promise<LegStatus>
-}
-
 export const SendStatus = {
   Sent: 'sent',
   NotSent: 'not_sent',
@@ -21,8 +16,11 @@ export type SendResult =
   | { readonly status: typeof SendStatus.Sent; readonly reference: Reference }
   | { readonly status: typeof SendStatus.NotSent | typeof SendStatus.Unknown }
 
-/** Moves value. Called only AFTER the leg was recorded as `locking` / `claiming` / `refunding`. */
+/** One rail, as the swap loop uses it. Lightning, Arkade, onchain and EVM each implement it once. */
 export interface RailService {
+  /** Only reads. Safe to call at any time. */
+  status(swap: Swap, side: Side): Promise<LegStatus>
+  // The three below move value. Call them only after the leg was saved as `locking` / `claiming` / `refunding`.
   lock(swap: Swap, side: Side): Promise<SendResult>
   claim(swap: Swap, side: Side): Promise<SendResult>
   refund(swap: Swap, side: Side): Promise<SendResult>
