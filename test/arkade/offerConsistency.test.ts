@@ -53,6 +53,13 @@ describe('offerIsConsistent', () => {
     expect(offerIsConsistent(offerWith({ swapPkScript: honest }), xonly(9))).toBe(false)
   })
 
+  it('accepts a directed offer on the script its taker compiles, and refuses another taker', () => {
+    const directed = offerVtxoScript(offerWith({ taker: xonly(5), swapPkScript: new Uint8Array(34) }), SERVER).pkScript
+    expect(directed).not.toEqual(honest)
+    expect(offerIsConsistent(offerWith({ taker: xonly(5), swapPkScript: directed }), SERVER)).toBe(true)
+    expect(offerIsConsistent(offerWith({ taker: xonly(6), swapPkScript: directed }), SERVER)).toBe(false)
+  })
+
   it('refuses an offer whose script cannot be reconstructed at all', () => {
     // A key off the curve is a mismatch, not an exception to propagate: a
     // script that cannot be built cannot agree.
