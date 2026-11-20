@@ -3,6 +3,7 @@ import {
   validOpenRfqPrice,
   tokenBucket,
   OPEN_RFQ_MAX_AGE_MS,
+  OPEN_RFQ_MAX_FUTURE_MS,
   type TokenBucket,
   type OpenRfq,
   type OpenRfqPrice,
@@ -95,7 +96,7 @@ export class OpenRfqBidder {
       if (event.topic !== open.pair || !this.subscriptions.has(open.pair)) return
       if (
         !Number.isSafeInteger(event.createdAtMs) ||
-        event.createdAtMs > now + 5000 ||
+        event.createdAtMs > now + OPEN_RFQ_MAX_FUTURE_MS ||
         now - event.createdAtMs > OPEN_RFQ_MAX_AGE_MS
       )
         return

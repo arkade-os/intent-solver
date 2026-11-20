@@ -663,8 +663,10 @@ undirected topic key there, so a `~`-joined open pair is malformed.
   128 digits). JSON numbers and size buckets are not accepted.
 - `bids_until` is a required integer unix second, after now and at most sixty
   seconds ahead. The reference solver also rejects events older than sixty
-  seconds or timestamped more than five seconds ahead. Transport timestamps
-  filter replay freshness; the payload field controls the collection deadline.
+  seconds or timestamped more than thirty seconds ahead, since the stamp is
+  the client's clock. Transport timestamps filter replay freshness; the
+  payload field controls the collection deadline. A client SHOULD likewise
+  accept a bid stamped up to thirty seconds either side of its own open.
 - A malformed, stale, expired or unserved request is ignored silently, never
   refused. The request MUST NOT contain an invoice, recipient, destination,
   refund address, payment hash, hashlock or wallet profile. Only the pair,
