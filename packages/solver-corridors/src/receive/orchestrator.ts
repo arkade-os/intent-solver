@@ -37,6 +37,7 @@ import {
   SETTLE_SAFETY_MARGIN,
 } from '@arkade-os/solver-core/core/receive.js'
 import { MIN_CLAIM_WINDOW, refundWithoutReceiverDelayCovers } from '@arkade-os/solver-core/core/send.js'
+import { planReceive } from '@arkade-os/solver-core/core/receivePlan.js'
 import type { ChainTipProvider } from '@arkade-os/solver-rails/onchain/chainTip.js'
 import { absoluteLocktimeFor, refundDeadlineReached, refundDeadlineSeconds } from '../chainClock.js'
 import type { Limits } from '@arkade-os/solver-core/core/limits.js'
@@ -688,21 +689,23 @@ export class ReceiveSwapService {
 
   private async whenQuoted(row: ReceiveSwapRow): Promise<boolean> {
     const { store, ln, arkade } = this.deps
-    const state = await ln.getHoldState(row.paymentHash)
+    const hold = await ln.getHoldState(row.paymentHash)
+    const coupled =
+      hold.status === 'armed' ? null : await this.deps.coupledSendStore?.findLiveByPaymentHash(row.paymentHash)
+    const next = planReceive(row, { hold, coupled: Boolean(coupled), nowSeconds: this.now() })
     // A REAL htlc always wins, and is checked first. Coupling must never
     // override one: a row funded against a send lockup while an htlc it is
     // obliged to settle is also live owes two payouts on one preimage.
-    if (state.status === 'armed') {
-      const armed = await store.transition(row.id, 'quoted', 'armed', { htlc_expires_at: state.expiresAt })
-      if (armed) await this.noteCltvHeadroom(row, state.expiresAt)
+    if (next.do === 'arm') {
+      const armed = await store.transition(row.id, 'quoted', 'armed', { htlc_expires_at: next.htlcExpiresAt })
+      if (armed) await this.noteCltvHeadroom(row, next.htlcExpiresAt)
       return armed
     }
 
     // Coupled: no htlc will ever arrive, because the invoice is one we minted
     // and cannot pay. We arm against the client's SEND lockup instead — but
     // only once it is funded and holds what it promised, so we never go first.
-    const coupled = await this.deps.coupledSendStore?.findLiveByPaymentHash(row.paymentHash)
-    if (coupled) {
+    if (next.do === 'couple' && coupled) {
       // Send lockup vs our payout. The send corridor already couples only on
       // our bolt11, so both legs price off one A and lockup ≥ A ≥ payout —
       // this is false. That gate lives in another file; this is the leg that
@@ -764,7 +767,7 @@ export class ReceiveSwapService {
       return store.transition(row.id, 'quoted', 'armed', { htlc_expires_at: null })
     }
 
-    if (this.now() >= row.invoiceExpiresAt) {
+    if (next.do === 'refuse') {
       // Retire the invoice as well as the row. The row is ours and the
       // invoice is the BACKEND's: failing one does not touch the other, so
       // without this the mint outlives the quote and sits on the node until
@@ -776,7 +779,7 @@ export class ReceiveSwapService {
       // Safe here for the reason the coupled path above gives: the row is
       // being failed, so nothing downstream will ever settle this htlc.
       await this.retireInvoice(row.paymentHash)
-      await store.fail(row.id, 'quoted', 'invoice expired before it was ever armed')
+      await store.fail(row.id, 'quoted', next.reason)
     }
     return false
   }
