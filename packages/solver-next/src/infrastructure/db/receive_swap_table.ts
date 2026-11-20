@@ -188,8 +188,11 @@ const columnsFor = (event: SwapEvent, payoutSats: number, now: number): Record<s
   }
 }
 
-/** Lightning receive swaps, kept in the `receive_swap` table the legacy solver created. The schema is not changed. */
-export class ReceiveSwapRepository implements Omit<SwapRepository, 'add'> {
+/**
+ * One of the legacy tables swaps are kept in: `receive_swap`, for Lightning receive. The schema is not changed.
+ * There is one `Swap` and one repository; each legacy table only needs its own row mapping until they are merged.
+ */
+export class ReceiveSwapTable implements Omit<SwapRepository, 'add'> {
   constructor(
     private readonly driver: SqlDriver,
     private readonly now: () => number,

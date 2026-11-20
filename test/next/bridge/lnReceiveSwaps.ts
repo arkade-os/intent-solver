@@ -2,7 +2,7 @@ import type { RfqId } from '@arkade-os/solver-next/domain/shared/ids.js'
 import type { Hashlock } from '@arkade-os/solver-next/domain/swap/hashlock.js'
 import type { Swap } from '@arkade-os/solver-next/domain/swap/swap.js'
 import type { SwapRepository } from '@arkade-os/solver-next/domain/swap/swap_repo.js'
-import { swapFromReceiveRow } from '@arkade-os/solver-next/infrastructure/db/receive_swap_repo.js'
+import { swapFromReceiveRow } from '@arkade-os/solver-next/infrastructure/db/receive_swap_table.js'
 import type { ReceiveSwapRow, ReceiveSwapState, ReceiveSwapStore } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
 
 export { swapFromReceiveRow }

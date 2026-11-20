@@ -7,7 +7,7 @@ import { Conflict } from '@arkade-os/solver-next/domain/shared/error.js'
 import { RfqId, SwapId } from '@arkade-os/solver-next/domain/shared/ids.js'
 import { Hashlock } from '@arkade-os/solver-next/domain/swap/hashlock.js'
 import type { Swap } from '@arkade-os/solver-next/domain/swap/swap.js'
-import { ReceiveSwapRepository } from '@arkade-os/solver-next/infrastructure/db/receive_swap_repo.js'
+import { ReceiveSwapTable } from '@arkade-os/solver-next/infrastructure/db/receive_swap_table.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { ReceiveSwapStore } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
 import { ref, SECRET, t } from '../../domain/support.js'
@@ -21,7 +21,7 @@ const RFQ = 'ef'.repeat(32)
 interface Side {
   readonly db: Database.Database
   readonly legacy: ReceiveSwapStore
-  readonly repo: ReceiveSwapRepository
+  readonly table: ReceiveSwapTable
 }
 
 let now: number
@@ -59,7 +59,7 @@ const open = async (name: string): Promise<Side> => {
     nonInteractiveParameters: true,
     rfqId: RFQ,
   })
-  return { db, legacy, repo: new ReceiveSwapRepository(driver, () => now) }
+  return { db, legacy, table: new ReceiveSwapTable(driver, () => now) }
 }
 
 const rows = ({ db }: Side) => ({
@@ -71,7 +71,7 @@ const rows = ({ db }: Side) => ({
 const step = async (legacy: (store: ReceiveSwapStore) => Promise<unknown>, change: (swap: Swap) => void) => {
   now += 1
   await legacy(old.legacy)
-  await next.repo.update(ID, change)
+  await next.table.update(ID, change)
   expect(rows(next)).toEqual(rows(old))
 }
 
@@ -112,7 +112,7 @@ afterEach(async () => {
   rmSync(dir, { recursive: true, force: true })
 })
 
-describe('receive_swap written through the repository', () => {
+describe('receive_swap written through its table mapping', () => {
   it('writes the same rows as the legacy store, step by step to settled', async () => {
     await armed()
     await paying()
@@ -129,7 +129,7 @@ describe('receive_swap written through the repository', () => {
       (store) => store.transition(ID, 'claimed', 'settled', {}),
       (swap) => void swap.claim('from', t(now)),
     )
-    expect((await next.repo.get(ID))?.state).toBe('settled')
+    expect((await next.table.get(ID))?.state).toBe('settled')
   })
 
   it('writes the same rows through a refund', async () => {
@@ -162,7 +162,7 @@ describe('receive_swap written through the repository', () => {
       (store) => store.fail(ID, 'funded', 'funded state with no funded outpoint recorded'),
       (swap) => void swap.fail('stuck', 'funded state with no funded outpoint recorded', t(now)),
     )
-    expect((await next.repo.get(ID))?.to.state).toBe('locked')
+    expect((await next.table.get(ID))?.to.state).toBe('locked')
   })
 
   it('gives the payout lease back when the payout was not sent', async () => {
@@ -170,7 +170,7 @@ describe('receive_swap written through the repository', () => {
     await paying()
     now += 1
     await old.legacy.releaseFundLease(ID)
-    await next.repo.update(ID, (swap) => void swap.lockFailed('to', t(now)))
+    await next.table.update(ID, (swap) => void swap.lockFailed('to', t(now)))
     // The legacy release does not touch `updated_at`; the repository always does, so a stale writer is refused.
     const { updated_at: _a, ...mine } = rows(next).swaps[0] as Record<string, unknown>
     const { updated_at: _b, ...theirs } = rows(old).swaps[0] as Record<string, unknown>
@@ -179,18 +179,18 @@ describe('receive_swap written through the repository', () => {
 
   it('refuses a write when the row changed after it was read', async () => {
     await armed()
-    const racing = next.repo.update(ID, async (swap) => {
-      await next.repo.update(ID, (other) => void other.locking('to', t(now)))
+    const racing = next.table.update(ID, async (swap) => {
+      await next.table.update(ID, (other) => void other.locking('to', t(now)))
       swap.locking('to', t(now))
     })
     await expect(racing).rejects.toThrow(Conflict)
-    expect((await next.repo.get(ID))?.to.state).toBe('locking')
+    expect((await next.table.get(ID))?.to.state).toBe('locking')
   })
 
   it('moves the version on every write, even two in one second', async () => {
-    const before = (await next.repo.get(ID))?.version
-    const first = await next.repo.update(ID, (swap) => void swap.lock('from', t(now), ref(HASH), t(5_000)))
-    const second = await next.repo.update(ID, (swap) => void swap.locking('to', t(now)))
+    const before = (await next.table.get(ID))?.version
+    const first = await next.table.update(ID, (swap) => void swap.lock('from', t(now), ref(HASH), t(5_000)))
+    const second = await next.table.update(ID, (swap) => void swap.locking('to', t(now)))
     expect(new Set([before, first.version, second.version]).size).toBe(3)
   })
 
@@ -198,14 +198,14 @@ describe('receive_swap written through the repository', () => {
     await armed()
     await paying()
     await funded()
-    const { repo } = next
-    expect((await repo.get(ID))?.id).toBe(ID)
-    expect(await repo.get(SwapId.of('nope'))).toBeNull()
-    expect((await repo.findByRfqId(RfqId.of(RFQ)))?.id).toBe(ID)
-    expect((await repo.findByHash(HASH)).map((swap) => swap.id)).toEqual([ID])
-    expect((await repo.findLiveByScript('5120aa'))?.id).toBe(ID)
-    expect((await repo.findByFundingTx(ref('lockup:1'))).map((swap) => swap.id)).toEqual([ID])
-    expect((await repo.listOpen({ after: null, limit: 10 })).map((swap) => swap.id)).toEqual([ID])
-    expect(await repo.listOpen({ after: ID, limit: 10 })).toEqual([])
+    const { table } = next
+    expect((await table.get(ID))?.id).toBe(ID)
+    expect(await table.get(SwapId.of('nope'))).toBeNull()
+    expect((await table.findByRfqId(RfqId.of(RFQ)))?.id).toBe(ID)
+    expect((await table.findByHash(HASH)).map((swap) => swap.id)).toEqual([ID])
+    expect((await table.findLiveByScript('5120aa'))?.id).toBe(ID)
+    expect((await table.findByFundingTx(ref('lockup:1'))).map((swap) => swap.id)).toEqual([ID])
+    expect((await table.listOpen({ after: null, limit: 10 })).map((swap) => swap.id)).toEqual([ID])
+    expect(await table.listOpen({ after: ID, limit: 10 })).toEqual([])
   })
 })
