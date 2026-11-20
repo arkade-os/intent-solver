@@ -28,6 +28,8 @@ export const betterSqliteDriver = (path: string): SqlDriver => {
   db.pragma('synchronous = FULL')
   // A transaction stays open across awaits on this one connection. A statement from anywhere else would run
   // inside it and be rolled back with it, so it waits until the transaction ends.
+  // Inside a transaction `foreign()` is false, and that does not make a second one safe: transactions do not
+  // nest, and `BEGIN` inside one throws.
   const transactionOf = new AsyncLocalStorage<object>()
   let open: { readonly ended: Promise<void> } | null = null
   const foreign = (): boolean => open !== null && transactionOf.getStore() !== open
@@ -59,6 +61,8 @@ export const betterSqliteDriver = (path: string): SqlDriver => {
       if (foreign()) await untilFree()
       return db.prepare(sql).all(...(params as never[])) as T[]
     },
+    // `fn` must issue its statements on this driver itself. If it awaits work that was started outside it and
+    // that work then needs the database, that work waits for this transaction and the transaction waits for it.
     transaction: async <T>(fn: () => Promise<T>): Promise<T> => {
       if (foreign()) await untilFree()
       // Manual BEGIN/COMMIT rather than db.transaction(), which wraps a SYNC

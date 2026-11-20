@@ -413,4 +413,15 @@ describe('a transaction on the shared connection', () => {
     expect(await names()).toEqual(['first', 'second'])
     await driver.close()
   })
+
+  it('still refuses a transaction opened inside another, and rolls the outer one back', async () => {
+    const { driver, names } = await opened()
+    const nested = driver.transaction(async () => {
+      await driver.run("INSERT INTO t VALUES ('outer')")
+      await driver.transaction(() => driver.run("INSERT INTO t VALUES ('inner')"))
+    })
+    await expect(nested).rejects.toThrow('cannot start a transaction within a transaction')
+    expect(await names()).toEqual([])
+    await driver.close()
+  })
 })
