@@ -195,6 +195,8 @@ const columnsFor = (event: SwapEvent, payoutSats: number, now: number): Record<s
  * There is one `Swap` and one repository; each legacy table only needs its own row mapping until they are merged.
  */
 export class ReceiveSwapTable implements Omit<SwapRepository, 'add'>, LockupContracts {
+  private readonly contracts = new Map<string, LockupContract>()
+
   constructor(
     private readonly driver: SqlDriver,
     private readonly now: () => number,
@@ -235,6 +237,16 @@ export class ReceiveSwapTable implements Omit<SwapRepository, 'add'>, LockupCont
 
   /** The contract the payout is locked under, from the columns the quote wrote. */
   async contract(id: string): Promise<LockupContract> {
+    const known = this.contracts.get(id)
+    if (known !== undefined) return known
+    const read = await this.readContract(id)
+    // A contract never changes after the quote. The cap only bounds memory.
+    if (this.contracts.size >= 4_096) this.contracts.clear()
+    this.contracts.set(id, read)
+    return read
+  }
+
+  private async readContract(id: string): Promise<LockupContract> {
     const raw = await this.driver.get<Raw>('SELECT * FROM receive_swap WHERE id = ?', [id])
     if (raw === undefined) throw new Conflict(`swap ${id} does not exist`)
     const flag = raw.non_interactive_parameters ?? null

@@ -2,8 +2,8 @@ import { Conflict, RuleViolated } from '../domain/shared/error.js'
 import type { SwapId } from '../domain/shared/ids.js'
 import type { UnixSeconds } from '../domain/shared/time.js'
 import { ReferenceKind, Side, type LegState } from '../domain/swap/leg.js'
-import type { Observation } from '../domain/swap/observation.js'
-import { Action, plan, type Decision, type Policies, type Recorded } from '../domain/swap/plan.js'
+import { NOT_SEEN, type Observation } from '../domain/swap/observation.js'
+import { Action, legsToRead, plan, type Decision, type Policies, type Recorded } from '../domain/swap/plan.js'
 import type { Swap } from '../domain/swap/swap.js'
 import type { SwapRepository } from '../domain/swap/swap_repo.js'
 import { SendStatus, type RailService } from '../ports/rail.js'
@@ -61,9 +61,10 @@ export class DriveSwap {
 
   private async observe(swap: Swap): Promise<Observation> {
     const { rails, context, now } = this.deps
+    const read = legsToRead(swap)
     const [from, to, rest] = await Promise.all([
-      rails.from.status(swap, Side.From),
-      rails.to.status(swap, Side.To),
+      read.from ? rails.from.status(swap, Side.From) : NOT_SEEN,
+      read.to ? rails.to.status(swap, Side.To) : NOT_SEEN,
       context(swap),
     ])
     return { now: now(), from, to, ...rest }

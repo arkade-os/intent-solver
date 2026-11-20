@@ -56,6 +56,8 @@ class FakeArkade {
   claimed: Uint8Array | null = null
   payouts = 0
   refunds = 0
+  /** How many times the indexer was asked. */
+  reads = 0
 
   /** The client claims our lockup and reveals the preimage. */
   clientClaims(): void {
@@ -71,8 +73,9 @@ class FakeArkade {
     solverRefundPkScript: hex.encode(p2tr(key(4))),
     delays: { unilateralClaimDelay: 512, unilateralRefundDelay: 1024, unilateralRefundWithoutReceiverDelay: 1536 },
     hrp: HRP,
-    findLockups: async () => this.outputs,
+    findLockups: async () => ((this.reads += 1), this.outputs),
     findLockupOutpoints: async () => [
+      ...((this.reads += 1), []),
       ...this.outputs.map((o) => ({ ...o, spent: false, unrolled: false })),
       ...this.spent.map((o) => ({ ...o, spent: true, unrolled: false })),
     ],
@@ -87,7 +90,7 @@ class FakeArkade {
       this.outputs = []
       return 'refund-ark-txid'
     },
-    findClaimPreimage: async () => this.claimed,
+    findClaimPreimage: async () => ((this.reads += 1), this.claimed),
   }
 }
 
@@ -133,6 +136,8 @@ const then = async (happens: (world: World) => void = () => undefined, seconds =
   await next.tick()
   expect(rows(next)).toEqual(rows(legacy))
   expect([next.arkade.payouts, next.arkade.refunds]).toEqual([legacy.arkade.payouts, legacy.arkade.refunds])
+  // The new engine may never ask the indexer more than the legacy one does for the same work.
+  expect(next.arkade.reads).toBeLessThanOrEqual(legacy.arkade.reads)
 }
 
 const state = (world: World): unknown => rows(world).swaps[0]?.state

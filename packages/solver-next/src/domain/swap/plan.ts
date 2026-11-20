@@ -241,6 +241,27 @@ const whenStuck = (swap: Swap, seen: Observation): Decision => {
   return record(swap, Side.To, 'claimed', { preimage: secret, resume: true }) ?? WAIT
 }
 
+/**
+ * Which legs the next decision can depend on. A read is a call to a node or an indexer, made for every open swap
+ * on every tick, so a leg that cannot change the decision is not read.
+ */
+export const legsToRead = (swap: Swap): { readonly from: boolean; readonly to: boolean } => {
+  switch (swap.state) {
+    // Paying out is decided on both: is the client's lock good, and did a payout already go out.
+    case 'funded':
+      return { from: true, to: true }
+    // Our payout is out, or on its way out, or coming back: only it can move.
+    case 'filling':
+    case 'awaiting_claim':
+    case 'refunding':
+    case SwapOutcome.Stuck:
+      return { from: false, to: true }
+    // Before the client locks, and once the client has claimed: only their side can move.
+    default:
+      return { from: true, to: false }
+  }
+}
+
 /** One decision per call; the caller applies it and asks again until it gets `wait`. */
 export const plan = (swap: Swap, seen: Observation, policies: Policies): Decision => {
   const state = swap.state

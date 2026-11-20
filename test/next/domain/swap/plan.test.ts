@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { LegStatus, Observation } from '@arkade-os/solver-next/domain/swap/observation.js'
-import { plan, type Policies } from '@arkade-os/solver-next/domain/swap/plan.js'
+import { legsToRead, plan, type Policies } from '@arkade-os/solver-next/domain/swap/plan.js'
 import { Quote } from '@arkade-os/solver-next/domain/swap/quote.js'
 import type { Swap } from '@arkade-os/solver-next/domain/swap/swap.js'
 import { bothLocked, btc, quoted, ref, SECRET, t, terms, usdt } from '../support.js'
@@ -359,5 +359,20 @@ describe('plan: offers and coupled swaps', () => {
       side: 'from',
       state: 'claimed',
     })
+  })
+})
+
+describe('plan: which legs to read', () => {
+  it('reads only the side that can change the decision', () => {
+    expect(legsToRead(quoted())).toEqual({ from: true, to: false })
+    expect(legsToRead(funded())).toEqual({ from: true, to: true })
+    expect(legsToRead(filling())).toEqual({ from: false, to: true })
+    expect(legsToRead(bothLocked())).toEqual({ from: false, to: true })
+    const claimed = bothLocked()
+    claimed.claim('to', t(1_004), { preimage: SECRET })
+    expect(legsToRead(claimed)).toEqual({ from: true, to: false })
+    const stuck = bothLocked()
+    stuck.fail('stuck', 'unsure', t(1_004))
+    expect(legsToRead(stuck)).toEqual({ from: false, to: true })
   })
 })

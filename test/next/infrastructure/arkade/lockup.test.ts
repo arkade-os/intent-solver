@@ -37,6 +37,8 @@ interface World {
   fund: () => Promise<string | null>
   refund: () => Promise<string>
   refunds: number
+  /** Every read the leg made, in order. */
+  reads: string[]
 }
 
 let world: World
@@ -52,10 +54,12 @@ const output = (txid: string, value = PAYOUT, flags: Partial<LockupOutpoint> = {
 })
 
 const arkade = (): ArkadeLockups => ({
-  spendable: async () => world.history.filter((o) => !o.spent),
-  history: async () => world.history,
+  spendable: async () => (world.reads.push('spendable'), world.history.filter((o) => !o.spent)),
+  history: async () => (world.reads.push('history'), world.history),
   claimPreimage: async (_contract, outpoints) =>
-    outpoints.some((o) => `${o.txid}:${o.vout}` === world.claimedOn) ? hex.decode(SECRET) : null,
+    (world.reads.push('claimPreimage'), outpoints).some((o) => `${o.txid}:${o.vout}` === world.claimedOn)
+      ? hex.decode(SECRET)
+      : null,
   fund: () => world.fund(),
   refund: () => world.refund(),
   finishLostRefund: async () => world.lostRefund,
@@ -95,6 +99,7 @@ beforeEach(() => {
     fund: async () => 'pay',
     refund: async () => ((world.refunds += 1), 'refund-tx'),
     refunds: 0,
+    reads: [],
   }
   leg = new ArkadeLockup({ contract: async () => CONTRACT }, arkade())
 })
@@ -134,10 +139,10 @@ describe('our lockup on Arkade: what it shows', () => {
     expect(await leg.status(swap)).toMatchObject({ lock: 'landed', lockReference: 'pay:0' })
   })
 
-  it('reads the preimage from a claim of a sibling output', async () => {
+  it('reads the preimage from a claim of a sibling output before it refunds', async () => {
     world.history = [output('pay'), output('sibling', PAYOUT, { spent: true })]
     world.claimedOn = 'sibling:0'
-    expect(await leg.status(paidOut())).toMatchObject({ spent: { by: 'claim', preimage: SECRET } })
+    expect(await leg.status(refunding())).toMatchObject({ spent: { by: 'claim', preimage: SECRET } })
   })
 
   it('asks about our own output, not the script: dust does not make a spent payout look unspent', async () => {
@@ -206,5 +211,31 @@ describe('our lockup on Arkade: what it sends', () => {
 
   it('never claims: that is the client', async () => {
     await expect(leg.claim(paidOut(), 'to')).rejects.toThrow('claimed by the client')
+  })
+})
+
+describe('our lockup on Arkade: how much it reads', () => {
+  it('makes one read while nothing was paid out', async () => {
+    await leg.status(held())
+    expect(world.reads).toEqual(['history'])
+  })
+
+  it('makes one read while the payout waits for the client', async () => {
+    world.history = [output('pay')]
+    await leg.status(paidOut())
+    expect(world.reads).toEqual(['spendable'])
+  })
+
+  it('reads the rest only once our output is gone', async () => {
+    world.history = [output('pay', PAYOUT, { spent: true })]
+    world.claimedOn = 'pay:0'
+    await leg.status(paidOut())
+    expect(world.reads).toEqual(['spendable', 'history', 'claimPreimage'])
+  })
+
+  it('adopts an untouched payout with one read', async () => {
+    world.history = [output('pay')]
+    await leg.status(held())
+    expect(world.reads).toEqual(['history'])
   })
 })
