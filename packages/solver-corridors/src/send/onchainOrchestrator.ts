@@ -502,6 +502,26 @@ export class OnchainSendSwapService {
     )
   }
 
+  /** An open-RFQ bid, priced at the strategy's ceiling so the {@link quote} that follows can only meet or beat it. */
+  previewAmounts(amount: number, side: 'from' | 'to'): { fromAmount: number; toAmount: number } | undefined {
+    if (!Number.isSafeInteger(amount) || amount <= 0) return undefined
+    const pricing = this.pricing.ceiling ?? this.pricing
+    const fromAmount = side === 'from' ? amount : pricing.giveFor({ pair: RFQ_PAIR_ONCHAIN_SEND, payoutSats: amount })
+    const toAmount = side === 'to' ? amount : pricing.payoutFor({ pair: RFQ_PAIR_ONCHAIN_SEND, giveSats: fromAmount })
+    // An exact-out close re-prices the give at the live fee, so the minimum binds that smaller give.
+    const closeGive =
+      side === 'to' ? this.pricing.giveFor({ pair: RFQ_PAIR_ONCHAIN_SEND, payoutSats: amount }) : fromAmount
+    if (
+      !Number.isSafeInteger(fromAmount) ||
+      !Number.isSafeInteger(toAmount) ||
+      closeGive < this.deps.limits.minSats ||
+      fromAmount > this.deps.limits.maxSats ||
+      toAmount < this.refundablePayoutFloor()
+    )
+      return undefined
+    return { fromAmount, toAmount }
+  }
+
   tick(id: string): Promise<OnchainSendSwapRow> {
     return guardedTick(id, this.inFlight, this.deps.store, (row) => this.step(row))
   }

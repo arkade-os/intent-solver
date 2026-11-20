@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { Worker } from 'node:worker_threads'
 import {
   CORRIDORS,
   FREE,
@@ -12,6 +13,30 @@ import { descriptorFor } from '@arkade-os/solver-corridors/corridors/index.js'
 
 const ONCHAIN: Fee = { bps: 25, flatSats: 500 }
 const LN: Fee = { bps: 10, flatSats: 0 }
+
+const isolatedGive = (payoutSats: number, fee: Fee): Promise<number> => {
+  const worker = new Worker(
+    `const { parentPort, workerData } = require('node:worker_threads');
+    const feeSatsFor = ${feeSatsFor.toString()};
+    const payoutSatsFor = ${payoutSatsFor.toString()};
+    const giveSatsFor = ${giveSatsFor.toString()};
+    parentPort.postMessage('ready');
+    parentPort.postMessage(giveSatsFor(workerData.payoutSats, workerData.fee));`,
+    { eval: true, workerData: { payoutSats, fee } },
+  )
+  let timer: ReturnType<typeof setTimeout> | undefined
+  return new Promise<number>((resolve, reject) => {
+    worker.once('error', reject)
+    worker.on('message', (value: unknown) => {
+      if (value === 'ready') timer = setTimeout(() => reject(new Error('fee inversion did not finish')), 1000)
+      else if (typeof value === 'number') resolve(value)
+      else reject(new Error('invalid isolated pricing result'))
+    })
+  }).finally(async () => {
+    clearTimeout(timer)
+    await worker.terminate()
+  })
+}
 
 describe('corridors', () => {
   it('covers exactly the three directional pairs the solver serves', () => {
@@ -67,6 +92,20 @@ describe('payoutSatsFor', () => {
 })
 
 describe('giveSatsFor', () => {
+  it('terminates an unrepresentable exact-out correction without blocking the caller', async () => {
+    expect(await isolatedGive(Number.MAX_SAFE_INTEGER, { bps: 25, flatSats: 50 })).toBe(Infinity)
+  })
+
+  it('preserves the maximum safe free payout and the last representable fee-bearing boundary', () => {
+    expect(giveSatsFor(Number.MAX_SAFE_INTEGER, FREE)).toBe(Number.MAX_SAFE_INTEGER)
+    const fee = { bps: 25, flatSats: 50 }
+    const payout = payoutSatsFor(Number.MAX_SAFE_INTEGER, fee)
+    const give = giveSatsFor(payout, fee)
+    expect(Number.isSafeInteger(give)).toBe(true)
+    expect(payoutSatsFor(give, fee)).toBeGreaterThanOrEqual(payout)
+    expect(payoutSatsFor(give - 1, fee)).toBeLessThan(payout)
+  })
+
   it('is the inverse of payoutSatsFor across a range, never short by a sat', () => {
     for (const fee of [FREE, LN, ONCHAIN]) {
       for (const payout of [1_000, 5_000, 12_345, 100_000, 999_999]) {

@@ -185,7 +185,7 @@ export const nostrCodec = (identity: NostrIdentity): WireCodec => {
         template = {
           kind: NOSTR_KIND_DIRECTED,
           created_at: createdAt,
-          tags: [['p', event.recipient]],
+          tags: [['p', event.recipient], ...(event.replyTo ? [['e', event.replyTo]] : [])],
           content: encrypt(payloadJson, conversationKey(event.recipient)),
         }
       } else if (event.topic !== undefined) {
@@ -280,6 +280,7 @@ export const nostrCodec = (identity: NostrIdentity): WireCodec => {
           id: event.id,
           author: event.pubkey,
           ...(recipient !== undefined ? { recipient } : { topic }),
+          ...(firstTag(event.tags, 'e') ? { replyTo: firstTag(event.tags, 'e') } : {}),
           createdAtMs: event.created_at * 1000,
           payload,
         }

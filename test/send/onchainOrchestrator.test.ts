@@ -24,6 +24,7 @@ import {
   ONCHAIN_SECONDS_PER_BLOCK,
 } from '@arkade-os/solver-core/core/onchainSend.js'
 import type { Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
+import { networkFeePricing } from '@arkade-os/solver-core/core/pricing.js'
 import {
   FUND_LEASE_TTL_SECONDS,
   OnchainSendSwapStore,
@@ -3076,6 +3077,65 @@ describe('OnchainSendSwapService', () => {
 
     it('is what the smallest admissible give pays out after this corridor’s fee', () => {
       expect(serviceCharging({ bps: 100, flatSats: 50 }, 10_000).minimumPayoutSats()).toBe(9_850)
+    })
+
+    it('previews current prices without opening or reserving a swap', async () => {
+      const priced = serviceCharging({ bps: 100, flatSats: 50 }, 1_000)
+      const before = await deps.store.committedSats()
+      expect(priced.previewAmounts(10_000, 'from')).toEqual({ fromAmount: 10_000, toAmount: 9_850 })
+      expect(priced.previewAmounts(9_850, 'to')).toEqual({ fromAmount: 10_000, toAmount: 9_850 })
+      expect(priced.previewAmounts(999, 'from')).toBeUndefined()
+      expect(serviceCharging({ bps: 0, flatSats: 900 }, 1_000).previewAmounts(1000, 'from')).toBeUndefined()
+      expect(await deps.store.committedSats()).toBe(before)
+    })
+
+    it('previews at the network-fee cap, so a quote after the sample rises still meets the bid', async () => {
+      let sample = 100
+      const priced = new OnchainSendSwapService({
+        store: deps.store,
+        onchain: deps.onchain,
+        arkade: deps.arkade,
+        limits: { minSats: 1_000, maxSats: 1_000_000 },
+        maxExposedSats: 1_000_000,
+        totalCommitted: () => deps.store.committedSats(),
+        admission: new AdmissionControl(),
+        network: 'regtest',
+        signer,
+        refundDestinationScript,
+        pricing: networkFeePricing({ base: { bps: 100, flatSats: 50 }, costSats: () => sample, capSats: 400 }),
+        now: clock,
+      })
+      const bid = priced.previewAmounts(10_000, 'from')
+      sample = 400
+      const close = await priced.quote({
+        paymentHash,
+        amountSats: 10_000,
+        payoutPubkey,
+        refundAddress: REFUND_ADDRESS,
+        clientRefundPubkey,
+      })
+      if (!close.accepted || !bid) throw new Error('expected a bid and an accepted close')
+      expect(close.swap.payoutSats).toBeGreaterThanOrEqual(bid.toAmount)
+    })
+
+    it('bids no exact-out amount whose close, at the live fee, falls under the minimum', () => {
+      const priced = new OnchainSendSwapService({
+        store: deps.store,
+        onchain: deps.onchain,
+        arkade: deps.arkade,
+        limits: { minSats: 10_000, maxSats: 1_000_000 },
+        maxExposedSats: 1_000_000,
+        totalCommitted: () => deps.store.committedSats(),
+        admission: new AdmissionControl(),
+        network: 'regtest',
+        signer,
+        refundDestinationScript,
+        pricing: networkFeePricing({ base: { bps: 0, flatSats: 0 }, costSats: () => 100, capSats: 400 }),
+        now: clock,
+      })
+      // At the cap 9,600 needs 10,000 in; the live close asks 9,700, under the minimum.
+      expect(priced.previewAmounts(9_600, 'to')).toBeUndefined()
+      expect(priced.previewAmounts(9_900, 'to')).toEqual({ fromAmount: 10_300, toAmount: 9_900 })
     })
 
     it('tracks the configured minimum, not a constant', () => {

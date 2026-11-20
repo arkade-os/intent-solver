@@ -17,14 +17,13 @@ import { RFQ_CONTRACT_VERSION_UNSUPPORTED } from '@arkade-os/swap/rfq-contract'
 import { z } from 'zod'
 import { WIRE_AMOUNT } from './wireAmount.js'
 import { MAX_PAIR_LENGTH } from './marketKey.js'
+import type { SolverCard } from './registryCard.js'
 import { RFQ_CONTRACT_VERSION_ID } from './rfqContract.js'
 export const RFQ_ID = z
   .string()
   .length(64)
   .regex(/^[0-9a-f]{64}$/)
 
-// Shared between RfqRequest and RfqOpen so the wire contract for a pair
-// string, an amount side and an amount cannot diverge between the two.
 export const RFQ_PAIR = z.string().min(1).max(MAX_PAIR_LENGTH)
 export const AMOUNT_SIDE = z.enum(['from', 'to'])
 // § 2.1: a canonical decimal string of atomic units, with a JSON number
@@ -54,59 +53,56 @@ export const RfqStatusRequest = z
   })
   .strict()
 
-/**
- * An open-RFQ broadcast (docs/rfq-protocol.md § 4.6). Strict shape, but a
- * parse failure is answered with SILENCE, never a refusal — broadcasts are
- * the one place § 4's refusal rule inverts. Unknown fields also land on
- * silence: we do not bid on payloads we do not fully understand.
- */
+export const OPEN_RFQ_ATOMIC = z
+  .string()
+  .max(128)
+  .regex(/^[1-9][0-9]*$/)
+const OPEN_RFQ_LEG =
+  '(?:arkade|bolt11|bitcoin|eip155):[a-z0-9-]+/(?:slip44:[0-9]+|asset:[0-9a-f]{68}|erc20:0x[0-9a-f]{40})'
+export const OPEN_RFQ_PAIR = z
+  .string()
+  .max(512)
+  .regex(new RegExp(`^${OPEN_RFQ_LEG}->${OPEN_RFQ_LEG}$`))
+
 export const RfqOpen = z
   .object({
     v: z.literal(1),
     type: z.literal('rfq_open'),
     open_id: RFQ_ID,
-    pair: RFQ_PAIR,
+    pair: OPEN_RFQ_PAIR,
     amount_side: AMOUNT_SIDE,
-    amount: RFQ_AMOUNT.optional(),
-    size_bucket: z.object({ min: RFQ_AMOUNT, max: RFQ_AMOUNT }).strict().optional(),
-    bids_until: z.number().int().positive().optional(),
+    amount: OPEN_RFQ_ATOMIC,
+    bids_until: z.number().int().positive().safe(),
   })
   .strict()
-  .superRefine((open, ctx) => {
-    if ((open.amount === undefined) === (open.size_bucket === undefined)) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'exactly one of amount or size_bucket' })
-    }
-    if (open.size_bucket && open.size_bucket.min > open.size_bucket.max) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'size_bucket.min exceeds max' })
-    }
-  })
 
 export type RfqOpenPayload = z.infer<typeof RfqOpen>
 
-/**
- * A sealed bid on an open RFQ; addressed to the broadcast's author (§ 4.6).
- * `pair` is a parameter rather than the served-pair constant so the payload
- * cannot claim a market the caller did not bid on — the signature says what
- * goes on the wire, matching `decideOpenRfqBid`, which already takes the
- * pair it validated against.
- */
+export interface RfqBid {
+  v: 1
+  type: 'rfq_bid'
+  open_id: string
+  pair: string
+  amount_side: 'from' | 'to'
+  from_amount: string
+  to_amount: string
+  valid_until: number
+  card: SolverCard
+}
+
 export const rfqBidPayload = (
-  openId: string,
-  pair: string,
-  bid: { fee_bps: number; fee_flat: number; min: number; max: number; valid_until: number },
-): Record<string, unknown> => ({
+  open: RfqOpenPayload,
+  bid: Pick<RfqBid, 'from_amount' | 'to_amount' | 'valid_until' | 'card'>,
+): RfqBid => ({
   v: 1,
   type: 'rfq_bid',
-  open_id: openId,
-  pair,
-  fee_bps: bid.fee_bps,
-  // OPTIONAL in § 4.6, where omitted means zero — so a corridor charging no
-  // flat fee publishes exactly the bytes it published before the field
-  // existed, and a reader that predates it is not handed a key to ignore.
-  ...(bid.fee_flat > 0 ? { fee_flat: bid.fee_flat } : {}),
-  min: bid.min,
-  max: bid.max,
+  open_id: open.open_id,
+  pair: open.pair,
+  amount_side: open.amount_side,
+  from_amount: bid.from_amount,
+  to_amount: bid.to_amount,
   valid_until: bid.valid_until,
+  card: bid.card,
 })
 
 /**

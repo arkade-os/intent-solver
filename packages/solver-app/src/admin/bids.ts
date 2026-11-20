@@ -1,18 +1,4 @@
-/**
- * A bounded, in-memory tail of recent open-RFQ bids.
- *
- * Bids are persisted NOWHERE today — `src/core/openRfq.ts` is pure and the
- * ingress publishes without recording — so this is the only way to see that a
- * solver is bidding at all. It is deliberately not a database: persistence was
- * deferred, and a ring buffer that everyone knows is ephemeral is honest in a
- * way a half-built table would not be.
- *
- * The consequence has to reach the UI, which is why `ephemeral` is part of the
- * payload rather than a comment: an empty list after a restart means "nothing
- * recorded since boot", NOT "this solver has made no bids", and an operator
- * reading the second from the first would draw exactly the wrong conclusion
- * about a quiet market.
- */
+/** Published open-RFQ price previews, bounded in memory and cleared on restart. */
 import type { OpenRfq } from '@arkade-os/solver-core/core/openRfq.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 
@@ -21,10 +7,10 @@ export interface RecordedBid {
   at: number
   /** The directional pair bid on. */
   pair: string
-  /** Null when the open named a `size_bucket` rather than an amount. */
-  amountSats: number | null
-  feeBps: number
-  /** How long the bid's terms stay claimable, unix seconds. */
+  amountSide: 'from' | 'to'
+  fromAmount: string
+  toAmount: string
+  /** Preview expiry, unix seconds. */
   validUntil: number
 }
 
@@ -62,11 +48,12 @@ export const createBidTail = (capacity = BID_TAIL_CAPACITY): BidRecorder => {
 /** `OpenRfqBidderDeps.onBid`, filing each bid into `tail`. */
 export const recordBidsIn =
   (tail: BidRecorder, now: () => number = nowSeconds) =>
-  (open: OpenRfq, bid: { fee_bps: number; valid_until: number }): void =>
+  (open: OpenRfq, bid: { from_amount: string; to_amount: string; valid_until: number }): void =>
     tail.record({
       at: now(),
       pair: open.pair,
-      amountSats: open.amount ?? null,
-      feeBps: bid.fee_bps,
+      amountSide: open.amount_side,
+      fromAmount: bid.from_amount,
+      toAmount: bid.to_amount,
       validUntil: bid.valid_until,
     })

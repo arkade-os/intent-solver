@@ -87,6 +87,10 @@ export {
  * the rfq_id off an unparseable request, and a readable schema detail.
  */
 export {
+  RfqOpen,
+  rfqBidPayload,
+  type RfqOpenPayload,
+  type RfqBid,
   extractRfqId,
   zodDetail,
   isRfqRefusalReason,
@@ -235,10 +239,11 @@ export type { CovenantScriptRow } from '@arkade-os/solver-arkade/arkade/covenant
 /** Project one for the console. */
 export { phaseOfStates, diagnose, type AdminSwap, type AdminPhase } from '@arkade-os/solver-core/core/swapView.js'
 
-/** The four policy decisions an operator owns. Each defaults to today's behaviour. */
+/** The policy decisions an operator owns. Each defaults to today's behaviour. */
 export { fixedFeePricing, type PricingStrategy } from '@arkade-os/solver-core/core/pricing.js'
 export type { AdmissionStrategy, AdmissionRequest } from '@arkade-os/solver-core/core/admissionStrategy.js'
-export { defaultBidding, type BiddingStrategy } from '@arkade-os/solver-core/core/openRfq.js'
+export { type OpenRfq, type OpenRfqPrice, validOpenRfqPrice } from '@arkade-os/solver-core/core/openRfq.js'
+export { OpenRfqBidder, type OpenRfqBidderDeps } from '@arkade-os/solver-transport/ingress/openRfq.js'
 export {
   readRails,
   balanceOfRail,
