@@ -13,7 +13,7 @@
 import { describe, it, expect } from 'vitest'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { asset } from '@arkade-os/sdk'
-import { assetSwapContractVersion, offerVtxoScript } from '@arkade-os/swap/protocol'
+import { offerVtxoScript } from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
 import {
   offerExitDelay,
@@ -22,7 +22,7 @@ import {
   xOnlyPubkey,
   type QuotedOfferTerms,
 } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
-import { RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_V3 } from '@arkade-os/solver-core/core/rfqContract.js'
+import { RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_V4 } from '@arkade-os/solver-core/core/rfqContract.js'
 
 const xonly = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
 const SERVER = xonly(2)
@@ -115,34 +115,40 @@ describe('offerScriptFrom', () => {
 })
 
 describe('contract version', () => {
-  const sdk = (contractVersion: string): string =>
-    hex.encode(
-      offerVtxoScript(
-        {
-          wantAmount: 1_000n,
-          wantAsset: asset.AssetId.fromString(USDA),
-          makerPkScript: hex.decode(MAKER_SCRIPT),
-          makerPublicKey: MAKER_KEY,
-          emulatorPubkey: EMULATOR,
-          exitDelay: EXIT,
-        },
-        SERVER,
-        assetSwapContractVersion(contractVersion),
-      ).pkScript,
-    )
+  const sdkV2 = hex.encode(
+    offerVtxoScript(
+      {
+        wantAmount: 1_000n,
+        wantAsset: asset.AssetId.fromString(USDA),
+        makerPkScript: hex.decode(MAKER_SCRIPT),
+        makerPublicKey: MAKER_KEY,
+        emulatorPubkey: EMULATOR,
+        exitDelay: EXIT,
+      },
+      SERVER,
+      RFQ_ASSET_SWAP_V2,
+    ).pkScript,
+  )
 
-  it('refuses a version the SDK cannot derive instead of falling back to v2', () => {
-    expect(() => derive(terms(), 'asset-swap-v9')).toThrow(/unknown contract version/)
+  it('refuses a version it does not derive instead of falling back to v2', () => {
+    expect(() => derive(terms(), 'asset-swap-v9')).toThrow(/unsupported contract version asset-swap-v9/)
   })
 
-  it('derives v2 for the baseline and v3 only when it is named', () => {
-    expect(derive(terms()).pkScript).toBe(sdk(RFQ_ASSET_SWAP_V2))
-    expect(derive(terms(), RFQ_ASSET_SWAP_V2).pkScript).toBe(sdk(RFQ_ASSET_SWAP_V2))
-    expect(derive(terms(), RFQ_ASSET_SWAP_V3).pkScript).toBe(sdk(RFQ_ASSET_SWAP_V3))
+  it('reads a stored asset-swap-v3 as unsupported rather than deriving it', () => {
+    expect(() => derive(terms(), 'asset-swap-v3')).toThrow(/unsupported contract version asset-swap-v3/)
   })
 
-  it('puts a v3 deposit at a different address than a v2 one', () => {
-    expect(derive(terms(), RFQ_ASSET_SWAP_V3).pkScript).not.toBe(derive(terms()).pkScript)
+  it('derives v2 for the baseline and when it is named', () => {
+    expect(derive(terms()).pkScript).toBe(sdkV2)
+    expect(derive(terms(), RFQ_ASSET_SWAP_V2).pkScript).toBe(sdkV2)
+  })
+
+  it('derives the directed tree only with a taker key, and from it', () => {
+    expect(() => derive(terms(), RFQ_ASSET_SWAP_V4)).toThrow(/needs a taker key/)
+    const directed = (taker: Uint8Array) =>
+      offerScriptFrom({ ...derivation, taker })(terms(), RFQ_ASSET_SWAP_V4).pkScript
+    expect(directed(xonly(6))).not.toBe(directed(xonly(7)))
+    expect(directed(xonly(6))).not.toBe(sdkV2)
   })
 })
 

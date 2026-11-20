@@ -13,18 +13,11 @@
  * needs: a human. Its deposit's own liveness is the exception — a lost race is
  * no disagreement — so that one is typed. @see OfferNotSubmittedError
  */
-import { hex } from '@scure/base'
 import type { ArkadeContext } from './wallet.js'
 import { fulfillOffer, OfferNotSubmittedError, type FulfillOptions } from './offerFulfill.js'
 import { heldOf } from './offerFill.js'
 import { liveOfferOutpoints, type OfferOutpoint } from './offerOutpoints.js'
-import {
-  offerFromTerms,
-  offerScriptFrom,
-  xOnlyPubkey,
-  type OfferDerivation,
-  type QuotedOfferTerms,
-} from './offerTerms.js'
+import { offerScriptFrom, type OfferDerivation, type QuotedOfferTerms } from './offerTerms.js'
 
 const assertSafeSats = (sats: bigint): number => {
   if (sats > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error(`deposit of ${sats} sats exceeds a safe integer`)
@@ -69,9 +62,6 @@ export const quotedOfferSettleFor = (
   const outpointsAt = deps.outpointsAt ?? ((pkScript: string) => liveOfferOutpoints(deps.ctx, pkScript))
   const fulfill = deps.fulfill ?? fulfillOffer
   const derive = offerScriptFrom(deps.derivation)
-  // The same normalisation `offerScriptFrom` applies, or the offer handed to
-  // `fulfillOffer` would carry a key the derived script was not compiled from.
-  const emulatorPubkey = xOnlyPubkey(deps.derivation.emulatorPubkey)
 
   return async (intent, options) => {
     if (intent.depositTxid === null || intent.depositVout === null) {
@@ -111,10 +101,8 @@ export const quotedOfferSettleFor = (
     return fulfill(
       deps.ctx,
       deps.emulatorUrl,
-      {
-        ...offerFromTerms(termsOf(intent), emulatorPubkey, deps.derivation.exitDelay),
-        swapPkScript: hex.decode(derived.pkScript),
-      },
+      // The offer the derived script was compiled from, taker included.
+      derived.offer,
       {
         txid: deposit.txid,
         vout: deposit.vout,

@@ -8,7 +8,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { ArkAddress, CSVMultisigTapscript, RestArkProvider, asset } from '@arkade-os/sdk'
-import { createOffer, offerVtxoScript } from '@arkade-os/swap/protocol'
+import { createOffer, offerFromBinding, offerVtxoScript } from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
 import {
   offerExitDelay,
@@ -17,6 +17,7 @@ import {
   xOnlyPubkey,
   type QuotedOfferTerms,
 } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
+import { RFQ_ASSET_SWAP_V4 } from '@arkade-os/solver-core/core/rfqContract.js'
 
 const xonly = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
 const SERVER = xonly(2)
@@ -63,7 +64,10 @@ const clientWallet = () => ({
   getArkadeInfo: async () => new RestArkProvider(ARKD_URL).getInfo(),
 })
 
-const clientOffer = async (unilateralExitDelay: number) => {
+const clientOffer = async (
+  unilateralExitDelay: number,
+  over: { contractVersion?: typeof RFQ_ASSET_SWAP_V4; taker?: Uint8Array } = {},
+) => {
   vi.stubGlobal('fetch', async (url: unknown) =>
     String(url).includes('/v1/info')
       ? new Response(infoBody(String(unilateralExitDelay)), {
@@ -77,6 +81,7 @@ const clientOffer = async (unilateralExitDelay: number) => {
     wantAsset: asset.AssetId.fromString(USDA),
     emulatorPubkey: '02' + hex.encode(EMULATOR),
     contractVersion: 'asset-swap-v2', // a 0.0.12 client derives v2
+    ...over,
   })
 }
 
@@ -115,6 +120,34 @@ describe('offer address agreement with a 0.0.12 client', () => {
 
   it('moves the address when the advertised delay does', async () => {
     expect(solverOffer(605_184).address).not.toBe(solverOffer(604_672).address)
+  })
+})
+
+describe('the directed covenant', () => {
+  const TAKER = xonly(6)
+
+  it('derives the address the client derives, and the one its binding compiles', async () => {
+    const exitDelay = offerExitDelay(605_184)
+    const mine = offerScriptFrom({ serverPubkey: SERVER, emulatorPubkey: EMULATOR, hrp: HRP, exitDelay, taker: TAKER })(
+      terms,
+      RFQ_ASSET_SWAP_V4,
+    )
+    const theirs = await clientOffer(605_184, { contractVersion: RFQ_ASSET_SWAP_V4, taker: TAKER })
+    const bound = offerFromBinding({
+      version: RFQ_ASSET_SWAP_V4,
+      receiverPkScript: hex.decode(MAKER_SCRIPT),
+      amount: terms.wantAmount,
+      wantAsset: asset.AssetId.fromString(USDA),
+      userPublicKey: MAKER_KEY,
+      serverPublicKey: SERVER,
+      emulatorPublicKey: EMULATOR,
+      exitDelay,
+      taker: TAKER,
+    })
+
+    expect(mine.address).toBe(theirs.address)
+    expect(mine.pkScript).toBe(hex.encode(theirs.swapPkScript))
+    expect(mine.pkScript).toBe(hex.encode(bound.swapPkScript))
   })
 })
 

@@ -350,7 +350,8 @@ export const createCorridorSet = (corridors: readonly Corridor[], options: Corri
 /**
  * Contract version negotiation (docs/rfq-protocol.md § 4.1), gating only the quote path. A request without
  * `contract_versions` predates negotiation: it reaches the corridor untouched and its quote stays
- * byte-identical. The field is stripped before the corridor's strict schema and echoed only if asked.
+ * byte-identical, unless the corridor leaves its baseline out of `contractVersions`, which refuses it.
+ * The field is stripped before the corridor's strict schema and echoed only if asked.
  */
 const negotiatingContractVersion = (corridor: Corridor, supported: ReadonlySet<string> | undefined): Corridor => {
   const { pair, contractVersion: baseline } = corridor.descriptor
@@ -366,7 +367,9 @@ const negotiatingContractVersion = (corridor: Corridor, supported: ReadonlySet<s
       return {
         kind: 'refused',
         payload: rfqRefusalPayload(rfqId, 'unsupported_pair'),
-        detail: `${pair} speaks contract version ${baseline}, which rfq.contractVersions disables`,
+        detail: buildable.includes(baseline)
+          ? `${pair} speaks contract version ${baseline}, which rfq.contractVersions disables`
+          : `${pair} quotes only on negotiation: name ${buildable.join(', ')} in ${RFQ_CONTRACT_VERSIONS_KEY}`,
       }
     }
     const { [RFQ_CONTRACT_VERSIONS_KEY]: listed, ...rest } = payload as Record<string, unknown>
