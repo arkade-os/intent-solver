@@ -219,4 +219,55 @@ describe('receive_swap written through its table mapping', () => {
   it('reads the contract exactly as the legacy code builds it from the row', async () => {
     expect(await next.table.contract(ID)).toEqual(contractFromRow(await next.legacy.get(ID)))
   })
+
+  it('keeps listing a stuck swap while its payout is out, and collects once the claim is seen', async () => {
+    const { table } = next
+    const open = async () => (await table.listOpen({ after: null, limit: 10 })).map((swap) => swap.id)
+    await armed()
+    await paying()
+    await funded()
+    now += 1
+    await table.update(ID, (swap) => void swap.fail('stuck', 'refund kept failing', t(now)))
+    expect(await open()).toEqual([ID])
+
+    now += 1
+    const resumed = await table.update(ID, (swap) => {
+      swap.claim('to', t(now), { preimage: SECRET })
+      swap.resume(t(now))
+    })
+    expect(resumed.state).toBe('filled')
+    expect(rows(next).swaps[0]).toMatchObject({ state: 'claimed', preimage: SECRET, failure_reason: null })
+  })
+
+  it('watches a stuck swap even with a refund on record, until the refund is seen landed', async () => {
+    const { table } = next
+    const open = async () => (await table.listOpen({ after: null, limit: 10 })).length
+    await armed()
+    await paying()
+    await funded()
+    now += 1
+    await table.update(ID, (swap) => {
+      swap.refunding('to', t(now))
+      swap.reference('to', { refund: ref('refund-tx') }, t(now))
+      swap.fail('stuck', 'refund not confirmed', t(now))
+    })
+    expect(await open()).toBe(1)
+
+    now += 1
+    const back = await table.update(ID, (swap) => {
+      swap.refund('to', t(now), ref('refund-tx'))
+      swap.resume(t(now))
+    })
+    expect(back.state).toBe('refunded')
+    expect(rows(next).swaps[0]).toMatchObject({ state: 'refunded', refund_ark_txid: 'refund-tx', failure_reason: null })
+    expect(await open()).toBe(0)
+  })
+
+  it('does not list a stuck swap that never paid out', async () => {
+    const { table } = next
+    await armed()
+    now += 1
+    await next.db.prepare("UPDATE receive_swap SET state = 'stuck' WHERE id = ?").run(ID)
+    expect(await table.listOpen({ after: null, limit: 10 })).toEqual([])
+  })
 })

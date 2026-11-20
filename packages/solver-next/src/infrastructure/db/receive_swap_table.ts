@@ -162,6 +162,7 @@ export const swapFromReceiveRow = (row: ReceiveSwapRecord, failedFrom: Lived | n
 // What one change of the swap writes into the row, besides its state.
 const columnsFor = (event: SwapEvent, payoutSats: number, now: number): Record<string, string | number | null> => {
   if (event.type === 'SwapFailed') return { failure_reason: event.reason }
+  if (event.type === 'SwapResumed') return { failure_reason: null }
   if (event.type === 'LegReferenced') {
     const refund = event.side === Side.To ? event.references.refund : undefined
     return refund === undefined ? {} : { refund_ark_txid: refund }
@@ -226,13 +227,17 @@ export class ReceiveSwapTable implements Omit<SwapRepository, 'add'>, LockupCont
     return this.many('SELECT * FROM receive_swap WHERE arkade_lockup_txid = ?', [funding.split(':')[0]])
   }
 
+  // A stuck swap is still listed while its payout may be out: the client can claim it at any time, and only a
+  // tick that sees the claim can collect their payment. A recorded refund does not end the watch; it may not
+  // have taken our output. The watch ends when the swap leaves `stuck`, as claimed or as refunded.
   async listOpen(page: Page): Promise<readonly Swap[]> {
     const marks = OPEN.map(() => '?').join(', ')
-    return this.many(`SELECT * FROM receive_swap WHERE state IN (${marks}) AND id > ? ORDER BY id LIMIT ?`, [
-      ...OPEN,
-      page.after ?? '',
-      page.limit,
-    ])
+    const payoutMayBeOut = '(arkade_lockup_txid IS NOT NULL OR fund_started_at IS NOT NULL)'
+    const watched = `state = 'stuck' AND ${payoutMayBeOut} AND preimage IS NULL`
+    return this.many(
+      `SELECT * FROM receive_swap WHERE (state IN (${marks}) OR (${watched})) AND id > ? ORDER BY id LIMIT ?`,
+      [...OPEN, page.after ?? '', page.limit],
+    )
   }
 
   /** The contract the payout is locked under, from the columns the quote wrote. */

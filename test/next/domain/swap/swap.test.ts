@@ -214,11 +214,11 @@ describe('swap aggregate', () => {
     expect(() => swap.fail('stuck', 'late', t(1_006))).toThrow('already settled')
   })
 
-  it('resumes a stuck swap only to collect with the preimage in hand', () => {
+  it('resumes a stuck swap only with the preimage in hand or the payout back', () => {
     const swap = bothLocked()
     expect(() => swap.resume(t(1_004))).toThrow('only a stuck swap resumes')
     swap.fail('stuck', 'claim failed', t(1_004))
-    expect(() => swap.resume(t(1_005))).toThrow('preimage is not known')
+    expect(() => swap.resume(t(1_005))).toThrow('no preimage is known and our payout is not back')
     swap.claim('to', t(1_005), { preimage: SECRET })
     swap.resume(t(1_006))
     expect(swap.state).toBe('filled')

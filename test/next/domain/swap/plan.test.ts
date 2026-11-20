@@ -218,6 +218,17 @@ describe('plan: collecting', () => {
     expect(plan(swap, seen({ to: blind }), POLICIES)).toEqual({ do: 'wait' })
   })
 
+  it('ends a stuck swap as refunded once our refund is seen landed', () => {
+    const swap = bothLocked()
+    swap.refunding('to', t(1_010))
+    swap.fail('stuck', 'refund kept failing', t(1_020))
+    const back = seen({ to: { ...NOTHING, spent: { by: 'refund' }, refund: 'landed' } })
+    expect(plan(swap, back, POLICIES)).toEqual({ do: 'record', side: 'to', state: 'refunded', resume: true })
+    swap.refund('to', t(1_030))
+    swap.resume(t(1_030))
+    expect(swap.state).toBe('refunded')
+  })
+
   it('keeps the timeout and the reference the rail showed when a lock is recorded', () => {
     const held = {
       ...NOTHING,

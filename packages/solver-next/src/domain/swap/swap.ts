@@ -242,15 +242,21 @@ export class Swap {
     return this.raise({ topic: SWAP_TOPIC, type: 'SwapFailed', id: this.id, at, outcome, reason })
   }
 
-  get canResume(): boolean {
-    return this.props.outcome === SwapOutcome.Stuck && this.preimage !== null && this.legsState !== null
+  // A stuck swap stops being stuck in two cases only: the preimage is known, so it can be collected, or our
+  // payout is back, so nothing is out any more.
+  private get resolved(): boolean {
+    return this.preimage !== null || this.to.state === 'refunded'
   }
 
-  /** A stuck swap goes back to being driven, but only to collect with a preimage in hand. */
+  get canResume(): boolean {
+    return this.props.outcome === SwapOutcome.Stuck && this.resolved && this.legsState !== null
+  }
+
   resume(at: UnixSeconds): SwapEvent {
     if (this.props.outcome !== SwapOutcome.Stuck)
       throw this.error(IllegalTransition, `only a stuck swap resumes, this one is ${this.state}`)
-    if (this.preimage === null) throw this.error(RuleViolated, 'nothing to resume for: the preimage is not known')
+    if (!this.resolved)
+      throw this.error(RuleViolated, 'nothing to resume for: no preimage is known and our payout is not back')
     if (this.legsState === null)
       throw this.error(RuleViolated, `legs ${this.from.state}/${this.to.state} make no sense`)
     return this.raise({ topic: SWAP_TOPIC, type: 'SwapResumed', id: this.id, at })

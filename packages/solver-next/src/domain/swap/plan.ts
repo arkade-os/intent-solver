@@ -268,12 +268,15 @@ const whenOver = (swap: Swap, seen: Observation, policies: Policies): Decision =
   return WAIT
 }
 
-// A stuck swap is still watched for one thing: a claim that shows up late. With its preimage the swap can be
-// collected, and nobody else would do it.
+// A stuck swap is still watched for what the client or our own refund does with the payout. A claim seen late
+// carries the preimage, and nobody else would collect with it. A refund seen landed means nothing is out any more.
 const whenStuck = (swap: Swap, seen: Observation): Decision => {
+  const { to } = swap
+  if (to.state === 'claimed' || to.state === 'refunded') return WAIT
   const { secret } = claimOf(swap, seen)
-  if (secret === null || swap.to.state === 'claimed') return WAIT
-  return record(swap, Side.To, 'claimed', { preimage: secret, resume: true }) ?? WAIT
+  if (secret !== null) return record(swap, Side.To, 'claimed', { preimage: secret, resume: true }) ?? WAIT
+  if (seen.to.refund === TxStatus.Landed) return record(swap, Side.To, 'refunded', { resume: true }) ?? WAIT
+  return WAIT
 }
 
 /**
