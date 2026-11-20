@@ -12,6 +12,7 @@ const NOTHING: LegStatus = {
   refundOpen: false,
   expiresAt: null,
   refundOpensAt: null,
+  refundAloneDelay: null,
   lock: 'none',
   claim: 'none',
   refund: 'none',

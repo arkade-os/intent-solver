@@ -31,7 +31,14 @@ class World {
 
   seen(side: Side): LegStatus {
     const paid = this.payouts > 0
-    const base = { matured: true, refundOpen: false, expiresAt: null, refundOpensAt: null, refund: 'none' } as const
+    const base = {
+      matured: true,
+      refundOpen: false,
+      expiresAt: null,
+      refundOpensAt: null,
+      refundAloneDelay: null,
+      refund: 'none',
+    } as const
     return side === 'from'
       ? {
           ...base,

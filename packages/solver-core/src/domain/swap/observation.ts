@@ -45,6 +45,8 @@ export interface LegStatus {
   readonly expiresAt: UnixSeconds | null
   /** When our own way back opens. Null where the contract gives us none. */
   readonly refundOpensAt: UnixSeconds | null
+  /** Seconds after funding until we can refund with no help from the server or the client. Null where there is no such path. */
+  readonly refundAloneDelay: number | null
   readonly lock: TxStatus
   readonly claim: TxStatus
   readonly refund: TxStatus

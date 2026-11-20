@@ -70,7 +70,11 @@ export const start = (scenario: Scenario) => (): Run => {
   const load = (): Swap => Swap.fromEvents(history)
   const seen = (side: Side): LegStatus => {
     const none = { lock: 'none', claim: 'none', refund: 'none', refundOpen: false, matured: false } as const
-    const deadlines = { expiresAt: t(BASE + scenario.clientRefundAt), refundOpensAt: t(BASE + scenario.payoutRefundAt) }
+    const deadlines = {
+      expiresAt: t(BASE + scenario.clientRefundAt),
+      refundOpensAt: t(BASE + scenario.payoutRefundAt),
+      refundAloneDelay: null,
+    }
     if (side === 'from') {
       return {
         ...none,
