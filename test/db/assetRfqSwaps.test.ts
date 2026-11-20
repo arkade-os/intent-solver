@@ -377,6 +377,7 @@ describe('the fill phase', () => {
       emulatorPubkey: xonly(4),
       hrp: 'tark',
       exitDelay: offerExitDelay(605_184),
+      taker: xonly(5),
     }
     const maker = { script: `5120${'cc'.repeat(32)}`, key: hex.encode(xonly(3)) }
     const v2 = offerScriptFrom(derivation)({
@@ -640,6 +641,7 @@ describe('a deposit already gone when the adapter looked', () => {
     emulatorPubkey: xonly(4),
     hrp: 'tark',
     exitDelay: offerExitDelay(605_184),
+    taker: xonly(5),
   }
   const maker = { script: `5120${'cc'.repeat(32)}`, key: hex.encode(xonly(3)) }
 

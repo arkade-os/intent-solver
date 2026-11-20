@@ -45,7 +45,7 @@ export interface OfferDerivation {
   exitDelay: RelativeTimelock
   /** This solver's x-only identity key, the quote's `solver_pubkey`: the directed covenant's
    * `fulfill` needs its signature. Without it a directed derivation throws. */
-  taker?: Uint8Array
+  taker: Uint8Array
 }
 
 /** The exit closure a client's `createOffer` defaults to, from swap 0.0.12 on.

@@ -23,6 +23,7 @@ const xonly = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(
 const SERVER = xonly(2)
 const MAKER_KEY = xonly(3)
 const EMULATOR = xonly(4)
+const TAKER = xonly(6)
 const USDA = '11'.repeat(34)
 const HRP = 'tark'
 const MAKER_ADDRESS = new ArkAddress(SERVER, xonly(5), HRP).encode()
@@ -91,6 +92,7 @@ const solverOffer = (unilateralExitDelay: number) =>
     emulatorPubkey: EMULATOR,
     hrp: HRP,
     exitDelay: offerExitDelay(unilateralExitDelay),
+    taker: TAKER,
   })(terms)
 
 afterEach(() => vi.unstubAllGlobals())
@@ -124,8 +126,6 @@ describe('offer address agreement with a 0.0.12 client', () => {
 })
 
 describe('the directed covenant', () => {
-  const TAKER = xonly(6)
-
   it('derives the address the client derives, and the one its binding compiles', async () => {
     const exitDelay = offerExitDelay(605_184)
     const mine = offerScriptFrom({ serverPubkey: SERVER, emulatorPubkey: EMULATOR, hrp: HRP, exitDelay, taker: TAKER })(

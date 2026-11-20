@@ -35,6 +35,7 @@ import { OFFER_CONTRACT_V1, OFFER_CONTRACT_V2 } from '@arkade-os/solver-core/cor
 const USDT = '11'.repeat(34)
 const SCRIPT = new Uint8Array(34).fill(0xab)
 const SCRIPT_HEX = 'ab'.repeat(34)
+const SOLVER = 'e1'.repeat(32)
 
 const servicesSource = readFileSync(
   fileURLToPath(new URL('../../packages/solver-app/src/ops/services.ts', import.meta.url)),
@@ -56,6 +57,7 @@ const build = async (over: Partial<AssetOfferDeps> = {}) => {
   let n = 0
   const deps: AssetOfferDeps = {
     store,
+    solverPubkey: SOLVER,
     carrierSats: 0n,
     markets: [{ a: USDT, b: null }],
     minFillAmount: 10n,
@@ -1273,14 +1275,12 @@ describe('an offer an RFQ negotiation already holds', () => {
 })
 
 describe('a directed offer packet', () => {
-  const OURS = 'e1'.repeat(32)
   const directedTo = (taker: string) => ({ ...found, offer: offer({ taker: hex.decode(taker) }) })
 
   it('is skipped silently when it names another taker: no row, no refusal, no fill', async () => {
     const refused: unknown[] = []
     const settle = vi.fn(async () => 'f'.repeat(64))
     const { store, service } = await build({
-      solverPubkey: OURS,
       settle,
       onRefused: (outpoint, reason) => void refused.push({ outpoint, reason }),
     })
@@ -1296,14 +1296,9 @@ describe('a directed offer packet', () => {
     expect(settle).not.toHaveBeenCalled()
   })
 
-  it('skips every directed offer when this solver key was never wired', async () => {
-    const { service } = await build()
-    expect(await service.consider(directedTo(OURS))).toEqual({ fill: false, reason: 'offer_directed_elsewhere' })
-  })
-
   it('is considered like any other offer when it names this solver', async () => {
-    const { service } = await build({ solverPubkey: OURS })
-    expect(await service.consider(directedTo(OURS))).toEqual({ fill: true, id: 'fill-1' })
+    const { service } = await build()
+    expect(await service.consider(directedTo(SOLVER))).toEqual({ fill: true, id: 'fill-1' })
   })
 
   it('is wired the identity key the card advertises', () => {

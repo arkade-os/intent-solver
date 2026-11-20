@@ -32,7 +32,7 @@ const USDA = '11'.repeat(34)
 const MAKER_SCRIPT = '5120' + 'cc'.repeat(32)
 
 const EXIT = offerExitDelay(605_184)
-const derivation = { serverPubkey: SERVER, emulatorPubkey: EMULATOR, hrp: 'tark', exitDelay: EXIT }
+const derivation = { serverPubkey: SERVER, emulatorPubkey: EMULATOR, hrp: 'tark', exitDelay: EXIT, taker: xonly(9) }
 
 const terms = (over: Partial<QuotedOfferTerms> = {}): QuotedOfferTerms => ({
   wantAmount: 1_000n,
@@ -143,12 +143,12 @@ describe('contract version', () => {
     expect(derive(terms(), RFQ_ASSET_SWAP_V2).pkScript).toBe(sdkV2)
   })
 
-  it('derives the directed tree only with a taker key, and from it', () => {
-    expect(() => derive(terms(), RFQ_ASSET_SWAP_DIRECTED)).toThrow(/needs a taker key/)
+  it('derives the directed tree from the taker key, and never hands v2 one', () => {
     const directed = (taker: Uint8Array) =>
       offerScriptFrom({ ...derivation, taker })(terms(), RFQ_ASSET_SWAP_DIRECTED).pkScript
     expect(directed(xonly(6))).not.toBe(directed(xonly(7)))
     expect(directed(xonly(6))).not.toBe(sdkV2)
+    expect(offerScriptFrom({ ...derivation, taker: xonly(7) })(terms()).pkScript).toBe(sdkV2)
   })
 })
 

@@ -146,8 +146,8 @@ export interface AssetOfferDeps {
   /** Whether a live asset-RFQ negotiation of ours holds this script: its deposit carries a
    * public offer packet, so it arrives here too, and both paths would race to fill it. */
   rfqHolds?: (offerPkScript: string) => Promise<boolean>
-  /** This solver's x-only key, hex. A directed packet naming another taker is skipped; absent, every one is. */
-  solverPubkey?: string
+  /** This solver's x-only key, hex. A directed packet naming another taker is skipped. */
+  solverPubkey: string
   onError?: (id: string, error: unknown) => void
   /**
    * A fill put back for a later sweep because the float was pinned or short.
