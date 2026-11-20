@@ -6,7 +6,7 @@ export class Reconciliation {
   private constructor(
     readonly endpoint: Endpoint,
     readonly ledgerBalance: bigint,
-    /** Null when the rail could not be read: unknown, never zero. */
+    /** Null when the rail could not be read. It does not mean zero. */
     readonly actualBalance: Amount | null,
   ) {}
 

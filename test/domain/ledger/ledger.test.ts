@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Account } from '@arkade-os/solver-core/domain/ledger/account.js'
 import { bookSwap, type SwapBooking } from '@arkade-os/solver-core/domain/ledger/book.js'
-import { Posting, JournalEntry } from '@arkade-os/solver-core/domain/ledger/journal_entry.js'
+import { JournalLine, JournalEntry } from '@arkade-os/solver-core/domain/ledger/journal_entry.js'
 import { Reconciliation } from '@arkade-os/solver-core/domain/ledger/reconciliation.js'
 import { Endpoint } from '@arkade-os/solver-core/domain/shared/endpoint.js'
 import { RouteId, SwapId } from '@arkade-os/solver-core/domain/shared/ids.js'
@@ -9,7 +9,7 @@ import { ARKADE, BTC, btc, LIGHTNING, t, USDT, usdt } from '../support.js'
 
 const balances = (entries: readonly JournalEntry[]): Record<string, bigint> => {
   const totals: Record<string, bigint> = {}
-  for (const { account, units } of entries.flatMap((entry) => entry.postings)) {
+  for (const { account, units } of entries.flatMap((entry) => entry.lines)) {
     totals[account.key] = (totals[account.key] ?? 0n) + units
   }
   return Object.fromEntries(Object.entries(totals).filter(([, units]) => units !== 0n))
@@ -21,12 +21,12 @@ describe('journal entry', () => {
 
   it('balances per asset or does not exist', () => {
     expect(() =>
-      JournalEntry.of('k', t(1), [Posting.debit(holding, btc(10n)), Posting.credit(clearing, btc(9n))]),
+      JournalEntry.of('k', t(1), [JournalLine.debit(holding, btc(10n)), JournalLine.credit(clearing, btc(9n))]),
     ).toThrow('off by 1')
-    expect(() => JournalEntry.of('k', t(1), [Posting.debit(holding, btc(10n))])).toThrow('at least two')
-    expect(() => Posting.debit(holding, usdt(1n))).toThrow('holds btc')
+    expect(() => JournalEntry.of('k', t(1), [JournalLine.debit(holding, btc(10n))])).toThrow('at least two')
+    expect(() => JournalLine.debit(holding, usdt(1n))).toThrow('holds btc')
     expect(
-      JournalEntry.of('k', t(1), [Posting.debit(holding, btc(10n)), Posting.credit(clearing, btc(10n))]).postings,
+      JournalEntry.of('k', t(1), [JournalLine.debit(holding, btc(10n)), JournalLine.credit(clearing, btc(10n))]).lines,
     ).toHaveLength(2)
   })
 })

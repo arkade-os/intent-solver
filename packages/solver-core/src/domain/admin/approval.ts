@@ -3,12 +3,12 @@ import type { ValueOf } from '../shared/brand.js'
 import type { RouteId, SwapId } from '../shared/ids.js'
 import type { UnixSeconds } from '../shared/time.js'
 
-export const ApprovalVerdict = {
+export const ApprovalState = {
   Pending: 'pending',
   Approved: 'approved',
 } as const
 
-export type ApprovalVerdict = ValueOf<typeof ApprovalVerdict>
+export type ApprovalState = ValueOf<typeof ApprovalState>
 
 /** What the store says about a swap. `unreadable` holds the swap, exactly like `none`. */
 export const ApprovalRecord = {
@@ -29,7 +29,7 @@ export interface ApprovalProps {
   readonly approvedAt: UnixSeconds | null
 }
 
-// There is no rejected verdict: an operator who will not approve parks the swap instead.
+// There is no rejected state. An operator who will not approve parks the swap instead.
 export class Approval {
   static readonly REFUSAL = 'awaiting operator approval: this swap is at or above the approval threshold'
 
@@ -57,8 +57,8 @@ export class Approval {
   get snapshot(): ApprovalProps {
     return this.props
   }
-  get verdict(): ApprovalVerdict {
-    return this.props.approvedAt === null ? ApprovalVerdict.Pending : ApprovalVerdict.Approved
+  get state(): ApprovalState {
+    return this.props.approvedAt === null ? ApprovalState.Pending : ApprovalState.Approved
   }
 
   /** Approving again moves the timestamp: the record says when it was last confirmed. */

@@ -20,11 +20,11 @@ describe('approval', () => {
 
   it('starts as a request, and approving again moves the timestamp as it does today', () => {
     const approval = Approval.request(SwapId.of('swap-1'), RouteId.of('arkade:btc->onchain:btc'), btc(5_000n), t(100))
-    expect(approval.verdict).toBe('pending')
+    expect(approval.state).toBe('pending')
     approval.approve(t(200))
     approval.approve(t(300))
     expect(approval.snapshot.approvedAt).toBe(300)
-    expect(approval.verdict).toBe('approved')
+    expect(approval.state).toBe('approved')
   })
 })
 

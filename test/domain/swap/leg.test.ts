@@ -59,7 +59,7 @@ describe('leg', () => {
       .moveTo('locked', t(2), { funding: ref('txid') })
       .moveTo('refunding', t(3), { refund: ref('refund-1') })
     const bumped = refunding.record({ refund: ref('refund-2') }).record({ refund: ref('refund-2') })
-    expect(bumped.facts.refund).toEqual(['refund-1', 'refund-2'])
+    expect(bumped.references.refund).toEqual(['refund-1', 'refund-2'])
     expect(bumped.reference('refund')).toBe('refund-2')
     expect(bumped.reference('claim')).toBeNull()
     expect(bumped.state).toBe('refunding')

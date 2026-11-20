@@ -2,7 +2,7 @@ import { DriveSwap } from '@arkade-os/solver-core/application/drive_swap.js'
 import { Conflict } from '@arkade-os/solver-core/domain/shared/error.js'
 import type { SwapId } from '@arkade-os/solver-core/domain/shared/ids.js'
 import type { Side } from '@arkade-os/solver-core/domain/swap/leg.js'
-import type { LegSeen, Observation } from '@arkade-os/solver-core/domain/swap/observation.js'
+import type { LegStatus, Observation } from '@arkade-os/solver-core/domain/swap/observation.js'
 import { plan, type Policies } from '@arkade-os/solver-core/domain/swap/plan.js'
 import { Quote } from '@arkade-os/solver-core/domain/swap/quote.js'
 import { Swap } from '@arkade-os/solver-core/domain/swap/swap.js'
@@ -27,7 +27,7 @@ export interface Scenario {
   readonly policies: (scenario: Scenario) => Policies
 }
 
-type Spender = 'nobody' | 'us' | 'client'
+type SpentBy = 'nobody' | 'us' | 'client'
 
 const BASE = 1_000
 const SWAP: SwapId = terms.id
@@ -60,15 +60,15 @@ export const start = (scenario: Scenario) => (): Run => {
   let funded = false
   let payouts = 0
   let visible = 0
-  let deposit: Spender = 'nobody'
-  let payout: Spender = 'nobody'
+  let deposit: SpentBy = 'nobody'
+  let payout: SpentBy = 'nobody'
   let crashes = scenario.crashes
   const history: SwapEvent[] = []
   const policies = scenario.policies(scenario)
 
   const now = () => t(BASE + clock)
   const load = (): Swap => Swap.fromEvents(history)
-  const seen = (side: Side): LegSeen => {
+  const seen = (side: Side): LegStatus => {
     const none = { lock: 'none', claim: 'none', refund: 'none', refundOpen: false, matured: false } as const
     const deadlines = { expiresAt: t(BASE + scenario.clientRefundAt), refundOpensAt: t(BASE + scenario.payoutRefundAt) }
     if (side === 'from') {

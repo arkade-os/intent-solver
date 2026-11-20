@@ -1,7 +1,7 @@
 import type { ValueOf } from '../shared/brand.js'
 import type { Preimage } from './hashlock.js'
 import { ContractKind, Side, type Leg, type LegState } from './leg.js'
-import { ApprovalSeen, FundingSeen, Spender, TxSeen, type Observation } from './observation.js'
+import { ApprovalStatus, FundingStatus, SpentBy, TxStatus, type Observation } from './observation.js'
 import type { Swap } from './swap.js'
 import { SwapOutcome } from './swap_state.js'
 
@@ -9,7 +9,7 @@ export const Action = {
   Wait: 'wait',
   // The rail already shows it: record it on the leg.
   Record: 'record',
-  // Record the leg as `locking` / `claiming` / `refunding` FIRST, unless it already is, then ask its rail to act.
+  // First record the leg as `locking` / `claiming` / `refunding`, unless it already is. Then call the rail.
   Lock: 'lock',
   Claim: 'claim',
   Refund: 'refund',
@@ -31,37 +31,37 @@ export type Decision =
   | { readonly do: typeof Action.Abandon; readonly reason: string }
   | { readonly do: typeof Action.Fail; readonly outcome: SwapOutcome; readonly reason: string }
 
-export const Recovery = {
+export const OnFailure = {
   Retry: 'retry',
   Refuse: 'refuse',
   Stuck: 'stuck',
   Wait: 'wait',
 } as const
 
-export type Recovery = ValueOf<typeof Recovery>
+export type OnFailure = ValueOf<typeof OnFailure>
 
-export type Verdict = { readonly ok: true } | { readonly ok: false; readonly reason: string }
+export type CheckResult = { readonly ok: true } | { readonly ok: false; readonly reason: string }
 
 /**
- * Where the routes differ. The plan knows the order of things; a route's policies know its
- * deadlines, its margins, and how patient it is with a rail that failed.
+ * The rules that differ per route: deadlines, margins, and what to do when a rail fails.
+ * The order of steps is the same for every route and lives in `plan`.
  */
 export interface Policies {
   /** Every rule for paying out: quote expiry, deadlines, margins, key rotation, inventory. Asked before the approval wait. */
-  canFill(swap: Swap, seen: Observation): Verdict
+  canFill(swap: Swap, seen: Observation): CheckResult
   /** An overfunded lock: taken as funded, or refused. */
   readonly acceptsOverfunding: boolean
-  /** The lock on `to` definitely failed: pay again, end the swap, or call a human. */
-  onLockFailed(swap: Swap, seen: Observation): Exclude<Recovery, 'wait'>
+  /** The lock on `to` definitely failed: pay again, end the swap, or mark it stuck for an operator. */
+  onLockFailed(swap: Swap, seen: Observation): Exclude<OnFailure, 'wait'>
   /**
    * `to` is recorded as locking and the rail shows nothing: either the call is still in flight, or we
-   * crashed before making it. Only the route knows how long is too long, and whether asking again is safe.
+   * crashed before making it. The route decides how long to wait and whether sending again is safe.
    */
-  onLockMissing(swap: Swap, seen: Observation): Recovery
+  onLockMissing(swap: Swap, seen: Observation): OnFailure
   /** Whether `from` may still be collected, e.g. once its own refund has opened. */
-  canCollect(swap: Swap, seen: Observation): Verdict
-  onClaimFailed(swap: Swap, seen: Observation): Extract<Recovery, 'retry' | 'stuck'>
-  onRefundFailed(swap: Swap, seen: Observation): Extract<Recovery, 'retry' | 'stuck'>
+  canCollect(swap: Swap, seen: Observation): CheckResult
+  onClaimFailed(swap: Swap, seen: Observation): Extract<OnFailure, 'retry' | 'stuck'>
+  onRefundFailed(swap: Swap, seen: Observation): Extract<OnFailure, 'retry' | 'stuck'>
   /** A swap that ended without paying out: whether the client's lock may be handed back now. */
   canRelease(swap: Swap, seen: Observation): boolean
 }
@@ -82,47 +82,48 @@ const toShows = (swap: Swap, seen: Observation, policies: Policies): Decision | 
   const { to } = swap
   const rail = seen.to
   if (swap.isOffer) {
-    if (to.state === 'locking' && rail.lock === TxSeen.Landed) return { do: Action.Fill }
+    if (to.state === 'locking' && rail.lock === TxStatus.Landed) return { do: Action.Fill }
   } else {
     const secret = coupled(to, seen)
       ? (seen.peer?.preimage ?? null)
-      : rail.spent.by === Spender.Claim
+      : rail.spent.by === SpentBy.Claim
         ? rail.spent.preimage
         : null
-    const claimed = coupled(to, seen) ? secret !== null : rail.spent.by === Spender.Claim
+    const claimed = coupled(to, seen) ? secret !== null : rail.spent.by === SpentBy.Claim
     if (claimed && to.state !== 'claimed') {
       if (secret === null) return fail(SwapOutcome.Stuck, 'the to leg was claimed but its preimage is unknown')
       const shown = record(swap, Side.To, 'claimed', secret)
       if (shown !== null) return shown
     }
   }
-  // Only a refund of ours that is known to have landed; a spend that merely looks like one is not proof.
-  if (rail.refund === TxSeen.Landed && to.state !== 'refunded') {
+  // Only our own refund that has landed counts. A spend that looks like a refund is not enough.
+  if (rail.refund === TxStatus.Landed && to.state !== 'refunded') {
     const shown = record(swap, Side.To, 'refunded')
     if (shown !== null) return shown
   }
-  if (rail.spent.by === Spender.Unknown)
+  if (rail.spent.by === SpentBy.Unknown)
     return fail(SwapOutcome.Stuck, 'the to leg was spent by something we do not recognise')
   // Adopt a lock of ours that landed before any gate runs: after a crash it must not be paid twice.
-  if ((to.state === 'pending' || to.state === 'locking') && rail.lock === TxSeen.Landed) {
+  if ((to.state === 'pending' || to.state === 'locking') && rail.lock === TxStatus.Landed) {
     const shown = record(swap, Side.To, 'locked')
     if (shown !== null) return shown
   }
-  if (to.state === 'locking' && rail.lock === TxSeen.Failed) {
+  if (to.state === 'locking' && rail.lock === TxStatus.Failed) {
     const verdict = policies.onLockFailed(swap, seen)
-    if (verdict === Recovery.Retry) return { do: Action.Unlock }
-    if (verdict === Recovery.Refuse)
+    if (verdict === OnFailure.Retry) return { do: Action.Unlock }
+    if (verdict === OnFailure.Refuse)
       return { do: Action.Abandon, reason: 'the payout failed and nothing left our side' }
     return fail(SwapOutcome.Stuck, 'the lock on the to leg failed')
   }
-  if (to.state === 'locking' && rail.lock === TxSeen.None) {
+  if (to.state === 'locking' && rail.lock === TxStatus.None) {
     const verdict = policies.onLockMissing(swap, seen)
-    if (verdict === Recovery.Retry) return { do: Action.Lock, side: Side.To }
-    if (verdict === Recovery.Refuse) return { do: Action.Abandon, reason: 'the payout was never sent' }
-    if (verdict === Recovery.Stuck) return fail(SwapOutcome.Stuck, 'the payout was recorded but never reached the rail')
+    if (verdict === OnFailure.Retry) return { do: Action.Lock, side: Side.To }
+    if (verdict === OnFailure.Refuse) return { do: Action.Abandon, reason: 'the payout was never sent' }
+    if (verdict === OnFailure.Stuck)
+      return fail(SwapOutcome.Stuck, 'the payout was recorded but never reached the rail')
   }
-  if (to.state === 'refunding' && rail.refund === TxSeen.Failed) {
-    return policies.onRefundFailed(swap, seen) === Recovery.Retry
+  if (to.state === 'refunding' && rail.refund === TxStatus.Failed) {
+    return policies.onRefundFailed(swap, seen) === OnFailure.Retry
       ? { do: Action.Refund, side: Side.To }
       : fail(SwapOutcome.Stuck, 'the refund of the to leg failed')
   }
@@ -137,29 +138,29 @@ const fromShows = (swap: Swap, seen: Observation, policies: Policies): Decision 
     if (coupled(from, seen)) {
       if (seen.peer?.state === 'funded') return record(swap, Side.From, 'locked')
     } else if (
-      rail.funding === FundingSeen.Unusable ||
-      (rail.funding === FundingSeen.Over && !policies.acceptsOverfunding)
+      rail.funding === FundingStatus.Unusable ||
+      (rail.funding === FundingStatus.Over && !policies.acceptsOverfunding)
     ) {
       return fail(
         SwapOutcome.Refused,
-        rail.funding === FundingSeen.Over ? 'the client overfunded the lock' : 'the client lock cannot be used',
+        rail.funding === FundingStatus.Over ? 'the client overfunded the lock' : 'the client lock cannot be used',
       )
-    } else if (rail.funding === FundingSeen.Exact || rail.funding === FundingSeen.Over) {
+    } else if (rail.funding === FundingStatus.Exact || rail.funding === FundingStatus.Over) {
       if (rail.matured) return record(swap, Side.From, 'locked')
       if (from.state === 'pending') return record(swap, Side.From, 'locking')
     }
   }
-  if (rail.spent.by === Spender.Refund && (from.state === 'locked' || from.state === 'claiming')) {
+  if (rail.spent.by === SpentBy.Refund && (from.state === 'locked' || from.state === 'claiming')) {
     if (to.state === 'claimed')
       return fail(SwapOutcome.Lost, 'the client refunded the from leg after claiming the to leg')
     if (to.state === 'pending')
       return fail(SwapOutcome.Refused, 'the client refunded the from leg before it was filled')
   }
   if (from.state === 'claiming') {
-    if (rail.claim === TxSeen.Landed) return record(swap, Side.From, 'claimed')
+    if (rail.claim === TxStatus.Landed) return record(swap, Side.From, 'claimed')
     // `none` is a claim that never reached the rail, e.g. a crash after the intent was recorded.
-    if (rail.claim === TxSeen.Failed || rail.claim === TxSeen.None) {
-      return rail.claim === TxSeen.None || policies.onClaimFailed(swap, seen) === Recovery.Retry
+    if (rail.claim === TxStatus.Failed || rail.claim === TxStatus.None) {
+      return rail.claim === TxStatus.None || policies.onClaimFailed(swap, seen) === OnFailure.Retry
         ? { do: Action.Claim, side: Side.From }
         : fail(SwapOutcome.Stuck, 'the claim of the from leg failed')
     }
@@ -171,7 +172,7 @@ const whenFunded = (swap: Swap, seen: Observation, policies: Policies): Decision
   // Rules before approval: a swap held for an operator must still be refused once it cannot be filled.
   const verdict = policies.canFill(swap, seen)
   if (!verdict.ok) return fail(SwapOutcome.Refused, verdict.reason)
-  if (seen.approval === ApprovalSeen.Pending || coupled(swap.to, seen)) return WAIT
+  if (seen.approval === ApprovalStatus.Pending || coupled(swap.to, seen)) return WAIT
   return { do: Action.Lock, side: Side.To }
 }
 
@@ -188,10 +189,10 @@ const whenOver = (swap: Swap, seen: Observation, policies: Policies): Decision =
   const unpaid = swap.outcome === SwapOutcome.Refused || (swap.outcome === null && swap.to.state === 'refunded')
   if (!unpaid) return WAIT
   // A deposit that arrives, or confirms, after the swap ended is still the client's: adopt it so it can go back.
-  if ((from.state === 'pending' || from.state === 'locking') && seen.from.funding !== FundingSeen.None) {
+  if ((from.state === 'pending' || from.state === 'locking') && seen.from.funding !== FundingStatus.None) {
     return record(swap, Side.From, seen.from.matured ? 'locked' : 'locking') ?? WAIT
   }
-  if (from.state === 'refunding' && seen.from.refund === TxSeen.Landed)
+  if (from.state === 'refunding' && seen.from.refund === TxStatus.Landed)
     return record(swap, Side.From, 'refunded') ?? WAIT
   if (from.state === 'locked' && from.canMoveTo('refunding') && policies.canRelease(swap, seen)) {
     return { do: Action.Refund, side: Side.From }
@@ -221,7 +222,7 @@ export const plan = (swap: Swap, seen: Observation, policies: Policies): Decisio
     case 'refunding':
       // Either `to` is still locked while `from` unwinds, or our refund never reached the rail.
       if (swap.to.state === 'locked') return seen.to.refundOpen ? { do: Action.Refund, side: Side.To } : WAIT
-      return seen.to.refund === TxSeen.None ? { do: Action.Refund, side: Side.To } : WAIT
+      return seen.to.refund === TxStatus.None ? { do: Action.Refund, side: Side.To } : WAIT
     case 'settling':
       return WAIT
   }

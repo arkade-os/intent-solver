@@ -31,7 +31,7 @@ const check = (units: bigint, baseDecimals: number, quoteDecimals: number): void
   checkDecimals('quoteDecimals', quoteDecimals)
 }
 
-/** Quote units per ONE WHOLE base unit, as an exact decimal. Amounts are atomic; the decimals bridge the two. */
+/** Quote units per one whole base unit (1 BTC, not 1 sat), as an exact decimal. Amounts are in smallest units. */
 export class Price {
   private constructor(
     readonly mantissa: bigint,

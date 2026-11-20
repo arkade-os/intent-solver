@@ -15,7 +15,7 @@ export interface RebalanceLimits {
   readonly cooldownSeconds: number
 }
 
-/** Binds AUTOMATIC transfers. A manual one is an operator's own decision and is not capped by it. */
+/** Applies to automatic transfers only. A manual transfer by an operator is not capped. */
 export class RebalancePolicy {
   private constructor(readonly limits: RebalanceLimits) {}
 
@@ -63,7 +63,7 @@ export class RebalancePolicy {
     return capped.gte(minTransfer) && !capped.isZero ? capped : null
   }
 
-  /** The caps bind what actually leaves the source, which is the credit PLUS its fees. */
+  /** The caps count what leaves the source: the credit plus its fees. */
   debitAllowed(debit: Amount, debitedToday: Amount): boolean {
     return this.limits.maxDebit.gte(debit) && this.limits.dailyDebit.gte(debit.plus(debitedToday))
   }

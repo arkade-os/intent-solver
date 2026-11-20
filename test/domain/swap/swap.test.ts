@@ -96,7 +96,7 @@ describe('swap aggregate', () => {
     swap.claiming('from', t(1_005))
     swap.claim('from', t(1_006), { claim: ref('txid-collect') })
     expect(swap.state).toBe('settled')
-    expect(swap.to.facts).toEqual({ funding: ['txid-out'], claim: ['txid-claim'], refund: [] })
+    expect(swap.to.references).toEqual({ funding: ['txid-out'], claim: ['txid-claim'], refund: [] })
   })
 
   it('needs the right preimage to claim the to leg, and it before collecting the from leg', () => {
@@ -166,7 +166,7 @@ describe('swap aggregate', () => {
     expect(swap.state).toBe('refunding')
     swap.refund('to', t(1_012), ref('refund-2'))
     expect(swap.state).toBe('refunded')
-    expect(swap.to.facts.refund).toEqual(['refund-1', 'refund-2'])
+    expect(swap.to.references.refund).toEqual(['refund-1', 'refund-2'])
   })
 
   it('unwinds when the client side fails back while our lock is still open', () => {

@@ -28,7 +28,7 @@ export class Fee {
     return new Fee(this.bps, capped > min ? capped : min)
   }
 
-  /** Rounded up: a fraction of a unit is the solver's, never the client's. */
+  /** Rounded up, in the solver's favour. */
   on(give: bigint): bigint {
     const proportional = give * BigInt(this.bps)
     return proportional / BPS + (proportional % BPS === 0n ? 0n : 1n) + this.flat

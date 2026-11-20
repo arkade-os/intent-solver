@@ -3,7 +3,7 @@ import type { UnixSeconds } from '../shared/time.js'
 import type { Preimage } from './hashlock.js'
 import type { SwapState } from './swap_state.js'
 
-export const FundingSeen = {
+export const FundingStatus = {
   None: 'none',
   Short: 'short',
   Exact: 'exact',
@@ -11,67 +11,67 @@ export const FundingSeen = {
   Unusable: 'unusable',
 } as const
 
-export type FundingSeen = ValueOf<typeof FundingSeen>
+export type FundingStatus = ValueOf<typeof FundingStatus>
 
-export const TxSeen = {
+export const TxStatus = {
   None: 'none',
   Pending: 'pending',
   Landed: 'landed',
   Failed: 'failed',
 } as const
 
-export type TxSeen = ValueOf<typeof TxSeen>
+export type TxStatus = ValueOf<typeof TxStatus>
 
-export const Spender = {
+export const SpentBy = {
   Nobody: 'nobody',
   Claim: 'claim',
   Refund: 'refund',
   Unknown: 'unknown',
 } as const
 
-export type Spender = ValueOf<typeof Spender>
+export type SpentBy = ValueOf<typeof SpentBy>
 
-export type SpentSeen =
-  { readonly by: Exclude<Spender, 'claim'> } | { readonly by: typeof Spender.Claim; readonly preimage: Preimage | null }
+export type SpendStatus =
+  { readonly by: Exclude<SpentBy, 'claim'> } | { readonly by: typeof SpentBy.Claim; readonly preimage: Preimage | null }
 
-/** Facts from the rail about one leg. No decisions. */
-export interface LegSeen {
-  readonly funding: FundingSeen
+/** What the rail shows for one leg. */
+export interface LegStatus {
+  readonly funding: FundingStatus
   readonly matured: boolean
-  readonly spent: SpentSeen
+  readonly spent: SpendStatus
   /** What the rail says right now; it can trail `refundOpensAt`, which is measured on the wall clock. */
   readonly refundOpen: boolean
   /** When the contract can no longer be claimed, e.g. a held HTLC's expiry. Null while unknown, or where it has none. */
   readonly expiresAt: UnixSeconds | null
   /** When our own way back opens. Null where the contract gives us none. */
   readonly refundOpensAt: UnixSeconds | null
-  readonly lock: TxSeen
-  readonly claim: TxSeen
-  readonly refund: TxSeen
+  readonly lock: TxStatus
+  readonly claim: TxStatus
+  readonly refund: TxStatus
 }
 
-export const ApprovalSeen = {
+export const ApprovalStatus = {
   NotRequired: 'not_required',
   Pending: 'pending',
   Approved: 'approved',
 } as const
 
-export type ApprovalSeen = ValueOf<typeof ApprovalSeen>
+export type ApprovalStatus = ValueOf<typeof ApprovalStatus>
 
 /** The other swap on the same hash, when both clients are ours. Looked up every tick, never stored. */
-export interface PeerSeen {
+export interface PeerSwap {
   readonly state: SwapState
   readonly preimage: Preimage | null
 }
 
 export interface Observation {
   readonly now: UnixSeconds
-  readonly from: LegSeen
-  readonly to: LegSeen
-  readonly peer: PeerSeen | null
+  readonly from: LegStatus
+  readonly to: LegStatus
+  readonly peer: PeerSwap | null
   /** The key the contract was quoted with is still the live one. */
   readonly keyCurrent: boolean
-  readonly approval: ApprovalSeen
+  readonly approval: ApprovalStatus
   /** The invoice being paid is our own: there is a peer swap and no Lightning payment. */
   readonly ownInvoice: boolean
 }

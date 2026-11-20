@@ -24,7 +24,7 @@ export const ContractKind = {
 
 export type ContractKind = ValueOf<typeof ContractKind>
 
-// Every flag false: exposure is a property of the pair of legs, not of one leg.
+// `exposed` is false everywhere: exposure depends on both legs together, so the swap decides it.
 export const LegMachine = defineMachine({
   pending: { live: true, exposed: false, to: ['locking', 'locked', 'claiming', 'claimed'] },
   locking: { live: true, exposed: false, to: ['pending', 'locked', 'claiming', 'claimed', 'refunding'] },
@@ -38,13 +38,13 @@ export const LegMachine = defineMachine({
 
 export type LegState = StateOf<typeof LegMachine>
 
-export const FactKind = {
+export const ReferenceKind = {
   Funding: 'funding',
   Claim: 'claim',
   Refund: 'refund',
 } as const
 
-export type FactKind = ValueOf<typeof FactKind>
+export type ReferenceKind = ValueOf<typeof ReferenceKind>
 
 /** Where a leg shows on its rail: a txid, an outpoint, a payment id. */
 export type Reference = Brand<string, 'Reference'>
@@ -57,9 +57,9 @@ export const ContractVersion = { of: (value: string): ContractVersion => nonEmpt
  * Oldest first; the last is the current one.
  * A list because transactions get replaced: a refund is fee-bumped, a claim spends several outputs.
  */
-export type LegFacts = Readonly<Record<FactKind, readonly Reference[]>>
+export type ReferenceHistory = Readonly<Record<ReferenceKind, readonly Reference[]>>
 
-export type LegReferences = Partial<Record<FactKind, Reference>>
+export type LegReferences = Partial<Record<ReferenceKind, Reference>>
 
 export interface LegTerms {
   readonly rail: Rail
@@ -76,13 +76,13 @@ const NEVER: Partial<Record<ContractKind, Partial<Record<Side, readonly LegState
   payment: { to: ['locked', 'refunding', 'refunded'] },
 }
 
-const NO_FACTS: LegFacts = { funding: [], claim: [], refund: [] }
+const NO_REFERENCES: ReferenceHistory = { funding: [], claim: [], refund: [] }
 
-const withReferences = (facts: LegFacts, references: LegReferences): LegFacts => {
-  const next = { ...facts }
-  for (const kind of Object.keys(references) as FactKind[]) {
-    const reference = references[kind]
-    if (reference !== undefined && facts[kind].at(-1) !== reference) next[kind] = [...facts[kind], reference]
+const withReferences = (history: ReferenceHistory, added: LegReferences): ReferenceHistory => {
+  const next = { ...history }
+  for (const kind of Object.keys(added) as ReferenceKind[]) {
+    const reference = added[kind]
+    if (reference !== undefined && history[kind].at(-1) !== reference) next[kind] = [...history[kind], reference]
   }
   return next
 }
@@ -92,19 +92,19 @@ export class Leg {
     readonly side: Side,
     readonly terms: LegTerms,
     readonly state: LegState,
-    readonly facts: LegFacts,
-    /** When it entered `state`: what tells a call still in flight from one that never left. */
+    readonly references: ReferenceHistory,
+    /** When the leg entered `state`. Used to tell a send still in progress from one that was never made. */
     readonly since: UnixSeconds,
   ) {}
 
   static open(side: Side, terms: LegTerms, at: UnixSeconds): Leg {
     if (terms.amount.isZero) throw new InvalidValue(`${side} leg amount must be positive`)
-    return new Leg(side, terms, 'pending', NO_FACTS, at)
+    return new Leg(side, terms, 'pending', NO_REFERENCES, at)
   }
 
   /** For a repository: what was stored is trusted, not re-validated. */
-  static restore(side: Side, terms: LegTerms, state: LegState, facts: LegFacts, since: UnixSeconds): Leg {
-    return new Leg(side, terms, state, facts, since)
+  static restore(side: Side, terms: LegTerms, state: LegState, references: ReferenceHistory, since: UnixSeconds): Leg {
+    return new Leg(side, terms, state, references, since)
   }
 
   get rail(): Rail {
@@ -118,11 +118,11 @@ export class Leg {
   }
 
   /** The current reference of a kind, or null when none was recorded. */
-  reference(kind: FactKind): Reference | null {
-    return this.facts[kind].at(-1) ?? null
+  reference(kind: ReferenceKind): Reference | null {
+    return this.references[kind].at(-1) ?? null
   }
 
-  /** The machine's edges, minus what this kind of contract can never do on this side. */
+  /** The state table, minus the moves this kind of contract cannot make on this side. */
   static canTransition(leg: { side: Side; contract: ContractKind }, from: LegState, to: LegState): boolean {
     return LegMachine.canTransition(from, to) && !NEVER[leg.contract]?.[leg.side]?.includes(to)
   }
@@ -133,11 +133,11 @@ export class Leg {
 
   moveTo(state: LegState, at: UnixSeconds, references: LegReferences = {}): Leg {
     if (!this.canMoveTo(state)) throw new IllegalTransition(`${this.side} leg cannot go ${this.state} -> ${state}`)
-    return new Leg(this.side, this.terms, state, withReferences(this.facts, references), at)
+    return new Leg(this.side, this.terms, state, withReferences(this.references, references), at)
   }
 
   /** A reference learned without the leg changing state: a payment id after the intent, a replacement transaction. */
   record(references: LegReferences): Leg {
-    return new Leg(this.side, this.terms, this.state, withReferences(this.facts, references), this.since)
+    return new Leg(this.side, this.terms, this.state, withReferences(this.references, references), this.since)
   }
 }

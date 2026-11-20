@@ -8,7 +8,7 @@ export class SpreadPricing {
 
   private constructor(
     readonly fee: Fee,
-    /** Bound what the client GIVES. */
+    /** Limits on the amount the client gives. */
     readonly limits: Limits,
   ) {}
 

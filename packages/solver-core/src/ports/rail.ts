@@ -1,11 +1,11 @@
 import type { ValueOf } from '../domain/shared/brand.js'
-import type { LegSeen } from '../domain/swap/observation.js'
+import type { LegStatus } from '../domain/swap/observation.js'
 import type { Reference, Side } from '../domain/swap/leg.js'
 import type { Swap } from '../domain/swap/swap.js'
 
 /** Reads a rail and changes nothing, so it may be called from anywhere, as often as needed. */
 export interface RailWatcher {
-  observe(swap: Swap, side: Side): Promise<LegSeen>
+  observe(swap: Swap, side: Side): Promise<LegStatus>
 }
 
 export const SendStatus = {

@@ -2,7 +2,7 @@ import { Conflict, RuleViolated } from '../domain/shared/error.js'
 import type { SwapId } from '../domain/shared/ids.js'
 import type { UnixSeconds } from '../domain/shared/time.js'
 import type { Preimage } from '../domain/swap/hashlock.js'
-import { FactKind, Side, type LegState } from '../domain/swap/leg.js'
+import { ReferenceKind, Side, type LegState } from '../domain/swap/leg.js'
 import type { Observation } from '../domain/swap/observation.js'
 import { Action, plan, type Decision, type Policies } from '../domain/swap/plan.js'
 import type { Swap } from '../domain/swap/swap.js'
@@ -29,7 +29,7 @@ export type StepResult = Action | typeof SKIPPED
 type SendAction = typeof Action.Lock | typeof Action.Claim | typeof Action.Refund
 
 const SENDING_STATE: Record<SendAction, LegState> = { lock: 'locking', claim: 'claiming', refund: 'refunding' }
-const REFERENCE_KIND: Record<SendAction, FactKind> = { lock: 'funding', claim: 'claim', refund: 'refund' }
+const REFERENCE_KIND: Record<SendAction, ReferenceKind> = { lock: 'funding', claim: 'claim', refund: 'refund' }
 
 const MAX_STEPS = 32
 
@@ -87,7 +87,7 @@ export class DriveSwap {
           s.fail('refused', decision.reason, at)
         })
       case Action.Fill:
-        return this.save(swap, (s, at) => void s.fillOffer(at, s.to.reference(FactKind.Funding) ?? undefined))
+        return this.save(swap, (s, at) => void s.fillOffer(at, s.to.reference(ReferenceKind.Funding) ?? undefined))
       case Action.Fail:
         return this.save(swap, (s, at) => void s.fail(decision.outcome, decision.reason, at))
     }
@@ -110,7 +110,7 @@ export class DriveSwap {
     // The leg is already marked, so this is a second try. Step 1 still has to be a write, or two workers
     // could both send. A lock with no reference is cancelled and marked again. A claim or a refund spends
     // one output, so sending it twice is harmless; a lock that has a reference is the same transaction again.
-    if (action === Action.Lock && leg.reference(FactKind.Funding) === null) {
+    if (action === Action.Lock && leg.reference(ReferenceKind.Funding) === null) {
       swap.lockFailed(side, at)
       swap.locking(side, at)
     }

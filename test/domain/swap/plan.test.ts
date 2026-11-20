@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import type { LegSeen, Observation } from '@arkade-os/solver-core/domain/swap/observation.js'
+import type { LegStatus, Observation } from '@arkade-os/solver-core/domain/swap/observation.js'
 import { plan, type Policies } from '@arkade-os/solver-core/domain/swap/plan.js'
 import { Quote } from '@arkade-os/solver-core/domain/swap/quote.js'
 import type { Swap } from '@arkade-os/solver-core/domain/swap/swap.js'
 import { bothLocked, btc, quoted, ref, SECRET, t, terms, usdt } from '../support.js'
 
-const NOTHING: LegSeen = {
+const NOTHING: LegStatus = {
   funding: 'none',
   matured: false,
   spent: { by: 'nobody' },
@@ -165,7 +165,7 @@ describe('plan: collecting', () => {
     const swap = bothLocked()
     swap.claim('to', t(1_004), { preimage: SECRET })
     swap.claiming('from', t(1_005))
-    const at = (claim: LegSeen['claim']) => seen({ to: claimedBy, from: { ...NOTHING, claim } })
+    const at = (claim: LegStatus['claim']) => seen({ to: claimedBy, from: { ...NOTHING, claim } })
     expect(plan(swap, at('none'), POLICIES)).toEqual({ do: 'claim', side: 'from' })
     expect(plan(swap, at('failed'), POLICIES)).toEqual({ do: 'claim', side: 'from' })
     expect(plan(swap, at('failed'), policies({ onClaimFailed: () => 'stuck' }))).toMatchObject({ outcome: 'stuck' })

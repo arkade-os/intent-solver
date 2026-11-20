@@ -1,7 +1,7 @@
 import type { RfqId, SwapId } from '../shared/ids.js'
 import type { UnixSeconds } from '../shared/time.js'
 import { Preimage, type Hashlock } from './hashlock.js'
-import { ContractKind, FactKind, Leg, Side, type LegReferences, type LegState, type Reference } from './leg.js'
+import { ContractKind, ReferenceKind, Leg, Side, type LegReferences, type LegState, type Reference } from './leg.js'
 import type { AmountMode, Quote } from './quote.js'
 import { SWAP_TOPIC, type SwapEvent, type SwapQuoted } from './swap_event.js'
 import { SwapOutcome, SwapState } from './swap_state.js'
@@ -60,7 +60,7 @@ const applied = (props: SwapProps, e: SwapEvent): SwapProps => {
   }
 }
 
-const referenced = (kind: FactKind, reference?: Reference): LegReferences =>
+const referenced = (kind: ReferenceKind, reference?: Reference): LegReferences =>
   reference === undefined ? {} : { [kind]: reference }
 
 export class Swap {
@@ -153,7 +153,8 @@ export class Swap {
     const { to } = this
     if (to.state === 'pending') return true
     return (
-      to.state === 'locking' && !(to.contract === ContractKind.Lightning && to.reference(FactKind.Funding) !== null)
+      to.state === 'locking' &&
+      !(to.contract === ContractKind.Lightning && to.reference(ReferenceKind.Funding) !== null)
     )
   }
 
@@ -162,13 +163,13 @@ export class Swap {
     return this[side].canMoveTo(state) && this.coherentWith(side, state)
   }
 
-  /** Record the intent BEFORE acting on the rail: a crash in between must find the payout already tracked. */
+  /** Call this before sending on the rail, so a crash in between still leaves the payout recorded. */
   locking(side: Side, at: UnixSeconds, funding?: Reference): SwapEvent {
-    return this.advance(side, 'locking', at, referenced(FactKind.Funding, funding))
+    return this.advance(side, 'locking', at, referenced(ReferenceKind.Funding, funding))
   }
 
   lock(side: Side, at: UnixSeconds, funding?: Reference): SwapEvent {
-    return this.advance(side, 'locked', at, referenced(FactKind.Funding, funding))
+    return this.advance(side, 'locked', at, referenced(ReferenceKind.Funding, funding))
   }
 
   /**
@@ -178,14 +179,14 @@ export class Swap {
   lockFailed(side: Side, at: UnixSeconds): SwapEvent {
     const leg = this[side]
     if (leg.state !== 'locking') throw this.error(IllegalTransition, `${side} leg is ${leg.state}, not locking`)
-    if (leg.contract !== ContractKind.Lightning && leg.reference(FactKind.Funding) !== null) {
+    if (leg.contract !== ContractKind.Lightning && leg.reference(ReferenceKind.Funding) !== null) {
       throw this.error(RuleViolated, `${side} leg has a transaction that may still land`)
     }
     return this.advance(side, 'pending', at, {})
   }
 
   claiming(side: Side, at: UnixSeconds, claim?: Reference): SwapEvent {
-    return this.advance(side, 'claiming', at, referenced(FactKind.Claim, claim))
+    return this.advance(side, 'claiming', at, referenced(ReferenceKind.Claim, claim))
   }
 
   claim(
@@ -193,15 +194,15 @@ export class Swap {
     at: UnixSeconds,
     proof: { readonly claim?: Reference; readonly preimage?: Preimage } = {},
   ): SwapEvent {
-    return this.advance(side, 'claimed', at, referenced(FactKind.Claim, proof.claim), proof.preimage)
+    return this.advance(side, 'claimed', at, referenced(ReferenceKind.Claim, proof.claim), proof.preimage)
   }
 
   refunding(side: Side, at: UnixSeconds, refund?: Reference): SwapEvent {
-    return this.advance(side, 'refunding', at, referenced(FactKind.Refund, refund))
+    return this.advance(side, 'refunding', at, referenced(ReferenceKind.Refund, refund))
   }
 
   refund(side: Side, at: UnixSeconds, refund?: Reference): SwapEvent {
-    return this.advance(side, 'refunded', at, referenced(FactKind.Refund, refund))
+    return this.advance(side, 'refunded', at, referenced(ReferenceKind.Refund, refund))
   }
 
   /** A reference learned later, or a replacement for one: the leg stays where it is. */

@@ -3,16 +3,16 @@ import type { Endpoint } from '../shared/endpoint.js'
 import { InvalidValue } from '../shared/error.js'
 
 export interface InventoryTarget {
-  /** Below this the inventory is refilled; zero never triggers... */
+  /** A balance below this starts a refill. Zero turns refills off. */
   readonly minimum: Amount
-  /** ...up to this. */
+  /** A refill brings the balance up to this. */
   readonly target: Amount
 }
 
 export class Inventory {
   private constructor(
     readonly endpoint: Endpoint,
-    /** Null is UNKNOWN, never zero: a rail that cannot be read is blind, not broke. */
+    /** Null when the rail could not be read. It does not mean zero. */
     readonly balance: Amount | null,
     readonly target: InventoryTarget | null,
   ) {}

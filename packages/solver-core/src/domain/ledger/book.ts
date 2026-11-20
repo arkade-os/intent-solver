@@ -4,13 +4,13 @@ import { Endpoint } from '../shared/endpoint.js'
 import type { RouteId, SwapId } from '../shared/ids.js'
 import type { UnixSeconds } from '../shared/time.js'
 import { Account } from './account.js'
-import { Posting, JournalEntry } from './journal_entry.js'
+import { JournalLine, JournalEntry } from './journal_entry.js'
 
 /** What the ledger needs to know about a swap; the application maps a swap onto it. */
 export interface SwapBooking {
   readonly swapId: SwapId
   readonly route: RouteId
-  /** `collected`: we claimed it. A client merely funding their lock moves nothing of ours. */
+  /** `collected` is true once we claimed it. A client funding their lock does not change our books. */
   readonly from: { readonly endpoint: Endpoint; readonly amount: Amount; readonly collected: boolean }
   readonly to: {
     readonly endpoint: Endpoint
@@ -25,7 +25,7 @@ export interface SwapBooking {
    * given, a spread in the one paid. A swap in one asset keeps the difference of its legs.
    */
   readonly income?: readonly Amount[]
-  /** What the payout rail charged us. Null is UNKNOWN, never zero, and books nothing. */
+  /** What the payout rail charged us. Null means the cost is not known, and nothing is booked for it. */
   readonly cost: Amount | null
 }
 
@@ -36,30 +36,30 @@ const writtenOff = (b: SwapBooking | null): boolean =>
 const kept = (income: readonly Amount[], asset: Asset): Amount =>
   income.filter((amount) => amount.asset === asset).reduce((sum, amount) => sum.plus(amount), Amount.zero(asset))
 
-const closing = ({ route, from, to, income = [] }: SwapBooking): Posting[] => {
+const closing = ({ route, from, to, income = [] }: SwapBooking): JournalLine[] => {
   const [given, paid] = [from.amount, to.amount]
   if (given.asset !== paid.asset) {
     const [fee, spread] = [kept(income, given.asset), kept(income, paid.asset)]
     // Through trading on both sides, so each asset balances on its own without a price.
     return [
-      Posting.debit(Account.swapClearing(given.asset), given),
-      ...(fee.isZero ? [] : [Posting.credit(Account.swapIncome(route, given.asset), fee)]),
-      Posting.credit(Account.trading(given.asset), given.minus(fee)),
-      Posting.debit(Account.trading(paid.asset), paid.plus(spread)),
-      ...(spread.isZero ? [] : [Posting.credit(Account.swapIncome(route, paid.asset), spread)]),
-      Posting.credit(Account.swapClearing(paid.asset), paid),
+      JournalLine.debit(Account.swapClearing(given.asset), given),
+      ...(fee.isZero ? [] : [JournalLine.credit(Account.swapIncome(route, given.asset), fee)]),
+      JournalLine.credit(Account.trading(given.asset), given.minus(fee)),
+      JournalLine.debit(Account.trading(paid.asset), paid.plus(spread)),
+      ...(spread.isZero ? [] : [JournalLine.credit(Account.swapIncome(route, paid.asset), spread)]),
+      JournalLine.credit(Account.swapClearing(paid.asset), paid),
     ]
   }
   const clearing = Account.swapClearing(given.asset)
   if (given.equals(paid)) return []
   return given.gte(paid)
     ? [
-        Posting.debit(clearing, given.minus(paid)),
-        Posting.credit(Account.swapIncome(route, given.asset), given.minus(paid)),
+        JournalLine.debit(clearing, given.minus(paid)),
+        JournalLine.credit(Account.swapIncome(route, given.asset), given.minus(paid)),
       ]
     : [
-        Posting.debit(Account.swapExpense(route, given.asset), paid.minus(given)),
-        Posting.credit(clearing, paid.minus(given)),
+        JournalLine.debit(Account.swapExpense(route, given.asset), paid.minus(given)),
+        JournalLine.credit(clearing, paid.minus(given)),
       ]
 }
 
@@ -67,34 +67,34 @@ const closing = ({ route, from, to, income = [] }: SwapBooking): Posting[] => {
 export const bookSwap = (before: SwapBooking | null, after: SwapBooking, at: UnixSeconds): JournalEntry[] => {
   const { swapId, route, from, to, cost } = after
   const entries: JournalEntry[] = []
-  const book = (fact: string, postings: Posting[]): void => {
-    if (postings.length > 0) entries.push(JournalEntry.of(`swap:${swapId}:${fact}`, at, postings))
+  const book = (fact: string, lines: JournalLine[]): void => {
+    if (lines.length > 0) entries.push(JournalEntry.of(`swap:${swapId}:${fact}`, at, lines))
   }
   const holdingTo = Account.holding(to.endpoint)
   const clearingTo = Account.swapClearing(to.amount.asset)
 
   if (to.paidOut && !before?.to.paidOut)
-    book('paid-out', [Posting.debit(clearingTo, to.amount), Posting.credit(holdingTo, to.amount)])
+    book('paid-out', [JournalLine.debit(clearingTo, to.amount), JournalLine.credit(holdingTo, to.amount)])
   if (to.returned && !before?.to.returned)
-    book('returned', [Posting.debit(holdingTo, to.amount), Posting.credit(clearingTo, to.amount)])
+    book('returned', [JournalLine.debit(holdingTo, to.amount), JournalLine.credit(clearingTo, to.amount)])
   if (from.collected && !before?.from.collected) {
     book('collected', [
-      Posting.debit(Account.holding(from.endpoint), from.amount),
-      Posting.credit(Account.swapClearing(from.amount.asset), from.amount),
+      JournalLine.debit(Account.holding(from.endpoint), from.amount),
+      JournalLine.credit(Account.swapClearing(from.amount.asset), from.amount),
     ])
   }
   if (settled(after) && !settled(before)) book('settled', closing(after))
-  // Without this a lost payout would sit in clearing forever, looking like money still on its way.
+  // Without this a lost payout would stay in clearing forever and look like money still on its way.
   if (writtenOff(after) && !writtenOff(before)) {
     book('lost', [
-      Posting.debit(Account.swapExpense(route, to.amount.asset), to.amount),
-      Posting.credit(clearingTo, to.amount),
+      JournalLine.debit(Account.swapExpense(route, to.amount.asset), to.amount),
+      JournalLine.credit(clearingTo, to.amount),
     ])
   }
   if (cost !== null && !cost.isZero && (before === null || before.cost === null)) {
     book('cost', [
-      Posting.debit(Account.swapExpense(route, cost.asset), cost),
-      Posting.credit(Account.holding(Endpoint.of(to.endpoint.rail, cost.asset)), cost),
+      JournalLine.debit(Account.swapExpense(route, cost.asset), cost),
+      JournalLine.credit(Account.holding(Endpoint.of(to.endpoint.rail, cost.asset)), cost),
     ])
   }
   return entries

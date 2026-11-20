@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { DriveSwap } from '@arkade-os/solver-core/application/drive_swap.js'
 import type { Side } from '@arkade-os/solver-core/domain/swap/leg.js'
-import type { LegSeen } from '@arkade-os/solver-core/domain/swap/observation.js'
+import type { LegStatus } from '@arkade-os/solver-core/domain/swap/observation.js'
 import type { Policies } from '@arkade-os/solver-core/domain/swap/plan.js'
 import type { Swap } from '@arkade-os/solver-core/domain/swap/swap.js'
 import type { RailService, RailWatcher, SendResult } from '@arkade-os/solver-core/ports/rail.js'
@@ -29,7 +29,7 @@ class World {
     return result
   }
 
-  seen(side: Side): LegSeen {
+  seen(side: Side): LegStatus {
     const paid = this.payouts > 0
     const base = { matured: true, refundOpen: false, expiresAt: null, refundOpensAt: null, refund: 'none' } as const
     return side === 'from'

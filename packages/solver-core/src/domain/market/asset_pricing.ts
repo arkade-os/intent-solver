@@ -16,12 +16,12 @@ export interface AssetPricingProps {
   /** Per direction, when it differs from `feeBps`. "Sell base" is the client giving the base asset. */
   readonly sellBaseFeeBps?: number
   readonly buyBaseFeeBps?: number
-  /** In the units of the asset the client GIVES in that direction. */
+  /** In units of the asset the client gives in that direction. */
   readonly sellBaseFeeFlat?: bigint
   readonly buyBaseFeeFlat?: bigint
   /** How far an offer may sit from the feed price and still be taken. Quotes do not use it. */
   readonly toleranceBps: number
-  /** Bound what the solver PAYS OUT. A `maxPayout` of zero closes the market. */
+  /** Limits on what the solver pays out. A `maxPayout` of zero closes the market. */
   readonly minPayout: bigint
   readonly maxPayout: bigint
 }

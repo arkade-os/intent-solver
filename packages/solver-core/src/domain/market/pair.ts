@@ -2,20 +2,20 @@ import type { Asset } from '../shared/asset.js'
 import { MAX_DECIMALS } from './price.js'
 import { InvalidValue } from '../shared/error.js'
 
-export interface Denomination {
+export interface PairAsset {
   readonly asset: Asset
   readonly decimals: number
 }
 
 export class Pair {
   private constructor(
-    readonly base: Denomination,
-    readonly quote: Denomination,
+    readonly base: PairAsset,
+    readonly quote: PairAsset,
     /** Which feed prices it; opaque here, resolved by the price port. */
     readonly priceSource: string,
   ) {}
 
-  static of(base: Denomination, quote: Denomination, priceSource: string): Pair {
+  static of(base: PairAsset, quote: PairAsset, priceSource: string): Pair {
     if (base.asset === quote.asset) throw new InvalidValue(`a pair needs two assets, got ${base.asset} twice`)
     for (const { asset, decimals } of [base, quote]) {
       if (!Number.isInteger(decimals) || decimals < 0 || decimals > MAX_DECIMALS) {
