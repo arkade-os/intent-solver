@@ -13,7 +13,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
 import { offerExitDelay, offerScriptFrom } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
-import { RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_V4 } from '@arkade-os/solver-core/core/rfqContract.js'
+import { RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_DIRECTED } from '@arkade-os/solver-core/core/rfqContract.js'
 import { quotedOfferSettleFor, type QuotedOfferIntent } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
 import type { OfferOutpoint } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
 import { OfferNotSubmittedError, type fulfillOffer } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
@@ -141,7 +141,7 @@ describe('quotedOfferSettleFor', () => {
   })
 
   it.each([
-    ['directed', RFQ_ASSET_SWAP_V4],
+    ['directed', RFQ_ASSET_SWAP_DIRECTED],
     ['v2', RFQ_ASSET_SWAP_V2],
     ['NULL (baseline)', null],
   ])('settles a %s row on the tree its version derives', async (_label, contractVersion) => {
@@ -153,7 +153,7 @@ describe('quotedOfferSettleFor', () => {
 
   it('names the taker on a directed offer only', async () => {
     const { settle, fulfill } = settleWith([funded()])
-    await settle(intent({ contractVersion: RFQ_ASSET_SWAP_V4 }))
+    await settle(intent({ contractVersion: RFQ_ASSET_SWAP_DIRECTED }))
     await settle(intent({ contractVersion: RFQ_ASSET_SWAP_V2 }))
     expect(fulfill.mock.calls[0]![2].taker).toEqual(TAKER)
     expect(fulfill.mock.calls[1]![2].taker).toBeUndefined()
@@ -179,23 +179,23 @@ describe('quotedOfferSettleFor', () => {
       outpointsAt: async () => [funded()],
       fulfill,
     })
-    await expect(rotated(intent({ contractVersion: RFQ_ASSET_SWAP_V4 }))).rejects.toThrow(
+    await expect(rotated(intent({ contractVersion: RFQ_ASSET_SWAP_DIRECTED }))).rejects.toThrow(
       /derive .*, not the offer script/,
     )
     expect(fulfill).not.toHaveBeenCalled()
   })
 
   it('derives a directed row at a different script than a v2 one', () => {
-    expect(intent({ contractVersion: RFQ_ASSET_SWAP_V4 }).offerPkScript).not.toBe(intent().offerPkScript)
+    expect(intent({ contractVersion: RFQ_ASSET_SWAP_DIRECTED }).offerPkScript).not.toBe(intent().offerPkScript)
   })
 
   it('refuses a row whose stored script does not match its stored version', async () => {
     const { settle, fulfill } = settleWith([funded()])
-    const directedScript = intent({ contractVersion: RFQ_ASSET_SWAP_V4 }).offerPkScript
+    const directedScript = intent({ contractVersion: RFQ_ASSET_SWAP_DIRECTED }).offerPkScript
     await expect(settle({ ...intent(), offerPkScript: directedScript })).rejects.toThrow(
       /derive .*, not the offer script/,
     )
-    await expect(settle({ ...intent(), contractVersion: RFQ_ASSET_SWAP_V4 })).rejects.toThrow(
+    await expect(settle({ ...intent(), contractVersion: RFQ_ASSET_SWAP_DIRECTED })).rejects.toThrow(
       /derive .*, not the offer script/,
     )
     expect(fulfill).not.toHaveBeenCalled()

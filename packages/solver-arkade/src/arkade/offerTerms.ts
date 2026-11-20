@@ -12,7 +12,7 @@
  */
 import { asset, type RelativeTimelock } from '@arkade-os/sdk'
 import { isEncodableRelativeDelay, relativeDelayFrom } from '@arkade-os/solver-core/core/timelocks.js'
-import { RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_V4 } from '@arkade-os/solver-core/core/rfqContract.js'
+import { RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_DIRECTED } from '@arkade-os/solver-core/core/rfqContract.js'
 import { offerVtxoScript, type Offer } from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
 
@@ -108,9 +108,9 @@ export const offerFromTerms = (
  * directed-only, v2 for rows quoted before it (absent is that baseline). Not the SDK's resolver, so its
  * default can never move an old row; any other id, v3 included, throws before anything compiles.
  */
-const derivableVersion = (id: string | undefined): typeof RFQ_ASSET_SWAP_V2 | typeof RFQ_ASSET_SWAP_V4 => {
+const derivableVersion = (id: string | undefined): typeof RFQ_ASSET_SWAP_V2 | typeof RFQ_ASSET_SWAP_DIRECTED => {
   if (id === undefined || id === RFQ_ASSET_SWAP_V2) return RFQ_ASSET_SWAP_V2
-  if (id === RFQ_ASSET_SWAP_V4) return RFQ_ASSET_SWAP_V4
+  if (id === RFQ_ASSET_SWAP_DIRECTED) return RFQ_ASSET_SWAP_DIRECTED
   throw new Error(`unsupported contract version ${id}`)
 }
 
@@ -131,7 +131,7 @@ export const offerScriptFrom = (
       terms,
       emulatorPubkey,
       deps.exitDelay,
-      version === RFQ_ASSET_SWAP_V4 ? deps.taker : undefined,
+      version === RFQ_ASSET_SWAP_DIRECTED ? deps.taker : undefined,
     )
     const script = offerVtxoScript(offer, deps.serverPubkey, version)
     // Both from the SAME compiled script: the address is what the client is

@@ -18,7 +18,7 @@ import {
 import { recoverReadableMarkets } from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { AssetRfqSwapService, type AssetRfqDeps } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
-import { RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_V4 } from '@arkade-os/solver-core/core/rfqContract.js'
+import { RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_DIRECTED } from '@arkade-os/solver-core/core/rfqContract.js'
 
 const ASSET_A = `${'aa'.repeat(32)}0100`
 const ASSET_B = `${'bb'.repeat(32)}0000`
@@ -89,7 +89,7 @@ describe('corridorSetFromDeps — the serving set', () => {
     })
     const outcome = await set
       .get(pair)!
-      .quote({ v: 1, type: 'rfq_request', rfq_id: 'a'.repeat(64), contract_versions: [RFQ_ASSET_SWAP_V4] })
+      .quote({ v: 1, type: 'rfq_request', rfq_id: 'a'.repeat(64), contract_versions: [RFQ_ASSET_SWAP_DIRECTED] })
     expect(outcome.kind).toBe('refused')
     expect(outcome.payload).toMatchObject({ reason: 'unsupported_payload', error_code: 'contract_version_unsupported' })
     await store.close()
@@ -173,7 +173,7 @@ describe('asset RFQ negotiates the directed covenant and nothing else', () => {
     const outcome = await corridor.quote(request())
     expect(outcome).toMatchObject({ kind: 'refused', payload: { reason: 'unsupported_pair' } })
     expect(outcome.detail).toMatch(/negotiation/)
-    expect(outcome.detail).toContain(RFQ_ASSET_SWAP_V4)
+    expect(outcome.detail).toContain(RFQ_ASSET_SWAP_DIRECTED)
     expect(derived).toEqual([])
     expect(await store.findByRfqId(RFQ_ID)).toBeNull()
     await store.close()
@@ -196,10 +196,10 @@ describe('asset RFQ negotiates the directed covenant and nothing else', () => {
 
   it('quotes the directed covenant, derives that tree, records it and names it', async () => {
     const { store, derived, corridor } = await serving()
-    const outcome = await corridor.quote(request({ contract_versions: [RFQ_ASSET_SWAP_V4] }))
-    expect(outcome).toMatchObject({ kind: 'quote', payload: { contract_version: RFQ_ASSET_SWAP_V4 } })
-    expect(derived).toEqual([RFQ_ASSET_SWAP_V4])
-    expect((await store.findByRfqId(RFQ_ID))?.contractVersion).toBe(RFQ_ASSET_SWAP_V4)
+    const outcome = await corridor.quote(request({ contract_versions: [RFQ_ASSET_SWAP_DIRECTED] }))
+    expect(outcome).toMatchObject({ kind: 'quote', payload: { contract_version: RFQ_ASSET_SWAP_DIRECTED } })
+    expect(derived).toEqual([RFQ_ASSET_SWAP_DIRECTED])
+    expect((await store.findByRfqId(RFQ_ID))?.contractVersion).toBe(RFQ_ASSET_SWAP_DIRECTED)
     await store.close()
   })
 })

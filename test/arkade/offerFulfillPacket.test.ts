@@ -22,7 +22,7 @@ import {
 } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
-import { RFQ_ASSET_SWAP_V4 } from '@arkade-os/solver-core/core/rfqContract.js'
+import { RFQ_ASSET_SWAP_DIRECTED } from '@arkade-os/solver-core/core/rfqContract.js'
 
 const state = vi.hoisted(() => ({
   vtxos: [] as unknown[],
@@ -576,7 +576,7 @@ describe('a directed deposit', () => {
 
     await fulfillOffer(ctx([fundingCoin(80_000)]), 'http://emulator.test', directed(takerKey), deposit())
 
-    expect(vi.mocked(fillOffer).mock.calls[0]![2]).toMatchObject({ version: RFQ_ASSET_SWAP_V4, taker: takerKey })
+    expect(vi.mocked(fillOffer).mock.calls[0]![2]).toMatchObject({ version: RFQ_ASSET_SWAP_DIRECTED, taker: takerKey })
     expect(state.arkTx).toBeDefined()
   })
 

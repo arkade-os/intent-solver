@@ -7,10 +7,13 @@
  * content hash of its contract, program or compiled artifact later without a
  * schema or storage migration.
  */
-import { ASSET_SWAP_V2 as RFQ_ASSET_SWAP_V2, ASSET_SWAP_V4 as RFQ_ASSET_SWAP_V4 } from '@arkade-os/swap/rfq-contract'
+import {
+  ASSET_SWAP_DIRECTED as RFQ_ASSET_SWAP_DIRECTED,
+  ASSET_SWAP_V2 as RFQ_ASSET_SWAP_V2,
+} from '@arkade-os/swap/rfq-contract'
 
 /** Asset RFQ quotes the directed covenant alone; v2 stays for offer swaps and the RFQ rows quoted on it. */
-export { RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_V4 }
+export { RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_DIRECTED }
 export const RFQ_LIGHTNING_SEND_V2 = 'lightning-send-v2'
 export const RFQ_LIGHTNING_RECEIVE_V2 = 'lightning-receive-v2'
 export const RFQ_ONCHAIN_SEND_V2 = 'onchain-send-v2'
@@ -22,7 +25,7 @@ export const RFQ_CONTRACT_VERSIONS = [
   RFQ_LIGHTNING_SEND_V2,
   RFQ_LIGHTNING_RECEIVE_V2,
   RFQ_ONCHAIN_SEND_V2,
-  RFQ_ASSET_SWAP_V4,
+  RFQ_ASSET_SWAP_DIRECTED,
   RFQ_EVM_SEND_V1,
   RFQ_EVM_RECEIVE_V1,
 ] as const

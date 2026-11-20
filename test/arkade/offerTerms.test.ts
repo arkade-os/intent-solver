@@ -22,7 +22,7 @@ import {
   xOnlyPubkey,
   type QuotedOfferTerms,
 } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
-import { RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_V4 } from '@arkade-os/solver-core/core/rfqContract.js'
+import { RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_DIRECTED } from '@arkade-os/solver-core/core/rfqContract.js'
 
 const xonly = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
 const SERVER = xonly(2)
@@ -144,9 +144,9 @@ describe('contract version', () => {
   })
 
   it('derives the directed tree only with a taker key, and from it', () => {
-    expect(() => derive(terms(), RFQ_ASSET_SWAP_V4)).toThrow(/needs a taker key/)
+    expect(() => derive(terms(), RFQ_ASSET_SWAP_DIRECTED)).toThrow(/needs a taker key/)
     const directed = (taker: Uint8Array) =>
-      offerScriptFrom({ ...derivation, taker })(terms(), RFQ_ASSET_SWAP_V4).pkScript
+      offerScriptFrom({ ...derivation, taker })(terms(), RFQ_ASSET_SWAP_DIRECTED).pkScript
     expect(directed(xonly(6))).not.toBe(directed(xonly(7)))
     expect(directed(xonly(6))).not.toBe(sdkV2)
   })

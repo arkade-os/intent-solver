@@ -17,7 +17,7 @@ import {
   xOnlyPubkey,
   type QuotedOfferTerms,
 } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
-import { RFQ_ASSET_SWAP_V4 } from '@arkade-os/solver-core/core/rfqContract.js'
+import { RFQ_ASSET_SWAP_DIRECTED } from '@arkade-os/solver-core/core/rfqContract.js'
 
 const xonly = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
 const SERVER = xonly(2)
@@ -66,7 +66,7 @@ const clientWallet = () => ({
 
 const clientOffer = async (
   unilateralExitDelay: number,
-  over: { contractVersion?: typeof RFQ_ASSET_SWAP_V4; taker?: Uint8Array } = {},
+  over: { contractVersion?: typeof RFQ_ASSET_SWAP_DIRECTED; taker?: Uint8Array } = {},
 ) => {
   vi.stubGlobal('fetch', async (url: unknown) =>
     String(url).includes('/v1/info')
@@ -130,11 +130,11 @@ describe('the directed covenant', () => {
     const exitDelay = offerExitDelay(605_184)
     const mine = offerScriptFrom({ serverPubkey: SERVER, emulatorPubkey: EMULATOR, hrp: HRP, exitDelay, taker: TAKER })(
       terms,
-      RFQ_ASSET_SWAP_V4,
+      RFQ_ASSET_SWAP_DIRECTED,
     )
-    const theirs = await clientOffer(605_184, { contractVersion: RFQ_ASSET_SWAP_V4, taker: TAKER })
+    const theirs = await clientOffer(605_184, { contractVersion: RFQ_ASSET_SWAP_DIRECTED, taker: TAKER })
     const bound = offerFromBinding({
-      version: RFQ_ASSET_SWAP_V4,
+      version: RFQ_ASSET_SWAP_DIRECTED,
       receiverPkScript: hex.decode(MAKER_SCRIPT),
       amount: terms.wantAmount,
       wantAsset: asset.AssetId.fromString(USDA),

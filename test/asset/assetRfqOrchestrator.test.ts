@@ -26,7 +26,7 @@ import {
 } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { IMPLIED_PRICE_HEADROOM } from '@arkade-os/solver-core/core/assetRfq.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
-import { RFQ_ASSET_SWAP_V4 } from '@arkade-os/solver-core/core/rfqContract.js'
+import { RFQ_ASSET_SWAP_DIRECTED } from '@arkade-os/solver-core/core/rfqContract.js'
 import {
   AssetRfqSwapService,
   type AssetRfqDeps,
@@ -198,12 +198,12 @@ describe('quote', () => {
         return { pkScript: OFFER_SCRIPT, address: 'ark1qoffer' }
       },
     })
-    await service.quote(request({ contractVersion: RFQ_ASSET_SWAP_V4 }))
-    expect(seen[0]).toBe(RFQ_ASSET_SWAP_V4)
+    await service.quote(request({ contractVersion: RFQ_ASSET_SWAP_DIRECTED }))
+    expect(seen[0]).toBe(RFQ_ASSET_SWAP_DIRECTED)
   })
 
   it.each([
-    ['the negotiated version', { contractVersion: RFQ_ASSET_SWAP_V4 }, RFQ_ASSET_SWAP_V4],
+    ['the negotiated version', { contractVersion: RFQ_ASSET_SWAP_DIRECTED }, RFQ_ASSET_SWAP_DIRECTED],
     ['NULL for a request that named none', {}, null],
   ])('persists %s and reads it back', async (_label, over, stored) => {
     const { service, store } = await harness()

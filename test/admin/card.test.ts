@@ -5,7 +5,7 @@ import { schnorr } from '@noble/curves/secp256k1.js'
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
 import { cardOmissions, deploymentCard, type CardSource } from '@arkade-os/solver-app/admin/routes/card.js'
-import { RFQ_ASSET_SWAP_V4, RFQ_CONTRACT_VERSIONS } from '@arkade-os/solver-core/core/rfqContract.js'
+import { RFQ_ASSET_SWAP_DIRECTED, RFQ_CONTRACT_VERSIONS } from '@arkade-os/solver-core/core/rfqContract.js'
 import { verifyCardSig, type SolverCard } from '@arkade-os/solver-core/core/registryCard.js'
 import { AdPublisher, type AdPublishMode } from '@arkade-os/solver-transport/relay/adPublisher.js'
 
@@ -254,7 +254,7 @@ describe('GET /api/card', () => {
     const off = await withoutContractVersion(configured)
     expect(off.card!.markets.some((m) => quoteId(m) === `arkade:mutinynet/asset:${ASSET}`)).toBe(false)
     expect(off.cardOmitted).toEqual([
-      `asset RFQ markets are omitted: none of ${RFQ_ASSET_SWAP_V4} is in rfq.contractVersions`,
+      `asset RFQ markets are omitted: none of ${RFQ_ASSET_SWAP_DIRECTED} is in rfq.contractVersions`,
     ])
     const faulty = await withoutContractVersion({ ...configured, baseDecimals: 6 })
     expect(faulty.cardOmitted.join(' ')).toContain('the BTC leg is 8 decimals (sats), got 6')
@@ -269,12 +269,12 @@ describe('GET /api/card', () => {
           }),
         )
       ).body
-    const directedOnly = await servingOnly([RFQ_ASSET_SWAP_V4])
+    const directedOnly = await servingOnly([RFQ_ASSET_SWAP_DIRECTED])
     expect(directedOnly.card!.markets.some((m) => quoteId(m) === `arkade:mutinynet/asset:${ASSET}`)).toBe(true)
     expect(directedOnly.cardOmitted.join(' ')).not.toContain('asset RFQ markets are omitted')
     // An operator list written before the directed covenant, as the old example config shipped it.
     const legacyList = await servingOnly([
-      ...RFQ_CONTRACT_VERSIONS.filter((version) => version !== RFQ_ASSET_SWAP_V4),
+      ...RFQ_CONTRACT_VERSIONS.filter((version) => version !== RFQ_ASSET_SWAP_DIRECTED),
       'asset-swap-v2',
       'asset-swap-v3',
     ])
