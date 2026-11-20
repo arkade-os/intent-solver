@@ -5,19 +5,19 @@ import { Preimage } from '../../domain/swap/hashlock.js'
 import { Reference, type Side } from '../../domain/swap/leg.js'
 import { NOT_SEEN, type LegStatus, type SpendStatus } from '../../domain/swap/observation.js'
 import type { Swap } from '../../domain/swap/swap.js'
-import type { ArkadeLockups, LockupContracts, LockupOutpoint, LockupOutput, Outpoint } from '../../ports/arkade.js'
+import type {
+  ArkadeLockups,
+  LockupContract,
+  LockupContracts,
+  LockupOutpoint,
+  LockupOutput,
+  Outpoint,
+} from '../../ports/arkade.js'
 import { SendStatus, type RailService, type SendResult } from '../../ports/rail.js'
 
 const NOT_SENT: SendResult = { status: SendStatus.NotSent }
 const UNKNOWN: SendResult = { status: SendStatus.Unknown }
 const sent = (reference: string): SendResult => ({ status: SendStatus.Sent, reference: Reference.of(reference) })
-
-// The lockup address is public from the quote on, so anyone can pay dust to it. Only an output of exactly the
-// payout is ours. A spent one is still ours: a claimed payout must be found, not paid again.
-const ours = (history: readonly LockupOutpoint[], payoutSats: number): LockupOutpoint | null => {
-  const exact = history.filter((output) => output.value === payoutSats)
-  return exact.find((output) => !output.spent) ?? exact[0] ?? null
-}
 
 const same =
   (wanted: Outpoint) =>
@@ -30,11 +30,18 @@ const outpointOf = (reference: string | null): Outpoint | null => {
   return !txid || vout === undefined ? null : { txid, vout: Number(vout) }
 }
 
-// A payout just sent is recorded by its transaction alone, so its output is looked up in what the script holds.
-const recorded = (swap: Swap, history: readonly LockupOutpoint[]): Outpoint | null => {
-  const txid = swap.to.reference('funding')
-  return txid === null ? null : (history.find((output) => output.txid === txid) ?? null)
+// The lockup address is public from the quote on, so anyone can pay dust to it. Only an output of exactly the
+// payout is ours. A spent one is still ours: a claimed payout must be found, not paid again.
+const exactPayout = (history: readonly LockupOutpoint[], payoutSats: number): LockupOutpoint | null => {
+  const exact = history.filter((output) => output.value === payoutSats)
+  return exact.find((output) => !output.spent) ?? exact[0] ?? null
 }
+
+const landed = (base: LegStatus, lockup: Outpoint): LegStatus => ({
+  ...base,
+  lock: 'landed',
+  lockReference: Reference.of(`${lockup.txid}:${lockup.vout}`),
+})
 
 /** Our side of a swap paid out on Arkade: a lockup the client claims with the preimage, or we refund. */
 export class ArkadeLockup implements RailService {
@@ -43,61 +50,67 @@ export class ArkadeLockup implements RailService {
     private readonly arkade: ArkadeLockups,
   ) {}
 
-  // Reads cost a call to the indexer each, and every open swap is read on every tick, so each state asks for
-  // the least that can change its decision.
+  // Each read is a call to the indexer, made for every open swap on every tick. The steps go from the cheapest
+  // answer to the dearest and stop at the first one that settles the decision.
   async status(swap: Swap): Promise<LegStatus> {
     const { arkade } = this
     const contract = await this.contracts.contract(swap.id)
-    const deadlines = {
+    const nothing: LegStatus = {
+      ...NOT_SEEN,
       refundOpen: await arkade.refundOpen(contract),
       refundOpensAt: UnixSeconds.of(await arkade.refundOpensAt(contract)),
       refundAloneDelay: arkade.refundAloneDelaySeconds(contract),
     }
-    const landed = (lockup: Outpoint): LegStatus => ({
-      ...NOT_SEEN,
-      ...deadlines,
-      lock: 'landed',
-      lockReference: Reference.of(`${lockup.txid}:${lockup.vout}`),
-    })
-
-    // Paid out and waiting for the client: while our output is still there, nothing else needs reading.
     const known = outpointOf(swap.to.reference('funding'))
+
+    // 1. Paid out and waiting for the client: one read says whether our output is still there.
     let spendable: readonly LockupOutput[] | null = null
     if (swap.to.state === 'locked' && known !== null) {
       spendable = await arkade.spendable(contract)
-      if (spendable.some(same(known))) return landed(known)
+      if (spendable.some(same(known))) return landed(nothing, known)
     }
 
+    // 2. Find our output among everything the script ever held.
     const history = await arkade.history(contract)
-    const lockup = known ?? recorded(swap, history) ?? ours(history, contract.payoutSats)
-    if (lockup === null) return { ...NOT_SEEN, ...deadlines }
-    const seen = history.find(same(lockup))
-    // Not recorded as paid out yet, and the indexer shows it untouched: adopting it is all there is to decide.
-    const adopting = swap.to.state === 'pending' || swap.to.state === 'locking'
-    if (adopting && seen?.spent === false) return landed(lockup)
+    const sentTx = swap.to.reference('funding')
+    const lockup =
+      known ?? history.find((output) => output.txid === sentTx) ?? exactPayout(history, contract.payoutSats)
+    if (lockup === null) return nothing
+    const seen = history.find(same(lockup)) ?? null
+    const notRecordedYet = swap.to.state === 'pending' || swap.to.state === 'locking'
+    if (notRecordedYet && seen?.spent === false) return landed(nothing, lockup)
 
+    // 3. It was spent, or we are refunding it: find out who has it.
+    const spent = await this.spentBy(swap, contract, history, lockup, seen, spendable)
+    return { ...landed(nothing, lockup), spent, refund: spent.by === 'refund' ? 'landed' : 'none' }
+  }
+
+  private async spentBy(
+    swap: Swap,
+    contract: LockupContract,
+    history: readonly LockupOutpoint[],
+    lockup: Outpoint,
+    seen: LockupOutpoint | null,
+    spendable: readonly LockupOutput[] | null,
+  ): Promise<SpendStatus> {
+    const { arkade } = this
     // A claim counts on any output the script held: a payout sent twice has siblings, and each reveals the preimage.
     const preimage = await arkade.claimPreimage(contract, history.length > 0 ? history : [lockup])
-    // Asked of our own output, not of the script: dust left at the address must not look like an unspent payout.
-    // A lockup taken onto Bitcoin is gone from Arkade but is still ours to refund there.
-    // The history is final about an output that was spent. About one that was not, only the spendable read is:
+    if (preimage !== null) return { by: 'claim', preimage: Preimage.of(hex.encode(preimage)) }
+
+    // Taken onto Bitcoin by a unilateral exit: gone from Arkade, still ours to refund there.
+    if (seen?.unrolled === true) return { by: 'nobody' }
+    // The history is final about a spent output. About an unspent one only the spendable read is:
     // an output in an expired batch is neither spent nor spendable.
-    const there = seen?.spent === true ? false : (spendable ?? (await arkade.spendable(contract))).some(same(lockup))
-    const unspent = there || seen?.unrolled === true
-    const refund = swap.to.reference('refund')
-    const lostRefund =
-      preimage === null && !unspent && refund === null && swap.to.state === 'refunding'
-        ? ((await arkade.finishLostRefund?.(contract)) ?? null)
-        : null
-    const refunded = refund !== null || lostRefund !== null
-    const spent: SpendStatus =
-      preimage !== null
-        ? { by: 'claim', preimage: Preimage.of(hex.encode(preimage)) }
-        : unspent
-          ? { by: 'nobody' }
-          : { by: refunded ? 'refund' : 'unknown' }
-    // A refund that only swept dust leaves our output in place, and then it has not landed.
-    return { ...landed(lockup), spent, refund: !unspent && preimage === null && refunded ? 'landed' : 'none' }
+    if (seen?.spent !== true) {
+      const now = spendable ?? (await arkade.spendable(contract))
+      if (now.some(same(lockup))) return { by: 'nobody' }
+    }
+
+    // Gone, with no claim. It is our refund if we recorded one, or if the server finished one whose answer we lost.
+    if (swap.to.reference('refund') !== null) return { by: 'refund' }
+    const lost = swap.to.state === 'refunding' ? await arkade.finishLostRefund?.(contract) : null
+    return { by: lost ? 'refund' : 'unknown' }
   }
 
   async lock(swap: Swap): Promise<SendResult> {
