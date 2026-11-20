@@ -3118,6 +3118,26 @@ describe('OnchainSendSwapService', () => {
       expect(close.swap.payoutSats).toBeGreaterThanOrEqual(bid.toAmount)
     })
 
+    it('bids no exact-out amount whose close, at the live fee, falls under the minimum', () => {
+      const priced = new OnchainSendSwapService({
+        store: deps.store,
+        onchain: deps.onchain,
+        arkade: deps.arkade,
+        limits: { minSats: 10_000, maxSats: 1_000_000 },
+        maxExposedSats: 1_000_000,
+        totalCommitted: () => deps.store.committedSats(),
+        admission: new AdmissionControl(),
+        network: 'regtest',
+        signer,
+        refundDestinationScript,
+        pricing: networkFeePricing({ base: { bps: 0, flatSats: 0 }, costSats: () => 100, capSats: 400 }),
+        now: clock,
+      })
+      // At the cap 9,600 needs 10,000 in; the live close asks 9,700, under the minimum.
+      expect(priced.previewAmounts(9_600, 'to')).toBeUndefined()
+      expect(priced.previewAmounts(9_900, 'to')).toEqual({ fromAmount: 10_300, toAmount: 9_900 })
+    })
+
     it('tracks the configured minimum, not a constant', () => {
       const free = { bps: 0, flatSats: 0 }
       expect(serviceCharging(free, 20_000).minimumPayoutSats()).toBe(20_000)

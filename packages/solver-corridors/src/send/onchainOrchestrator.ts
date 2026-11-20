@@ -508,10 +508,13 @@ export class OnchainSendSwapService {
     const pricing = this.pricing.ceiling ?? this.pricing
     const fromAmount = side === 'from' ? amount : pricing.giveFor({ pair: RFQ_PAIR_ONCHAIN_SEND, payoutSats: amount })
     const toAmount = side === 'to' ? amount : pricing.payoutFor({ pair: RFQ_PAIR_ONCHAIN_SEND, giveSats: fromAmount })
+    // An exact-out close re-prices the give at the live fee, so the minimum binds that smaller give.
+    const closeGive =
+      side === 'to' ? this.pricing.giveFor({ pair: RFQ_PAIR_ONCHAIN_SEND, payoutSats: amount }) : fromAmount
     if (
       !Number.isSafeInteger(fromAmount) ||
       !Number.isSafeInteger(toAmount) ||
-      fromAmount < this.deps.limits.minSats ||
+      closeGive < this.deps.limits.minSats ||
       fromAmount > this.deps.limits.maxSats ||
       toAmount < this.refundablePayoutFloor()
     )
