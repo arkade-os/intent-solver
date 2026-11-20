@@ -54,6 +54,7 @@ const assetMarketsOf = (source: CardSource, rfqServed = assetRfqServed(source)) 
       offerBounds: { min: source.bootPolicy.offerMinFillAmount, max: source.bootPolicy.offerMaxFillAmount },
       rfqMarkets: rfqServed ? source.assetRfqMarkets : [],
       chargesDeliveredCarrier: source.bootPolicy.offerChargesDeliveredCarrier,
+      rfqCarrierPricedByDefault: source.policy.assetCarrierPricing,
     }),
     source.config.network,
   )
