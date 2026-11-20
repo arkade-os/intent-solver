@@ -40,7 +40,7 @@ vi.mock('@arkade-os/sdk', async (importOriginal) => {
         signerPubkey: `02${hex.encode(SERVER)}`,
         checkpointTapscript: hex.encode(
           mod.CSVMultisigTapscript.encode({
-            timelock: { type: 'blocks', value: 10n },
+            timelock: { type: 'seconds', value: 512n },
             pubkeys: [SERVER],
           }).script,
         ),
