@@ -1,7 +1,8 @@
 import type { ValueOf } from '../shared/brand.js'
+import type { UnixSeconds } from '../shared/time.js'
 import type { Preimage } from './hashlock.js'
-import { ContractKind, Side, type Leg, type LegState } from './leg.js'
-import { ApprovalStatus, FundingStatus, SpentBy, TxStatus, type Observation } from './observation.js'
+import { ContractKind, Side, type Leg, type LegState, type Reference } from './leg.js'
+import { ApprovalStatus, FundingStatus, SpentBy, TxStatus, type LegStatus, type Observation } from './observation.js'
 import type { Swap } from './swap.js'
 import { SwapOutcome } from './swap_state.js'
 
@@ -24,9 +25,18 @@ export const Action = {
 
 export type Action = ValueOf<typeof Action>
 
+/** What a `record` writes besides the state. */
+export interface Recorded {
+  readonly preimage?: Preimage
+  readonly funding?: Reference
+  readonly expiresAt?: UnixSeconds
+  /** The swap was stuck and can now be collected, so it goes back to being driven. */
+  readonly resume?: true
+}
+
 export type Decision =
   | { readonly do: typeof Action.Wait | typeof Action.Unlock | typeof Action.Fill }
-  | { readonly do: typeof Action.Record; readonly side: Side; readonly state: LegState; readonly preimage?: Preimage }
+  | ({ readonly do: typeof Action.Record; readonly side: Side; readonly state: LegState } & Recorded)
   | { readonly do: typeof Action.Lock | typeof Action.Claim | typeof Action.Refund; readonly side: Side }
   | { readonly do: typeof Action.Abandon; readonly reason: string }
   | { readonly do: typeof Action.Fail; readonly outcome: SwapOutcome; readonly reason: string }
@@ -72,13 +82,28 @@ const WAIT: Decision = { do: Action.Wait }
 const fail = (outcome: SwapOutcome, reason: string): Decision => ({ do: Action.Fail, outcome, reason })
 
 // Never offer a record the aggregate would refuse: it would throw on every tick.
-const record = (swap: Swap, side: Side, state: LegState, preimage?: Preimage): Decision | null => {
-  if (!swap.accepts(side, state)) return null
-  return preimage === undefined ? { do: Action.Record, side, state } : { do: Action.Record, side, state, preimage }
-}
+const record = (swap: Swap, side: Side, state: LegState, extra: Recorded = {}): Decision | null =>
+  swap.accepts(side, state) ? { do: Action.Record, side, state, ...extra } : null
+
+// What the rail showed about the lock, kept on the leg: it is what a later step compares against.
+const lockSeen = (rail: LegStatus): Recorded => ({
+  ...(rail.lockReference === null ? {} : { funding: rail.lockReference }),
+  ...(rail.expiresAt === null ? {} : { expiresAt: rail.expiresAt }),
+})
 
 /** The invoice is our own, so this Lightning leg is settled by the peer swap, never by a payment. */
 const coupled = (leg: Leg, seen: Observation): boolean => seen.ownInvoice && leg.contract === ContractKind.Lightning
+
+/** Whether the rails show `to` claimed, and the preimage if it can be read. */
+const claimOf = (swap: Swap, seen: Observation): { readonly claimed: boolean; readonly secret: Preimage | null } => {
+  if (swap.isOffer) return { claimed: false, secret: null }
+  if (coupled(swap.to, seen)) {
+    const secret = seen.peer?.preimage ?? null
+    return { claimed: secret !== null, secret }
+  }
+  const { spent } = seen.to
+  return spent.by === SpentBy.Claim ? { claimed: true, secret: spent.preimage } : { claimed: false, secret: null }
+}
 
 const toShows = (swap: Swap, seen: Observation, policies: Policies): Decision | null => {
   const { to } = swap
@@ -86,15 +111,10 @@ const toShows = (swap: Swap, seen: Observation, policies: Policies): Decision | 
   if (swap.isOffer) {
     if (to.state === 'locking' && rail.lock === TxStatus.Landed) return { do: Action.Fill }
   } else {
-    const secret = coupled(to, seen)
-      ? (seen.peer?.preimage ?? null)
-      : rail.spent.by === SpentBy.Claim
-        ? rail.spent.preimage
-        : null
-    const claimed = coupled(to, seen) ? secret !== null : rail.spent.by === SpentBy.Claim
+    const { claimed, secret } = claimOf(swap, seen)
     if (claimed && to.state !== 'claimed') {
       if (secret !== null) {
-        const shown = record(swap, Side.To, 'claimed', secret)
+        const shown = record(swap, Side.To, 'claimed', { preimage: secret })
         if (shown !== null) return shown
       } else if (policies.onSpentUnknown(swap, seen) === OnFailure.Stuck) {
         return fail(SwapOutcome.Stuck, 'the to leg was claimed but its preimage is unknown')
@@ -111,7 +131,7 @@ const toShows = (swap: Swap, seen: Observation, policies: Policies): Decision | 
     return fail(SwapOutcome.Stuck, 'the to leg was spent by something we do not recognise')
   // Adopt a lock of ours that landed before any gate runs: after a crash it must not be paid twice.
   if ((to.state === 'pending' || to.state === 'locking') && rail.lock === TxStatus.Landed) {
-    const shown = record(swap, Side.To, 'locked')
+    const shown = record(swap, Side.To, 'locked', lockSeen(rail))
     if (shown !== null) return shown
   }
   if (to.state === 'locking' && rail.lock === TxStatus.Failed) {
@@ -154,7 +174,7 @@ const fromShows = (swap: Swap, seen: Observation, policies: Policies): Decision 
         rail.funding === FundingStatus.Over ? 'the client overfunded the lock' : 'the client lock cannot be used',
       )
     } else if (rail.funding === FundingStatus.Exact || rail.funding === FundingStatus.Over) {
-      if (rail.matured) return record(swap, Side.From, 'locked')
+      if (rail.matured) return record(swap, Side.From, 'locked', lockSeen(rail))
       if (from.state === 'pending') return record(swap, Side.From, 'locking')
     }
   }
@@ -198,7 +218,10 @@ const whenOver = (swap: Swap, seen: Observation, policies: Policies): Decision =
   if (!unpaid) return WAIT
   // A deposit that arrives, or confirms, after the swap ended is still the client's: adopt it so it can go back.
   if ((from.state === 'pending' || from.state === 'locking') && seen.from.funding !== FundingStatus.None) {
-    return record(swap, Side.From, seen.from.matured ? 'locked' : 'locking') ?? WAIT
+    return (
+      record(swap, Side.From, seen.from.matured ? 'locked' : 'locking', seen.from.matured ? lockSeen(seen.from) : {}) ??
+      WAIT
+    )
   }
   if (from.state === 'refunding') {
     if (seen.from.refund === TxStatus.Landed) return record(swap, Side.From, 'refunded') ?? WAIT
@@ -210,11 +233,20 @@ const whenOver = (swap: Swap, seen: Observation, policies: Policies): Decision =
   return WAIT
 }
 
+// A stuck swap is still watched for one thing: a claim that shows up late. With its preimage the swap can be
+// collected, and nobody else would do it.
+const whenStuck = (swap: Swap, seen: Observation): Decision => {
+  const { secret } = claimOf(swap, seen)
+  if (secret === null || swap.to.state === 'claimed') return WAIT
+  return record(swap, Side.To, 'claimed', { preimage: secret, resume: true }) ?? WAIT
+}
+
 /** One decision per call; the caller applies it and asks again until it gets `wait`. */
 export const plan = (swap: Swap, seen: Observation, policies: Policies): Decision => {
   const state = swap.state
   if (state === SwapOutcome.Refused || state === 'refunded') return whenOver(swap, seen, policies)
-  if (state === 'settled' || state === SwapOutcome.Lost || state === SwapOutcome.Stuck) return WAIT
+  if (state === SwapOutcome.Stuck) return whenStuck(swap, seen)
+  if (state === 'settled' || state === SwapOutcome.Lost) return WAIT
 
   const shown = toShows(swap, seen, policies) ?? fromShows(swap, seen, policies)
   if (shown !== null) return shown

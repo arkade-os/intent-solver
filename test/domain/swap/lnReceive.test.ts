@@ -25,6 +25,7 @@ const leg: LegStatus = {
   expiresAt: null,
   refundOpensAt: null,
   refundAloneDelay: null,
+  lockReference: null,
   lock: 'none',
   claim: 'none',
   refund: 'none',
@@ -117,9 +118,10 @@ describe('LN receive rules', () => {
   it('retries a failed settle only until the Lightning payment times out', () => {
     const { onClaimFailed } = lnReceivePolicies({ acceptRefundAloneGap: false })
     const swap = swapValidUntil(NOW + 100)
-    expect(onClaimFailed(swap, seen(NOW, { expiresAt: t(NOW + 1) }))).toBe('retry')
-    expect(onClaimFailed(swap, seen(NOW, { expiresAt: t(NOW) }))).toBe('stuck')
     expect(onClaimFailed(swap, seen(NOW))).toBe('stuck')
+    swap.lock('from', t(NOW - 900), ref('held'), t(NOW + 1))
+    expect(onClaimFailed(swap, seen(NOW))).toBe('retry')
+    expect(onClaimFailed(swap, seen(NOW + 1))).toBe('stuck')
   })
 
   it('retries a failed refund for six hours, then calls an operator', () => {
@@ -136,13 +138,10 @@ describe('LN receive rules', () => {
   it('waits for a late claim of a spent payout while the Lightning payment can still be collected', () => {
     const { onSpentUnknown } = lnReceivePolicies({ acceptRefundAloneGap: false })
     const swap = swapValidUntil(NOW + 100)
-    swap.lock('from', t(NOW - 900), ref('held'))
+    swap.lock('from', t(NOW - 900), ref('held'), t(NOW + 1_000))
     swap.locking('to', t(NOW - 800))
     swap.lock('to', t(NOW), ref('txid-out'))
-    const timesOut = { expiresAt: t(NOW + 1_000) }
-    expect(onSpentUnknown(swap, seen(NOW + 999, timesOut))).toBe('wait')
-    expect(onSpentUnknown(swap, seen(NOW + 1_000, timesOut))).toBe('stuck')
-    expect(onSpentUnknown(swap, seen(NOW + SPEND_READ_GRACE - 1))).toBe('wait')
-    expect(onSpentUnknown(swap, seen(NOW + SPEND_READ_GRACE))).toBe('stuck')
+    expect(onSpentUnknown(swap, seen(NOW + 999))).toBe('wait')
+    expect(onSpentUnknown(swap, seen(NOW + 1_000))).toBe('stuck')
   })
 })

@@ -1,6 +1,7 @@
 import type { ValueOf } from '../shared/brand.js'
 import type { UnixSeconds } from '../shared/time.js'
 import type { Preimage } from './hashlock.js'
+import type { Reference } from './leg.js'
 import type { SwapState } from './swap_state.js'
 
 export const FundingStatus = {
@@ -48,6 +49,8 @@ export interface LegStatus {
   /** Seconds after funding until we can refund with no help from the server or the client. Null where there is no such path. */
   readonly refundAloneDelay: number | null
   readonly lock: TxStatus
+  /** The lock as the rail shows it: a txid, an outpoint, a payment id. Null when it shows none. */
+  readonly lockReference: Reference | null
   readonly claim: TxStatus
   readonly refund: TxStatus
 }

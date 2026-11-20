@@ -13,6 +13,7 @@ const NOTHING: LegStatus = {
   expiresAt: null,
   refundOpensAt: null,
   refundAloneDelay: null,
+  lockReference: null,
   lock: 'none',
   claim: 'none',
   refund: 'none',
@@ -199,6 +200,41 @@ describe('plan: collecting', () => {
     const blind = { ...NOTHING, spent: { by: 'claim' as const, preimage: null } }
     expect(plan(bothLocked(), seen({ to: blind }), POLICIES)).toMatchObject({ outcome: 'stuck' })
     expect(plan(bothLocked(), seen({ to: blind }), policies({ onSpentUnknown: () => 'wait' }))).toEqual({ do: 'wait' })
+  })
+
+  it('keeps watching a stuck swap for a late claim, and reopens it to collect', () => {
+    const swap = bothLocked()
+    swap.refunding('to', t(1_010))
+    swap.fail('stuck', 'refund kept failing', t(1_020))
+    expect(plan(swap, seen({ to: { ...NOTHING, refundOpen: true } }), POLICIES)).toEqual({ do: 'wait' })
+    expect(plan(swap, seen({ to: claimedBy }), POLICIES)).toEqual({
+      do: 'record',
+      side: 'to',
+      state: 'claimed',
+      preimage: SECRET,
+      resume: true,
+    })
+    const blind = { ...NOTHING, spent: { by: 'claim' as const, preimage: null } }
+    expect(plan(swap, seen({ to: blind }), POLICIES)).toEqual({ do: 'wait' })
+  })
+
+  it('keeps the timeout and the reference the rail showed when a lock is recorded', () => {
+    const held = {
+      ...NOTHING,
+      funding: 'exact' as const,
+      matured: true,
+      expiresAt: t(9_000),
+      lockReference: ref('hold'),
+    }
+    expect(plan(quoted(), seen({ from: held }), POLICIES)).toEqual({
+      do: 'record',
+      side: 'from',
+      state: 'locked',
+      funding: ref('hold'),
+      expiresAt: t(9_000),
+    })
+    const paid = { ...NOTHING, lock: 'landed' as const, lockReference: ref('txid-out:0') }
+    expect(plan(filling(), seen({ to: paid }), POLICIES)).toMatchObject({ state: 'locked', funding: 'txid-out:0' })
   })
 
   it('calls it lost when the client takes both sides', () => {

@@ -54,6 +54,7 @@ export const encodeSwapEvent = (event: SwapEvent): string => {
         state: event.state,
         references: event.references,
         preimage: event.preimage,
+        expiresAt: event.expiresAt,
       })
     case 'LegReferenced':
       return JSON.stringify({ side: event.side, references: event.references })
@@ -91,7 +92,8 @@ export const decodeSwapEvent = (id: string, type: string, at: number, body: stri
         side: json.side as Side,
         state: json.state as LegState,
         references: referencesIn(json.references as Json),
-        preimage: json.preimage === null ? null : Preimage.of(String(json.preimage)),
+        preimage: json.preimage == null ? null : Preimage.of(String(json.preimage)),
+        expiresAt: json.expiresAt == null ? null : UnixSeconds.of(Number(json.expiresAt)),
       }
     case 'LegReferenced':
       return { ...base, type, side: json.side as Side, references: referencesIn(json.references as Json) }

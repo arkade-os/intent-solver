@@ -44,7 +44,7 @@ const applied = (props: SwapProps, e: SwapEvent): SwapProps => {
     case 'LegAdvanced':
       return {
         ...props,
-        [e.side]: props[e.side].moveTo(e.state, e.at, e.references),
+        [e.side]: props[e.side].moveTo(e.state, e.at, e.references, e.expiresAt),
         preimage: e.preimage ?? props.preimage,
       }
     case 'LegReferenced':
@@ -168,8 +168,8 @@ export class Swap {
     return this.advance(side, 'locking', at, referenced(ReferenceKind.Funding, funding))
   }
 
-  lock(side: Side, at: UnixSeconds, funding?: Reference): SwapEvent {
-    return this.advance(side, 'locked', at, referenced(ReferenceKind.Funding, funding))
+  lock(side: Side, at: UnixSeconds, funding?: Reference, expiresAt: UnixSeconds | null = null): SwapEvent {
+    return this.advance(side, 'locked', at, referenced(ReferenceKind.Funding, funding), undefined, expiresAt)
   }
 
   /**
@@ -237,7 +237,11 @@ export class Swap {
     return this.raise({ topic: SWAP_TOPIC, type: 'SwapFailed', id: this.id, at, outcome, reason })
   }
 
-  /** Operator recovery: a stuck swap goes back to being driven, but only to collect with a preimage in hand. */
+  get canResume(): boolean {
+    return this.props.outcome === SwapOutcome.Stuck && this.preimage !== null && this.legsState !== null
+  }
+
+  /** A stuck swap goes back to being driven, but only to collect with a preimage in hand. */
   resume(at: UnixSeconds): SwapEvent {
     if (this.props.outcome !== SwapOutcome.Stuck)
       throw this.error(IllegalTransition, `only a stuck swap resumes, this one is ${this.state}`)
@@ -266,6 +270,7 @@ export class Swap {
     at: UnixSeconds,
     references: LegReferences,
     preimage?: Preimage,
+    expiresAt: UnixSeconds | null = null,
   ): SwapEvent {
     if (!this[side].canMoveTo(state))
       throw this.error(IllegalTransition, `${side} leg cannot go ${this[side].state} -> ${state}`)
@@ -282,6 +287,7 @@ export class Swap {
       state,
       references,
       preimage: revealed,
+      expiresAt,
     })
   }
 

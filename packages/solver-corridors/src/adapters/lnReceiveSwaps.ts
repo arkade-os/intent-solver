@@ -71,6 +71,7 @@ export const swapFromReceiveRow = (row: ReceiveSwapRow, failedFrom: Lived | null
         from,
         { funding: [], claim: [], refund: [] },
         changed,
+        row.htlcExpiresAt === null ? null : UnixSeconds.of(row.htlcExpiresAt),
       ),
       to: Leg.restore(
         Side.To,

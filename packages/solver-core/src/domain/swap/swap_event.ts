@@ -30,6 +30,7 @@ export interface LegAdvanced extends SwapEventBase {
   readonly state: LegState
   readonly references: LegReferences
   readonly preimage: Preimage | null
+  readonly expiresAt: UnixSeconds | null
 }
 
 export interface LegReferenced extends SwapEventBase {

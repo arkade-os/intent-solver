@@ -1,10 +1,9 @@
 import { Conflict, RuleViolated } from '../domain/shared/error.js'
 import type { SwapId } from '../domain/shared/ids.js'
 import type { UnixSeconds } from '../domain/shared/time.js'
-import type { Preimage } from '../domain/swap/hashlock.js'
 import { ReferenceKind, Side, type LegState } from '../domain/swap/leg.js'
 import type { Observation } from '../domain/swap/observation.js'
-import { Action, plan, type Decision, type Policies } from '../domain/swap/plan.js'
+import { Action, plan, type Decision, type Policies, type Recorded } from '../domain/swap/plan.js'
 import type { Swap } from '../domain/swap/swap.js'
 import type { SwapRepository } from '../domain/swap/swap_repo.js'
 import { SendStatus, type RailService } from '../ports/rail.js'
@@ -75,7 +74,10 @@ export class DriveSwap {
       case Action.Wait:
         return
       case Action.Record:
-        return this.save(swap, (s, at) => this.setLegState(s, decision.side, decision.state, at, decision.preimage))
+        return this.save(swap, (s, at) => {
+          this.setLegState(s, decision.side, decision.state, at, decision)
+          if (decision.resume && s.canResume) s.resume(at)
+        })
       case Action.Lock:
       case Action.Claim:
       case Action.Refund:
@@ -124,16 +126,16 @@ export class DriveSwap {
     }
   }
 
-  private setLegState(swap: Swap, side: Side, state: LegState, at: UnixSeconds, preimage?: Preimage): void {
+  private setLegState(swap: Swap, side: Side, state: LegState, at: UnixSeconds, seen: Recorded = {}): void {
     switch (state) {
       case 'locking':
         return void swap.locking(side, at)
       case 'locked':
-        return void swap.lock(side, at)
+        return void swap.lock(side, at, seen.funding, seen.expiresAt)
       case 'claiming':
         return void swap.claiming(side, at)
       case 'claimed':
-        return void swap.claim(side, at, preimage ? { preimage } : {})
+        return void swap.claim(side, at, seen.preimage ? { preimage: seen.preimage } : {})
       case 'refunding':
         return void swap.refunding(side, at)
       case 'refunded':

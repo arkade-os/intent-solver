@@ -55,12 +55,13 @@ export const lnReceivePolicies = (config: LnReceiveConfig): Policies => ({
   onLockMissing: (_swap, seen) =>
     seen.to.refundOpensAt !== null && seen.now >= seen.to.refundOpensAt ? OnFailure.Stuck : OnFailure.Wait,
   canCollect: () => ({ ok: true }),
-  onClaimFailed: (_swap, seen) =>
-    seen.from.expiresAt !== null && seen.now < seen.from.expiresAt ? OnFailure.Retry : OnFailure.Stuck,
+  // The timeout saved with the lock: once the payment is gone the rail can no longer show it.
+  onClaimFailed: (swap, seen) =>
+    swap.from.expiresAt !== null && seen.now < swap.from.expiresAt ? OnFailure.Retry : OnFailure.Stuck,
   onRefundFailed: (swap, seen) => (seen.now - swap.to.since < REFUND_RETRY_WINDOW ? OnFailure.Retry : OnFailure.Stuck),
   // Stuck stops the loop, so a claim that shows up later would never be collected. Wait while collecting is possible.
   onSpentUnknown: (swap, seen) => {
-    const timesOutAt = seen.from.expiresAt
+    const timesOutAt = swap.from.expiresAt
     if (seen.now - swap.to.since < SPEND_READ_GRACE) return OnFailure.Wait
     return timesOutAt !== null && seen.now < timesOutAt ? OnFailure.Wait : OnFailure.Stuck
   },

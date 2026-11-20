@@ -95,16 +95,25 @@ export class Leg {
     readonly references: ReferenceHistory,
     /** When the leg entered `state`. Used to tell a send still in progress from one that was never made. */
     readonly since: UnixSeconds,
+    /** When the lock times out, as the rail showed it when the lock was recorded. Null where it was not shown. */
+    readonly expiresAt: UnixSeconds | null,
   ) {}
 
   static open(side: Side, terms: LegTerms, at: UnixSeconds): Leg {
     if (terms.amount.isZero) throw new InvalidValue(`${side} leg amount must be positive`)
-    return new Leg(side, terms, 'pending', NO_REFERENCES, at)
+    return new Leg(side, terms, 'pending', NO_REFERENCES, at, null)
   }
 
   /** For a repository: what was stored is trusted, not re-validated. */
-  static restore(side: Side, terms: LegTerms, state: LegState, references: ReferenceHistory, since: UnixSeconds): Leg {
-    return new Leg(side, terms, state, references, since)
+  static restore(
+    side: Side,
+    terms: LegTerms,
+    state: LegState,
+    references: ReferenceHistory,
+    since: UnixSeconds,
+    expiresAt: UnixSeconds | null = null,
+  ): Leg {
+    return new Leg(side, terms, state, references, since, expiresAt)
   }
 
   get rail(): Rail {
@@ -131,13 +140,21 @@ export class Leg {
     return Leg.canTransition(this, this.state, state)
   }
 
-  moveTo(state: LegState, at: UnixSeconds, references: LegReferences = {}): Leg {
+  moveTo(state: LegState, at: UnixSeconds, references: LegReferences = {}, expiresAt: UnixSeconds | null = null): Leg {
     if (!this.canMoveTo(state)) throw new IllegalTransition(`${this.side} leg cannot go ${this.state} -> ${state}`)
-    return new Leg(this.side, this.terms, state, withReferences(this.references, references), at)
+    const expires = expiresAt ?? this.expiresAt
+    return new Leg(this.side, this.terms, state, withReferences(this.references, references), at, expires)
   }
 
   /** A reference learned without the leg changing state: a payment id after the intent, a replacement transaction. */
   record(references: LegReferences): Leg {
-    return new Leg(this.side, this.terms, this.state, withReferences(this.references, references), this.since)
+    return new Leg(
+      this.side,
+      this.terms,
+      this.state,
+      withReferences(this.references, references),
+      this.since,
+      this.expiresAt,
+    )
   }
 }

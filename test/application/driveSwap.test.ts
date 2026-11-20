@@ -39,6 +39,7 @@ class World {
       expiresAt: null,
       refundOpensAt: null,
       refundAloneDelay: null,
+      lockReference: null,
       refund: 'none',
     } as const
     return side === 'from'
@@ -130,6 +131,22 @@ describe('driving a swap', () => {
     expect(await worker(neverResend).drive(terms.id)).toBe('wait')
     expect((await swaps.get(terms.id))?.state).toBe('settled')
     expect(world.payouts).toBe(1)
+  })
+
+  it('collects a stuck swap once the client claim shows up', async () => {
+    await swaps.update(terms.id, (swap) => {
+      swap.lock('from', t(1_001), ref('txid-in'))
+      swap.locking('to', t(1_002))
+      swap.lock('to', t(1_003), ref('payout'))
+      swap.fail('stuck', 'refund kept failing', t(1_004))
+    })
+    expect(await worker().drive(terms.id)).toBe('wait')
+    expect((await swaps.get(terms.id))?.state).toBe('stuck')
+
+    world.payouts = 1
+    expect(await worker().drive(terms.id)).toBe('wait')
+    expect((await swaps.get(terms.id))?.state).toBe('settled')
+    expect(world.collected).toBe(1)
   })
 
   it('still settles with one payout after a crash before or after any write or rail call', async () => {

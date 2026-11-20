@@ -75,6 +75,7 @@ export const start = (scenario: Scenario) => (): Run => {
       expiresAt: t(BASE + scenario.clientRefundAt),
       refundOpensAt: t(BASE + scenario.payoutRefundAt),
       refundAloneDelay: null,
+      lockReference: null,
     }
     if (side === 'from') {
       return {
