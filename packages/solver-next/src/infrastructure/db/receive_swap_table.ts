@@ -11,6 +11,7 @@ import { Swap } from '../../domain/swap/swap.js'
 import type { SwapEvent } from '../../domain/swap/swap_event.js'
 import type { Page, SwapRepository } from '../../domain/swap/swap_repo.js'
 import { SwapOutcome } from '../../domain/swap/swap_state.js'
+import type { LockupContract, LockupContracts } from '../../ports/arkade.js'
 import type { SqlDriver } from '../../ports/sql.js'
 
 const BTC = Asset.of('BTC')
@@ -53,7 +54,7 @@ const recordOf = (raw: Raw): ReceiveSwapRecord => ({
   updatedAt: Number(raw.updated_at),
   paymentHash: String(raw.payment_hash),
   amountSats: Number(raw.amount_sats),
-  payoutSats: Number(raw.payout_sats),
+  payoutSats: Number(raw.payout_sats ?? raw.amount_sats),
   invoiceExpiresAt: Number(raw.invoice_expires_at),
   htlcExpiresAt: number(raw.htlc_expires_at ?? null),
   arkadeLockupTxid: text(raw.arkade_lockup_txid ?? null),
@@ -192,7 +193,7 @@ const columnsFor = (event: SwapEvent, payoutSats: number, now: number): Record<s
  * One of the legacy tables swaps are kept in: `receive_swap`, for Lightning receive. The schema is not changed.
  * There is one `Swap` and one repository; each legacy table only needs its own row mapping until they are merged.
  */
-export class ReceiveSwapTable implements Omit<SwapRepository, 'add'> {
+export class ReceiveSwapTable implements Omit<SwapRepository, 'add'>, LockupContracts {
   constructor(
     private readonly driver: SqlDriver,
     private readonly now: () => number,
@@ -229,6 +230,33 @@ export class ReceiveSwapTable implements Omit<SwapRepository, 'add'> {
       page.after ?? '',
       page.limit,
     ])
+  }
+
+  /** The contract the payout is locked under, from the columns the quote wrote. */
+  async contract(id: string): Promise<LockupContract> {
+    const raw = await this.driver.get<Raw>('SELECT * FROM receive_swap WHERE id = ?', [id])
+    if (raw === undefined) throw new Conflict(`swap ${id} does not exist`)
+    const flag = raw.non_interactive_parameters ?? null
+    return {
+      id: String(raw.id),
+      paymentHash: String(raw.payment_hash),
+      pkScript: String(raw.pk_script),
+      lockupAddress: String(raw.lockup_address),
+      payoutSats: Number(raw.payout_sats ?? raw.amount_sats),
+      // The column is NOT NULL, so a quote without a packet stores an empty string.
+      claimPacket: raw.claim_packet === '' ? null : text(raw.claim_packet ?? null),
+      refundLocktime: Number(raw.refund_locktime),
+      claimDelay: Number(raw.claim_delay),
+      refundDelay: Number(raw.refund_delay),
+      refundWithoutReceiverDelay: Number(raw.refund_without_receiver_delay),
+      receiverPubkey: String(raw.payout_pubkey),
+      receiverPkScript: text(raw.payout_pk_script ?? null),
+      serverPubkey: String(raw.server_pubkey),
+      emulatorPubkey: text(raw.emulator_pubkey ?? null),
+      clientRefundPubkey: text(raw.solver_pubkey ?? null),
+      refundPkScript: text(raw.solver_refund_pk_script ?? null),
+      nonInteractiveParameters: flag === null ? null : flag === '1',
+    }
   }
 
   /** One UPDATE for everything `change` did. It fails when the row was written by anyone since it was read. */

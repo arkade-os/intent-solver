@@ -10,6 +10,7 @@ import type { Swap } from '@arkade-os/solver-next/domain/swap/swap.js'
 import { ReceiveSwapTable } from '@arkade-os/solver-next/infrastructure/db/receive_swap_table.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { ReceiveSwapStore } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
+import { contractFromRow } from '../../bridge/legacyArkadeLockups.js'
 import { ref, SECRET, t } from '../../domain/support.js'
 
 const ID = SwapId.of('swap-1')
@@ -207,5 +208,9 @@ describe('receive_swap written through its table mapping', () => {
     expect((await table.findByFundingTx(ref('lockup:1'))).map((swap) => swap.id)).toEqual([ID])
     expect((await table.listOpen({ after: null, limit: 10 })).map((swap) => swap.id)).toEqual([ID])
     expect(await table.listOpen({ after: ID, limit: 10 })).toEqual([])
+  })
+
+  it('reads the contract exactly as the legacy code builds it from the row', async () => {
+    expect(await next.table.contract(ID)).toEqual(contractFromRow(await next.legacy.get(ID)))
   })
 })
