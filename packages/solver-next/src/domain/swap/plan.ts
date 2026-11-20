@@ -50,6 +50,43 @@ export const OnFailure = {
 
 export type OnFailure = ValueOf<typeof OnFailure>
 
+/** Why plan fails a swap. Each has plain default words; a route may give its own for the operator. */
+export const Reason = {
+  PayoutClaimedBlind: 'payout_claimed_blind',
+  PayoutSpentUnknown: 'payout_spent_unknown',
+  PayoutFailedUnsent: 'payout_failed_unsent',
+  PayoutFailed: 'payout_failed',
+  PayoutNeverSent: 'payout_never_sent',
+  PayoutLost: 'payout_lost',
+  RefundFailed: 'refund_failed',
+  ClientTookBoth: 'client_took_both',
+  ClientRefundedEarly: 'client_refunded_early',
+  CollectFailed: 'collect_failed',
+  QuoteExpired: 'quote_expired',
+  RefundNeverSent: 'refund_never_sent',
+  ClientOverfunded: 'client_overfunded',
+  ClientLockUnusable: 'client_lock_unusable',
+} as const
+
+export type Reason = ValueOf<typeof Reason>
+
+const WORDS: Record<Reason, string> = {
+  [Reason.PayoutClaimedBlind]: 'the to leg was claimed but its preimage is unknown',
+  [Reason.PayoutSpentUnknown]: 'the to leg was spent by something we do not recognise',
+  [Reason.PayoutFailedUnsent]: 'the payout failed and nothing left our side',
+  [Reason.PayoutFailed]: 'the lock on the to leg failed',
+  [Reason.PayoutNeverSent]: 'the payout was never sent',
+  [Reason.PayoutLost]: 'the payout was recorded but never reached the rail',
+  [Reason.RefundFailed]: 'the refund of the to leg failed',
+  [Reason.ClientTookBoth]: 'the client refunded the from leg after claiming the to leg',
+  [Reason.ClientRefundedEarly]: 'the client refunded the from leg before it was filled',
+  [Reason.CollectFailed]: 'the from leg could not be claimed',
+  [Reason.QuoteExpired]: 'quote expired before the client funded',
+  [Reason.RefundNeverSent]: 'the refund of the to leg never reached the rail',
+  [Reason.ClientOverfunded]: 'the client overfunded the lock',
+  [Reason.ClientLockUnusable]: 'the client lock cannot be used',
+}
+
 export type CheckResult = { readonly ok: true } | { readonly ok: false; readonly reason: string }
 
 /**
@@ -74,6 +111,8 @@ export interface Policies {
   onRefundFailed(swap: Swap, seen: Observation): Extract<OnFailure, 'retry' | 'stuck'>
   /** `to` was spent and the rail cannot say by whom yet. A claim can show up late, and it carries the preimage. */
   onSpentUnknown(swap: Swap, seen: Observation): Extract<OnFailure, 'wait' | 'stuck'>
+  /** This route's own words for a reason, where the operator already knows them by another name. */
+  readonly reasons?: Partial<Record<Reason, string>>
   /** A swap that ended without paying out: whether the client's lock may be handed back now. */
   canRelease(swap: Swap, seen: Observation): boolean
 }
@@ -117,7 +156,7 @@ const toShows = (swap: Swap, seen: Observation, policies: Policies): Decision | 
         const shown = record(swap, Side.To, 'claimed', { preimage: secret })
         if (shown !== null) return shown
       } else if (policies.onSpentUnknown(swap, seen) === OnFailure.Stuck) {
-        return fail(SwapOutcome.Stuck, 'the to leg was claimed but its preimage is unknown')
+        return fail(SwapOutcome.Stuck, Reason.PayoutClaimedBlind)
       }
     }
   }
@@ -128,7 +167,7 @@ const toShows = (swap: Swap, seen: Observation, policies: Policies): Decision | 
   }
   const open = to.state !== 'claimed' && to.state !== 'refunded'
   if (open && rail.spent.by === SpentBy.Unknown && policies.onSpentUnknown(swap, seen) === OnFailure.Stuck)
-    return fail(SwapOutcome.Stuck, 'the to leg was spent by something we do not recognise')
+    return fail(SwapOutcome.Stuck, Reason.PayoutSpentUnknown)
   // Adopt a lock of ours that landed before any gate runs: after a crash it must not be paid twice.
   if ((to.state === 'pending' || to.state === 'locking') && rail.lock === TxStatus.Landed) {
     const shown = record(swap, Side.To, 'locked', lockSeen(rail))
@@ -138,22 +177,20 @@ const toShows = (swap: Swap, seen: Observation, policies: Policies): Decision | 
     // With a transaction on record the lock cannot be undone: it may still land.
     const verdict = swap.canCancelLock(Side.To) ? policies.onLockFailed(swap, seen) : OnFailure.Stuck
     if (verdict === OnFailure.Retry) return { do: Action.Unlock }
-    if (verdict === OnFailure.Refuse)
-      return { do: Action.Abandon, reason: 'the payout failed and nothing left our side' }
-    return fail(SwapOutcome.Stuck, 'the lock on the to leg failed')
+    if (verdict === OnFailure.Refuse) return { do: Action.Abandon, reason: Reason.PayoutFailedUnsent }
+    return fail(SwapOutcome.Stuck, Reason.PayoutFailed)
   }
   if (to.state === 'locking' && rail.lock === TxStatus.None) {
     const verdict = policies.onLockMissing(swap, seen)
     if (verdict === OnFailure.Retry) return { do: Action.Lock, side: Side.To }
     if (verdict === OnFailure.Refuse && swap.canCancelLock(Side.To))
-      return { do: Action.Abandon, reason: 'the payout was never sent' }
-    if (verdict === OnFailure.Stuck)
-      return fail(SwapOutcome.Stuck, 'the payout was recorded but never reached the rail')
+      return { do: Action.Abandon, reason: Reason.PayoutNeverSent }
+    if (verdict === OnFailure.Stuck) return fail(SwapOutcome.Stuck, Reason.PayoutLost)
   }
   if (to.state === 'refunding' && rail.refund === TxStatus.Failed) {
     return policies.onRefundFailed(swap, seen) === OnFailure.Retry
       ? { do: Action.Refund, side: Side.To }
-      : fail(SwapOutcome.Stuck, 'the refund of the to leg failed')
+      : fail(SwapOutcome.Stuck, Reason.RefundFailed)
   }
   return null
 }
@@ -171,7 +208,7 @@ const fromShows = (swap: Swap, seen: Observation, policies: Policies): Decision 
     ) {
       return fail(
         SwapOutcome.Refused,
-        rail.funding === FundingStatus.Over ? 'the client overfunded the lock' : 'the client lock cannot be used',
+        rail.funding === FundingStatus.Over ? Reason.ClientOverfunded : Reason.ClientLockUnusable,
       )
     } else if (rail.funding === FundingStatus.Exact || rail.funding === FundingStatus.Over) {
       if (rail.matured) return record(swap, Side.From, 'locked', lockSeen(rail))
@@ -179,10 +216,8 @@ const fromShows = (swap: Swap, seen: Observation, policies: Policies): Decision 
     }
   }
   if (rail.spent.by === SpentBy.Refund && (from.state === 'locked' || from.state === 'claiming')) {
-    if (to.state === 'claimed')
-      return fail(SwapOutcome.Lost, 'the client refunded the from leg after claiming the to leg')
-    if (to.state === 'pending')
-      return fail(SwapOutcome.Refused, 'the client refunded the from leg before it was filled')
+    if (to.state === 'claimed') return fail(SwapOutcome.Lost, Reason.ClientTookBoth)
+    if (to.state === 'pending') return fail(SwapOutcome.Refused, Reason.ClientRefundedEarly)
   }
   if (from.state === 'claiming') {
     if (rail.claim === TxStatus.Landed) return record(swap, Side.From, 'claimed')
@@ -190,7 +225,7 @@ const fromShows = (swap: Swap, seen: Observation, policies: Policies): Decision 
     if (rail.claim === TxStatus.Failed || rail.claim === TxStatus.None) {
       return policies.onClaimFailed(swap, seen) === OnFailure.Retry
         ? { do: Action.Claim, side: Side.From }
-        : fail(SwapOutcome.Stuck, 'the from leg could not be claimed')
+        : fail(SwapOutcome.Stuck, Reason.CollectFailed)
     }
   }
   return null
@@ -264,6 +299,14 @@ export const legsToRead = (swap: Swap): { readonly from: boolean; readonly to: b
 
 /** One decision per call; the caller applies it and asks again until it gets `wait`. */
 export const plan = (swap: Swap, seen: Observation, policies: Policies): Decision => {
+  const decision = decide(swap, seen, policies)
+  if (decision.do !== Action.Fail && decision.do !== Action.Abandon) return decision
+  // A reason from a route's own check is already in its words; one of ours is looked up.
+  const words = policies.reasons?.[decision.reason as Reason] ?? WORDS[decision.reason as Reason]
+  return words === undefined ? decision : { ...decision, reason: words }
+}
+
+const decide = (swap: Swap, seen: Observation, policies: Policies): Decision => {
   const state = swap.state
   if (state === SwapOutcome.Refused || state === 'refunded') return whenOver(swap, seen, policies)
   if (state === SwapOutcome.Stuck) return whenStuck(swap, seen)
@@ -274,7 +317,7 @@ export const plan = (swap: Swap, seen: Observation, policies: Policies): Decisio
 
   switch (state) {
     case 'quoted':
-      return swap.quote.expiredAt(seen.now) ? fail(SwapOutcome.Refused, 'quote expired before the client funded') : WAIT
+      return swap.quote.expiredAt(seen.now) ? fail(SwapOutcome.Refused, Reason.QuoteExpired) : WAIT
     case 'funded':
       return whenFunded(swap, seen, policies)
     case 'filled':
@@ -289,7 +332,7 @@ export const plan = (swap: Swap, seen: Observation, policies: Policies): Decisio
       if (seen.to.refund !== TxStatus.None || seen.to.spent.by !== SpentBy.Nobody) return WAIT
       return policies.onRefundFailed(swap, seen) === OnFailure.Retry
         ? { do: Action.Refund, side: Side.To }
-        : fail(SwapOutcome.Stuck, 'the refund of the to leg never reached the rail')
+        : fail(SwapOutcome.Stuck, Reason.RefundNeverSent)
     case 'settling':
       return WAIT
   }

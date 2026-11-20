@@ -1,5 +1,5 @@
 import type { Observation } from './observation.js'
-import { OnFailure, type CheckResult, type Policies } from './plan.js'
+import { OnFailure, Reason, type CheckResult, type Policies } from './plan.js'
 import type { Swap } from './swap.js'
 
 const MINUTE = 60
@@ -49,6 +49,14 @@ const canFill =
 
 export const lnReceivePolicies = (config: LnReceiveConfig): Policies => ({
   canFill: canFill(config),
+  // The words operators and alerts already know from the legacy corridor.
+  reasons: {
+    [Reason.QuoteExpired]: 'invoice expired before it was ever armed',
+    [Reason.PayoutLost]:
+      'funding response lost; refund deadline reached with no lockup adopted — review for a stray lockup',
+    [Reason.PayoutSpentUnknown]: 'funded output gone during refunding with no matching claim found; needs review',
+    [Reason.PayoutClaimedBlind]: 'funded output gone during refunding with no matching claim found; needs review',
+  },
   // A payer may overpay a Lightning invoice. The payout stays as quoted.
   acceptsOverfunding: true,
   // Nothing left our side, so the swap goes back to `funded` and every check runs again.

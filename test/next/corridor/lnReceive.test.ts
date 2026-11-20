@@ -242,17 +242,12 @@ describe('Lightning receive, both engines side by side', () => {
     await then()
   })
 
-  it('refuses a quote nobody paid and retires its invoice; only the wording of the reason differs', async () => {
-    now += 3 * HOUR
-    await legacy.tick()
-    await next.tick()
-    const [old, mine] = [rows(legacy).swaps[0]!, rows(next).swaps[0]!]
-    expect({ ...mine, failure_reason: null }).toEqual({ ...old, failure_reason: null })
-    expect(rows(next).history).toEqual(rows(legacy).history)
-    expect([old.failure_reason, mine.failure_reason]).toEqual([
-      'invoice expired before it was ever armed',
-      'quote expired before the client funded',
-    ])
+  it('refuses a quote nobody paid, in the same words, and retires its invoice', async () => {
+    await then(undefined, 3 * HOUR)
+    expect(rows(next).swaps[0]).toMatchObject({
+      state: 'refused',
+      failure_reason: 'invoice expired before it was ever armed',
+    })
     for (const world of [legacy, next]) expect((await world.node.getHoldState(HASH)).status).toBe('cancelled')
   })
 })

@@ -11,6 +11,7 @@ import {
   SETTLE_SAFETY_MARGIN,
 } from '@arkade-os/solver-next/domain/swap/ln_receive.js'
 import type { LegStatus, Observation } from '@arkade-os/solver-next/domain/swap/observation.js'
+import { plan } from '@arkade-os/solver-next/domain/swap/plan.js'
 import { Quote } from '@arkade-os/solver-next/domain/swap/quote.js'
 import { EMPTY_LOCKUP_GRACE, REFUND_CENSORSHIP_GRACE } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import { btc, quoted, ref, t } from '../support.js'
@@ -145,5 +146,20 @@ describe('LN receive rules', () => {
     swap.lock('to', t(NOW), ref('txid-out'))
     expect(onSpentUnknown(swap, seen(NOW + 999))).toBe('wait')
     expect(onSpentUnknown(swap, seen(NOW + 1_000))).toBe('stuck')
+  })
+
+  it('keeps the words the legacy corridor uses when a quote expires or a payout is lost', () => {
+    const policies = lnReceivePolicies({ acceptRefundAloneGap: false })
+    expect(plan(swapValidUntil(NOW - 1), seen(NOW), policies)).toMatchObject({
+      outcome: 'refused',
+      reason: 'invoice expired before it was ever armed',
+    })
+    const paying = swapValidUntil(NOW + 100)
+    paying.lock('from', t(NOW - 900), ref('held'), t(NOW + 9_000))
+    paying.locking('to', t(NOW - 800))
+    expect(plan(paying, seen(NOW, {}, { refundOpensAt: t(NOW) }), policies)).toMatchObject({
+      outcome: 'stuck',
+      reason: 'funding response lost; refund deadline reached with no lockup adopted — review for a stray lockup',
+    })
   })
 })
