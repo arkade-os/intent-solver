@@ -166,8 +166,14 @@ describe('open RFQ boundary', () => {
     await relay.open(request(), { recipient: provider })
     await relay.open(request({ pair: pair.split('->').reverse().join('->') }))
     await relay.open(request({ bids_until: now / 1000 }))
-    await relay.open(request(), { createdAtMs: now + 6000 })
+    await relay.open(request({ bids_until: now / 1000 + 40 }), { createdAtMs: now + 31_000 })
     expect(preview).not.toHaveBeenCalled()
+  })
+
+  it('prices an open stamped by a client clock up to thirty seconds ahead', async () => {
+    const { relay, preview } = await setup()
+    await relay.open(request({ bids_until: now / 1000 + 40 }), { createdAtMs: now + 30_000 })
+    expect(preview).toHaveBeenCalledOnce()
   })
 
   it('deduplicates a signed open and bounds work before a price fetch', async () => {

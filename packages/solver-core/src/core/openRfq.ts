@@ -1,6 +1,8 @@
 import { OPEN_RFQ_ATOMIC, type RfqOpenPayload } from './rfqProtocol.js'
 
 export const OPEN_RFQ_MAX_AGE_MS = 60_000
+/** The client's clock, not ours: the SDK allows bid stamps the same 30 s each way. */
+export const OPEN_RFQ_MAX_FUTURE_MS = 30_000
 
 export type OpenRfq = RfqOpenPayload
 export interface OpenRfqPrice {
