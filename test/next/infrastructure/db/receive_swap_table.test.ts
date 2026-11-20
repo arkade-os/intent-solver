@@ -7,6 +7,7 @@ import { Conflict } from '@arkade-os/solver-next/domain/shared/error.js'
 import { RfqId, SwapId } from '@arkade-os/solver-next/domain/shared/ids.js'
 import { Hashlock } from '@arkade-os/solver-next/domain/swap/hashlock.js'
 import type { Swap } from '@arkade-os/solver-next/domain/swap/swap.js'
+import { MAX_REFUND_HORIZON, SETTLE_SAFETY_MARGIN } from '@arkade-os/solver-next/domain/swap/ln_receive.js'
 import { ReceiveSwapTable } from '@arkade-os/solver-next/infrastructure/db/receive_swap_table.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { ReceiveSwapStore } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
@@ -16,6 +17,7 @@ import { ref, SECRET, t } from '../../domain/support.js'
 const ID = SwapId.of('swap-1')
 const HASH = Hashlock.ofPreimage(SECRET)
 const RFQ = 'ef'.repeat(32)
+const CREATED = 1_000
 
 // Two databases with the same quote. The legacy store writes one, the new repository the other,
 // and after every step both must hold the same rows.
@@ -78,7 +80,11 @@ const step = async (legacy: (store: ReceiveSwapStore) => Promise<unknown>, chang
 
 const armed = () =>
   step(
-    (store) => store.transition(ID, 'quoted', 'armed', { htlc_expires_at: 5_000 }),
+    // What the legacy orchestrator does when the payment arrives: the transition, then a note for the operator.
+    async (store) => {
+      await store.transition(ID, 'quoted', 'armed', { htlc_expires_at: 5_000 })
+      await store.noteCltvHeadroom(ID, 5_000 - now, 5_000 - CREATED - (MAX_REFUND_HORIZON + SETTLE_SAFETY_MARGIN))
+    },
     (swap) => void swap.lock('from', t(now), ref(HASH), t(5_000)),
   )
 const paying = () =>

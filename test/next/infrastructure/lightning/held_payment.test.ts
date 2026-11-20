@@ -63,13 +63,14 @@ describe('a held Lightning payment', () => {
   })
 
   it('retires an invoice nobody paid', async () => {
-    expect(await leg.refund(receive())).toEqual({ status: 'sent', reference: HASH })
+    await leg.retire(receive())
     expect((await node.getHoldState(HASH)).status).toBe('cancelled')
   })
 
-  it('leaves a held payment alone', async () => {
+  it('leaves a held payment alone: it is neither retired nor refunded', async () => {
     node.armHold(HASH, TIMES_OUT)
-    expect(await leg.refund(receive())).toEqual({ status: 'not_sent' })
+    await leg.retire(receive())
+    expect(await leg.refund()).toEqual({ status: 'not_sent' })
     expect((await node.getHoldState(HASH)).status).toBe('armed')
   })
 

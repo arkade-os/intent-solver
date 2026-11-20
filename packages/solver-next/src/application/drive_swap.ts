@@ -92,6 +92,8 @@ export class DriveSwap {
       case Action.Fill:
         return this.save(swap, (s, at) => void s.fillOffer(at, s.to.reference(ReferenceKind.Funding) ?? undefined))
       case Action.Fail:
+        // Before the write, so a crash in between retires again instead of leaving the invoice open.
+        if (swap.from.state === 'pending') await this.deps.rails.from.retire?.(swap, Side.From).catch(() => undefined)
         return this.save(swap, (s, at) => void s.fail(decision.outcome, decision.reason, at))
     }
   }

@@ -5,6 +5,7 @@ import { Conflict, RuleViolated } from '../../domain/shared/error.js'
 import { RfqId, SwapId } from '../../domain/shared/ids.js'
 import { UnixSeconds } from '../../domain/shared/time.js'
 import { Hashlock, Preimage } from '../../domain/swap/hashlock.js'
+import { MAX_REFUND_HORIZON, SETTLE_SAFETY_MARGIN } from '../../domain/swap/ln_receive.js'
 import { ContractKind, Leg, Reference, Side, type LegState } from '../../domain/swap/leg.js'
 import { AmountMode, Quote } from '../../domain/swap/quote.js'
 import { Swap } from '../../domain/swap/swap.js'
@@ -277,6 +278,8 @@ export class ReceiveSwapTable implements Omit<SwapRepository, 'add'>, LockupCont
     // Strictly later than the last write, so `updated_at` tells two writes in one second apart.
     const updatedAt = Math.max(at, row.updatedAt + 1)
     const names = Object.keys(columns)
+    // A change the table has no column for, such as the transaction id of a payout just sent.
+    if (names.length === 0 && state === row.state) return swap
     const assignments = ['state = ?', 'updated_at = ?', ...names.map((name) => `${name} = ?`)].join(', ')
     const written = await this.driver.run(`UPDATE receive_swap SET ${assignments} WHERE id = ? AND updated_at = ?`, [
       state,
@@ -292,9 +295,22 @@ export class ReceiveSwapTable implements Omit<SwapRepository, 'add'>, LockupCont
         [id, at, row.state, state],
       )
     }
+    if (row.state === 'quoted' && state === 'armed') await this.noteHeadroom(id, at).catch(() => undefined)
     const saved = await this.get(id)
     if (saved === null) throw new Conflict(`swap ${id} disappeared while it was written`)
     return saved
+  }
+
+  // A line for the operator in the swap's history: how long the payment is held for, and how much of that is spare.
+  private async noteHeadroom(id: SwapId, at: number): Promise<void> {
+    const raw = await this.driver.get<Raw>('SELECT htlc_expires_at, created_at FROM receive_swap WHERE id = ?', [id])
+    if (raw === undefined || raw.htlc_expires_at === null) return
+    const timesOutAt = Number(raw.htlc_expires_at)
+    const spare = timesOutAt - Number(raw.created_at) - (MAX_REFUND_HORIZON + SETTLE_SAFETY_MARGIN)
+    await this.driver.run(
+      "INSERT INTO receive_swap_event (swap_id, at, from_state, to_state, detail) VALUES (?, ?, 'armed', 'armed', ?)",
+      [id, at, `cltv headroom ${timesOutAt - at}s — ${spare}s spare`],
+    )
   }
 
   private async row(id: SwapId): Promise<ReceiveSwapRecord | null> {

@@ -24,4 +24,6 @@ export interface RailService {
   lock(swap: Swap, side: Side): Promise<SendResult>
   claim(swap: Swap, side: Side): Promise<SendResult>
   refund(swap: Swap, side: Side): Promise<SendResult>
+  /** The swap ended before the client locked anything: close what was opened for them. Best effort, safe to repeat. */
+  retire?(swap: Swap, side: Side): Promise<void>
 }

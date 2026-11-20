@@ -64,16 +64,15 @@ export class HeldPayment implements RailService {
     }
   }
 
-  /** Retires an invoice nobody paid. A held payment is left alone. */
-  async refund(swap: Swap): Promise<SendResult> {
+  /** A held payment cannot be handed back. It times out on its own. */
+  async refund(): Promise<SendResult> {
+    return NOT_SENT
+  }
+
+  /** Cancels an invoice nobody paid, so it does not sit on the node until its own expiry. A held one is left alone. */
+  async retire(swap: Swap): Promise<void> {
     const hash = hashOf(swap)
-    if (!this.node.cancelHold) return NOT_SENT
-    try {
-      if ((await this.node.getHoldState(hash)).status !== HoldStatus.Pending) return NOT_SENT
-      await this.node.cancelHold(hash)
-      return { status: SendStatus.Sent, reference: Reference.of(hash) }
-    } catch {
-      return NOT_SENT
-    }
+    if (!this.node.cancelHold) return
+    if ((await this.node.getHoldState(hash)).status === HoldStatus.Pending) await this.node.cancelHold(hash)
   }
 }

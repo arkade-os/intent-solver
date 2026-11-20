@@ -3,6 +3,7 @@ import * as legacy from '@arkade-os/solver-core/core/receive.js'
 import { rawDelaySeconds } from '@arkade-os/solver-core/core/timelocks.js'
 import {
   lnReceivePolicies,
+  MAX_REFUND_HORIZON,
   MIN_SETTLE_WINDOW,
   REFUND_ALONE_MARGIN,
   REFUND_RETRY_WINDOW,
@@ -47,6 +48,7 @@ const swapValidUntil = (validUntil: number) =>
 describe('LN receive rules', () => {
   it('uses the same numbers as the legacy corridor', () => {
     expect(MIN_SETTLE_WINDOW).toBe(legacy.MIN_SETTLE_WINDOW)
+    expect(MAX_REFUND_HORIZON).toBe(legacy.MAX_REFUND_HORIZON)
     expect(SETTLE_SAFETY_MARGIN).toBe(legacy.SETTLE_SAFETY_MARGIN)
     expect(REFUND_ALONE_MARGIN).toBe(legacy.UNILATERAL_RECOURSE_MARGIN)
     expect(REFUND_RETRY_WINDOW).toBe(REFUND_CENSORSHIP_GRACE)

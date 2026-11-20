@@ -4,6 +4,8 @@ import type { Swap } from './swap.js'
 
 const MINUTE = 60
 
+/** The longest one swap may keep our payout locked. The refund locktime is set this far ahead when quoting. */
+export const MAX_REFUND_HORIZON = 120 * MINUTE
 /** The least time we need between paying out and the Lightning payment timing out. */
 export const MIN_SETTLE_WINDOW = 90 * MINUTE
 /** Our refund must open at least this long before the Lightning payment times out. */
