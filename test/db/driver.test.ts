@@ -348,3 +348,69 @@ describe('AssetRfqSwapStore.migrate', () => {
     await expect(AssetRfqSwapStore.open(d1Driver(fakeD1(legacy)))).resolves.toBeInstanceOf(AssetRfqSwapStore)
   })
 })
+
+describe('a transaction on the shared connection', () => {
+  const opened = async () => {
+    const driver = betterSqliteDriver(':memory:')
+    await driver.exec('CREATE TABLE t (name TEXT PRIMARY KEY)')
+    const names = async () =>
+      (await driver.all<{ name: string }>('SELECT name FROM t ORDER BY name')).map((r) => r.name)
+    return { driver, names }
+  }
+  const gate = () => {
+    let release = (): void => {}
+    const passed = new Promise<void>((resolve) => (release = resolve))
+    return { passed, release }
+  }
+
+  it('does not roll back a write made from outside while it was open', async () => {
+    const { driver, names } = await opened()
+    const hold = gate()
+    const failing = driver.transaction(async () => {
+      await driver.run("INSERT INTO t VALUES ('inside')")
+      await hold.passed
+      throw new Error('boom')
+    })
+    const outside = driver.run("INSERT INTO t VALUES ('outside')")
+    hold.release()
+
+    await expect(failing).rejects.toThrow('boom')
+    await outside
+    expect(await names()).toEqual(['outside'])
+    await driver.close()
+  })
+
+  it('does not show its uncommitted writes to a read from outside', async () => {
+    const { driver, names } = await opened()
+    const hold = gate()
+    const committing = driver.transaction(async () => {
+      await driver.run("INSERT INTO t VALUES ('inside')")
+      expect(await names()).toEqual(['inside'])
+      await hold.passed
+    })
+    let seen: string[] | null = null
+    const reading = names().then((rows) => (seen = rows))
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(seen).toBeNull()
+    hold.release()
+
+    await Promise.all([committing, reading])
+    expect(seen).toEqual(['inside'])
+    await driver.close()
+  })
+
+  it('makes a second transaction wait instead of failing to begin', async () => {
+    const { driver, names } = await opened()
+    const hold = gate()
+    const first = driver.transaction(async () => {
+      await driver.run("INSERT INTO t VALUES ('first')")
+      await hold.passed
+    })
+    const second = driver.transaction(() => driver.run("INSERT INTO t VALUES ('second')"))
+    hold.release()
+
+    await Promise.all([first, second])
+    expect(await names()).toEqual(['first', 'second'])
+    await driver.close()
+  })
+})

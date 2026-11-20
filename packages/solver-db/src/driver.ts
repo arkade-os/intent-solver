@@ -5,6 +5,7 @@
  * halves: file pragmas on Node, statement splitting on D1.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks'
 import Database from 'better-sqlite3'
 import { ensureDatabaseDir } from '@arkade-os/solver-core/util/sqlite.js'
 import { UniqueConstraintError, type SqlDriver } from '@arkade-os/solver-core/core/driver.js'
@@ -25,11 +26,21 @@ export const betterSqliteDriver = (path: string): SqlDriver => {
   // the most recent commit is precisely the one recording that we are about to
   // spend money. Durability is worth more here than write throughput.
   db.pragma('synchronous = FULL')
+  // A transaction stays open across awaits on this one connection. A statement from anywhere else would run
+  // inside it and be rolled back with it, so it waits until the transaction ends.
+  const transactionOf = new AsyncLocalStorage<object>()
+  let open: { readonly ended: Promise<void> } | null = null
+  const foreign = (): boolean => open !== null && transactionOf.getStore() !== open
+  const untilFree = async (): Promise<void> => {
+    while (open !== null && transactionOf.getStore() !== open) await open.ended
+  }
   return {
     exec: async (sql) => {
+      if (foreign()) await untilFree()
       db.exec(sql)
     },
     run: async (sql, params = []) => {
+      if (foreign()) await untilFree()
       try {
         return { changes: db.prepare(sql).run(...(params as never[])).changes }
       } catch (error) {
@@ -40,19 +51,32 @@ export const betterSqliteDriver = (path: string): SqlDriver => {
         throw error
       }
     },
-    get: async <T>(sql: string, params: unknown[] = []) => db.prepare(sql).get(...(params as never[])) as T | undefined,
-    all: async <T>(sql: string, params: unknown[] = []) => db.prepare(sql).all(...(params as never[])) as T[],
+    get: async <T>(sql: string, params: unknown[] = []) => {
+      if (foreign()) await untilFree()
+      return db.prepare(sql).get(...(params as never[])) as T | undefined
+    },
+    all: async <T>(sql: string, params: unknown[] = []) => {
+      if (foreign()) await untilFree()
+      return db.prepare(sql).all(...(params as never[])) as T[]
+    },
     transaction: async <T>(fn: () => Promise<T>): Promise<T> => {
+      if (foreign()) await untilFree()
       // Manual BEGIN/COMMIT rather than db.transaction(), which wraps a SYNC
       // function — our driver surface is async. A failure rolls back and rethrows.
       db.exec('BEGIN IMMEDIATE')
+      let end = (): void => {}
+      const mine = { ended: new Promise<void>((resolve) => (end = resolve)) }
+      open = mine
       try {
-        const result = await fn()
+        const result = await transactionOf.run(mine, fn)
         db.exec('COMMIT')
         return result
       } catch (error) {
         db.exec('ROLLBACK')
         throw error
+      } finally {
+        open = null
+        end()
       }
     },
     close: async () => {
