@@ -23,7 +23,9 @@ export interface DriveSwapDeps {
 
 /** Another worker changed the swap first, so this one did nothing. */
 export const SKIPPED = 'skipped'
-export type StepResult = Action | typeof SKIPPED
+/** The rail did not confirm a send. The next tick tries again; asking again at once would only hammer the rail. */
+export const NOT_SENT = 'not_sent'
+export type StepResult = Action | typeof SKIPPED | typeof NOT_SENT
 
 type SendAction = typeof Action.Lock | typeof Action.Claim | typeof Action.Refund
 
@@ -39,7 +41,7 @@ export class DriveSwap {
   async drive(id: SwapId): Promise<StepResult> {
     for (let i = 0; i < MAX_STEPS; i++) {
       const result = await this.step(id)
-      if (result === Action.Wait || result === SKIPPED) return result
+      if (result === Action.Wait || result === SKIPPED || result === NOT_SENT) return result
     }
     throw new RuleViolated(`swap ${id}: still not finished after ${MAX_STEPS} steps`)
   }
@@ -50,12 +52,12 @@ export class DriveSwap {
     if (swap === null) throw new RuleViolated(`swap ${id} does not exist`)
     const decision = plan(swap, await this.observe(swap), this.deps.policies)
     try {
-      await this.apply(swap, decision)
+      const sent = await this.apply(swap, decision)
+      return sent === false ? NOT_SENT : decision.do
     } catch (error) {
       if (error instanceof Conflict) return SKIPPED
       throw error
     }
-    return decision.do
   }
 
   private async observe(swap: Swap): Promise<Observation> {
@@ -92,21 +94,22 @@ export class DriveSwap {
     }
   }
 
-  private async send(swap: Swap, action: SendAction, side: Side): Promise<void> {
+  private async send(swap: Swap, action: SendAction, side: Side): Promise<boolean> {
     // 1. Write down that we are about to send. Only the worker whose write succeeds goes on to step 2.
     const marked = await this.save(swap, (s, at) => this.markSending(s, action, side, at))
     // 2. Send.
-    const result = await this.deps.rails[side][action](swap, side)
+    const result = await this.deps.rails[side][action](marked, side)
     // A lock that was not sent is undone at once, so the route's checks run again instead of waiting for a payout
     // that will never show. Only if nobody else touched the swap: another worker may be sending by now.
     if (result.status === SendStatus.NotSent && action === Action.Lock) {
       await this.save(marked, (s, at) => void s.lockFailed(side, at))
-      return
+      return false
     }
-    if (result.status !== SendStatus.Sent) return
+    if (result.status !== SendStatus.Sent) return false
     // 3. Write down what was sent.
     const reference = { [REFERENCE_KIND[action]]: result.reference }
     await this.deps.swaps.update(swap.id, (s) => void s.reference(side, reference, this.deps.now()))
+    return true
   }
 
   private markSending(swap: Swap, action: SendAction, side: Side, at: UnixSeconds): void {

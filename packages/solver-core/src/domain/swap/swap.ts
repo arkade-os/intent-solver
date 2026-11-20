@@ -179,10 +179,13 @@ export class Swap {
   lockFailed(side: Side, at: UnixSeconds): SwapEvent {
     const leg = this[side]
     if (leg.state !== 'locking') throw this.error(IllegalTransition, `${side} leg is ${leg.state}, not locking`)
-    if (leg.contract !== ContractKind.Lightning && leg.reference(ReferenceKind.Funding) !== null) {
-      throw this.error(RuleViolated, `${side} leg has a transaction that may still land`)
-    }
+    if (!this.canCancelLock(side)) throw this.error(RuleViolated, `${side} leg has a transaction that may still land`)
     return this.advance(side, 'pending', at, {})
+  }
+
+  canCancelLock(side: Side): boolean {
+    const leg = this[side]
+    return leg.contract === ContractKind.Lightning || leg.reference(ReferenceKind.Funding) === null
   }
 
   claiming(side: Side, at: UnixSeconds, claim?: Reference): SwapEvent {

@@ -124,6 +124,14 @@ describe('plan: paying out', () => {
     expect(plan(filling(), seen({ to: { ...NOTHING, lock: 'pending' } }), POLICIES)).toEqual({ do: 'wait' })
   })
 
+  it('never undoes a failed lock that has a transaction on record', () => {
+    const swap = funded()
+    swap.locking('to', t(1_002), ref('txid-out'))
+    const failed = seen({ to: { ...NOTHING, lock: 'failed' } })
+    expect(plan(swap, failed, policies({ onLockFailed: () => 'retry' }))).toMatchObject({ outcome: 'stuck' })
+    expect(plan(swap, seen(), policies({ onLockMissing: () => 'refuse' }))).toEqual({ do: 'wait' })
+  })
+
   it('asks the route about a payout that was recorded but never reached the rail', () => {
     const swap = filling(LIGHTNING)
     expect(plan(swap, seen(), POLICIES)).toEqual({ do: 'wait' })
@@ -138,6 +146,13 @@ describe('plan: paying out', () => {
     expect(plan(bothLocked(), seen({ to: { ...NOTHING, spent: { by: 'unknown' } } }), POLICIES)).toMatchObject({
       outcome: 'stuck',
     })
+  })
+
+  it('ignores an unrecognised spend once the claim is already recorded', () => {
+    const swap = bothLocked()
+    swap.claim('to', t(1_004), { preimage: SECRET })
+    const odd = seen({ to: { ...NOTHING, spent: { by: 'unknown' } } })
+    expect(plan(swap, odd, POLICIES)).toEqual({ do: 'claim', side: 'from' })
   })
 })
 
@@ -171,6 +186,7 @@ describe('plan: collecting', () => {
     expect(plan(swap, at('none'), POLICIES)).toEqual({ do: 'claim', side: 'from' })
     expect(plan(swap, at('failed'), POLICIES)).toEqual({ do: 'claim', side: 'from' })
     expect(plan(swap, at('failed'), policies({ onClaimFailed: () => 'stuck' }))).toMatchObject({ outcome: 'stuck' })
+    expect(plan(swap, at('none'), policies({ onClaimFailed: () => 'stuck' }))).toMatchObject({ outcome: 'stuck' })
     expect(plan(swap, at('pending'), POLICIES)).toEqual({ do: 'wait' })
     expect(plan(swap, at('landed'), POLICIES)).toEqual({ do: 'record', side: 'from', state: 'claimed' })
   })
@@ -182,6 +198,7 @@ describe('plan: collecting', () => {
   it('sticks on a claim whose preimage it cannot see', () => {
     const blind = { ...NOTHING, spent: { by: 'claim' as const, preimage: null } }
     expect(plan(bothLocked(), seen({ to: blind }), POLICIES)).toMatchObject({ outcome: 'stuck' })
+    expect(plan(bothLocked(), seen({ to: blind }), policies({ onSpentUnknown: () => 'wait' }))).toEqual({ do: 'wait' })
   })
 
   it('calls it lost when the client takes both sides', () => {
@@ -199,6 +216,7 @@ describe('plan: unwinding', () => {
     swap.refunding('to', t(1_010))
     expect(plan(swap, seen({ to: { ...NOTHING, refund: 'none' } }), POLICIES)).toEqual({ do: 'refund', side: 'to' })
     expect(plan(swap, seen({ to: { ...NOTHING, refund: 'pending' } }), POLICIES)).toEqual({ do: 'wait' })
+    expect(plan(swap, seen(), policies({ onRefundFailed: () => 'stuck' }))).toMatchObject({ outcome: 'stuck' })
     expect(plan(swap, seen({ to: { ...NOTHING, refund: 'failed' } }), POLICIES)).toEqual({ do: 'refund', side: 'to' })
     expect(
       plan(swap, seen({ to: { ...NOTHING, refund: 'failed' } }), policies({ onRefundFailed: () => 'stuck' })),
@@ -229,6 +247,8 @@ describe('plan: unwinding', () => {
     expect(plan(refused, seen(), POLICIES)).toEqual({ do: 'refund', side: 'from' })
     expect(plan(refused, seen(), policies({ canRelease: () => false }))).toEqual({ do: 'wait' })
     refused.refunding('from', t(1_003))
+    expect(plan(refused, seen(), POLICIES)).toEqual({ do: 'refund', side: 'from' })
+    expect(plan(refused, seen({ from: { ...NOTHING, refund: 'pending' } }), POLICIES)).toEqual({ do: 'wait' })
     expect(plan(refused, seen({ from: { ...NOTHING, refund: 'landed' } }), POLICIES)).toEqual({
       do: 'record',
       side: 'from',

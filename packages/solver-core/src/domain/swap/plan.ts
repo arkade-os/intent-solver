@@ -93,9 +93,12 @@ const toShows = (swap: Swap, seen: Observation, policies: Policies): Decision | 
         : null
     const claimed = coupled(to, seen) ? secret !== null : rail.spent.by === SpentBy.Claim
     if (claimed && to.state !== 'claimed') {
-      if (secret === null) return fail(SwapOutcome.Stuck, 'the to leg was claimed but its preimage is unknown')
-      const shown = record(swap, Side.To, 'claimed', secret)
-      if (shown !== null) return shown
+      if (secret !== null) {
+        const shown = record(swap, Side.To, 'claimed', secret)
+        if (shown !== null) return shown
+      } else if (policies.onSpentUnknown(swap, seen) === OnFailure.Stuck) {
+        return fail(SwapOutcome.Stuck, 'the to leg was claimed but its preimage is unknown')
+      }
     }
   }
   // Only our own refund that has landed counts. A spend that looks like a refund is not enough.
@@ -103,7 +106,8 @@ const toShows = (swap: Swap, seen: Observation, policies: Policies): Decision | 
     const shown = record(swap, Side.To, 'refunded')
     if (shown !== null) return shown
   }
-  if (rail.spent.by === SpentBy.Unknown && policies.onSpentUnknown(swap, seen) === OnFailure.Stuck)
+  const open = to.state !== 'claimed' && to.state !== 'refunded'
+  if (open && rail.spent.by === SpentBy.Unknown && policies.onSpentUnknown(swap, seen) === OnFailure.Stuck)
     return fail(SwapOutcome.Stuck, 'the to leg was spent by something we do not recognise')
   // Adopt a lock of ours that landed before any gate runs: after a crash it must not be paid twice.
   if ((to.state === 'pending' || to.state === 'locking') && rail.lock === TxStatus.Landed) {
@@ -111,7 +115,8 @@ const toShows = (swap: Swap, seen: Observation, policies: Policies): Decision | 
     if (shown !== null) return shown
   }
   if (to.state === 'locking' && rail.lock === TxStatus.Failed) {
-    const verdict = policies.onLockFailed(swap, seen)
+    // With a transaction on record the lock cannot be undone: it may still land.
+    const verdict = swap.canCancelLock(Side.To) ? policies.onLockFailed(swap, seen) : OnFailure.Stuck
     if (verdict === OnFailure.Retry) return { do: Action.Unlock }
     if (verdict === OnFailure.Refuse)
       return { do: Action.Abandon, reason: 'the payout failed and nothing left our side' }
@@ -120,7 +125,8 @@ const toShows = (swap: Swap, seen: Observation, policies: Policies): Decision | 
   if (to.state === 'locking' && rail.lock === TxStatus.None) {
     const verdict = policies.onLockMissing(swap, seen)
     if (verdict === OnFailure.Retry) return { do: Action.Lock, side: Side.To }
-    if (verdict === OnFailure.Refuse) return { do: Action.Abandon, reason: 'the payout was never sent' }
+    if (verdict === OnFailure.Refuse && swap.canCancelLock(Side.To))
+      return { do: Action.Abandon, reason: 'the payout was never sent' }
     if (verdict === OnFailure.Stuck)
       return fail(SwapOutcome.Stuck, 'the payout was recorded but never reached the rail')
   }
@@ -160,11 +166,11 @@ const fromShows = (swap: Swap, seen: Observation, policies: Policies): Decision 
   }
   if (from.state === 'claiming') {
     if (rail.claim === TxStatus.Landed) return record(swap, Side.From, 'claimed')
-    // `none` is a claim that never reached the rail, e.g. a crash after the intent was recorded.
+    // `none` is a claim that never reached the rail, e.g. a crash after it was recorded. The route decides both.
     if (rail.claim === TxStatus.Failed || rail.claim === TxStatus.None) {
-      return rail.claim === TxStatus.None || policies.onClaimFailed(swap, seen) === OnFailure.Retry
+      return policies.onClaimFailed(swap, seen) === OnFailure.Retry
         ? { do: Action.Claim, side: Side.From }
-        : fail(SwapOutcome.Stuck, 'the claim of the from leg failed')
+        : fail(SwapOutcome.Stuck, 'the from leg could not be claimed')
     }
   }
   return null
@@ -194,8 +200,10 @@ const whenOver = (swap: Swap, seen: Observation, policies: Policies): Decision =
   if ((from.state === 'pending' || from.state === 'locking') && seen.from.funding !== FundingStatus.None) {
     return record(swap, Side.From, seen.from.matured ? 'locked' : 'locking') ?? WAIT
   }
-  if (from.state === 'refunding' && seen.from.refund === TxStatus.Landed)
-    return record(swap, Side.From, 'refunded') ?? WAIT
+  if (from.state === 'refunding') {
+    if (seen.from.refund === TxStatus.Landed) return record(swap, Side.From, 'refunded') ?? WAIT
+    return seen.from.refund === TxStatus.Pending ? WAIT : { do: Action.Refund, side: Side.From }
+  }
   if (from.state === 'locked' && from.canMoveTo('refunding') && policies.canRelease(swap, seen)) {
     return { do: Action.Refund, side: Side.From }
   }
@@ -224,7 +232,10 @@ export const plan = (swap: Swap, seen: Observation, policies: Policies): Decisio
     case 'refunding':
       // Either `to` is still locked while `from` unwinds, or our refund never reached the rail.
       if (swap.to.state === 'locked') return seen.to.refundOpen ? { do: Action.Refund, side: Side.To } : WAIT
-      return seen.to.refund === TxStatus.None ? { do: Action.Refund, side: Side.To } : WAIT
+      if (seen.to.refund !== TxStatus.None) return WAIT
+      return policies.onRefundFailed(swap, seen) === OnFailure.Retry
+        ? { do: Action.Refund, side: Side.To }
+        : fail(SwapOutcome.Stuck, 'the refund of the to leg never reached the rail')
     case 'settling':
       return WAIT
   }

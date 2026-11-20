@@ -41,7 +41,7 @@ export interface LegStatus {
   readonly spent: SpendStatus
   /** What the rail says right now; it can trail `refundOpensAt`, which is measured on the wall clock. */
   readonly refundOpen: boolean
-  /** When the contract can no longer be claimed, e.g. a held HTLC's expiry. Null while unknown, or where it has none. */
+  /** When the contract can no longer be claimed, e.g. a held HTLC's expiry. Null where nothing is held. A rail that cannot read it throws. */
   readonly expiresAt: UnixSeconds | null
   /** When our own way back opens. Null where the contract gives us none. */
   readonly refundOpensAt: UnixSeconds | null

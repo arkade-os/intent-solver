@@ -122,9 +122,11 @@ describe('driving a swap', () => {
     expect([swap?.to.reference('funding'), swap?.from.reference('claim')]).toEqual(['payout', 'collect'])
   })
 
-  it('tries the payout again at once when the rail did not send it', async () => {
+  it('tries the payout again on the next tick when the rail did not send it', async () => {
     world.unsentLocks = 1
     const neverResend: Policies = { ...POLICIES, onLockMissing: () => 'wait' }
+    expect(await worker(neverResend).drive(terms.id)).toBe('not_sent')
+    expect((await swaps.get(terms.id))?.to.state).toBe('pending')
     expect(await worker(neverResend).drive(terms.id)).toBe('wait')
     expect((await swaps.get(terms.id))?.state).toBe('settled')
     expect(world.payouts).toBe(1)

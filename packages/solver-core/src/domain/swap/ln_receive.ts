@@ -47,7 +47,8 @@ const canFill =
 
 export const lnReceivePolicies = (config: LnReceiveConfig): Policies => ({
   canFill: canFill(config),
-  acceptsOverfunding: false,
+  // A payer may overpay a Lightning invoice. The payout stays as quoted.
+  acceptsOverfunding: true,
   // Nothing left our side, so the swap goes back to `funded` and every check runs again.
   onLockFailed: () => OnFailure.Retry,
   // Never send again: the first payout may still show up. Wait until our refund opens, then call an operator.
