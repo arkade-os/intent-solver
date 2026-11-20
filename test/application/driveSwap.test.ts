@@ -1,0 +1,138 @@
+import { beforeEach, describe, expect, it } from 'vitest'
+import { DriveSwap, type RouteDriver } from '@arkade-os/solver-core/application/drive_swap.js'
+import type { Side } from '@arkade-os/solver-core/domain/swap/leg.js'
+import type { LegSeen } from '@arkade-os/solver-core/domain/swap/observation.js'
+import type { Policies } from '@arkade-os/solver-core/domain/swap/plan.js'
+import type { Swap } from '@arkade-os/solver-core/domain/swap/swap.js'
+import type { RailService, RailWatcher, Sent } from '@arkade-os/solver-core/ports/rail.js'
+import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
+import { SwapEvents } from '@arkade-os/solver-db/swapEvents.js'
+import { quoted, ref, SECRET, t, terms } from '../domain/support.js'
+
+class Crash extends Error {}
+
+/** The two rails of one swap: the client has funded, and claims our payout as soon as it lands. */
+class World {
+  payouts = 0
+  collected = 0
+  /** Counts every write and every rail call; the one numbered `crashAt` dies, before or after taking effect. */
+  calls = 0
+  crashAt = 0
+  crashAfterEffect = false
+
+  effect<T>(run: () => T): T {
+    this.calls += 1
+    const dying = this.calls === this.crashAt
+    if (dying && !this.crashAfterEffect) throw new Crash()
+    const result = run()
+    if (dying) throw new Crash()
+    return result
+  }
+
+  seen(side: Side): LegSeen {
+    const paid = this.payouts > 0
+    const base = { matured: true, refundOpen: false, expiresAt: null, refundOpensAt: null, refund: 'none' } as const
+    return side === 'from'
+      ? {
+          ...base,
+          funding: 'exact',
+          spent: { by: 'nobody' },
+          lock: 'none',
+          claim: this.collected > 0 ? 'landed' : 'none',
+        }
+      : {
+          ...base,
+          funding: 'none',
+          spent: paid ? { by: 'claim', preimage: SECRET } : { by: 'nobody' },
+          lock: paid ? 'landed' : 'none',
+          claim: 'none',
+        }
+  }
+}
+
+const POLICIES: Policies = {
+  canFill: () => ({ ok: true }),
+  acceptsOverfunding: false,
+  onLockFailed: () => 'stick',
+  onLockMissing: () => 'retry',
+  canCollect: () => ({ ok: true }),
+  onClaimFailed: () => 'retry',
+  onRefundFailed: () => 'retry',
+  canRelease: () => true,
+}
+
+let world: World
+let swaps: SwapEvents
+
+const worker = (): DriveSwap => {
+  const watcher: RailWatcher = { observe: async (_swap: Swap, side: Side) => world.seen(side) }
+  const sent = (reference: string): Sent => ({ dispatch: 'sent', reference: ref(reference) })
+  const service: RailService = {
+    lock: async () => world.effect(() => ((world.payouts += 1), sent('payout'))),
+    claim: async () => world.effect(() => ((world.collected += 1), sent('collect'))),
+    refund: async () => world.effect(() => sent('refund')),
+  }
+  const route: RouteDriver = {
+    policies: POLICIES,
+    watchers: { from: watcher, to: watcher },
+    services: { from: service, to: service },
+    circumstances: async () => ({ peer: null, keyCurrent: true, approval: 'not_required', ownInvoice: false }),
+  }
+  const stored: Pick<SwapEvents, 'get' | 'update'> = {
+    get: (id) => swaps.get(id),
+    update: async (id, change) => {
+      const before = world.calls
+      // The write itself is the effect; the callback only prepares it.
+      const result = await swaps.update(id, async (swap) => {
+        await change(swap)
+        if (world.calls === before) world.effect(() => undefined)
+      })
+      return result
+    },
+  }
+  return new DriveSwap({ swaps: stored, route, now: () => t(1_500) })
+}
+
+beforeEach(async () => {
+  world = new World()
+  swaps = await SwapEvents.open(betterSqliteDriver(':memory:'))
+  await swaps.add(quoted())
+})
+
+describe('driving a swap', () => {
+  it('takes it from funded to settled, paying out and collecting once', async () => {
+    expect(await worker().drive(terms.id)).toBe('wait')
+    const swap = await swaps.get(terms.id)
+    expect(swap?.state).toBe('settled')
+    expect([world.payouts, world.collected]).toEqual([1, 1])
+    expect([swap?.to.reference('funding'), swap?.from.reference('claim')]).toEqual(['payout', 'collect'])
+  })
+
+  it('resumes from the store after a crash at any write or rail call, and still pays out once', async () => {
+    await worker().drive(terms.id)
+    const total = world.calls
+    expect(total).toBeGreaterThan(6)
+
+    for (const crashAfterEffect of [false, true]) {
+      for (let crashAt = 1; crashAt <= total; crashAt++) {
+        world = Object.assign(new World(), { crashAt, crashAfterEffect })
+        swaps = await SwapEvents.open(betterSqliteDriver(':memory:'))
+        await swaps.add(quoted())
+        await expect(worker().drive(terms.id), `crash ${crashAt}`).rejects.toThrow(Crash)
+
+        expect(await worker().drive(terms.id)).toBe('wait')
+        const label = `crash ${crashAfterEffect ? 'after' : 'before'} call ${crashAt}`
+        expect((await swaps.get(terms.id))?.state, label).toBe('settled')
+        expect(world.payouts, label).toBe(1)
+      }
+    }
+  })
+
+  it('lets one of two workers act on the same decision; the other sends nothing', async () => {
+    const steps = await Promise.all([worker().step(terms.id), worker().step(terms.id)])
+    expect(steps.sort()).toEqual(['lost', 'record'])
+    const racing = await Promise.all([worker().step(terms.id), worker().step(terms.id)])
+    expect(racing.sort()).toEqual(['lock', 'lost'])
+    expect(world.payouts).toBe(1)
+  })
+})
