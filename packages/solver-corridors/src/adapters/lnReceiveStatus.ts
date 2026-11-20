@@ -12,9 +12,10 @@ import { refundDeadlineReached, refundDeadlineSeconds } from '../chainClock.js'
 import type { ReceiveSwapRow } from '../db/receiveSwaps.js'
 import { adoptFunding } from '../legs/arkadeLockup.js'
 import type { LockupPreimageReader } from '../receive/lockupPreimage.js'
-import { receiveCovenantRowFor } from '../receive/orchestrator.js'
+import { receiveCovenantRowFor } from '../receive/covenantRow.js'
 
-const NOTHING: LegStatus = {
+/** A leg that was not read, or shows nothing. */
+export const NOT_SEEN: LegStatus = {
   funding: 'none',
   matured: false,
   spent: { by: 'nobody' },
@@ -45,19 +46,20 @@ export const holdStatus = async (
     case 'pending':
     // A status this build does not know is not `armed`, and only `armed` is acted on.
     case 'unknown':
-      return NOTHING
+      return NOT_SEEN
     case 'armed':
       return {
-        ...NOTHING,
+        ...NOT_SEEN,
         funding: 'exact',
         matured: true,
         expiresAt: hold.expiresAt === null ? null : UnixSeconds.of(hold.expiresAt),
         lockReference: Reference.of(row.paymentHash),
       }
     case 'settled':
-      return { ...NOTHING, funding: 'exact', matured: true, claim: 'landed' }
+      // Not `funded`: a settled payment is no longer held, and only a held one may be paid out against.
+      return { ...NOT_SEEN, claim: 'landed' }
     case 'cancelled':
-      return { ...NOTHING, spent: { by: 'refund' }, refund: 'landed' }
+      return { ...NOT_SEEN, spent: { by: 'refund' }, refund: 'landed' }
   }
 }
 
@@ -80,7 +82,7 @@ export const lockupStatus = async (deps: LockupStatusDeps, row: ReceiveSwapRow, 
     refundOpensAt: UnixSeconds.of(await refundDeadlineSeconds(row.refundLocktime, now, chainTip, 'read the lockup')),
     refundAloneDelay: rawDelaySeconds(row.refundWithoutReceiverDelay),
   }
-  if (lockup === null) return { ...NOTHING, ...deadlines }
+  if (lockup === null) return { ...NOT_SEEN, ...deadlines }
 
   const same = (o: { txid: string; vout: number }): boolean => o.txid === lockup.txid && o.vout === lockup.vout
   // A claim counts on any output of the script: it reveals the same preimage.
@@ -100,7 +102,7 @@ export const lockupStatus = async (deps: LockupStatusDeps, row: ReceiveSwapRow, 
         ? { by: 'nobody' }
         : { by: refunded ? 'refund' : 'unknown' }
   return {
-    ...NOTHING,
+    ...NOT_SEEN,
     ...deadlines,
     lock: 'landed',
     lockReference: Reference.of(`${lockup.txid}:${lockup.vout}`),

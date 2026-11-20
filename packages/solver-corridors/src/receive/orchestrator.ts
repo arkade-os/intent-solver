@@ -43,6 +43,14 @@ import type { Limits } from '@arkade-os/solver-core/core/limits.js'
 import { FREE, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { fixedFeePricing, type PricingStrategy } from '@arkade-os/solver-core/core/pricing.js'
 import { RFQ_PAIR_RECEIVE } from '../wire/lightningReceivePayloads.js'
+import { UnixSeconds } from '@arkade-os/solver-core/domain/shared/time.js'
+import { lnReceivePolicies } from '@arkade-os/solver-core/domain/swap/ln_receive.js'
+import type { LegStatus } from '@arkade-os/solver-core/domain/swap/observation.js'
+import { Action, plan, type Decision, type Policies } from '@arkade-os/solver-core/domain/swap/plan.js'
+import type { Swap } from '@arkade-os/solver-core/domain/swap/swap.js'
+import { swapFromReceiveRow } from '../adapters/lnReceiveSwaps.js'
+import { holdStatus, NOT_SEEN } from '../adapters/lnReceiveStatus.js'
+import { receiveCovenantRowFor } from './covenantRow.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
 import { satsOutputs } from '@arkade-os/solver-arkade/arkade/wallet.js'
@@ -129,36 +137,7 @@ export const EMPTY_LOCKUP_GRACE = 120
  */
 export const REFUND_CENSORSHIP_GRACE = 6 * 60 * 60
 
-/**
- * Maps this leg's row onto the shape `covenantScriptFromRow`
- * (`src/send/arkadeOps.ts`) needs — the receive-leg counterpart of
- * `src/send/onchainOrchestrator.ts`'s `covenantRowFor`.
- *
- * A ROLE INVERSION, not a rename: on this leg the CLIENT ultimately claims (they
- * generated `P`), so they play the covenant's `receiver`; the PROVIDER funds the
- * lockup and needs the "needs nobody" refund, so it plays `client`. The three delay
- * fields are NOT part of the inversion — they are operator-derived
- * (`deriveUnilateralDelays`) and mean the same thing whoever holds which key.
- *
- * Also consumed by `arkade/vtxoLifecycle.ts`'s `liveLockupRows`, aliased there against
- * the other receive corridor's same-named function.
- */
-export const receiveCovenantRowFor = (row: ReceiveSwapRow): CovenantScriptRow => ({
-  id: row.id,
-  receiverPubkey: row.payoutPubkey,
-  serverPubkey: row.serverPubkey,
-  paymentHash: row.paymentHash,
-  refundLocktime: row.refundLocktime,
-  claimDelay: row.claimDelay,
-  emulatorPubkey: row.emulatorPubkey,
-  refundPkScript: row.solverRefundPkScript,
-  pkScript: row.pkScript,
-  clientRefundPubkey: row.solverPubkey,
-  refundWithoutReceiverDelay: row.refundWithoutReceiverDelay,
-  refundDelay: row.refundDelay,
-  receiverPkScript: row.payoutPkScript,
-  nonInteractiveParameters: row.nonInteractiveParameters,
-})
+export { receiveCovenantRowFor }
 
 export interface ReceiveServiceDeps {
   quoteLimiter?: RateLimiter
@@ -314,6 +293,7 @@ export class ReceiveSwapService {
 
   private readonly admission: AdmissionStrategy
   private readonly preimages: LockupPreimageReader
+  private readonly policies: Policies
 
   constructor(private readonly deps: ReceiveServiceDeps) {
     this.admission = deps.admission
@@ -322,6 +302,7 @@ export class ReceiveSwapService {
     this.quoteLimiter = deps.quoteLimiter ?? new RateLimiter(QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, this.now)
     this.fee = deps.fee ?? FREE
     this.pricing = deps.pricing ?? fixedFeePricing(this.fee)
+    this.policies = lnReceivePolicies({ acceptRefundAloneGap: deps.acceptUnilateralGap })
   }
 
   onTickError?: (id: string, error: unknown) => void
@@ -686,15 +667,31 @@ export class ReceiveSwapService {
     }
   }
 
+  // What `plan` says for this row. The rules live there and in `lnReceivePolicies`; the methods below carry them out.
+  private decide(swap: Swap, from: LegStatus, to: LegStatus = NOT_SEEN): Decision {
+    const seen = {
+      now: UnixSeconds.of(this.now()),
+      from,
+      to,
+      peer: null,
+      keyCurrent: true,
+      approval: 'not_required',
+      ownInvoice: false,
+    } as const
+    return plan(swap, seen, this.policies)
+  }
+
   private async whenQuoted(row: ReceiveSwapRow): Promise<boolean> {
     const { store, ln, arkade } = this.deps
-    const state = await ln.getHoldState(row.paymentHash)
+    const swap = swapFromReceiveRow(row)
+    const decision = this.decide(swap, await holdStatus(ln, row, swap))
     // A REAL htlc always wins, and is checked first. Coupling must never
     // override one: a row funded against a send lockup while an htlc it is
     // obliged to settle is also live owes two payouts on one preimage.
-    if (state.status === 'armed') {
-      const armed = await store.transition(row.id, 'quoted', 'armed', { htlc_expires_at: state.expiresAt })
-      if (armed) await this.noteCltvHeadroom(row, state.expiresAt)
+    if (decision.do === Action.Record) {
+      const expiresAt = decision.expiresAt ?? null
+      const armed = await store.transition(row.id, 'quoted', 'armed', { htlc_expires_at: expiresAt })
+      if (armed) await this.noteCltvHeadroom(row, expiresAt)
       return armed
     }
 
@@ -764,7 +761,7 @@ export class ReceiveSwapService {
       return store.transition(row.id, 'quoted', 'armed', { htlc_expires_at: null })
     }
 
-    if (this.now() >= row.invoiceExpiresAt) {
+    if (decision.do === Action.Fail) {
       // Retire the invoice as well as the row. The row is ours and the
       // invoice is the BACKEND's: failing one does not touch the other, so
       // without this the mint outlives the quote and sits on the node until

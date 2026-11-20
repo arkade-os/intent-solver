@@ -7,7 +7,7 @@ import type { ReceiveArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps
 import type { ReceiveSwapStore } from '../db/receiveSwaps.js'
 import { claimPacketStamp } from '../receive/claimPacket.js'
 import { FundNotSubmittedError } from '../receive/fundLockup.js'
-import { receiveCovenantRowFor } from '../receive/orchestrator.js'
+import { receiveCovenantRowFor } from '../receive/covenantRow.js'
 import { covenantScriptFromRow } from '../send/arkadeOps.js'
 import { holdStatus, lockupStatus, type LockupStatusDeps } from './lnReceiveStatus.js'
 
