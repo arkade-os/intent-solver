@@ -224,7 +224,7 @@ it does not derive a registry market key.
 One id holds the corridor, the network and the asset.
 
 This section describes a future directed-negotiation version. Open discovery
-reuses these canonical leg spellings with its own directional `~` pair and
+reuses these canonical leg spellings with its own directional `->` pair and
 topic (§ 4.6); it does not use the draft aliases or sorted topic below.
 
 **Legs.** A leg is `<corridor>:<network>/<asset-namespace>:<asset-reference>`:
@@ -635,16 +635,18 @@ and recovery retain their existing version and fields.
 
 **Phase 1 — `rfq_open` (public broadcast, kind `24860`).** The signed event
 contains plaintext JSON, with no recipient or `p` tag. Its `t` tag MUST equal
-the payload's directional `pair`: canonical CAIP-19 legs joined with `~`, in
+the payload's directional `pair`: canonical CAIP-19 legs joined with `->`, in
 client-gives then client-receives order. Leg spellings are defined in § 2.2;
 no aliases, sorting or registry market-key conversion applies to this flow.
+The arrow is the directed pairs' separator (§ 2.2). `~` stays reserved for the
+undirected topic key there, so a `~`-joined open pair is malformed.
 
 ```json
 {
   "v": 1,
   "type": "rfq_open",
   "open_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-  "pair": "arkade:bitcoin/slip44:0~eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+  "pair": "arkade:bitcoin/slip44:0->eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
   "amount_side": "from",
   "amount": "25000",
   "bids_until": 1800000005
@@ -680,7 +682,7 @@ bid's `p` tag MUST name the author and its `e` tag MUST name the signed open
   "v": 1,
   "type": "rfq_bid",
   "open_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-  "pair": "arkade:bitcoin/slip44:0~eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+  "pair": "arkade:bitcoin/slip44:0->eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
   "amount_side": "from",
   "from_amount": "25000",
   "to_amount": "24920000",

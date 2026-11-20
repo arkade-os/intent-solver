@@ -111,7 +111,7 @@ const open = (overrides: Partial<RfqOpenPayload> = {}): RfqOpenPayload => ({
   v: 1,
   type: 'rfq_open',
   open_id: OPEN_ID,
-  pair: 'arkade:bitcoin/slip44:0~bolt11:bitcoin/slip44:0',
+  pair: 'arkade:bitcoin/slip44:0->bolt11:bitcoin/slip44:0',
   amount_side: 'to',
   amount: '100000000000000000001',
   bids_until: 1_800_000_005,
@@ -143,7 +143,7 @@ describe('rfqBidPayload', () => {
       v: 1,
       type: 'rfq_bid',
       open_id: OPEN_ID,
-      pair: 'arkade:bitcoin/slip44:0~bolt11:bitcoin/slip44:0',
+      pair: 'arkade:bitcoin/slip44:0->bolt11:bitcoin/slip44:0',
       amount_side: 'to',
       from_amount: '100250000000000000001',
       to_amount: '100000000000000000001',
@@ -155,7 +155,7 @@ describe('rfqBidPayload', () => {
   it('echoes the selected exact amount side and directional canonical pair', () => {
     const request = open({
       open_id: 'e'.repeat(64),
-      pair: 'bolt11:bitcoin/slip44:0~arkade:bitcoin/slip44:0',
+      pair: 'bolt11:bitcoin/slip44:0->arkade:bitcoin/slip44:0',
       amount_side: 'from',
       amount: '100250000000000000001',
     })

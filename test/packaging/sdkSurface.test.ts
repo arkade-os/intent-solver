@@ -100,7 +100,7 @@ describe('the solver SDK surface', () => {
       v: 1,
       type: 'rfq_open',
       open_id: 'a'.repeat(64),
-      pair: 'arkade:bitcoin/slip44:0~bolt11:bitcoin/slip44:0',
+      pair: 'arkade:bitcoin/slip44:0->bolt11:bitcoin/slip44:0',
       amount_side: 'from',
       amount: '100000000000000000001',
       bids_until: 1_800_000_005,

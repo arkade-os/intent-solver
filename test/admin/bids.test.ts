@@ -6,7 +6,7 @@ import type { OpenRfq } from '@arkade-os/solver-core/core/openRfq.js'
 import { createBidTail, recordBidsIn } from '@arkade-os/solver-app/admin/bids.js'
 
 const NOW = 1_800_000_000
-const pair = 'arkade:bitcoin/slip44:0~bolt11:bitcoin/slip44:0'
+const pair = 'arkade:bitcoin/slip44:0->bolt11:bitcoin/slip44:0'
 const open: OpenRfq = {
   v: 1,
   type: 'rfq_open',

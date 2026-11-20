@@ -4,7 +4,7 @@ import { marketKeyForPair } from '@arkade-os/solver-core/core/marketKey.js'
 import { RfqOpen } from '@arkade-os/solver-core/core/rfqProtocol.js'
 
 const OPEN_ID = 'a'.repeat(64)
-const PAIR = 'arkade:bitcoin/slip44:0~bolt11:bitcoin/slip44:0'
+const PAIR = 'arkade:bitcoin/slip44:0->bolt11:bitcoin/slip44:0'
 const NOW_MS = 1_800_000_000_000
 const NOW_SECONDS = NOW_MS / 1000
 
@@ -157,7 +157,7 @@ describe('RfqOpen wire schema', () => {
   it('accepts canonical CAIP asset pairs across supported asset namespaces', () => {
     const asset = `arkade:bitcoin/asset:${'a'.repeat(68)}`
     const token = `eip155:1/erc20:0x${'b'.repeat(40)}`
-    for (const pair of [PAIR, `bitcoin:bitcoin/slip44:0~${asset}`, `${asset}~${token}`, `${token}~${asset}`]) {
+    for (const pair of [PAIR, `bitcoin:bitcoin/slip44:0->${asset}`, `${asset}->${token}`, `${token}->${asset}`]) {
       expect(RfqOpen.parse(open({ pair })).pair).toBe(pair)
     }
   })
@@ -166,10 +166,10 @@ describe('RfqOpen wire schema', () => {
     for (const pair of [
       'arkade:BTC->lightning:BTC',
       PAIR.toUpperCase(),
-      PAIR.replace('~', '->'),
-      `${PAIR}~bolt11:bitcoin/slip44:0`,
-      `arkade:bitcoin/asset:${'a'.repeat(67)}~bolt11:bitcoin/slip44:0`,
-      `arkade:${'a'.repeat(512)}/slip44:0~bolt11:bitcoin/slip44:0`,
+      PAIR.replace('->', '~'),
+      `${PAIR}->bolt11:bitcoin/slip44:0`,
+      `arkade:bitcoin/asset:${'a'.repeat(67)}->bolt11:bitcoin/slip44:0`,
+      `arkade:${'a'.repeat(512)}/slip44:0->bolt11:bitcoin/slip44:0`,
     ]) {
       expect(RfqOpen.safeParse(open({ pair })).success).toBe(false)
     }

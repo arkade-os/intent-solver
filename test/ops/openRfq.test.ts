@@ -101,7 +101,7 @@ describe('public price previews', () => {
       assetMarkets: services.assetRfqMarkets,
     })
     expect(validateCard(listed).ok).toBe(true)
-    expect(await preview(open(`${btc}~arkade:bitcoin/asset:${asset}`, '100000000'))).toEqual({
+    expect(await preview(open(`${btc}->arkade:bitcoin/asset:${asset}`, '100000000'))).toEqual({
       from_amount: '100000000',
       to_amount: '2000000000000000000',
       valid_until: 1800000035,
@@ -111,15 +111,15 @@ describe('public price previews', () => {
 
   it('uses real fee inversion and each BTC corridor bound side', async () => {
     const preview = openRfqPreview(source() as unknown as Services, { now: () => 1800000000 })
-    expect(await preview(open(`${btc}~bolt11:bitcoin/slip44:0`, '1000', 'to'))).toMatchObject({
+    expect(await preview(open(`${btc}->bolt11:bitcoin/slip44:0`, '1000', 'to'))).toMatchObject({
       from_amount: String(giveSatsFor(1000, fee)),
       to_amount: '1000',
     })
-    expect(await preview(open(`bolt11:bitcoin/slip44:0~${btc}`, '1000'))).toMatchObject({
+    expect(await preview(open(`bolt11:bitcoin/slip44:0->${btc}`, '1000'))).toMatchObject({
       from_amount: '1000',
       to_amount: String(payoutSatsFor(1000, fee)),
     })
-    expect(await preview(open(`${btc}~bolt11:bitcoin/slip44:0`, '1000'))).toBeUndefined()
+    expect(await preview(open(`${btc}->bolt11:bitcoin/slip44:0`, '1000'))).toBeUndefined()
   })
 
   it('refuses unsafe exact-out inversions while preserving safe maximum free previews', async () => {
@@ -142,7 +142,7 @@ describe('public price previews', () => {
       }
       const preview = openRfqPreview(services as unknown as Services, { now: () => 1800000000 })
       const amount = String(Number.MAX_SAFE_INTEGER)
-      for (const pair of [`${btc}~bolt11:bitcoin/slip44:0`, `bolt11:bitcoin/slip44:0~${btc}`]) {
+      for (const pair of [`${btc}->bolt11:bitcoin/slip44:0`, `bolt11:bitcoin/slip44:0->${btc}`]) {
         const result = await preview(open(pair, amount, 'to'))
         if (bps > 0) expect(result).toBeUndefined()
         else expect(result).toMatchObject({ from_amount: amount, to_amount: amount })
@@ -164,11 +164,11 @@ describe('public price previews', () => {
     }
     const preview = openRfqPreview(services as unknown as Services, { now: () => 1800000000 })
     const priced = { from_amount: '10000', to_amount: '9850', valid_until: 1800000035 }
-    expect(await preview(open(`${btc}~bitcoin:bitcoin/slip44:0`, '10000'))).toEqual(priced)
-    expect(await preview(open(`${btc}~bitcoin:bitcoin/slip44:0`, '9850', 'to'))).toEqual(priced)
+    expect(await preview(open(`${btc}->bitcoin:bitcoin/slip44:0`, '10000'))).toEqual(priced)
+    expect(await preview(open(`${btc}->bitcoin:bitcoin/slip44:0`, '9850', 'to'))).toEqual(priced)
     expect(previewAmounts).toHaveBeenNthCalledWith(1, 10000, 'from')
     expect(previewAmounts).toHaveBeenNthCalledWith(2, 9850, 'to')
-    expect(await preview(open(`${btc}~bitcoin:bitcoin/slip44:0`, '9007199254740992'))).toBeUndefined()
+    expect(await preview(open(`${btc}->bitcoin:bitcoin/slip44:0`, '9007199254740992'))).toBeUndefined()
     expect(previewAmounts).toHaveBeenCalledTimes(2)
     expect(services.corridors.get).toHaveBeenCalledWith('arkade:BTC->onchain:BTC')
   })
@@ -188,8 +188,8 @@ describe('public price previews', () => {
         onchainService: state === 'missing' ? undefined : { previewAmounts },
       }
       const preview = openRfqPreview(services as unknown as Services, { now: () => 1800000000 })
-      expect(await preview(open(`${btc}~bitcoin:bitcoin/slip44:0`, '10000'))).toBeUndefined()
-      expect(await preview(open(`${btc}~bitcoin:bitcoin/slip44:0`, '9850', 'to'))).toBeUndefined()
+      expect(await preview(open(`${btc}->bitcoin:bitcoin/slip44:0`, '10000'))).toBeUndefined()
+      expect(await preview(open(`${btc}->bitcoin:bitcoin/slip44:0`, '9850', 'to'))).toBeUndefined()
       if (state === 'missing') {
         expect(previewAmounts).not.toHaveBeenCalled()
       } else {
@@ -217,7 +217,7 @@ describe('public price previews', () => {
       onchainService: { previewAmounts },
     }
     const preview = openRfqPreview(services as unknown as Services, { now: () => 1800000000 })
-    const pair = `${btc}~bitcoin:bitcoin/slip44:0`
+    const pair = `${btc}->bitcoin:bitcoin/slip44:0`
     for (const [from_amount, to_amount] of [
       ['1000', '850'],
       ['10000', '9850'],
@@ -258,13 +258,16 @@ describe('public price previews', () => {
       now: () => 1800000000,
     })
     const tokenId = `arkade:bitcoin/asset:${asset}`
-    expect(await preview(open(`${btc}~${tokenId}`, '25000'))).toMatchObject({ from_amount: '25000', to_amount: '2459' })
-    expect(await preview(open(`${btc}~${tokenId}`, '2459', 'to'))).toMatchObject({
+    expect(await preview(open(`${btc}->${tokenId}`, '25000'))).toMatchObject({
       from_amount: '25000',
       to_amount: '2459',
     })
-    expect(await preview(open(`${tokenId}~${btc}`, '2492'))).toMatchObject({ from_amount: '2492', to_amount: '25175' })
-    expect(await preview(open(`${tokenId}~${btc}`, '25175', 'to'))).toMatchObject({
+    expect(await preview(open(`${btc}->${tokenId}`, '2459', 'to'))).toMatchObject({
+      from_amount: '25000',
+      to_amount: '2459',
+    })
+    expect(await preview(open(`${tokenId}->${btc}`, '2492'))).toMatchObject({ from_amount: '2492', to_amount: '25175' })
+    expect(await preview(open(`${tokenId}->${btc}`, '25175', 'to'))).toMatchObject({
       from_amount: '2492',
       to_amount: '25175',
     })
@@ -276,12 +279,12 @@ describe('public price previews', () => {
       now: () => 1800000000,
     })
     const evm = `eip155:1/erc20:${token.address}`
-    expect(await preview(open(`${btc}~${evm}`, '10000'))).toMatchObject({ from_amount: '10000', to_amount: '9920000' })
-    expect(await preview(open(`${evm}~${btc}`, '10000000'))).toMatchObject({
+    expect(await preview(open(`${btc}->${evm}`, '10000'))).toMatchObject({ from_amount: '10000', to_amount: '9920000' })
+    expect(await preview(open(`${evm}->${btc}`, '10000000'))).toMatchObject({
       from_amount: '10000000',
       to_amount: '9920',
     })
-    expect(await preview(open(`${btc}~${evm}`, '10000000', 'to'))).toBeUndefined()
+    expect(await preview(open(`${btc}->${evm}`, '10000000', 'to'))).toBeUndefined()
   })
 
   it('honors the current serve list before feeds and after asynchronous pricing', async () => {
@@ -291,8 +294,8 @@ describe('public price previews', () => {
       return { mantissa: 2n, scale: 0 }
     })
     const preview = openRfqPreview(services as unknown as Services, { fetchPrice })
-    expect(await preview(open(`${btc}~arkade:bitcoin/asset:${asset}`, '100000000'))).toBeUndefined()
-    expect(await preview(open(`${btc}~arkade:bitcoin/asset:${asset}`, '100000000'))).toBeUndefined()
+    expect(await preview(open(`${btc}->arkade:bitcoin/asset:${asset}`, '100000000'))).toBeUndefined()
+    expect(await preview(open(`${btc}->arkade:bitcoin/asset:${asset}`, '100000000'))).toBeUndefined()
     expect(fetchPrice).toHaveBeenCalledOnce()
   })
 
@@ -311,12 +314,12 @@ describe('public price previews', () => {
       now: () => 1800000000,
     })
     expect(evmCardMarketsOf(services as unknown as CardSource).publishable[0]?.send?.fee).toEqual(fee)
-    expect(await preview(open(`${btc}~eip155:1/erc20:${token.address}`, '10000'))).toMatchObject({
+    expect(await preview(open(`${btc}->eip155:1/erc20:${token.address}`, '10000'))).toMatchObject({
       to_amount: '9920000',
     })
-    expect(await preview(open(`${btc}~eip155:1/erc20:${token.address}`, '200000'))).toBeUndefined()
+    expect(await preview(open(`${btc}->eip155:1/erc20:${token.address}`, '200000'))).toBeUndefined()
     services.policy.evmCorridors = []
-    expect(await preview(open(`${btc}~eip155:1/erc20:${token.address}`, '10000'))).toBeUndefined()
+    expect(await preview(open(`${btc}->eip155:1/erc20:${token.address}`, '10000'))).toBeUndefined()
   })
 
   it('declines each route whose settlement contract version rfq.contractVersions disables', async () => {
@@ -334,17 +337,17 @@ describe('public price previews', () => {
     const all = [...RFQ_CONTRACT_VERSIONS]
     const without = (...dropped: string[]) => all.filter((entry) => !dropped.includes(entry))
 
-    expect(await priced(all, `${btc}~${tokenId}`, '100000')).toBeDefined()
-    expect(await priced(all, `${btc}~${evm}`, '10000')).toBeDefined()
-    expect(await priced(all, `${btc}~${ln}`, '10000')).toBeDefined()
+    expect(await priced(all, `${btc}->${tokenId}`, '100000')).toBeDefined()
+    expect(await priced(all, `${btc}->${evm}`, '10000')).toBeDefined()
+    expect(await priced(all, `${btc}->${ln}`, '10000')).toBeDefined()
 
-    expect(await priced(without(RFQ_ASSET_SWAP_V2), `${btc}~${tokenId}`, '100000')).toBeDefined()
-    expect(await priced(without(RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_V3), `${btc}~${tokenId}`, '100000')).toBeUndefined()
-    expect(await priced(without(RFQ_EVM_SEND_V1), `${btc}~${evm}`, '10000')).toBeUndefined()
-    expect(await priced(without(RFQ_EVM_RECEIVE_V1), `${evm}~${btc}`, '10000000')).toBeUndefined()
-    expect(await priced(without(RFQ_EVM_RECEIVE_V1), `${btc}~${evm}`, '10000')).toBeDefined()
-    expect(await priced(without(RFQ_LIGHTNING_SEND_V2), `${btc}~${ln}`, '10000')).toBeUndefined()
-    expect(await priced(without(RFQ_LIGHTNING_SEND_V2), `${ln}~${btc}`, '10000')).toBeDefined()
+    expect(await priced(without(RFQ_ASSET_SWAP_V2), `${btc}->${tokenId}`, '100000')).toBeDefined()
+    expect(await priced(without(RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_V3), `${btc}->${tokenId}`, '100000')).toBeUndefined()
+    expect(await priced(without(RFQ_EVM_SEND_V1), `${btc}->${evm}`, '10000')).toBeUndefined()
+    expect(await priced(without(RFQ_EVM_RECEIVE_V1), `${evm}->${btc}`, '10000000')).toBeUndefined()
+    expect(await priced(without(RFQ_EVM_RECEIVE_V1), `${btc}->${evm}`, '10000')).toBeDefined()
+    expect(await priced(without(RFQ_LIGHTNING_SEND_V2), `${btc}->${ln}`, '10000')).toBeUndefined()
+    expect(await priced(without(RFQ_LIGHTNING_SEND_V2), `${ln}->${btc}`, '10000')).toBeDefined()
   })
 
   it('drops an EVM direction from the inline card when its contract version is disabled', () => {
@@ -373,9 +376,9 @@ describe('public price previews', () => {
 
   it('leaves time to choose when collection uses the entire thirty-second window', async () => {
     const preview = openRfqPreview(source() as unknown as Services, { now: () => 1800000000 })
-    expect(await preview({ ...open(`${btc}~bolt11:bitcoin/slip44:0`, '10000'), bids_until: 1800000030 })).toMatchObject(
-      { valid_until: 1800000060 },
-    )
+    expect(
+      await preview({ ...open(`${btc}->bolt11:bitcoin/slip44:0`, '10000'), bids_until: 1800000030 }),
+    ).toMatchObject({ valid_until: 1800000060 })
   })
 })
 
@@ -410,15 +413,15 @@ describe('EVM card discovery', () => {
       solver_fee: { base: { flat: '50', bps: 30 }, quote: { bps: 20 } },
     })
     expect(openRfqPairs(result)).toEqual([
-      `${btc}~eip155:1/erc20:${token.address}`,
-      `eip155:1/erc20:${token.address}~${btc}`,
+      `${btc}->eip155:1/erc20:${token.address}`,
+      `eip155:1/erc20:${token.address}->${btc}`,
     ])
   })
 
   it('keeps an executable send direction when the receive flat fee cannot be represented', () => {
     const result = publishableEvmMarkets([{ ...evm, receive: { limits: bounds, fee } }], 'bitcoin')
     expect(result.omitted).toHaveLength(1)
-    expect(openRfqPairs(card(result.publishable))).toEqual([`${btc}~eip155:1/erc20:${token.address}`])
+    expect(openRfqPairs(card(result.publishable))).toEqual([`${btc}->eip155:1/erc20:${token.address}`])
   })
 
   it('keeps the published card on v0 and includes EVM only in the requested inline variant', async () => {
@@ -447,14 +450,14 @@ describe('EVM card discovery', () => {
     expect(published.version).toBe(0)
     expect(published.markets).toHaveLength(1)
     expect(JSON.stringify(published)).not.toContain('eip155:')
-    expect(openRfqPairs(published)).toEqual([`${btc}~bolt11:bitcoin/slip44:0`, `bolt11:bitcoin/slip44:0~${btc}`])
+    expect(openRfqPairs(published)).toEqual([`${btc}->bolt11:bitcoin/slip44:0`, `bolt11:bitcoin/slip44:0->${btc}`])
     expect(inline.version).toBe(1)
     expect(inline.markets).toHaveLength(2)
     expect(cardErrors(inline, 'bitcoin')).toEqual([])
     expect(openRfqPairs(inline)).toEqual([
-      `${btc}~bolt11:bitcoin/slip44:0`,
-      `bolt11:bitcoin/slip44:0~${btc}`,
-      `${btc}~eip155:1/erc20:${token.address}`,
+      `${btc}->bolt11:bitcoin/slip44:0`,
+      `bolt11:bitcoin/slip44:0->${btc}`,
+      `${btc}->eip155:1/erc20:${token.address}`,
     ])
   })
 

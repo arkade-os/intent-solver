@@ -15,7 +15,7 @@ import {
 const secret = new Uint8Array(32).fill(1)
 const provider = bytesToHex(schnorr.getPublicKey(secret))
 const client = bytesToHex(schnorr.getPublicKey(new Uint8Array(32).fill(2)))
-const pair = 'arkade:bitcoin/slip44:0~bolt11:bitcoin/slip44:0'
+const pair = 'arkade:bitcoin/slip44:0->bolt11:bitcoin/slip44:0'
 const now = 1_800_000_000_000
 const request = (over: Record<string, unknown> = {}) => ({
   v: 1,
@@ -164,7 +164,7 @@ describe('open RFQ boundary', () => {
   it('drops mismatched topics, recipients, expired windows and future stamps before pricing', async () => {
     const { relay, preview } = await setup()
     await relay.open(request(), { recipient: provider })
-    await relay.open(request({ pair: pair.split('~').reverse().join('~') }))
+    await relay.open(request({ pair: pair.split('->').reverse().join('->') }))
     await relay.open(request({ bids_until: now / 1000 }))
     await relay.open(request(), { createdAtMs: now + 6000 })
     expect(preview).not.toHaveBeenCalled()
@@ -230,7 +230,7 @@ describe('open RFQ boundary', () => {
       .spyOn(relay, 'subscribe')
       .mockImplementationOnce(subscribe)
       .mockRejectedValueOnce(new Error('unavailable'))
-    const pairs = vi.fn(async () => [pair, pair.split('~').reverse().join('~')])
+    const pairs = vi.fn(async () => [pair, pair.split('->').reverse().join('->')])
     await setup({ relay, pairs })
     expect(relay.subscriptions).toHaveLength(1)
     await bidder!.stop()

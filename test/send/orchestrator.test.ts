@@ -573,7 +573,7 @@ describe('an open-RFQ bid', () => {
       v: 1,
       type: 'rfq_open',
       open_id: 'cd'.repeat(32),
-      pair: 'arkade:bitcoin/slip44:0~bolt11:bitcoin/slip44:0',
+      pair: 'arkade:bitcoin/slip44:0->bolt11:bitcoin/slip44:0',
       amount: String(amount),
       amount_side: side,
       bids_until: clock + 5,

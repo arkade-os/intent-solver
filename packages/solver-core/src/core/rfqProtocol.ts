@@ -62,7 +62,7 @@ const OPEN_RFQ_LEG =
 export const OPEN_RFQ_PAIR = z
   .string()
   .max(512)
-  .regex(new RegExp(`^${OPEN_RFQ_LEG}~${OPEN_RFQ_LEG}$`))
+  .regex(new RegExp(`^${OPEN_RFQ_LEG}->${OPEN_RFQ_LEG}$`))
 
 export const RfqOpen = z
   .object({

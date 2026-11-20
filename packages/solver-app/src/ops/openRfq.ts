@@ -14,8 +14,8 @@ export const openRfqPairs = (card: SolverCard): string[] =>
     const base = (market.base_asset as { id: string }).id
     const quote = (market.quote_asset as { id: string }).id
     return [
-      ...(BigInt(String(market.max_quote_amount ?? 0)) > 0n ? [`${base}~${quote}`] : []),
-      ...(BigInt(String(market.max_base_amount ?? 0)) > 0n ? [`${quote}~${base}`] : []),
+      ...(BigInt(String(market.max_quote_amount ?? 0)) > 0n ? [`${base}->${quote}`] : []),
+      ...(BigInt(String(market.max_base_amount ?? 0)) > 0n ? [`${quote}->${base}`] : []),
     ]
   })
 
@@ -41,7 +41,7 @@ export const openRfqPreview = (
   const fetchPrice = options.fetchPrice ?? createPriceFeed()
   const now = options.now ?? (() => Math.floor(Date.now() / 1000))
   return async (open: OpenRfq): Promise<OpenRfqPrice | undefined> => {
-    const [fromId, toId] = open.pair.split('~')
+    const [fromId, toId] = open.pair.split('->')
     const from = fromId ? legacyLeg(fromId, source) : undefined
     const to = toId ? legacyLeg(toId, source) : undefined
     if (!from || !to) return undefined

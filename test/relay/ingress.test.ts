@@ -535,7 +535,7 @@ describe('relay frame codec', () => {
 })
 
 describe('open RFQ alongside directed negotiation', () => {
-  const pair = 'arkade:bitcoin/slip44:0~bolt11:bitcoin/slip44:0'
+  const pair = 'arkade:bitcoin/slip44:0->bolt11:bitcoin/slip44:0'
   const open = () => ({
     v: 1,
     type: 'rfq_open',
