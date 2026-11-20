@@ -41,7 +41,7 @@ import {
 import { maxRoutingFeeSats, type Limits } from '@arkade-os/solver-core/core/limits.js'
 import { askApproval, type ApprovalCheck } from '@arkade-os/solver-core/core/approvalGate.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
-import { FREE, giveSatsFor, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
+import { FREE, giveSatsFor, payoutSatsFor, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import type { UnilateralDelays } from '@arkade-os/solver-core/core/timelocks.js'
 import type { SwapNetwork } from '@arkade-os/solver-core/core/networks.js'
 import type { ChainTipProvider } from '@arkade-os/solver-rails/onchain/chainTip.js'
@@ -444,6 +444,24 @@ export class SendSwapService {
     this.fee = deps.fee ?? FREE
     this.lockupTimeout = deps.lockupTimeout ?? DEFAULT_LOCKUP_TIMEOUT
     this.sendHintScidDenylist = deps.sendHintScidDenylist ?? new Set()
+  }
+
+  /**
+   * An open-RFQ bid: the most {@link quote} charges, so the binding quote can only meet or beat it. An estimated
+   * quote swaps the flat for the routing estimate, priced here at the routing cap; past that cap the quote can lose.
+   * An exact-in bid sizes the cap on the give, which bounds the invoice it buys.
+   */
+  previewAmounts(amount: number, side: 'from' | 'to'): { fromAmount: number; toAmount: number } | undefined {
+    if (!Number.isSafeInteger(amount) || amount <= 0) return undefined
+    const fee =
+      this.deps.ln.estimateSendFee === undefined
+        ? this.fee
+        : { bps: this.fee.bps, flatSats: Math.max(this.fee.flatSats, maxRoutingFeeSats(amount)) }
+    const fromAmount = side === 'from' ? amount : giveSatsFor(amount, fee)
+    const toAmount = side === 'to' ? amount : payoutSatsFor(amount, fee)
+    const { minSats, maxSats } = this.deps.limits
+    if (!Number.isSafeInteger(fromAmount) || toAmount <= 0 || toAmount < minSats || toAmount > maxSats) return undefined
+    return { fromAmount, toAmount }
   }
 
   /**

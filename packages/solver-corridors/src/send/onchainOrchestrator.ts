@@ -502,12 +502,12 @@ export class OnchainSendSwapService {
     )
   }
 
+  /** An open-RFQ bid, priced at the strategy's ceiling so the {@link quote} that follows can only meet or beat it. */
   previewAmounts(amount: number, side: 'from' | 'to'): { fromAmount: number; toAmount: number } | undefined {
     if (!Number.isSafeInteger(amount) || amount <= 0) return undefined
-    const fromAmount =
-      side === 'from' ? amount : this.pricing.giveFor({ pair: RFQ_PAIR_ONCHAIN_SEND, payoutSats: amount })
-    const toAmount =
-      side === 'to' ? amount : this.pricing.payoutFor({ pair: RFQ_PAIR_ONCHAIN_SEND, giveSats: fromAmount })
+    const pricing = this.pricing.ceiling ?? this.pricing
+    const fromAmount = side === 'from' ? amount : pricing.giveFor({ pair: RFQ_PAIR_ONCHAIN_SEND, payoutSats: amount })
+    const toAmount = side === 'to' ? amount : pricing.payoutFor({ pair: RFQ_PAIR_ONCHAIN_SEND, giveSats: fromAmount })
     if (
       !Number.isSafeInteger(fromAmount) ||
       !Number.isSafeInteger(toAmount) ||

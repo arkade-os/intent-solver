@@ -718,7 +718,13 @@ These bids are **indicative price previews**, not executable quotes or
 standing commitments to later directed requests. The solver uses live pricing
 resolvers without reserving capacity, creating an invoice, persisting a swap
 or accepting a trade. Invoice-specific Lightning execution fees are resolved
-only during the private directed close. EVM previews support exact-in only,
+only during the private directed close, and the client refuses a close worse
+than the bid (Phase 3). So a solver SHOULD bid the worst case its close can
+charge. The reference solver prices a Lightning send's routing at its routing
+cap (`maxRoutingFeeSats`: 0.5% of the amount, at least 25 sats) when its
+backend estimates routing, and an onchain send's network fee at the
+configured cap. Its close then meets or beats the bid, unless a route costs
+more than that cap. EVM previews support exact-in only,
 as the directed EVM paths do. A malformed or unrelated bid is dropped without
 a refusal; relay redelivery must not create duplicate offers.
 

@@ -84,14 +84,18 @@ export const openRfqPreview = (
       if (amount > BigInt(Number.MAX_SAFE_INTEGER)) return undefined
       const fee = source.bootPolicy.corridorFees[pair]
       const limits = source.bootPolicy.corridorLimits[pair]
-      const onchain =
+      // The sends re-price at close (routing, network fee), so their services bid the worst case they can charge.
+      const sendService =
         pair === 'arkade:BTC->onchain:BTC'
-          ? source.onchainService?.previewAmounts(Number(amount), open.amount_side)
-          : undefined
-      if (pair === 'arkade:BTC->onchain:BTC' && !onchain) return undefined
+          ? source.onchainService
+          : pair === 'arkade:BTC->lightning:BTC'
+            ? source.service
+            : undefined
+      const preview = sendService?.previewAmounts(Number(amount), open.amount_side)
+      if (pair !== 'lightning:BTC->arkade:BTC' && !preview) return undefined
       const give =
-        onchain?.fromAmount ?? (open.amount_side === 'from' ? Number(amount) : giveSatsFor(Number(amount), fee))
-      const take = onchain?.toAmount ?? (open.amount_side === 'to' ? Number(amount) : payoutSatsFor(give, fee))
+        preview?.fromAmount ?? (open.amount_side === 'from' ? Number(amount) : giveSatsFor(Number(amount), fee))
+      const take = preview?.toAmount ?? (open.amount_side === 'to' ? Number(amount) : payoutSatsFor(give, fee))
       const bounded = pair === 'arkade:BTC->lightning:BTC' ? take : give
       if (
         !Number.isSafeInteger(give) ||

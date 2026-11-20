@@ -11,7 +11,8 @@ import {
 } from '@arkade-os/solver-core/core/registryCard.js'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { bytesToHex } from '@noble/hashes/utils.js'
-import { giveSatsFor, payoutSatsFor } from '@arkade-os/solver-core/core/corridorPolicy.js'
+import { giveSatsFor, payoutSatsFor, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
+import { SendSwapService } from '@arkade-os/solver-corridors/send/orchestrator.js'
 import type { OpenRfq } from '@arkade-os/solver-core/core/openRfq.js'
 import {
   RFQ_ASSET_SWAP_V2,
@@ -38,6 +39,9 @@ const evmPolicies = [
     fee,
   },
 ]
+// The real send service on a backend with no routing estimator, so it bids the configured fee alone.
+const sendService = (corridorFee: Fee, limits: { minSats: number; maxSats: number }) =>
+  new SendSwapService({ ln: {}, limits, fee: corridorFee } as never)
 const open = (pair: string, amount: string, amount_side: 'from' | 'to' = 'from'): OpenRfq => ({
   v: 1,
   type: 'rfq_open',
@@ -78,6 +82,7 @@ const source = () => ({
   ],
   arkade: { dustSats: 1n },
   assetRfqService: { quote: vi.fn() },
+  service: sendService(fee, bounds),
 })
 
 describe('public price previews', () => {
@@ -133,6 +138,7 @@ describe('public price previews', () => {
             'lightning:BTC->arkade:BTC': { minSats: 1, maxSats: Number.MAX_SAFE_INTEGER },
           },
         },
+        service: sendService({ bps, flatSats: 0 }, { minSats: 1, maxSats: Number.MAX_SAFE_INTEGER }),
       }
       const preview = openRfqPreview(services as unknown as Services, { now: () => 1800000000 })
       const amount = String(Number.MAX_SAFE_INTEGER)

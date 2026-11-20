@@ -24,6 +24,7 @@ import {
   ONCHAIN_SECONDS_PER_BLOCK,
 } from '@arkade-os/solver-core/core/onchainSend.js'
 import type { Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
+import { networkFeePricing } from '@arkade-os/solver-core/core/pricing.js'
 import {
   FUND_LEASE_TTL_SECONDS,
   OnchainSendSwapStore,
@@ -3086,6 +3087,35 @@ describe('OnchainSendSwapService', () => {
       expect(priced.previewAmounts(999, 'from')).toBeUndefined()
       expect(serviceCharging({ bps: 0, flatSats: 900 }, 1_000).previewAmounts(1000, 'from')).toBeUndefined()
       expect(await deps.store.committedSats()).toBe(before)
+    })
+
+    it('previews at the network-fee cap, so a quote after the sample rises still meets the bid', async () => {
+      let sample = 100
+      const priced = new OnchainSendSwapService({
+        store: deps.store,
+        onchain: deps.onchain,
+        arkade: deps.arkade,
+        limits: { minSats: 1_000, maxSats: 1_000_000 },
+        maxExposedSats: 1_000_000,
+        totalCommitted: () => deps.store.committedSats(),
+        admission: new AdmissionControl(),
+        network: 'regtest',
+        signer,
+        refundDestinationScript,
+        pricing: networkFeePricing({ base: { bps: 100, flatSats: 50 }, costSats: () => sample, capSats: 400 }),
+        now: clock,
+      })
+      const bid = priced.previewAmounts(10_000, 'from')
+      sample = 400
+      const close = await priced.quote({
+        paymentHash,
+        amountSats: 10_000,
+        payoutPubkey,
+        refundAddress: REFUND_ADDRESS,
+        clientRefundPubkey,
+      })
+      if (!close.accepted || !bid) throw new Error('expected a bid and an accepted close')
+      expect(close.swap.payoutSats).toBeGreaterThanOrEqual(bid.toAmount)
     })
 
     it('tracks the configured minimum, not a constant', () => {
