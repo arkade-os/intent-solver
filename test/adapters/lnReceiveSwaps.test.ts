@@ -109,6 +109,7 @@ describe('receive_swap read as a swap', () => {
     await walk(ARMED)
     await store.claimFundLease('swap-1', 'armed')
     expect(await legs()).toBe('locked/locking filling')
+    expect((await load()).to.since).toBe(now)
     await store.releaseFundLease('swap-1')
     expect(await legs()).toBe('locked/pending funded')
   })

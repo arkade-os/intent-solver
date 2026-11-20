@@ -39,7 +39,12 @@ export interface LegSeen {
   readonly funding: FundingSeen
   readonly matured: boolean
   readonly spent: SpentSeen
+  /** What the rail says right now; it can trail `refundOpensAt`, which is measured on the wall clock. */
   readonly refundOpen: boolean
+  /** When the contract can no longer be claimed, e.g. a held HTLC's expiry. Null while unknown, or where it has none. */
+  readonly expiresAt: UnixSeconds | null
+  /** When our own way back opens. Null where the contract gives us none. */
+  readonly refundOpensAt: UnixSeconds | null
   readonly lock: TxSeen
   readonly claim: TxSeen
   readonly refund: TxSeen

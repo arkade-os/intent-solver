@@ -52,6 +52,8 @@ export const swapFromReceiveRow = (row: ReceiveSwapRow, failedFrom: Lived | null
   const [from, to] = legsAt(row, isFailed(row.state) ? (failedFrom ?? lastProven(row)) : row.state)
   const lockup =
     row.arkadeLockupTxid === null ? [] : [Reference.of(`${row.arkadeLockupTxid}:${row.arkadeLockupVout ?? 0}`)]
+  // The row keeps one timestamp for both legs; only the fund lease has its own.
+  const changed = UnixSeconds.of(row.updatedAt)
   const amount = Amount.of(BTC, BigInt(row.amountSats))
   const payout = Amount.of(BTC, BigInt(row.payoutSats))
   return Swap.fromSnapshot(
@@ -68,12 +70,15 @@ export const swapFromReceiveRow = (row: ReceiveSwapRow, failedFrom: Lived | null
         { rail: Rail.Lightning, amount, contract: ContractKind.Lightning, version: null },
         from,
         { funding: [], claim: [], refund: [] },
+        changed,
       ),
-      to: Leg.restore(Side.To, { rail: Rail.Arkade, amount: payout, contract: ContractKind.Vhtlc, version: null }, to, {
-        funding: lockup,
-        claim: [],
-        refund: row.refundArkTxid === null ? [] : [Reference.of(row.refundArkTxid)],
-      }),
+      to: Leg.restore(
+        Side.To,
+        { rail: Rail.Arkade, amount: payout, contract: ContractKind.Vhtlc, version: null },
+        to,
+        { funding: lockup, claim: [], refund: row.refundArkTxid === null ? [] : [Reference.of(row.refundArkTxid)] },
+        to === 'locking' && row.fundStartedAt !== null ? UnixSeconds.of(row.fundStartedAt) : changed,
+      ),
       outcome: failed ? (row.state === 'refused' ? SwapOutcome.Refused : SwapOutcome.Stuck) : null,
       outcomeReason: failed ? row.failureReason : null,
     },

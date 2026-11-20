@@ -3,6 +3,7 @@ import { nonEmpty, type Brand, type ValueOf } from '../shared/brand.js'
 import type { Rail } from '../shared/endpoint.js'
 import { IllegalTransition, InvalidValue } from '../shared/error.js'
 import { defineMachine, type StateOf } from '../shared/state_machine.js'
+import type { UnixSeconds } from '../shared/time.js'
 
 export const Side = {
   From: 'from',
@@ -92,16 +93,18 @@ export class Leg {
     readonly terms: LegTerms,
     readonly state: LegState,
     readonly facts: LegFacts,
+    /** When it entered `state`: what tells a call still in flight from one that never left. */
+    readonly since: UnixSeconds,
   ) {}
 
-  static open(side: Side, terms: LegTerms): Leg {
+  static open(side: Side, terms: LegTerms, at: UnixSeconds): Leg {
     if (terms.amount.isZero) throw new InvalidValue(`${side} leg amount must be positive`)
-    return new Leg(side, terms, 'pending', NO_FACTS)
+    return new Leg(side, terms, 'pending', NO_FACTS, at)
   }
 
   /** For a repository: what was stored is trusted, not re-validated. */
-  static restore(side: Side, terms: LegTerms, state: LegState, facts: LegFacts): Leg {
-    return new Leg(side, terms, state, facts)
+  static restore(side: Side, terms: LegTerms, state: LegState, facts: LegFacts, since: UnixSeconds): Leg {
+    return new Leg(side, terms, state, facts, since)
   }
 
   get rail(): Rail {
@@ -128,13 +131,13 @@ export class Leg {
     return Leg.canTransition(this, this.state, state)
   }
 
-  moveTo(state: LegState, references: LegReferences = {}): Leg {
+  moveTo(state: LegState, at: UnixSeconds, references: LegReferences = {}): Leg {
     if (!this.canMoveTo(state)) throw new IllegalTransition(`${this.side} leg cannot go ${this.state} -> ${state}`)
-    return new Leg(this.side, this.terms, state, withReferences(this.facts, references))
+    return new Leg(this.side, this.terms, state, withReferences(this.facts, references), at)
   }
 
   /** A reference learned without the leg changing state: a payment id after the intent, a replacement transaction. */
   record(references: LegReferences): Leg {
-    return new Leg(this.side, this.terms, this.state, withReferences(this.facts, references))
+    return new Leg(this.side, this.terms, this.state, withReferences(this.facts, references), this.since)
   }
 }

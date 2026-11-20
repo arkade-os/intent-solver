@@ -31,8 +31,8 @@ const created = (e: SwapQuoted): SwapProps => ({
   quote: e.quote,
   hashlock: e.hashlock,
   preimage: null,
-  from: Leg.open(Side.From, e.from),
-  to: Leg.open(Side.To, e.to),
+  from: Leg.open(Side.From, e.from, e.at),
+  to: Leg.open(Side.To, e.to, e.at),
   outcome: null,
   outcomeReason: null,
 })
@@ -44,14 +44,14 @@ const applied = (props: SwapProps, e: SwapEvent): SwapProps => {
     case 'LegAdvanced':
       return {
         ...props,
-        [e.side]: props[e.side].moveTo(e.state, e.references),
+        [e.side]: props[e.side].moveTo(e.state, e.at, e.references),
         preimage: e.preimage ?? props.preimage,
       }
     case 'LegReferenced':
       return { ...props, [e.side]: props[e.side].record(e.references) }
     case 'OfferFilled': {
       const claim = e.fill === null ? {} : { claim: e.fill }
-      return { ...props, from: props.from.moveTo('claimed', claim), to: props.to.moveTo('claimed', claim) }
+      return { ...props, from: props.from.moveTo('claimed', e.at, claim), to: props.to.moveTo('claimed', e.at, claim) }
     }
     case 'SwapFailed':
       return { ...props, outcome: e.outcome, outcomeReason: e.reason }

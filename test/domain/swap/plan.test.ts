@@ -10,6 +10,8 @@ const NOTHING: LegSeen = {
   matured: false,
   spent: { by: 'nobody' },
   refundOpen: false,
+  expiresAt: null,
+  refundOpensAt: null,
   lock: 'none',
   claim: 'none',
   refund: 'none',
