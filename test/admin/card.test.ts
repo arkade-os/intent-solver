@@ -84,6 +84,7 @@ const makeDeps = (
     offerMarkets: over.offerMarkets ?? [],
     offerMinFillAmount: over.offerFill?.min ?? 5_000n,
     offerMaxFillAmount: over.offerFill?.max ?? 900_000n,
+    assetCarrierPricing: false,
   }
   return {
     services: {
