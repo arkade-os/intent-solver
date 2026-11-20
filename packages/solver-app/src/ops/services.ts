@@ -35,7 +35,7 @@ import { RestEmulatorProvider } from '@arkade-os/sdk'
 import { hex } from '@scure/base'
 import { Address, OutScript } from '@scure/btc-signer'
 import { corridorSetFromDeps, readerSetFromDeps, servedContractVersions } from './corridorSet.js'
-import type { Config } from '../config.js'
+import { resolveOnchainEsploraUrl, type Config } from '../config.js'
 import type { PricingStrategy } from '@arkade-os/solver-core/core/pricing.js'
 import { onchainCorridorPricing, onchainFeeRateSampler } from './onchainPricing.js'
 import { onchainFloatSampler, type FloatSampler } from './floatSampler.js'
@@ -366,7 +366,7 @@ const createRail = async (
     // loadConfig() only produces lnBackend: 'lnd' together with a populated lnd config. Opened, not probed: a
     // node that is down leaves its corridors refusing (`watchRail`) instead of the whole solver crash-looping.
     const ln = LndLightningBackendAdapter.open(config.lnd!)
-    const onchain = LndOnchainAdapter.open(config.lnd!)
+    const onchain = LndOnchainAdapter.open({ ...config.lnd!, esploraUrl: resolveOnchainEsploraUrl(config) })
     return { ln, onchain, rebalance: createLndRebalanceBackend(ln, onchain), probe: () => ln.probe() }
   }
   // Non-null: the caller only reaches this for a configured rail.
@@ -1075,14 +1075,8 @@ export const createServices = async (
    * Built once and shared by both Lightning services so every swap in a tick resolves
    * its deadlines against ONE height — two swaps in a tick deciding against different
    * heights is how one refund gets pushed and its neighbour does not.
-   *
-   * Undefined on a seconds-typed deployment, which never asks for a height. The
-   * orchestrators throw a named error rather than guessing if a block-typed row ever
-   * reaches them without one.
    */
-  const chainTip = config.chainTipEsploraUrl
-    ? esploraChainTip(createEsploraClient(config.chainTipEsploraUrl))
-    : undefined
+  const chainTip = esploraChainTip(createEsploraClient(resolveOnchainEsploraUrl(config, config.chainTipEsploraUrl)))
 
   const service = enabled('arkade:BTC->lightning:BTC')
     ? new SendSwapService({
@@ -1237,8 +1231,7 @@ export const createServices = async (
         ln: rail!.ln,
         backendName: config.lnBackend ?? undefined,
         arkade: receiveOps,
-        // LND reads a third party's spend through Esplora alone; without one that read throws every tick.
-        ...(config.lnBackend === 'lnd' && !config.lnd?.esploraUrl ? {} : { onchain: rail!.onchain }),
+        onchain: rail!.onchain,
         limits: policy.corridorLimits['lightning:BTC->arkade:BTC'],
         fee: policy.corridorFees['lightning:BTC->arkade:BTC'],
         // From `config`, not `policy`: this is not a console-editable knob and

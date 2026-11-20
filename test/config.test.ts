@@ -38,7 +38,8 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { basename, join } from 'node:path'
-import { configFromKnobs } from '@arkade-os/solver-app/config.js'
+import { ESPLORA_URL } from '@arkade-os/sdk'
+import { configFromKnobs, resolveOnchainEsploraUrl } from '@arkade-os/solver-app/config.js'
 import { adminDbPath } from '@arkade-os/solver-app/admin/db.js'
 import { registerLightningRail, type LightningRailModule } from '@arkade-os/solver-app/ops/rails.js'
 import { CORRIDORS } from '@arkade-os/solver-core/core/corridorPolicy.js'
@@ -399,6 +400,38 @@ describe('loadConfig — ARKADE_ESPLORA_URL', () => {
     process.env.LND_ESPLORA_URL = 'http://lightning-side/api'
     delete process.env.ARKADE_ESPLORA_URL
     expect(configFromKnobs(process.env).arkade.esploraUrl).toBeUndefined()
+  })
+})
+
+describe('onchain Esplora endpoints', () => {
+  const knobs = { ...BASE_ENV, LN_BACKEND: 'lnd', LND_SOCKET: 'localhost:10009', LND_CERT: 'c', LND_MACAROON: 'm' }
+
+  it.each(['bitcoin', 'signet', 'mutinynet', 'regtest'] as const)('uses the SDK %s default', (network) => {
+    const config = configFromKnobs({ ...knobs, SWAP_NETWORK: network })
+    expect(resolveOnchainEsploraUrl(config)).toBe(ESPLORA_URL[network])
+    expect(resolveOnchainEsploraUrl(config, config.chainTipEsploraUrl)).toBe(ESPLORA_URL[network])
+  })
+
+  it('preserves separate onchain and chain-tip overrides', () => {
+    const onchain = 'http://onchain.test/api'
+    const tip = 'http://tip.test/api'
+    const config = configFromKnobs({ ...knobs, LND_ESPLORA_URL: onchain, CHAIN_TIP_ESPLORA_URL: tip })
+    expect(resolveOnchainEsploraUrl(config)).toBe(onchain)
+    expect(resolveOnchainEsploraUrl(config, config.chainTipEsploraUrl)).toBe(tip)
+
+    const shared = configFromKnobs({ ...knobs, LND_ESPLORA_URL: onchain })
+    expect(resolveOnchainEsploraUrl(shared, shared.chainTipEsploraUrl)).toBe(onchain)
+  })
+
+  it('treats blank overrides as omitted and keeps the Arkade wallet endpoint independent', () => {
+    const config = configFromKnobs({
+      ...knobs,
+      LND_ESPLORA_URL: ' ',
+      CHAIN_TIP_ESPLORA_URL: ' ',
+      ARKADE_ESPLORA_URL: 'http://wallet.test/api',
+    })
+    expect(resolveOnchainEsploraUrl(config)).toBe(ESPLORA_URL.regtest)
+    expect(resolveOnchainEsploraUrl(config, config.chainTipEsploraUrl)).toBe(ESPLORA_URL.regtest)
   })
 })
 

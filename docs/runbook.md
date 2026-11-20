@@ -2191,10 +2191,10 @@ bitcoin-cli -regtest generatetoaddress 30 "$(bitcoin-cli -regtest getnewaddress)
 bitcoin-cli -regtest generatetoaddress 15 "$(bitcoin-cli -regtest getnewaddress)"
 ```
 
-Set `rails.onchain.chainTipEsploraUrl` (or rely on `rails.onchain.esploraUrl`) so the service can
-read a height. Without one, a block-typed row makes the orchestrator throw a
-named error rather than guess — guessing "not reached" strands a refund forever,
-and "reached" pushes one the chain will reject.
+On regtest, the chain tip defaults to the Arkade SDK endpoint at
+`http://localhost:3000/api`. If the solver runs in a container and the indexer
+runs elsewhere, set `rails.onchain.esploraUrl` to a reachable URL.
+`rails.onchain.chainTipEsploraUrl` overrides that URL for the height read alone.
 
 ### Which clock each deadline counts
 

@@ -9,6 +9,7 @@
 
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { ESPLORA_URL } from '@arkade-os/sdk'
 import { base64 } from '@scure/base'
 import { resolveLimits, withBounds, type Limits } from '@arkade-os/solver-core/core/limits.js'
 import { DEFAULT_LOCKUP_TIMEOUT, MAX_LOCKUP_TIMEOUT } from '@arkade-os/solver-core/core/send.js'
@@ -145,13 +146,7 @@ export interface LndConfig {
   cert: string
   /** Base64-serialized macaroon. */
   macaroon: string
-  /**
-   * Esplora base URL, for the ONCHAIN RECEIVE corridor and the Lightning receive leg's L1 claim read.
-   * LND's own chain view is wallet-scoped and carries no per-output values, so it cannot see a
-   * client's funding transaction — see `onchain/lnd/adapter.ts`'s `findOutputs`.
-   * Optional: unset is fine for a send-only deployment, and the receive path
-   * fails loudly rather than under-reporting.
-   */
+  /** Override the SDK's network default for Bitcoin transaction and spend reads. */
   esploraUrl?: string
 }
 
@@ -413,8 +408,7 @@ export interface Config {
    * height, so the service needs somewhere to read one. A seconds-typed deployment never
    * reads it and may leave this unset.
    *
-   * Falls back to `LND_ESPLORA_URL`, which points at the same indexer on every deployment
-   * that has one, so block mode usually needs no new variable at all.
+   * Falls back to `LND_ESPLORA_URL`, then the SDK's network default.
    */
   chainTipEsploraUrl?: string
   /**
@@ -563,6 +557,9 @@ const loadLndConfig = (env: Knobs): LndConfig => ({
   macaroon: resolveLndSecret(env, 'LND_MACAROON'),
   esploraUrl: env.LND_ESPLORA_URL,
 })
+
+export const resolveOnchainEsploraUrl = (config: Pick<Config, 'lnd' | 'network'>, override?: string): string =>
+  override?.trim() || config.lnd?.esploraUrl?.trim() || ESPLORA_URL[config.network]
 
 /**
  * One directory for every database this service opens.

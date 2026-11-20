@@ -286,16 +286,6 @@ const watchSwaps = async (services: Services, startEvmSendSweep: () => void, sig
         `or by accepting the gap where the trader's recourse opens first (rails.lightning.receiveAcceptUnilateralGap: true)`,
     )
   }
-  if (
-    services.config.corridorEnabled['lightning:BTC->arkade:BTC'] &&
-    services.config.lnBackend === 'lnd' &&
-    !services.config.lnd?.esploraUrl
-  ) {
-    log(
-      'lightning receive has no rails.onchain.esploraUrl to read Bitcoin with: a client that unrolls its lockup and claims ' +
-        'it on L1 reveals P only there, so that swap is reported and left for review instead of settled',
-    )
-  }
   // Said out loud at every boot, not just recorded in the console. This is the
   // only setting here that accepts a LOSS, and an operator who inherits a
   // deployment should meet it in the log rather than by reading the unit file.
