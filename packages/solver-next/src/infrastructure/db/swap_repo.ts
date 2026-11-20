@@ -1,10 +1,10 @@
 import { UniqueConstraintError, type SqlDriver } from '@arkade-os/solver-core/core/driver.js'
-import { Conflict, RuleViolated } from '../domain/shared/error.js'
-import type { SwapId } from '../domain/shared/ids.js'
-import { Swap } from '../domain/swap/swap.js'
-import type { SwapEvent } from '../domain/swap/swap_event.js'
-import type { SwapRepository } from '../domain/swap/swap_repo.js'
-import { decodeSwapEvent, encodeSwapEvent } from './swapEventCodec.js'
+import { Conflict, RuleViolated } from '../../domain/shared/error.js'
+import type { SwapId } from '../../domain/shared/ids.js'
+import { Swap } from '../../domain/swap/swap.js'
+import type { SwapEvent } from '../../domain/swap/swap_event.js'
+import type { SwapRepository } from '../../domain/swap/swap_repo.js'
+import { decodeSwapEvent, encodeSwapEvent } from './swap_event_codec.js'
 
 // `seq` orders events across swaps for the workers that read them; `version` orders one swap's own.
 const SCHEMA = `
@@ -42,12 +42,12 @@ const MAX_EVENTS_PER_WRITE = 20
 const decoded = (raw: Raw): SwapEvent => decodeSwapEvent(raw.swap_id, raw.type, Number(raw.at), raw.body)
 
 /** The history of every swap, and the source of truth: every other table is derived from it by a worker. */
-export class SwapEvents implements Pick<SwapRepository, 'add' | 'update' | 'get'> {
+export class SqlSwapRepository implements Pick<SwapRepository, 'add' | 'update' | 'get'> {
   private constructor(private readonly driver: SqlDriver) {}
 
-  static async open(driver: SqlDriver): Promise<SwapEvents> {
+  static async open(driver: SqlDriver): Promise<SqlSwapRepository> {
     await driver.exec(SCHEMA)
-    return new SwapEvents(driver)
+    return new SqlSwapRepository(driver)
   }
 
   async add(swap: Swap): Promise<void> {

@@ -3,14 +3,14 @@ import { Conflict, InvalidValue } from '@arkade-os/solver-next/domain/shared/err
 import { SwapId } from '@arkade-os/solver-next/domain/shared/ids.js'
 import { ContractVersion } from '@arkade-os/solver-next/domain/swap/leg.js'
 import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
-import { decodeSwapEvent } from '@arkade-os/solver-next/store/swapEventCodec.js'
-import { SwapEvents } from '@arkade-os/solver-next/store/swapEvents.js'
-import { bothLocked, btc, quoted, ref, SECRET, t, terms, usdt } from '../domain/support.js'
+import { decodeSwapEvent } from '@arkade-os/solver-next/infrastructure/db/swap_event_codec.js'
+import { SqlSwapRepository } from '@arkade-os/solver-next/infrastructure/db/swap_repo.js'
+import { bothLocked, btc, quoted, ref, SECRET, t, terms, usdt } from '../../domain/support.js'
 
-let events: SwapEvents
+let events: SqlSwapRepository
 
 beforeEach(async () => {
-  events = await SwapEvents.open(betterSqliteDriver(':memory:'))
+  events = await SqlSwapRepository.open(betterSqliteDriver(':memory:'))
 })
 
 describe('swap events as the source of truth', () => {
@@ -47,7 +47,7 @@ describe('swap events as the source of truth', () => {
     stuck.fail('stuck', 'settle failing past E', t(1_005))
     stuck.resume(t(1_006))
     stuck.fail('stuck', 'again', t(1_007))
-    const other = await SwapEvents.open(betterSqliteDriver(':memory:'))
+    const other = await SqlSwapRepository.open(betterSqliteDriver(':memory:'))
     await other.add(stuck)
     expect((await other.get(terms.id))?.snapshot).toEqual(stuck.snapshot)
   })

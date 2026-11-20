@@ -1,10 +1,10 @@
-import { Amount } from '../domain/shared/amount.js'
-import { Asset } from '../domain/shared/asset.js'
-import type { Rail } from '../domain/shared/endpoint.js'
-import { CorruptHistory } from '../domain/shared/error.js'
-import { RfqId, SwapId } from '../domain/shared/ids.js'
-import { UnixSeconds } from '../domain/shared/time.js'
-import { Hashlock, Preimage } from '../domain/swap/hashlock.js'
+import { Amount } from '../../domain/shared/amount.js'
+import { Asset } from '../../domain/shared/asset.js'
+import type { Rail } from '../../domain/shared/endpoint.js'
+import { CorruptHistory } from '../../domain/shared/error.js'
+import { RfqId, SwapId } from '../../domain/shared/ids.js'
+import { UnixSeconds } from '../../domain/shared/time.js'
+import { Hashlock, Preimage } from '../../domain/swap/hashlock.js'
 import {
   ContractVersion,
   Reference,
@@ -13,10 +13,10 @@ import {
   type LegState,
   type LegTerms,
   type Side,
-} from '../domain/swap/leg.js'
-import { Quote, type AmountMode } from '../domain/swap/quote.js'
-import { SWAP_TOPIC, type SwapEvent } from '../domain/swap/swap_event.js'
-import type { SwapOutcome } from '../domain/swap/swap_state.js'
+} from '../../domain/swap/leg.js'
+import { Quote, type AmountMode } from '../../domain/swap/quote.js'
+import { SWAP_TOPIC, type SwapEvent } from '../../domain/swap/swap_event.js'
+import type { SwapOutcome } from '../../domain/swap/swap_state.js'
 
 type Json = Record<string, unknown>
 

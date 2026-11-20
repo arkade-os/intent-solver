@@ -6,7 +6,7 @@ import type { Policies } from '@arkade-os/solver-next/domain/swap/plan.js'
 import type { Swap } from '@arkade-os/solver-next/domain/swap/swap.js'
 import type { RailService, SendResult } from '@arkade-os/solver-next/ports/rail.js'
 import { betterSqliteDriver } from '@arkade-os/solver-db/driver.js'
-import { SwapEvents } from '@arkade-os/solver-next/store/swapEvents.js'
+import { SqlSwapRepository } from '@arkade-os/solver-next/infrastructure/db/swap_repo.js'
 import { quoted, ref, SECRET, t, terms } from '../domain/support.js'
 
 class Crash extends Error {}
@@ -73,7 +73,7 @@ const POLICIES: Policies = {
 }
 
 let world: World
-let swaps: SwapEvents
+let swaps: SqlSwapRepository
 
 const worker = (policies: Policies = POLICIES): DriveSwap => {
   const sent = (reference: string): SendResult => ({ status: 'sent', reference: ref(reference) })
@@ -87,7 +87,7 @@ const worker = (policies: Policies = POLICIES): DriveSwap => {
     claim: async () => world.effect(() => ((world.collected += 1), sent('collect'))),
     refund: async () => world.effect(() => sent('refund')),
   }
-  const stored: Pick<SwapEvents, 'get' | 'update'> = {
+  const stored: Pick<SqlSwapRepository, 'get' | 'update'> = {
     get: (id) => swaps.get(id),
     update: async (id, change) => {
       const before = world.calls
@@ -110,7 +110,7 @@ const worker = (policies: Policies = POLICIES): DriveSwap => {
 
 beforeEach(async () => {
   world = new World()
-  swaps = await SwapEvents.open(betterSqliteDriver(':memory:'))
+  swaps = await SqlSwapRepository.open(betterSqliteDriver(':memory:'))
   await swaps.add(quoted())
 })
 
@@ -157,7 +157,7 @@ describe('driving a swap', () => {
     for (const crashAfterEffect of [false, true]) {
       for (let crashAt = 1; crashAt <= total; crashAt++) {
         world = Object.assign(new World(), { crashAt, crashAfterEffect })
-        swaps = await SwapEvents.open(betterSqliteDriver(':memory:'))
+        swaps = await SqlSwapRepository.open(betterSqliteDriver(':memory:'))
         await swaps.add(quoted())
         await expect(worker().drive(terms.id), `crash ${crashAt}`).rejects.toThrow(Crash)
 
