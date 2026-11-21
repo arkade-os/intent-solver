@@ -921,7 +921,7 @@ ordinary clock skew.
 | Constant                                             | Value                                                           | Where                                                   | Tunable       |
 | ---------------------------------------------------- | --------------------------------------------------------------- | ------------------------------------------------------- | ------------- |
 | `DEFAULT_HOLD_INVOICE_WINDOW`                        | derived: `MAX_REFUND_HORIZON − MIN_CLAIM_WINDOW` (1800 s today) | `packages/solver-corridors/src/receive/orchestrator.ts` | **invariant** |
-| `EMPTY_LOCKUP_GRACE`                                 | 120 s                                                           | `packages/solver-corridors/src/receive/orchestrator.ts` | **invariant** |
+| `EMPTY_LOCKUP_GRACE`                                 | 120 s                                                           | `packages/solver-core/src/core/receivePlan.ts`          | **invariant** |
 | `FUND_CONFIRM_ATTEMPTS` / `FUND_CONFIRM_INTERVAL_MS` | 8 × 1000 ms                                                     | `packages/solver-corridors/src/receive/orchestrator.ts` | **invariant** |
 
 The window is subtracted, never picked: `refund_locktime` is `now + MAX_REFUND_HORIZON`
