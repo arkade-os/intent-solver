@@ -505,9 +505,8 @@ export const createServices = async (
   // never open a second connection to a file this process already has open.
   const swapFile = betterSqliteDriver(config.swapDbPath)
   // Consolidated, every store shares ONE connection. Safe because no two
-  // stores name the same table or index, and the only `driver.transaction()`
-  // in the codebase runs inside `open()`, which is awaited store by store — so
-  // no two of them are ever mid-transaction on this handle at the same time.
+  // stores name the same table or index, and the driver makes every other
+  // statement wait while a `driver.transaction()` is open on this handle.
   // Each store still gets its own `close()`; better-sqlite3's is a no-op after
   // the first, and `Services.close()` isolates each step anyway.
   const shared = layout.consolidated ? swapFile : undefined
