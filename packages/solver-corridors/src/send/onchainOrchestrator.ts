@@ -20,16 +20,11 @@ import type { AdmissionStrategy, FloatRequirement } from '@arkade-os/solver-core
 import { RFQ_PAIR_ONCHAIN_SEND } from '../wire/onchainPayloads.js'
 import { ArkAddress } from '@arkade-os/sdk'
 import {
-  ARKADE_CLAIM_WINDOW_SECONDS,
   DEFAULT_ONCHAIN_LOCKUP_TIMEOUT,
   HTLC_REFUND_MTP_MARGIN,
   ONCHAIN_DUST_SATS,
   arkadeClaimDeadline,
-  arkadeClaimTimeLeft,
   evaluateOnchainSendAcceptance,
-  evaluateOnchainSendFunding,
-  expiryBeforeClaimDeadline,
-  lockupExpiryFloor,
   onchainRefundConfirmDeadline,
   type OnchainSendAcceptanceRefusal,
 } from '@arkade-os/solver-core/core/onchainSend.js'
@@ -38,7 +33,7 @@ import { FREE, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { fixedFeePricing, type PricingStrategy } from '@arkade-os/solver-core/core/pricing.js'
 import { paymentHashFromPreimage, scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
-import { claimOutputs, satsOutputs } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { claimOutputs, satsOutputs, type FundedOutput } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
 import { advanceUnrolledClaims, awaitLeftover, lockupLeftover, settleUnrolledClaims } from '../unrolledSpendStep.js'
 import { boundedSpendInputs, MAX_LOCKUP_SPEND_INPUTS } from '@arkade-os/solver-arkade/arkade/wallet.js'
@@ -66,8 +61,17 @@ import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { unilateralLadderFor } from '@arkade-os/solver-core/core/send.js'
 import { askApproval, type ApprovalCheck } from '@arkade-os/solver-core/core/approvalGate.js'
 import { guardedTick, sweep } from '@arkade-os/solver-core/util/sweep.js'
+import { wasRead } from '@arkade-os/solver-core/util/wasRead.js'
 import { stepFor } from '@arkade-os/solver-core/core/stateMachine.js'
 import { OnchainSendMachine } from '../machines/onchainSend.js'
+import {
+  lockupShortfall,
+  onchainFundingRefusal,
+  planOnchainSend,
+  planRefundNotSent,
+  type OnchainSendAction,
+  type OnchainSendReads,
+} from '@arkade-os/solver-core/core/onchainSendPlan.js'
 import { adoptedOnly, providerKeyCurrent, unadopted } from '../legs/arkadeLockup.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
@@ -221,9 +225,6 @@ type OnchainHtlcRefundAttempt =
   | { broadcast: false; reason: string; retry: boolean }
 
 const MIN_RELAY_FEE_RATE = 1
-const KEY_ROTATED = 'provider key rotated since quote; refusing to fund an unclaimable lockup'
-/** How long a funding broadcast may sit unconfirmed before the stuck-tx alert fires, re-raised every tick after. */
-const FUNDING_STUCK_ALERT_SECONDS = 20 * 60
 
 /**
  * Re-exported, not defined here: `core/onchainSend.ts` owns it now, because
@@ -258,6 +259,13 @@ export const covenantRowFor = (row: OnchainSendSwapRow): CovenantScriptRow => ({
   receiverPkScript: row.receiverPkScript,
   nonInteractiveParameters: row.nonInteractiveParameters,
 })
+
+type FailAction = Extract<OnchainSendAction, { do: 'fail' }>
+
+/** The planner's reads for one tick, and the lockup outputs it read, which adopting them needs in full. */
+interface TickReads extends OnchainSendReads {
+  lockupOutputs: FundedOutput[] | null
+}
 
 export class OnchainSendSwapService {
   private readonly now: () => number
@@ -832,64 +840,65 @@ export class OnchainSendSwapService {
     stuck: null,
   })
 
-  private async whenQuoted(row: OnchainSendSwapRow): Promise<boolean> {
-    const { store, arkade, network } = this.deps
-    const all = await arkade.findLockups(row.pkScript)
-    const outputs = satsOutputs(all)
-    const locked = outputs.reduce((sum, o) => sum + o.value, 0)
-    const held = all.reduce((sum, o) => sum + o.value, 0)
-    const timedOut = this.now() >= row.createdAt + DEFAULT_ONCHAIN_LOCKUP_TIMEOUT
+  private readsFor(row: OnchainSendSwapRow): TickReads {
+    const { arkade, onchain } = this.deps
+    const reads: TickReads = {
+      lockupOutputs: null,
+      now: this.now,
+      providerKeyCurrent: () => providerKeyCurrent(row.providerPubkey, arkade.providerPubkey),
+      checksLockupExpiry: () => this.deps.network !== 'regtest',
+      maxLockupOutputs: () => MAX_LOCKUP_SPEND_INPUTS,
+      lockups: async () => {
+        const all = await arkade.findLockups(row.pkScript)
+        const spendable = satsOutputs(all)
+        reads.lockupOutputs = spendable
+        return { held: all.reduce((sum, o) => sum + o.value, 0), spendable }
+      },
+      approved: async () => Boolean(await askApproval(this.deps.approvalGate, row.id, row.amountSats)),
+      lockupHeld: () => this.lockupHeld(row),
+      payoutOutputs: () => onchain.findOutputs({ address: row.onchainAddress }),
+      spend: async () => {
+        if (!row.fundingTxid || row.fundingVout === null) {
+          throw new Error(`swap ${row.id}: no funding outpoint recorded to look for a spend of`)
+        }
+        const witness = await onchain.findSpendWitness({
+          txid: row.fundingTxid,
+          vout: row.fundingVout,
+          outputScript: hex.decode(row.onchainPkScript),
+        })
+        return witness ? { preimage: preimageFromClaimWitness(witness) } : null
+      },
+      fundingOutcome: async () => {
+        if (!row.fundingTxid) throw new Error(`swap ${row.id}: no funding txid recorded to ask the outcome of`)
+        return onchain.transactionOutcome(row.fundingTxid)
+      },
+      refundOutcome: () => outcomeOfAny(onchain, trackedRefundTxids(row)),
+    }
+    return reads
+  }
 
-    if (locked > row.amountSats) {
-      await store.patch(row.id, { onchain_lockup_value: held })
-      await store.fail(row.id, 'quoted', `overfunded lockup: ${locked} > ${row.amountSats} sats`)
-      return false
-    }
-    // One claim spends at most this many; the rest would stay for the client to refund.
-    if (locked === row.amountSats && outputs.length > MAX_LOCKUP_SPEND_INPUTS) {
-      await store.fail(row.id, 'quoted', `lockup funded in ${outputs.length} outputs, over ${MAX_LOCKUP_SPEND_INPUTS}`)
-      return false
-    }
-    // Funded, but (some of) the value sits on an asset vtxo a claim can never
-    // spend. Refuse at once rather than wait out the timeout for the same end;
-    // the refund sweep returns the whole lockup through the cooperative leaf.
-    if (locked < row.amountSats && held >= row.amountSats) {
-      await store.patch(row.id, { onchain_lockup_value: held })
-      await store.fail(
-        row.id,
-        'quoted',
-        `lockup funded on an asset vtxo a claim cannot spend: ${held} held, ${locked} spendable`,
-      )
-      return false
-    }
-    if (locked === row.amountSats && !timedOut) {
-      // Off regtest only: that stack expires batches (ARKD_VTXO_TREE_EXPIRY=6144, SDK floor 6000s) sooner than any claim deadline.
-      const expiresTooSoon = network === 'regtest' ? null : expiryBeforeClaimDeadline(outputs, row.htlcLocktime)
-      if (expiresTooSoon !== null) {
-        await store.fail(
-          row.id,
-          'quoted',
-          `lockup expires at ${expiresTooSoon}, before ${lockupExpiryFloor(row.htlcLocktime)} — the last moment ` +
-            'a claim answering this swap could still need it',
-        )
-        return false
-      }
-      const [first] = outputs
-      return store.transition(row.id, 'quoted', 'funded', {
-        onchain_lockup_txid: first?.txid ?? null,
-        onchain_lockup_vout: first?.vout ?? null,
-        onchain_lockup_value: locked,
-        lockup_outpoints: JSON.stringify(
-          outputs.map(({ txid, vout, value, expiresAt }) => ({ txid, vout, value, expiresAt })),
-        ),
-      })
-    }
-    if (timedOut) {
-      // The full held value, asset vtxo included, so the refund sweep returns it.
-      if (held > 0) await store.patch(row.id, { onchain_lockup_value: held })
-      await store.fail(row.id, 'quoted', locked > 0 ? `lockup timeout with partial ${locked} sats` : 'lockup timeout')
-    }
+  private async failAs(row: OnchainSendSwapRow, next: FailAction): Promise<false> {
+    const { store } = this.deps
+    if (next.lockupValue !== undefined) await store.patch(row.id, { onchain_lockup_value: next.lockupValue })
+    await store.fail(row.id, row.state, next.reason)
     return false
+  }
+
+  private async whenQuoted(row: OnchainSendSwapRow): Promise<boolean> {
+    const reads = this.readsFor(row)
+    const next = await planOnchainSend(row, reads)
+    if (next.do === 'fail') return this.failAs(row, next)
+    if (next.do !== 'adopt_lockup') return false
+    const outputs = wasRead(reads.lockupOutputs, 'lockups')
+    const [first] = outputs
+    return this.deps.store.transition(row.id, 'quoted', 'funded', {
+      onchain_lockup_txid: first?.txid ?? null,
+      onchain_lockup_vout: first?.vout ?? null,
+      onchain_lockup_value: outputs.reduce((sum, o) => sum + o.value, 0),
+      lockup_outpoints: JSON.stringify(
+        outputs.map(({ txid, vout, value, expiresAt }) => ({ txid, vout, value, expiresAt })),
+      ),
+    })
   }
 
   /** The adopted lockup's earliest batch expiry; regtest is exempt, as at the funding gate. */
@@ -903,78 +912,35 @@ export class OnchainSendSwapService {
 
   private async whenFunded(row: OnchainSendSwapRow): Promise<boolean> {
     const { store } = this.deps
-    if (!providerKeyCurrent(row.providerPubkey, this.deps.arkade.providerPubkey)) {
-      await store.fail(row.id, 'funded', KEY_ROTATED)
-      return false
-    }
-    const decision = this.fundingDecision(row)
-    if (!decision.fund) {
-      await store.fail(row.id, 'funded', decision.reason)
-      return false
-    }
-    // After the funding decision, before the CAS: a held swap still reaches its deadline and refuses.
-    if (!(await askApproval(this.deps.approvalGate, row.id, row.amountSats))) return false
-    const shortfall = await this.lockupShortfall(row)
-    if (shortfall) {
-      await store.fail(row.id, 'funded', shortfall)
-      return false
-    }
+    const next = await planOnchainSend(row, this.readsFor(row))
+    if (next.do === 'fail') return this.failAs(row, next)
+    if (next.do !== 'enter_funding') return false
     if (!(await store.enterFunding(row.id))) return false
     return this.submitFunding(await store.get(row.id), true)
   }
 
-  /** Read again right before money moves: an approval wait or a failing `fund()` is time the client can spend unrolling it. */
-  private async lockupShortfall(row: OnchainSendSwapRow): Promise<string | null> {
-    const held = (await this.deps.arkade.findLockups(row.pkScript)).reduce((sum, o) => sum + o.value, 0)
-    const funded = row.onchainLockupValue ?? row.amountSats
-    return held < funded ? `lockup holds ${held} of ${funded} sats at funding: unrolled, swept or spent` : null
+  private async lockupHeld(row: OnchainSendSwapRow): Promise<number> {
+    return (await this.deps.arkade.findLockups(row.pkScript)).reduce((sum, o) => sum + o.value, 0)
   }
 
-  private fundingDecision(row: OnchainSendSwapRow) {
-    return evaluateOnchainSendFunding({
-      refundLocktime: row.refundLocktime,
-      htlcLocktime: row.htlcLocktime,
-      minConfirmations: row.minConfirmations,
-      now: this.now(),
-    })
+  /** Read again right before money moves: an approval wait or a failing `fund()` is time the client can spend unrolling it. */
+  private async lockupShortfall(row: OnchainSendSwapRow): Promise<string | null> {
+    return lockupShortfall(row, await this.lockupHeld(row))
   }
 
   private async whenFundingOnchain(row: OnchainSendSwapRow): Promise<boolean> {
-    if (row.fundingTxid) return this.checkFunded(row)
-    return this.recoverFunding(row)
-  }
-
-  /**
-   * Recovery path: `funding_onchain` with no txid on disk means the process died around the
-   * funding broadcast. A recorded `funding_tx` is resent and nothing is signed again. Without
-   * one — a row funded before that column, through `fund()` — a blind resubmit is a SECOND
-   * funding transaction paying the same HTLC out of the solver's own pocket.
-   *
-   * So ask the chain instead. `row.onchainAddress` is a per-swap P2TR derived from this
-   * swap's payment hash, claim key and locktime, so an output there for exactly
-   * `payoutSats` is this swap's own funding; adopting its txid/vout finishes the write
-   * that never landed.
-   *
-   * The amount filter is load-bearing: `onchainAddress` is public from the moment the
-   * client holds a quote, so adopting an arbitrary output would let one dust payment
-   * stop the solver funding at all — leaving a client who claims that dust to reveal
-   * `P` and lose the whole Arkade lockup for a few sats. Both backends pay exactly
-   * `payoutSats`, so anything else falls through to a real fund.
-   *
-   * RESIDUAL WINDOW, for such a row only: a crash after the backend commits to paying but before the payment
-   * is visible to `findOutputs`. Small for LND; for a backend that accepts first and
-   * broadcasts afterwards the idempotency key is what closes it, not this query.
-   */
-  private async recoverFunding(row: OnchainSendSwapRow): Promise<boolean> {
-    const { store, onchain } = this.deps
-    if (row.fundingTx) return this.publishFunding(row, row.fundingTx, true)
-    const outputs = await onchain.findOutputs({ address: row.onchainAddress })
-    const already = outputs.find((output) => output.valueSats === row.payoutSats)
-    if (!already) return this.submitFunding(row, false)
-    return store.transition(row.id, 'funding_onchain', 'awaiting_claim', {
-      funding_txid: already.txid,
-      funding_vout: already.vout,
-    })
+    const { store } = this.deps
+    const next = await planOnchainSend(row, this.readsFor(row))
+    if (next.do === 'record_funded') return store.transition(row.id, 'funding_onchain', 'awaiting_claim', {})
+    if (next.do === 'publish_recorded' && row.fundingTx) return this.publishFunding(row, row.fundingTx, true)
+    if (next.do === 'adopt_funding') {
+      return store.transition(row.id, 'funding_onchain', 'awaiting_claim', {
+        funding_txid: next.txid,
+        funding_vout: next.vout,
+      })
+    }
+    if (next.do === 'submit_funding') return this.submitFunding(row, false)
+    return false
   }
 
   /** `fresh`: this tick's `enterFunding` took the lease with the entry, so no `fund()` can have run for the row. */
@@ -1022,9 +988,10 @@ export class OnchainSendSwapService {
   }
 
   private fundingRefusal(row: OnchainSendSwapRow): string | null {
-    if (!providerKeyCurrent(row.providerPubkey, this.deps.arkade.providerPubkey)) return KEY_ROTATED
-    const decision = this.fundingDecision(row)
-    return decision.fund ? null : decision.reason
+    return onchainFundingRefusal(row, {
+      providerKeyCurrent: providerKeyCurrent(row.providerPubkey, this.deps.arkade.providerPubkey),
+      nowSeconds: this.now(),
+    })
   }
 
   /**
@@ -1059,78 +1026,18 @@ export class OnchainSendSwapService {
     return false
   }
 
-  private async checkFunded(row: OnchainSendSwapRow): Promise<boolean> {
-    return this.deps.store.transition(row.id, 'funding_onchain', 'awaiting_claim', {})
-  }
-
   private async whenAwaitingClaim(row: OnchainSendSwapRow): Promise<boolean> {
-    const { store, onchain } = this.deps
-    if (!row.fundingTxid || row.fundingVout === null) {
-      await store.fail(row.id, 'awaiting_claim', 'awaiting_claim state with no funding txid/vout')
-      return false
+    const { store } = this.deps
+    const next = await planOnchainSend(row, this.readsFor(row))
+    if ((next.do === 'wait' || next.do === 'record_claim') && next.alert !== undefined) {
+      this.onTickError?.(row.id, new Error(next.alert))
     }
-    const witness = await onchain.findSpendWitness({
-      txid: row.fundingTxid,
-      vout: row.fundingVout,
-      outputScript: hex.decode(row.onchainPkScript),
-    })
-    if (!witness) {
-      // Margin against MTP lag, not just the bare deadline — see
-      // HTLC_REFUND_MTP_MARGIN's doc comment.
-      if (this.now() >= row.htlcLocktime + HTLC_REFUND_MTP_MARGIN) {
-        return store.transition(row.id, 'awaiting_claim', 'refunding_onchain', {})
-      }
-      if (row.fundStartedAt !== null && this.now() - row.fundStartedAt >= FUNDING_STUCK_ALERT_SECONDS) {
-        // Unconfirmed funding blocks every later spend, and a confirm past refund_locktime is a double loss;
-        // its fee is fixed at sign time, so only a human can bump/CPFP it — surface it.
-        if ((await onchain.transactionOutcome(row.fundingTxid)) !== 'confirmed') {
-          this.onTickError?.(
-            row.id,
-            new Error(
-              `funding ${row.fundingTxid} unconfirmed ${this.now() - row.fundStartedAt}s after broadcast — ` +
-                `bump or CPFP before refund_locktime ${row.refundLocktime} (the client reclaims the Arkade lockup ` +
-                `after it, so a later confirm pays both sides); htlc_locktime ${row.htlcLocktime}`,
-            ),
-          )
-        }
-      }
-      return false // client has not claimed yet, and the timeout hasn't matured — keep waiting
+    if (next.do === 'fail') return this.failAs(row, next)
+    if (next.do === 'start_refund') return store.transition(row.id, 'awaiting_claim', 'refunding_onchain', {})
+    if (next.do === 'record_claim') {
+      return store.transition(row.id, 'awaiting_claim', 'claiming', { preimage: next.preimage })
     }
-
-    const preimage = preimageFromClaimWitness(witness)
-    if (!preimage || paymentHashFromPreimage(preimage) !== row.paymentHash) {
-      // A spend exists but does not look like our claim leaf (or reveals a
-      // preimage that does not fit) — most likely the SOLVER'S OWN refund
-      // spend after a timeout, not the client's claim. Routed to a human:
-      // the exposed capital needs eyes either way.
-      await store.fail(row.id, 'awaiting_claim', 'onchain HTLC spent by something other than a matching claim')
-      return false
-    }
-    // TLA+ FINDING F7, THE HALF NO LOCKTIME CAN FIX.
-    //
-    // `onchainRefundLocktimeFor` reserves ARKADE_CLAIM_WINDOW_SECONDS past the
-    // last instant a claim can arrive, so the GEOMETRY of a quote always leaves
-    // room. What it cannot reserve is elapsed time: a solver that was down for
-    // hours comes back to a claim already on the chain and a deadline nearly
-    // spent. From here the race is real — we hold `P`, and the client can pull
-    // their lockup back on its refund leaf the moment `refund_locktime` passes.
-    //
-    // Claiming anyway is right: it is the only recourse, and a claim that lands
-    // one second before the deadline collects in full. So the row is NOT failed
-    // and the transition is NOT skipped. What was missing is that nobody was
-    // told — the loss would arrive as a swap that simply stopped being worth
-    // anything, with no record of the squeeze that caused it.
-    const timeLeft = arkadeClaimTimeLeft(row.refundLocktime, this.now())
-    if (timeLeft < ARKADE_CLAIM_WINDOW_SECONDS) {
-      this.onTickError?.(
-        row.id,
-        new Error(
-          `claim race: ${timeLeft}s left to claim the arkade lockup, under the ${ARKADE_CLAIM_WINDOW_SECONDS}s budget ` +
-            `(refund_locktime ${row.refundLocktime}, htlc_locktime ${row.htlcLocktime}) — claiming anyway`,
-        ),
-      )
-    }
-    return store.transition(row.id, 'awaiting_claim', 'claiming', { preimage: hex.encode(preimage) })
+    return false
   }
 
   private async whenClaiming(row: OnchainSendSwapRow): Promise<boolean> {
@@ -1227,62 +1134,30 @@ export class OnchainSendSwapService {
    */
   private async whenRefundingOnchain(row: OnchainSendSwapRow): Promise<boolean> {
     const { store, onchain } = this.deps
-    if (!row.fundingTxid || row.fundingVout === null) {
-      await store.fail(row.id, 'refunding_onchain', 'refunding_onchain state with no funding txid/vout')
+    const next = await planOnchainSend(row, this.readsFor(row))
+    if (next.do === 'fail') return this.failAs(row, next)
+    if (next.do === 'record_refund') {
+      return store.transition(row.id, 'refunding_onchain', 'refunded', { onchain_refund_txid: next.txid })
+    }
+    if (next.do === 'record_claim') {
+      return store.transition(row.id, 'refunding_onchain', 'claiming', { preimage: next.preimage })
+    }
+    if (!row.fundingTxid || row.fundingVout === null) return false
+    if (next.do === 'bump_refund') {
+      await this.replaceOnchainHtlcRefund(row, row.fundingTxid, row.fundingVout)
       return false
     }
-
-    // OUR OWN EARLIER ATTEMPTS, BY NAME: the pre-committed txids stop
-    // a refund that went out before a crash being written off as a foreign spend
-    // below. Before the claim read, because a CONFIRMED refund of this outpoint
-    // means no claim can exist; the reverse is not true.
-    const tracked = trackedRefundTxids(row)
-    if (tracked.length > 0) {
-      const { outcome, txid } = await outcomeOfAny(onchain, tracked)
-      if (outcome === 'confirmed')
-        return store.transition(row.id, 'refunding_onchain', 'refunded', { onchain_refund_txid: txid })
-      // Until it confirms the untimelocked claim leaf stays open, stretching toward `refundLocktime`.
-      if (outcome === 'mempool') {
-        await this.replaceOnchainHtlcRefund(row, row.fundingTxid, row.fundingVout)
-        return false
-      }
-    }
-
-    // The client can still land a valid claim right up to (and, within
-    // HTLC_REFUND_MTP_MARGIN, briefly after) htlcLocktime matures. Re-check
-    // before racing a refund broadcast against it: without this, a
-    // late-but-valid claim leaves this row retrying a failing double-spend
-    // forever (LEGAL_EDGES has no way back to `claiming` otherwise) — the
-    // preimage is never recovered, the Arkade lockup is never claimed, and
-    // the client can still unilaterally refund that same lockup once
-    // refundLocktime passes. Net: the solver pays onchain AND loses the
-    // lockup.
-    const claimWitness = await onchain.findSpendWitness({
-      txid: row.fundingTxid,
-      vout: row.fundingVout,
-      outputScript: hex.decode(row.onchainPkScript),
-    })
-    if (claimWitness) {
-      const preimage = preimageFromClaimWitness(claimWitness)
-      if (preimage && paymentHashFromPreimage(preimage) === row.paymentHash) {
-        return store.transition(row.id, 'refunding_onchain', 'claiming', { preimage: hex.encode(preimage) })
-      }
-      // Neither a matching claim nor the refund above: genuinely unrecognisable.
-      await store.fail(row.id, 'refunding_onchain', 'onchain HTLC spent by something other than a matching claim')
-      return false
-    }
+    if (next.do !== 'push_refund') return false
 
     const attempt = await this.pushOnchainHtlcRefund(row, row.fundingTxid, row.fundingVout, {
       estimate: await onchain.estimateFeeRate(),
       previousFeeRate: null,
     })
-    if (!attempt.broadcast) {
-      // Parking before refundLocktime would end both the claim re-check above and the
-      // retry; `refunding_onchain` is recoverable, so the next sweep re-reads the rate.
-      if (attempt.retry && this.now() < row.refundLocktime) throw new Error(attempt.reason)
-      await store.fail(row.id, 'refunding_onchain', attempt.reason)
-      return false
-    }
+    if (attempt.broadcast) return false
+    // `refunding_onchain` is recoverable, so a throw lets the next sweep read the rate again.
+    const after = planRefundNotSent(row, this.now(), attempt)
+    if (after.do === 'throw') throw new Error(after.message)
+    if (after.do === 'fail') return this.failAs(row, after)
     return false
   }
 
