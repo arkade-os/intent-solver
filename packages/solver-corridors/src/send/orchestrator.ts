@@ -71,13 +71,7 @@ import type { ReceiveSwapRow } from '../db/receiveSwaps.js'
 import type { SendSwapRow, SendSwapState, SwapStore } from '../db/swaps.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { sweep } from '@arkade-os/solver-core/util/sweep.js'
-import {
-  planSend,
-  SEND_COUPLED_REFUSED,
-  type SendAction,
-  type SendObservation,
-  type SendRead,
-} from '@arkade-os/solver-core/core/sendPlan.js'
+import { planSend, SEND_COUPLED_REFUSED, type SendReads } from '@arkade-os/solver-core/core/sendPlan.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
 import type { CovenantScriptRow } from '@arkade-os/solver-arkade/arkade/covenantRow.js'
@@ -418,11 +412,9 @@ const stuckBecause = (refunded: boolean, verdict: SelfPaymentVerdict): string =>
   return 'client refunded, but the self-payment probe could not be asked'
 }
 
-/** The planner's observation, with the full objects the orchestrator needs to act on. */
-interface Seen extends SendObservation {
-  lockups?: { held: number; spendable: FundedOutput[] }
-  coupled?: CoupledReceiveRow | null
-  failedReceive?: CoupledReceiveRow | null
+/** The planner's reads for one tick, and the lockup outputs it read, which adopting them needs in full. */
+interface TickReads extends SendReads {
+  lockupOutputs: FundedOutput[]
 }
 
 export class SendSwapService {
@@ -1037,99 +1029,61 @@ export class SendSwapService {
     }
   }
 
-  private newSeen(row: SendSwapRow): Seen {
-    const { ln, arkade } = this.deps
-    return {
-      nowSeconds: this.now(),
-      lockupTimeout: this.lockupTimeout,
-      maxLockupOutputs: MAX_LOCKUP_SPEND_INPUTS,
-      providerKeyCurrent: row.receiverPubkey === arkade.providerPubkey,
-      invoiceProbe: ln.getOwnInvoiceState ? 'own' : ln.getKnownInvoiceState ? 'known' : 'none',
-      backendName: this.deps.backendName,
-      routeCltvBudgetBlocks: ln.routeCltvBudgetBlocks,
-      enforcesRouteCltv: ln.enforcesRouteCltv,
-      hintDenylist: this.sendHintScidDenylist,
-    }
-  }
-
-  /** Asks the planner, reading each fact it asks for, until it names something to do. */
-  private async decide(row: SendSwapRow, seen: Seen): Promise<SendAction> {
-    const asked = new Set<SendRead>()
-    for (;;) {
-      seen.nowSeconds = this.now()
-      const next = planSend(row, seen)
-      if (next.do !== 'read') return next
-      // The planner asks for each fact once. A second ask means the read left it unset.
-      if (asked.has(next.what)) throw new Error(`swap ${row.id}: reading ${next.what} gave no answer`)
-      asked.add(next.what)
-      await this.read(row, next.what, seen)
-    }
-  }
-
-  private async read(row: SendSwapRow, what: SendRead, seen: Seen): Promise<void> {
-    const { ln, coupling } = this.deps
-    switch (what) {
-      case 'lockups': {
+  private readsFor(row: SendSwapRow): TickReads {
+    const { ln, arkade, coupling } = this.deps
+    const reads: TickReads = {
+      lockupOutputs: [],
+      now: this.now,
+      lockupTimeout: () => this.lockupTimeout,
+      maxLockupOutputs: () => MAX_LOCKUP_SPEND_INPUTS,
+      providerKeyCurrent: () => row.receiverPubkey === arkade.providerPubkey,
+      invoiceProbe: () => (ln.getOwnInvoiceState ? 'own' : ln.getKnownInvoiceState ? 'known' : 'none'),
+      backendName: () => this.deps.backendName,
+      routeCltvBudgetBlocks: () => ln.routeCltvBudgetBlocks,
+      enforcesRouteCltv: () => ln.enforcesRouteCltv,
+      hintDenylist: () => this.sendHintScidDenylist,
+      lockups: async () => {
         const all = await this.availableLockups(row)
-        seen.lockups = { held: all.reduce((sum, o) => sum + o.value, 0), spendable: satsOutputs(all) }
-        return
-      }
-      case 'refund_deadline':
-        seen.refundDeadlineSeconds = await refundDeadlineSeconds(
-          row.refundLocktime,
-          this.now,
-          this.deps.chainTip,
-          DEADLINE_SECONDS_PURPOSE,
-        )
-        return
-      case 'coupled':
-        seen.coupled = (await coupling?.receiveStore.findLiveByPaymentHash(row.paymentHash)) ?? null
-        return
-      case 'coupled_preimage': {
-        if (!coupling || !seen.coupled)
-          throw new Error(`swap ${row.id}: no coupled receive read to look for a claim of`)
-        const outpoints = await coupling.findLockupOutpoints(seen.coupled.pkScript)
+        reads.lockupOutputs = satsOutputs(all)
+        return { held: all.reduce((sum, o) => sum + o.value, 0), spendable: reads.lockupOutputs }
+      },
+      refundDeadline: () =>
+        refundDeadlineSeconds(row.refundLocktime, this.now, this.deps.chainTip, DEADLINE_SECONDS_PURPOSE),
+      coupledReceive: async () => (await coupling?.receiveStore.findLiveByPaymentHash(row.paymentHash)) ?? null,
+      coupledPreimage: async (receive) => {
+        if (!coupling) throw new Error(`swap ${row.id}: no coupling to look for a claim through`)
+        const outpoints = await coupling.findLockupOutpoints(receive.pkScript)
         const preimage = outpoints.length > 0 ? await coupling.findClaimPreimage(outpoints, row.paymentHash) : null
-        seen.coupledPreimage = preimage ? hex.encode(preimage) : null
-        return
-      }
-      case 'failed_receive':
-        seen.failedReceive = (await coupling?.receiveStore.findByPaymentHash(row.paymentHash)) ?? null
-        return
-      case 'wallet_identity':
-        seen.currentWallet = (await ln.walletFingerprint?.()) ?? null
-        return
-      case 'own_invoice': {
+        return preimage ? hex.encode(preimage) : null
+      },
+      failedReceive: async () => (await coupling?.receiveStore.findByPaymentHash(row.paymentHash)) ?? null,
+      currentWallet: async () => (await ln.walletFingerprint?.()) ?? null,
+      ownInvoice: async () => {
         if (!ln.getOwnInvoiceState && !ln.getKnownInvoiceState) {
           throw new Error(`swap ${row.id}: this backend cannot be asked about its own invoice`)
         }
         const own: HoldState | null | undefined = ln.getOwnInvoiceState
           ? await ln.getOwnInvoiceState(row.paymentHash)
           : await ln.getKnownInvoiceState?.(row.paymentHash)
-        seen.ownInvoice = own?.status ?? null
-        return
-      }
-      case 'pay_deadline':
-        if (seen.refundDeadlineSeconds === undefined) throw new Error(`swap ${row.id}: no refund deadline read yet`)
-        seen.payDeadline = await this.payDeadline(row, seen.refundDeadlineSeconds)
-        return
-      case 'approval':
-        seen.approved = Boolean(await askApproval(this.deps.approvalGate, row.id, row.amountSats))
-        return
+        return own?.status ?? null
+      },
+      payDeadline: (refundDeadline) => this.payDeadline(row, refundDeadline),
+      approved: async () => Boolean(await askApproval(this.deps.approvalGate, row.id, row.amountSats)),
     }
+    return reads
   }
 
   private async whenQuoted(row: SendSwapRow): Promise<boolean> {
     const { store } = this.deps
-    const seen = this.newSeen(row)
-    const next = await this.decide(row, seen)
+    const reads = this.readsFor(row)
+    const next = await planSend(row, reads)
     if (next.do === 'fail') {
       if (next.lockupValue !== undefined) await store.patch(row.id, { lockup_value: next.lockupValue })
       await store.fail(row.id, 'quoted', next.reason)
       return false
     }
-    if (next.do !== 'adopt_lockup' || !seen.lockups) return false
-    const outputs = seen.lockups.spendable
+    if (next.do !== 'adopt_lockup') return false
+    const outputs = reads.lockupOutputs
     const [first] = outputs
     // Every funding output gets its own history entry: the transition marks the state change and cannot
     // name an outpoint. Before the transition, so a crash between them leaves a recorded funding.
@@ -1144,7 +1098,7 @@ export class SendSwapService {
 
   private async whenFunded(row: SendSwapRow): Promise<boolean> {
     const { store } = this.deps
-    const next = await this.decide(row, this.newSeen(row))
+    const next = await planSend(row, this.readsFor(row))
     if (next.do === 'wait' && next.alert !== undefined) this.onTickError?.(row.id, new Error(next.alert))
     if (next.do === 'fail') {
       await store.fail(row.id, 'funded', next.reason)

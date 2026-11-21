@@ -1,13 +1,13 @@
 /**
  * What an `arkade:BTC->lightning:BTC` swap should do next, up to the moment it starts paying. Pure: the
  * orchestrator reads, this decides, the orchestrator acts. Same shape as `receivePlan.ts`: the planner asks
- * for one fact at a time (`{ do: 'read' }`), so the order of the rules is the order of the reads.
+ * reads the outside world through `SendReads`, in the order the rules need it.
  *
  * `paying`, `paid` and `claiming` keep their rules in the orchestrator for now.
  */
 
 import { decodeInvoice } from '../invoice/decode.js'
-import { judgeClientLockup } from './clientLockup.js'
+import { judgeClientLockup, type ClientLockup } from './clientLockup.js'
 import { evaluateSendPayment, lockupDeadlineFor, refundWithoutReceiverDelayCovers } from './send.js'
 
 export const SEND_KEY_ROTATED = 'provider key rotated since quote; refusing to pay an unclaimable lockup'
@@ -27,6 +27,7 @@ export interface SendPlanRow {
 /** The receive swap of our own client on the same payment hash, when this solver minted the invoice. */
 export interface SendPlanCoupledReceive {
   state: string
+  pkScript: string
   invoice: string
   htlcExpiresAt: number | null
   fundStartedAt: number | null
@@ -34,49 +35,37 @@ export interface SendPlanCoupledReceive {
   invoiceBackendName?: string | null
 }
 
-export type SendRead =
-  | 'lockups'
-  | 'refund_deadline'
-  | 'coupled'
-  | 'coupled_preimage'
-  | 'failed_receive'
-  | 'wallet_identity'
-  | 'own_invoice'
-  | 'pay_deadline'
-  | 'approval'
+export type { ClientLockup }
 
-/** What has been read so far this tick. A field that is `undefined` has not been read. */
-export interface SendObservation {
-  /** Taken again before every call. */
-  nowSeconds: number
-  lockupTimeout: number
+export interface SendReads {
+  now(): number
+  lockupTimeout(): number
   /** One claim spends at most this many outputs; the rest would stay for the client to refund. */
-  maxLockupOutputs: number
-  providerKeyCurrent: boolean
+  maxLockupOutputs(): number
+  providerKeyCurrent(): boolean
   /** How the node can be asked about an invoice it minted: directly, only after proving it is the same wallet, or not at all. */
-  invoiceProbe: 'own' | 'known' | 'none'
-  backendName: string | undefined
-  routeCltvBudgetBlocks: number
-  enforcesRouteCltv: boolean
-  hintDenylist: ReadonlySet<string>
-  /** `held` counts every output; `spendable` leaves out those on an asset vtxo, which a claim cannot spend. */
-  lockups?: { held: number; spendable: readonly { value: number }[] }
-  refundDeadlineSeconds?: number
-  coupled?: SendPlanCoupledReceive | null
+  invoiceProbe(): 'own' | 'known' | 'none'
+  backendName(): string | undefined
+  routeCltvBudgetBlocks(): number
+  enforcesRouteCltv(): boolean
+  hintDenylist(): ReadonlySet<string>
+  lockups(): Promise<ClientLockup>
+  refundDeadline(): Promise<number>
+  /** The live receive swap of our own client on the same payment hash. */
+  coupledReceive(): Promise<SendPlanCoupledReceive | null>
   /** The preimage the client revealed by claiming the coupled payout. */
-  coupledPreimage?: string | null
+  coupledPreimage(receive: SendPlanCoupledReceive): Promise<string | null>
   /** Any receive swap on the hash, finished ones too. */
-  failedReceive?: SendPlanCoupledReceive | null
-  currentWallet?: string | null
+  failedReceive(): Promise<SendPlanCoupledReceive | null>
+  currentWallet(): Promise<string | null>
   /** The status of our own invoice on the node, or null when it has none to give. */
-  ownInvoice?: string | null
+  ownInvoice(): Promise<string | null>
   /** The refund deadline, pulled in by a lockup that is short or about to expire. */
-  payDeadline?: number
-  approved?: boolean
+  payDeadline(refundDeadline: number): Promise<number>
+  approved(): Promise<boolean>
 }
 
 export type SendAction =
-  | { do: 'read'; what: SendRead }
   | { do: 'wait'; alert?: string }
   | { do: 'adopt_lockup' }
   | { do: 'collect'; preimage: string }
@@ -88,36 +77,34 @@ export type SendAction =
   | { do: 'hand_over' }
 
 const WAIT: SendAction = { do: 'wait' }
-const read = (what: SendRead): SendAction => ({ do: 'read', what })
-const fail = (reason: string, lockupValue?: number): SendAction =>
-  lockupValue === undefined ? { do: 'fail', reason } : { do: 'fail', reason, lockupValue }
+const fail = (reason: string): SendAction => ({ do: 'fail', reason })
 
-export const planSend = (row: SendPlanRow, seen: SendObservation): SendAction => {
+export const planSend = (row: SendPlanRow, reads: SendReads): Promise<SendAction> => {
   switch (row.state) {
     case 'quoted':
-      return whenQuoted(row, seen)
+      return whenQuoted(row, reads)
     case 'funded':
-      return whenFunded(row, seen)
+      return whenFunded(row, reads)
     case 'paying':
     case 'paid':
     case 'claiming':
-      return { do: 'hand_over' }
+      return Promise.resolve({ do: 'hand_over' })
     default:
-      return WAIT
+      return Promise.resolve(WAIT)
   }
 }
 
-const whenQuoted = (row: SendPlanRow, seen: SendObservation): SendAction => {
-  if (seen.lockups === undefined) return read('lockups')
+const whenQuoted = async (row: SendPlanRow, reads: SendReads): Promise<SendAction> => {
+  const lockup = await reads.lockups()
+  const now = reads.now()
   const tooLate =
-    seen.nowSeconds >= lockupDeadlineFor(row.createdAt, row.invoiceExpiresAt, seen.lockupTimeout) ||
-    seen.nowSeconds >= row.invoiceExpiresAt
-  return judgeClientLockup(seen.lockups, {
+    now >= lockupDeadlineFor(row.createdAt, row.invoiceExpiresAt, reads.lockupTimeout()) || now >= row.invoiceExpiresAt
+  return judgeClientLockup(lockup, {
     amountSats: row.amountSats,
-    maxOutputs: seen.maxLockupOutputs,
+    maxOutputs: reads.maxLockupOutputs(),
     tooLate,
     // A full lockup that lands late is refused too: the refund locktime was fixed at the quote.
-    lateReason: (claimable) => lateFundingReason(row, claimable, seen.nowSeconds),
+    lateReason: (claimable) => lateFundingReason(row, claimable, now),
     refusal: null,
     recordOnOverfund: 'claimable',
     recordOnTooManyOutputs: true,
@@ -132,52 +119,45 @@ const lateFundingReason = (row: SendPlanRow, claimable: number, nowSeconds: numb
 
 const sameInvoice = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase()
 
-const whenFunded = (row: SendPlanRow, seen: SendObservation): SendAction => {
-  // Approval is the last thing read, and nothing is asked again after it.
-  if (seen.approved !== undefined) return seen.approved ? { do: 'start_paying' } : WAIT
-
-  if (!seen.providerKeyCurrent) return fail(SEND_KEY_ROTATED)
-  if (seen.refundDeadlineSeconds === undefined) return read('refund_deadline')
+const whenFunded = async (row: SendPlanRow, reads: SendReads): Promise<SendAction> => {
+  if (!reads.providerKeyCurrent()) return fail(SEND_KEY_ROTATED)
+  const refundDeadline = await reads.refundDeadline()
   const clientCanRefundAloneInTime = refundWithoutReceiverDelayCovers(
     row.refundWithoutReceiverDelay,
-    row.quotedRefundDeadline ?? seen.refundDeadlineSeconds,
+    row.quotedRefundDeadline ?? refundDeadline,
     row.createdAt,
   )
   if (!clientCanRefundAloneInTime) return fail('refused to proceed: client solo refund opens before the quoted refund')
 
-  if (seen.coupled === undefined) return read('coupled')
-  if (seen.coupled) return collectFromCoupledReceive(seen.coupled, seen)
+  const coupled = await reads.coupledReceive()
+  if (coupled) return collectFromCoupledReceive(coupled, reads)
 
-  if (seen.failedReceive === undefined) return read('failed_receive')
-  const failed = seen.failedReceive
+  const failed = await reads.failedReceive()
   if (failed && sameInvoice(failed.invoice, row.invoice) && failed.state === 'refused') {
-    return afterCoupledReceiveRefused(failed, seen)
+    return afterCoupledReceiveRefused(failed, reads)
   }
-  return payOrRefuse(row, seen)
+  return payOrRefuse(row, refundDeadline, reads)
 }
 
 // The invoice is our own and a node cannot pay itself, so a coupled swap only collects: its preimage shows
 // on Arkade when the client claims the payout of the receive leg.
-const collectFromCoupledReceive = (coupled: SendPlanCoupledReceive, seen: SendObservation): SendAction => {
+const collectFromCoupledReceive = async (coupled: SendPlanCoupledReceive, reads: SendReads): Promise<SendAction> => {
   if (coupled.htlcExpiresAt !== null) return fail('refused to collect: receive took a real htlc')
-  if (seen.coupledPreimage === undefined) return read('coupled_preimage')
-  return seen.coupledPreimage === null ? WAIT : { do: 'collect', preimage: seen.coupledPreimage }
+  const preimage = await reads.coupledPreimage(coupled)
+  return preimage === null ? WAIT : { do: 'collect', preimage }
 }
 
-const afterCoupledReceiveRefused = (failed: SendPlanCoupledReceive, seen: SendObservation): SendAction => {
+const afterCoupledReceiveRefused = async (failed: SendPlanCoupledReceive, reads: SendReads): Promise<SendAction> => {
   const mayStillHavePaidOut = failed.fundStartedAt !== null || failed.htlcExpiresAt !== null
   if (mayStillHavePaidOut) return WAIT
-  if (seen.invoiceProbe === 'none') {
+  if (reads.invoiceProbe() === 'none') {
     return { do: 'wait', alert: 'coupled refund blocked: Lightning backend cannot probe its own invoice' }
   }
-  if (seen.invoiceProbe === 'known') {
-    if (seen.currentWallet === undefined) return read('wallet_identity')
-    if (!mintedByThisNode(failed, seen.currentWallet, seen.backendName)) {
-      return { do: 'wait', alert: 'coupled refund blocked: invoice wallet or backend identity unavailable or changed' }
-    }
+  if (reads.invoiceProbe() === 'known' && !mintedByThisNode(failed, await reads.currentWallet(), reads.backendName())) {
+    return { do: 'wait', alert: 'coupled refund blocked: invoice wallet or backend identity unavailable or changed' }
   }
-  if (seen.ownInvoice === undefined) return read('own_invoice')
-  const invoiceUnpaid = seen.ownInvoice === 'pending' || seen.ownInvoice === 'cancelled'
+  const status = await reads.ownInvoice()
+  const invoiceUnpaid = status === 'pending' || status === 'cancelled'
   return invoiceUnpaid ? { do: 'refuse_coupled' } : WAIT
 }
 
@@ -193,21 +173,23 @@ const mintedByThisNode = (
   )
 }
 
-// Asked right before the money moves, which can be minutes after the quote.
-const payOrRefuse = (row: SendPlanRow, seen: SendObservation): SendAction => {
-  const invoice = decodeInvoice(row.invoice, seen.hintDenylist)
-  if (seen.payDeadline === undefined) return read('pay_deadline')
+// Asked right before the money moves, which can be minutes after the quote. Approval comes last, so a
+// held swap whose invoice lapses is refused here on a later tick.
+const payOrRefuse = async (row: SendPlanRow, refundDeadline: number, reads: SendReads): Promise<SendAction> => {
+  const invoice = decodeInvoice(row.invoice, reads.hintDenylist())
+  const payDeadline = await reads.payDeadline(refundDeadline)
   const decision = evaluateSendPayment({
     invoiceExpiresAt: row.invoiceExpiresAt,
-    refundLocktime: seen.payDeadline,
+    refundLocktime: payDeadline,
     lockedSats: row.lockupValue ?? 0,
     expectedSats: row.amountSats,
     minFinalCltvBlocks: invoice.minFinalCltvBlocks,
     worstRouteHintCltvBlocks: invoice.worstRouteHintCltvBlocks,
     bestRouteHintCltvBlocks: invoice.bestRouteHintCltvBlocks,
-    routeCltvBudgetBlocks: seen.routeCltvBudgetBlocks,
-    enforcesRouteCltv: seen.enforcesRouteCltv,
-    now: seen.nowSeconds,
+    routeCltvBudgetBlocks: reads.routeCltvBudgetBlocks(),
+    enforcesRouteCltv: reads.enforcesRouteCltv(),
+    now: reads.now(),
   })
-  return decision.pay ? read('approval') : fail(`refused to pay: ${decision.reason}`)
+  if (!decision.pay) return fail(`refused to pay: ${decision.reason}`)
+  return (await reads.approved()) ? { do: 'start_paying' } : WAIT
 }
