@@ -30,7 +30,6 @@ import {
   evaluateCouplingDeadlines,
   evaluateSendAcceptance,
   evaluateSendPayment,
-  lockupDeadlineFor,
   payableCltvBlocks,
   deadlineContainsHtlc,
   hintCltvBlocks,
@@ -72,6 +71,8 @@ import type { ReceiveSwapRow } from '../db/receiveSwaps.js'
 import type { SendSwapRow, SendSwapState, SwapStore } from '../db/swaps.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { sweep } from '@arkade-os/solver-core/util/sweep.js'
+import { wasRead } from '@arkade-os/solver-core/util/wasRead.js'
+import { planSend, SEND_COUPLED_REFUSED, type SendReads } from '@arkade-os/solver-core/core/sendPlan.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
 import type { CovenantScriptRow } from '@arkade-os/solver-arkade/arkade/covenantRow.js'
@@ -410,6 +411,11 @@ const stuckBecause = (refunded: boolean, verdict: SelfPaymentVerdict): string =>
   if (verdict === 'withhold') return 'refund withheld — our own node may still collect against this hash'
   if (!refunded) return 'the refund did not land — see refund_attempt'
   return 'client refunded, but the self-payment probe could not be asked'
+}
+
+/** The planner's reads for one tick, and the lockup outputs it read, which adopting them needs in full. */
+interface TickReads extends SendReads {
+  lockupOutputs: FundedOutput[] | null
 }
 
 export class SendSwapService {
@@ -1024,211 +1030,89 @@ export class SendSwapService {
     }
   }
 
+  private readsFor(row: SendSwapRow): TickReads {
+    const { ln, arkade, coupling } = this.deps
+    const reads: TickReads = {
+      lockupOutputs: null,
+      now: this.now,
+      lockupTimeout: () => this.lockupTimeout,
+      maxLockupOutputs: () => MAX_LOCKUP_SPEND_INPUTS,
+      providerKeyCurrent: () => row.receiverPubkey === arkade.providerPubkey,
+      invoiceProbe: () => (ln.getOwnInvoiceState ? 'own' : ln.getKnownInvoiceState ? 'known' : 'none'),
+      backendName: () => this.deps.backendName,
+      routeCltvBudgetBlocks: () => ln.routeCltvBudgetBlocks,
+      enforcesRouteCltv: () => ln.enforcesRouteCltv,
+      hintDenylist: () => this.sendHintScidDenylist,
+      lockups: async () => {
+        const all = await this.availableLockups(row)
+        const spendable = satsOutputs(all)
+        reads.lockupOutputs = spendable
+        return { held: all.reduce((sum, o) => sum + o.value, 0), spendable }
+      },
+      refundDeadline: () =>
+        refundDeadlineSeconds(row.refundLocktime, this.now, this.deps.chainTip, DEADLINE_SECONDS_PURPOSE),
+      coupledReceive: async () => (await coupling?.receiveStore.findLiveByPaymentHash(row.paymentHash)) ?? null,
+      coupledPreimage: async (receive) => {
+        if (!coupling) throw new Error(`swap ${row.id}: no coupling to look for a claim through`)
+        const outpoints = await coupling.findLockupOutpoints(receive.pkScript)
+        const preimage = outpoints.length > 0 ? await coupling.findClaimPreimage(outpoints, row.paymentHash) : null
+        return preimage ? hex.encode(preimage) : null
+      },
+      failedReceive: async () => (await coupling?.receiveStore.findByPaymentHash(row.paymentHash)) ?? null,
+      currentWallet: async () => (await ln.walletFingerprint?.()) ?? null,
+      ownInvoice: async () => {
+        if (!ln.getOwnInvoiceState && !ln.getKnownInvoiceState) {
+          throw new Error(`swap ${row.id}: this backend cannot be asked about its own invoice`)
+        }
+        const own: HoldState | null | undefined = ln.getOwnInvoiceState
+          ? await ln.getOwnInvoiceState(row.paymentHash)
+          : await ln.getKnownInvoiceState?.(row.paymentHash)
+        return own?.status ?? null
+      },
+      payDeadline: (refundDeadline) => this.payDeadline(row, refundDeadline),
+      approved: async () => Boolean(await askApproval(this.deps.approvalGate, row.id, row.amountSats)),
+    }
+    return reads
+  }
+
   private async whenQuoted(row: SendSwapRow): Promise<boolean> {
-    const { store, arkade } = this.deps
-    const all = await this.availableLockups(row)
-    const outputs = satsOutputs(all)
-    const locked = outputs.reduce((sum, o) => sum + o.value, 0)
-    const held = all.reduce((sum, o) => sum + o.value, 0)
-
-    const timedOut = this.now() >= lockupDeadlineFor(row.createdAt, row.invoiceExpiresAt, this.lockupTimeout)
-    const expired = this.now() >= row.invoiceExpiresAt
-
-    // Overfunding is refused, never paid. The claim leaf sweeps WHOLE vtxos to
-    // the provider (an Arkade spend cannot take part of a vtxo), so paying an
-    // overfunded lockup would hand us the excess with no path for the client to
-    // recover it. Refusing instead routes the entire lockup to the refund path,
-    // so the client gets all of it back. Arkade vtxos are exact-value, so a correct
-    // single funding is exactly `amountSats`.
-    if (locked > row.amountSats) {
-      await store.patch(row.id, { lockup_value: locked })
-      await store.fail(row.id, 'quoted', `overfunded lockup: ${locked} > ${row.amountSats} sats`)
+    const { store } = this.deps
+    const reads = this.readsFor(row)
+    const next = await planSend(row, reads)
+    if (next.do === 'fail') {
+      if (next.lockupValue !== undefined) await store.patch(row.id, { lockup_value: next.lockupValue })
+      await store.fail(row.id, 'quoted', next.reason)
       return false
     }
-    // One claim spends at most this many; the rest would stay for the client to refund.
-    if (locked === row.amountSats && outputs.length > MAX_LOCKUP_SPEND_INPUTS) {
-      await store.patch(row.id, { lockup_value: locked })
-      await store.fail(row.id, 'quoted', `lockup funded in ${outputs.length} outputs, over ${MAX_LOCKUP_SPEND_INPUTS}`)
-      return false
-    }
-
-    // Funded, but (some of) the value sits on an asset vtxo a claim can never
-    // spend — so we would never collect even after paying. Refuse at once rather
-    // than wait out the lockup timeout for the same end: the refund sweep then
-    // returns the WHOLE lockup, asset included, through the cooperative leaf.
-    // `held >= amountSats` is what separates this from a client still funding.
-    if (locked < row.amountSats && held >= row.amountSats) {
-      await store.patch(row.id, { lockup_value: held })
-      await store.fail(
-        row.id,
-        'quoted',
-        `lockup funded on an asset vtxo a claim cannot spend: ${held} held, ${locked} spendable`,
-      )
-      return false
-    }
-
-    if (locked === row.amountSats && !timedOut && !expired) {
-      const [first] = outputs
-      // Every funding output gets its own history entry, including this first
-      // one. The transition marks the STATE change and cannot name an outpoint;
-      // an operator chasing a deposit wants the transaction, and a later
-      // deposit at the same script is recorded the same way (see
-      // `noteFundings`). Before the transition, so a crash between them leaves
-      // a recorded funding rather than an unrecorded one.
-      await store.noteFundings(row.id, outputs)
-      return store.transition(row.id, 'quoted', 'funded', {
-        lockup_txid: first?.txid ?? null,
-        lockup_vout: first?.vout ?? null,
-        lockup_value: locked,
-        lockup_outpoints: JSON.stringify(outputs.map(({ txid, vout, value }) => ({ txid, vout, value }))),
-      })
-    }
-
-    // Either nothing (or only part) has arrived, or a full lockup arrived too
-    // late to pay. Late funding is refused, not paid: `refundLocktime` is
-    // anchored at quote time, so a lockup that lands well after the deadline
-    // shrinks the claim window we quoted against — and past the safety margin it
-    // would open the client's refund before our recourse. The deadline is thus a
-    // hard precondition enforced whenever we first OBSERVE funding, so the
-    // drive-later and crash-recovery paths cannot smuggle in a stale lockup that
-    // an always-on watcher would have timed out.
-    if (timedOut || expired) {
-      // Record whatever is there so the refund sweep can return it — including
-      // an asset vtxo's value, which `satsOutputs` drops from `locked` but the
-      // refund still takes.
-      if (held > 0) await store.patch(row.id, { lockup_value: held })
-      const reason = expired
-        ? 'invoice expired before funding completed'
-        : locked >= row.amountSats
-          ? 'lockup arrived after the funding deadline'
-          : locked > 0
-            ? `lockup timeout with partial ${locked} sats`
-            : 'lockup timeout'
-      await store.fail(row.id, 'quoted', reason)
-    }
-    return false
+    if (next.do !== 'adopt_lockup') return false
+    const outputs = wasRead(reads.lockupOutputs, 'lockups')
+    const [first] = outputs
+    // Every funding output gets its own history entry: the transition marks the state change and cannot
+    // name an outpoint. Before the transition, so a crash between them leaves a recorded funding.
+    await store.noteFundings(row.id, outputs)
+    return store.transition(row.id, 'quoted', 'funded', {
+      lockup_txid: first?.txid ?? null,
+      lockup_vout: first?.vout ?? null,
+      lockup_value: outputs.reduce((sum, o) => sum + o.value, 0),
+      lockup_outpoints: JSON.stringify(outputs.map(({ txid, vout, value }) => ({ txid, vout, value }))),
+    })
   }
 
   private async whenFunded(row: SendSwapRow): Promise<boolean> {
     const { store } = this.deps
-    // The claim leaf of the funded script needs the provider key that was live
-    // at QUOTE time. If the configured key has rotated since, paying would buy
-    // a lockup this key can never claim — refuse instead and let the lockup
-    // take the covenant refund back to the client.
-    if (row.receiverPubkey !== this.deps.arkade.providerPubkey) {
-      await store.fail(row.id, 'funded', 'provider key rotated since quote; refusing to pay an unclaimable lockup')
+    const next = await planSend(row, this.readsFor(row))
+    if (next.do === 'wait' && next.alert !== undefined) this.onTickError?.(row.id, new Error(next.alert))
+    if (next.do === 'fail') {
+      await store.fail(row.id, 'funded', next.reason)
       return false
     }
-    const refundDeadline = await refundDeadlineSeconds(
-      row.refundLocktime,
-      this.now,
-      this.deps.chainTip,
-      DEADLINE_SECONDS_PURPOSE,
-    )
-    if (
-      !refundWithoutReceiverDelayCovers(
-        row.refundWithoutReceiverDelay,
-        row.quotedRefundDeadline ?? refundDeadline,
-        row.createdAt,
-      )
-    ) {
-      await store.fail(row.id, 'funded', 'refused to proceed: client solo refund opens before the quoted refund')
-      return false
-    }
-    // A COUPLED row can never be paid: the invoice is one we minted, and a node
-    // cannot pay its own invoice. Its preimage arrives on-chain instead, when
-    // the client claims the payout we already made on the receive leg — so this
-    // corridor's job here is to collect, not to pay.
-    //
-    // Answered before `evaluateSendPayment` because every gate in there decides
-    // whether to PAY, and the answer on this path is "never". The state
-    // machine agrees: `funded -> claiming` skips `paying`/`paid` entirely.
-    const coupling = this.deps.coupling
-    const coupled = await coupling?.receiveStore.findLiveByPaymentHash(row.paymentHash)
-    if (coupling && coupled) {
-      if (coupled.htlcExpiresAt !== null) {
-        await store.fail(row.id, 'funded', 'refused to collect: receive took a real htlc')
-        return false
-      }
-      const outpoints = await coupling.findLockupOutpoints(coupled.pkScript)
-      const preimage = outpoints.length > 0 ? await coupling.findClaimPreimage(outpoints, row.paymentHash) : null
-      // Nothing provable yet. Routine on every tick before the client acts, so
-      // the row simply waits in `funded` rather than failing.
-      if (!preimage) return false
-      return this.claimWithPreimage(row.id, row.paymentHash, hex.encode(preimage), 'funded')
-    }
-    const failedReceive = await coupling?.receiveStore.findByPaymentHash(row.paymentHash)
-    if (failedReceive?.invoice.toLowerCase() === row.invoice.toLowerCase() && failedReceive.state === 'refused') {
-      // A held funding lease may have submitted a payout that the indexer has not shown yet.
-      if (failedReceive.fundStartedAt !== null || failedReceive.htlcExpiresAt !== null) return false
-      if (!this.deps.ln.getOwnInvoiceState && !this.deps.ln.getKnownInvoiceState) {
-        this.onTickError?.(row.id, new Error('coupled refund blocked: Lightning backend cannot probe its own invoice'))
-        return false
-      }
-      let own: HoldState | null | undefined
-      if (this.deps.ln.getOwnInvoiceState) {
-        own = await this.deps.ln.getOwnInvoiceState(row.paymentHash)
-      } else {
-        const issuedBy = failedReceive.invoiceWalletFingerprint
-        const issuedThrough = failedReceive.invoiceBackendName
-        const currentWallet = await this.deps.ln.walletFingerprint?.()
-        if (
-          !issuedBy ||
-          !currentWallet ||
-          issuedBy !== currentWallet ||
-          !issuedThrough ||
-          issuedThrough !== this.deps.backendName
-        ) {
-          this.onTickError?.(
-            row.id,
-            new Error('coupled refund blocked: invoice wallet or backend identity unavailable or changed'),
-          )
-          return false
-        }
-        own = await this.deps.ln.getKnownInvoiceState?.(row.paymentHash)
-      }
-      if (own?.status !== 'pending' && own?.status !== 'cancelled') return false
-      const won = await store.transition(row.id, 'funded', 'refused', {
-        failure_reason: 'coupled receive refused before funding; client refund pending',
-      })
+    if (next.do === 'collect') return this.claimWithPreimage(row.id, row.paymentHash, next.preimage, 'funded')
+    if (next.do === 'refuse_coupled') {
+      const won = await store.transition(row.id, 'funded', 'refused', { failure_reason: SEND_COUPLED_REFUSED })
       if (won) await this.refundAfterTerminalFailure(row)
       return false
     }
-
-    // Re-evaluated HERE, immediately before the money moves — not at quote time,
-    // not when the lockup was first seen. They can be minutes apart.
-    //
-    // Decoded ONCE and reused below. The point of re-deriving these from
-    // `row.invoice` is that there is no second copy to go stale against
-    // `refundLocktime`; that holds just as well parsing the verbatim string
-    // once per pass as parsing it per field, and `decodeInvoice` is pure.
-    const invoice = decodeInvoice(row.invoice, this.sendHintScidDenylist)
-    // Resolved to seconds first: `evaluateSendPayment` measures the remaining claim
-    // window against MIN_CLAIM_WINDOW, and a raw height there reads as a deadline in 1970.
-    const decision = evaluateSendPayment({
-      invoiceExpiresAt: row.invoiceExpiresAt,
-      refundLocktime: await this.payDeadline(row, refundDeadline),
-      lockedSats: row.lockupValue ?? 0,
-      expectedSats: row.amountSats,
-      // Re-decoded from the row's own invoice, for the reason `submitPayment`
-      // gives: it is the verbatim string the deadline was priced from, so this
-      // cannot go stale against `refundLocktime`.
-      minFinalCltvBlocks: invoice.minFinalCltvBlocks,
-      worstRouteHintCltvBlocks: invoice.worstRouteHintCltvBlocks,
-      bestRouteHintCltvBlocks: invoice.bestRouteHintCltvBlocks,
-      routeCltvBudgetBlocks: this.deps.ln.routeCltvBudgetBlocks,
-      enforcesRouteCltv: this.deps.ln.enforcesRouteCltv,
-      now: this.now(),
-    })
-    if (!decision.pay) {
-      // Nothing has been paid, so this is a refusal, not an incident.
-      await store.fail(row.id, 'funded', `refused to pay: ${decision.reason}`)
-      return false
-    }
-
-    // AFTER the payment decision, BEFORE the CAS: a held swap whose invoice lapses
-    // meets `decision.pay === false` on a later tick and is refused to the refund sweep.
-    if (!(await askApproval(this.deps.approvalGate, row.id, row.amountSats))) return false
+    if (next.do !== 'start_paying') return false
 
     // Commit intent before the irreversible call. The idempotency key is
     // derived from the payment hash, so even a retry from a different process
