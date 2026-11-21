@@ -186,6 +186,7 @@ const whenFunded = (row: OnchainSendPlanRow, seen: OnchainSendObservation): Onch
 }
 
 const whenFundingOnchain = (row: OnchainSendPlanRow, seen: OnchainSendObservation): OnchainSendAction => {
+  // On the txid alone, as before. A row with a txid and no vout is failed by `awaiting_claim` on the next tick.
   if (row.fundingTxid) return { do: 'record_funded' }
   // No txid on disk: the process died around the broadcast. A recorded funding is resent, never re-signed.
   if (row.fundingTx) return { do: 'publish_recorded' }
