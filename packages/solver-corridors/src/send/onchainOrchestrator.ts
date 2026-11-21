@@ -67,9 +67,9 @@ import {
   lockupShortfall,
   onchainFundingRefusal,
   planOnchainSend,
+  planRefundNotSent,
   type OnchainSendAction,
-  type OnchainSendObservation,
-  type OnchainSendRead,
+  type OnchainSendReads,
 } from '@arkade-os/solver-core/core/onchainSendPlan.js'
 import { adoptedOnly, providerKeyCurrent, unadopted } from '../legs/arkadeLockup.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
@@ -261,9 +261,9 @@ export const covenantRowFor = (row: OnchainSendSwapRow): CovenantScriptRow => ({
 
 type FailAction = Extract<OnchainSendAction, { do: 'fail' }>
 
-/** The planner's observation, with the full outputs the orchestrator needs to act on. */
-interface Seen extends OnchainSendObservation {
-  lockups?: { held: number; spendable: FundedOutput[] }
+/** The planner's reads for one tick, and the lockup outputs it read, which adopting them needs in full. */
+interface TickReads extends OnchainSendReads {
+  lockupOutputs: FundedOutput[]
 }
 
 export class OnchainSendSwapService {
@@ -839,48 +839,23 @@ export class OnchainSendSwapService {
     stuck: null,
   })
 
-  private newSeen(row: OnchainSendSwapRow): Seen {
-    return {
-      nowSeconds: this.now(),
-      providerKeyCurrent: providerKeyCurrent(row.providerPubkey, this.deps.arkade.providerPubkey),
-      checksLockupExpiry: this.deps.network !== 'regtest',
-      maxLockupOutputs: MAX_LOCKUP_SPEND_INPUTS,
-    }
-  }
-
-  /** Asks the planner, reading each fact it asks for, until it names something to do. */
-  private async decide(row: OnchainSendSwapRow, seen: Seen): Promise<OnchainSendAction> {
-    const asked = new Set<OnchainSendRead>()
-    for (;;) {
-      seen.nowSeconds = this.now()
-      seen.providerKeyCurrent = providerKeyCurrent(row.providerPubkey, this.deps.arkade.providerPubkey)
-      const next = planOnchainSend(row, seen)
-      if (next.do !== 'read') return next
-      // The planner asks for each fact once. A second ask means the read left it unset.
-      if (asked.has(next.what)) throw new Error(`swap ${row.id}: reading ${next.what} gave no answer`)
-      asked.add(next.what)
-      await this.read(row, next.what, seen)
-    }
-  }
-
-  private async read(row: OnchainSendSwapRow, what: OnchainSendRead, seen: Seen): Promise<void> {
+  private readsFor(row: OnchainSendSwapRow): TickReads {
     const { arkade, onchain } = this.deps
-    switch (what) {
-      case 'lockups': {
+    const reads: TickReads = {
+      lockupOutputs: [],
+      now: this.now,
+      providerKeyCurrent: () => providerKeyCurrent(row.providerPubkey, arkade.providerPubkey),
+      checksLockupExpiry: () => this.deps.network !== 'regtest',
+      maxLockupOutputs: () => MAX_LOCKUP_SPEND_INPUTS,
+      lockups: async () => {
         const all = await arkade.findLockups(row.pkScript)
-        seen.lockups = { held: all.reduce((sum, o) => sum + o.value, 0), spendable: satsOutputs(all) }
-        return
-      }
-      case 'approval':
-        seen.approved = Boolean(await askApproval(this.deps.approvalGate, row.id, row.amountSats))
-        return
-      case 'lockup_held':
-        seen.lockupHeld = await this.lockupHeld(row)
-        return
-      case 'payout_outputs':
-        seen.payoutOutputs = await onchain.findOutputs({ address: row.onchainAddress })
-        return
-      case 'spend_witness': {
+        reads.lockupOutputs = satsOutputs(all)
+        return { held: all.reduce((sum, o) => sum + o.value, 0), spendable: reads.lockupOutputs }
+      },
+      approved: async () => Boolean(await askApproval(this.deps.approvalGate, row.id, row.amountSats)),
+      lockupHeld: () => this.lockupHeld(row),
+      payoutOutputs: () => onchain.findOutputs({ address: row.onchainAddress }),
+      spend: async () => {
         if (!row.fundingTxid || row.fundingVout === null) {
           throw new Error(`swap ${row.id}: no funding outpoint recorded to look for a spend of`)
         }
@@ -889,17 +864,15 @@ export class OnchainSendSwapService {
           vout: row.fundingVout,
           outputScript: hex.decode(row.onchainPkScript),
         })
-        seen.spend = witness ? { preimage: preimageFromClaimWitness(witness) } : null
-        return
-      }
-      case 'funding_outcome':
+        return witness ? { preimage: preimageFromClaimWitness(witness) } : null
+      },
+      fundingOutcome: async () => {
         if (!row.fundingTxid) throw new Error(`swap ${row.id}: no funding txid recorded to ask the outcome of`)
-        seen.fundingOutcome = (await onchain.transactionOutcome(row.fundingTxid)) ?? 'unknown'
-        return
-      case 'refund_outcome':
-        seen.refundOutcome = await outcomeOfAny(onchain, trackedRefundTxids(row))
-        return
+        return onchain.transactionOutcome(row.fundingTxid)
+      },
+      refundOutcome: () => outcomeOfAny(onchain, trackedRefundTxids(row)),
     }
+    return reads
   }
 
   private async failAs(row: OnchainSendSwapRow, next: FailAction): Promise<false> {
@@ -910,11 +883,11 @@ export class OnchainSendSwapService {
   }
 
   private async whenQuoted(row: OnchainSendSwapRow): Promise<boolean> {
-    const seen = this.newSeen(row)
-    const next = await this.decide(row, seen)
+    const reads = this.readsFor(row)
+    const next = await planOnchainSend(row, reads)
     if (next.do === 'fail') return this.failAs(row, next)
-    if (next.do !== 'adopt_lockup' || !seen.lockups) return false
-    const outputs = seen.lockups.spendable
+    if (next.do !== 'adopt_lockup') return false
+    const outputs = reads.lockupOutputs
     const [first] = outputs
     return this.deps.store.transition(row.id, 'quoted', 'funded', {
       onchain_lockup_txid: first?.txid ?? null,
@@ -937,7 +910,7 @@ export class OnchainSendSwapService {
 
   private async whenFunded(row: OnchainSendSwapRow): Promise<boolean> {
     const { store } = this.deps
-    const next = await this.decide(row, this.newSeen(row))
+    const next = await planOnchainSend(row, this.readsFor(row))
     if (next.do === 'fail') return this.failAs(row, next)
     if (next.do !== 'enter_funding') return false
     if (!(await store.enterFunding(row.id))) return false
@@ -955,7 +928,7 @@ export class OnchainSendSwapService {
 
   private async whenFundingOnchain(row: OnchainSendSwapRow): Promise<boolean> {
     const { store } = this.deps
-    const next = await this.decide(row, this.newSeen(row))
+    const next = await planOnchainSend(row, this.readsFor(row))
     if (next.do === 'record_funded') return store.transition(row.id, 'funding_onchain', 'awaiting_claim', {})
     if (next.do === 'publish_recorded' && row.fundingTx) return this.publishFunding(row, row.fundingTx, true)
     if (next.do === 'adopt_funding') {
@@ -1053,7 +1026,7 @@ export class OnchainSendSwapService {
 
   private async whenAwaitingClaim(row: OnchainSendSwapRow): Promise<boolean> {
     const { store } = this.deps
-    const next = await this.decide(row, this.newSeen(row))
+    const next = await planOnchainSend(row, this.readsFor(row))
     if ((next.do === 'wait' || next.do === 'record_claim') && next.alert !== undefined) {
       this.onTickError?.(row.id, new Error(next.alert))
     }
@@ -1159,8 +1132,7 @@ export class OnchainSendSwapService {
    */
   private async whenRefundingOnchain(row: OnchainSendSwapRow): Promise<boolean> {
     const { store, onchain } = this.deps
-    const seen = this.newSeen(row)
-    const next = await this.decide(row, seen)
+    const next = await planOnchainSend(row, this.readsFor(row))
     if (next.do === 'fail') return this.failAs(row, next)
     if (next.do === 'record_refund') {
       return store.transition(row.id, 'refunding_onchain', 'refunded', { onchain_refund_txid: next.txid })
@@ -1180,10 +1152,8 @@ export class OnchainSendSwapService {
       previousFeeRate: null,
     })
     if (attempt.broadcast) return false
-    // Asked again with what just happened. Everything else is already in `seen`, so nothing is read twice.
     // `refunding_onchain` is recoverable, so a throw lets the next sweep read the rate again.
-    seen.refundNotSent = { reason: attempt.reason, retry: attempt.retry }
-    const after = await this.decide(row, seen)
+    const after = planRefundNotSent(row, this.now(), attempt)
     if (after.do === 'throw') throw new Error(after.message)
     if (after.do === 'fail') return this.failAs(row, after)
     return false

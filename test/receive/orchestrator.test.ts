@@ -2906,18 +2906,4 @@ describe('ReceiveSwapService.tick — answers a backend should never give', () =
     await service.tick(swap.id)
     expect(refunded).toEqual([true])
   })
-
-  it('throws instead of asking for ever when a read answers undefined', async () => {
-    const outcome = await service.quote(quoteRequest({ claimPacket: null }))
-    if (!outcome.accepted) throw new Error('expected acceptance')
-    let asked = 0
-    ln.getHoldState = async () => {
-      asked += 1
-      return undefined as never
-    }
-
-    await expect(service.tick(outcome.swap.id)).rejects.toThrow('reading hold gave no answer')
-    expect(asked).toBe(1)
-    expect((await store.get(outcome.swap.id)).state).toBe('quoted')
-  })
 })
