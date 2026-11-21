@@ -684,11 +684,15 @@ export class ReceiveSwapService {
 
   /** Asks the planner, reading each fact it asks for, until it names something to do. */
   private async decide(row: ReceiveSwapRow, seen: Seen): Promise<ReceiveAction> {
+    let asked: ReceiveRead | null = null
     for (;;) {
       seen.nowSeconds = this.now()
       seen.acceptUnilateralGap = this.deps.acceptUnilateralGap
       const next = planReceive(row, seen)
       if (next.do !== 'read') return next
+      // A backend that answers `undefined` would otherwise be asked for ever.
+      if (next.what === asked) throw new Error(`swap ${row.id}: reading ${asked} gave no answer`)
+      asked = next.what
       await this.read(row, next.what, seen)
     }
   }
@@ -1042,7 +1046,7 @@ export class ReceiveSwapService {
       await ln.settleHold(row.preimage)
       return store.transition(row.id, 'claimed', 'settled', {})
     } catch (error) {
-      seen.settleFailed = error instanceof Error ? error.message : String(error)
+      seen.settleFailed = String(error instanceof Error ? error.message : error)
       const after = await this.decide(row, seen)
       if (after.do === 'record_settled') return store.transition(row.id, 'claimed', 'settled', {})
       if (after.do === 'fail') {
@@ -1070,7 +1074,7 @@ export class ReceiveSwapService {
     if (next.do === 'refund_unrolled') {
       const covenantRow = receiveCovenantRowFor(row)
       const unrolled = seen.claim?.history.find(
-        (o) => o.txid === row.arkadeLockupTxid && o.vout === row.arkadeLockupVout,
+        (o) => o.unrolled && o.txid === row.arkadeLockupTxid && o.vout === row.arkadeLockupVout,
       )
       if (!unrolled || !arkade.refundUnrolled) return false
       const save = (record: UnrolledSpendRecord) => store.patch(row.id, { unrolled_refund: JSON.stringify(record) })

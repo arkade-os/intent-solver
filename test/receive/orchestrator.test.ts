@@ -2865,3 +2865,59 @@ describe('ReceiveSwapService.whenArmed — a lost funding response', () => {
     expect((await service.tick(swap.id)).state).toBe('stuck')
   })
 })
+
+describe('ReceiveSwapService.tick — answers a backend should never give', () => {
+  const funded = async () => {
+    const outcome = await service.quote(quoteRequest({ claimPacket: null }))
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    ln.armHold(paymentHash, now + 4 * 3600)
+    return service.tick(outcome.swap.id)
+  }
+
+  it('gives up on a settle past E even when the error carries no message', async () => {
+    const swap = await funded()
+    await driver.run(`UPDATE receive_swap SET state = 'claimed', preimage = ? WHERE id = ?`, [hex.encode(P), swap.id])
+    ln.settleHold = async () => {
+      throw Object.assign(new Error(), { message: undefined })
+    }
+    now = swap.htlcExpiresAt! + 1
+
+    const row = await service.tick(swap.id)
+    expect(row.state).toBe('stuck')
+    expect(row.failureReason).toBe('settle failing past E: undefined')
+  })
+
+  it('refunds the unrolled entry when the indexer lists the recorded outpoint twice', async () => {
+    const swap = await funded()
+    const [lockup] = arkade.state.outputs
+    arkade.state.outputs = []
+    const listed = { ...lockup!, spent: true }
+    arkade.ops.findLockupOutpoints = async () => [
+      { ...listed, unrolled: false },
+      { ...listed, unrolled: true },
+    ]
+    const refunded: boolean[] = []
+    arkade.ops.refundUnrolled = async (_row, outpoint) => {
+      refunded.push((outpoint as { unrolled?: boolean }).unrolled === true)
+      return { kind: 'waiting' }
+    }
+    await driver.run(`UPDATE receive_swap SET state = 'refunding' WHERE id = ?`, [swap.id])
+
+    await service.tick(swap.id)
+    expect(refunded).toEqual([true])
+  })
+
+  it('throws instead of asking for ever when a read answers undefined', async () => {
+    const outcome = await service.quote(quoteRequest({ claimPacket: null }))
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    let asked = 0
+    ln.getHoldState = async () => {
+      asked += 1
+      return undefined as never
+    }
+
+    await expect(service.tick(outcome.swap.id)).rejects.toThrow('reading hold gave no answer')
+    expect(asked).toBe(1)
+    expect((await store.get(outcome.swap.id)).state).toBe('quoted')
+  })
+})
