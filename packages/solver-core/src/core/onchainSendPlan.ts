@@ -149,8 +149,6 @@ const whenQuoted = async (row: OnchainSendPlanRow, reads: OnchainSendReads): Pro
         ? null
         : `lockup expires at ${expiresTooSoon}, before ${lockupExpiryFloor(row.htlcLocktime)} — the last moment ` +
           'a claim answering this swap could still need it',
-    recordOnOverfund: 'held',
-    recordOnTooManyOutputs: false,
   })
 }
 
