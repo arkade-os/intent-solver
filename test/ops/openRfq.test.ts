@@ -80,7 +80,16 @@ const source = () => ({
       pricePath: '/price',
     },
   ],
-  arkade: { dustSats: 1n },
+  arkade: {
+    dustSats: 1n,
+    vtxoMinSats: 1n,
+    wallet: {
+      getBalance: vi.fn(async () => ({
+        available: 100000000,
+        availableAssets: [{ assetId: asset, amount: 10n ** 30n }],
+      })),
+    },
+  },
   assetRfqService: { quote: vi.fn() },
   service: sendService(fee, bounds),
 })
@@ -107,6 +116,37 @@ describe('public price previews', () => {
       valid_until: 1800000035,
     })
     expect(services.assetRfqService.quote).not.toHaveBeenCalled()
+  })
+
+  it('bids for an asset payout only when its exact amount is spendable', async () => {
+    const services = source()
+    const amount = 2n * 10n ** 18n
+    const balance = {
+      available: 100000000,
+      assets: [{ assetId: asset, amount }],
+      availableAssets: [{ assetId: asset, amount: amount - 1n }],
+    }
+    services.arkade.wallet.getBalance
+      .mockResolvedValueOnce(balance)
+      .mockResolvedValueOnce({ ...balance, availableAssets: balance.assets })
+    const preview = openRfqPreview(services as unknown as Services, {
+      fetchPrice: async () => ({ mantissa: 5n, scale: 1 }),
+    })
+    const request = open(`${btc}->arkade:bitcoin/asset:${asset}`, '100000000')
+    expect(await preview(request)).toBeUndefined()
+    expect(await preview(request)).toMatchObject({ to_amount: amount.toString() })
+    expect(services.assetRfqService.quote).not.toHaveBeenCalled()
+  })
+
+  it('does not bid on a bitcoin payout below the VTXO minimum', async () => {
+    const services = source()
+    services.arkade.vtxoMinSats = 1000n
+    const preview = openRfqPreview(services as unknown as Services, {
+      fetchPrice: async () => ({ mantissa: 5n, scale: 1 }),
+    })
+    const pair = `arkade:bitcoin/asset:${asset}->${btc}`
+    expect(await preview(open(pair, '999', 'to'))).toBeUndefined()
+    expect(await preview(open(pair, '1000', 'to'))).toMatchObject({ to_amount: '1000' })
   })
 
   it('uses real fee inversion and each BTC corridor bound side', async () => {
@@ -238,7 +278,7 @@ describe('public price previews', () => {
     const base = source()
     const services = {
       ...base,
-      arkade: { dustSats: 330n },
+      arkade: { ...base.arkade, dustSats: 330n },
       assetRfqMarkets: [
         {
           ...base.assetRfqMarkets[0]!,
@@ -266,6 +306,10 @@ describe('public price previews', () => {
       from_amount: '25000',
       to_amount: '2459',
     })
+    const balance = { total: 25175, available: 25174, availableAssets: [] }
+    services.arkade.wallet.getBalance.mockResolvedValueOnce(balance)
+    expect(await preview(open(`${tokenId}->${btc}`, '2492'))).toBeUndefined()
+    services.arkade.wallet.getBalance.mockResolvedValueOnce({ ...balance, available: balance.total })
     expect(await preview(open(`${tokenId}->${btc}`, '2492'))).toMatchObject({ from_amount: '2492', to_amount: '25175' })
     expect(await preview(open(`${tokenId}->${btc}`, '25175', 'to'))).toMatchObject({
       from_amount: '2492',
