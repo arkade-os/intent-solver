@@ -12,8 +12,12 @@
  */
 import { asset, type RelativeTimelock } from '@arkade-os/sdk'
 import { isEncodableRelativeDelay, relativeDelayFrom } from '@arkade-os/solver-core/core/timelocks.js'
-import { RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_DIRECTED } from '@arkade-os/solver-core/core/rfqContract.js'
-import { offerVtxoScript, type Offer } from '@arkade-os/swap/protocol'
+import {
+  RFQ_ASSET_SWAP_V2,
+  RFQ_ASSET_SWAP_DIRECTED,
+  RFQ_ASSET_SWAP_DIRECTED_NONCE,
+} from '@arkade-os/solver-core/core/rfqContract.js'
+import { assetRfqNonce, offerVtxoScript, type Offer } from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
 
 /**
@@ -32,6 +36,7 @@ export interface QuotedOfferTerms {
   offerAssetId: string | null
   makerPkScript: string
   makerPublicKey: string
+  rfqId?: string
 }
 
 export interface OfferDerivation {
@@ -103,14 +108,10 @@ export const offerFromTerms = (
   ...(taker ? { taker } : {}),
 })
 
-/**
- * The tree a quote or a stored row names: the directed one for every quote since negotiation went
- * directed-only, v2 for rows quoted before it (absent is that baseline). Not the SDK's resolver, so its
- * default can never move an old row; any other id, v3 included, throws before anything compiles.
- */
-const derivableVersion = (id: string | undefined): typeof RFQ_ASSET_SWAP_V2 | typeof RFQ_ASSET_SWAP_DIRECTED => {
+// Keep the persisted baseline independent of the SDK's default.
+const derivableVersion = (id: string | undefined) => {
   if (id === undefined || id === RFQ_ASSET_SWAP_V2) return RFQ_ASSET_SWAP_V2
-  if (id === RFQ_ASSET_SWAP_DIRECTED) return RFQ_ASSET_SWAP_DIRECTED
+  if (id === RFQ_ASSET_SWAP_DIRECTED || id === RFQ_ASSET_SWAP_DIRECTED_NONCE) return id
   throw new Error(`unsupported contract version ${id}`)
 }
 
@@ -126,13 +127,16 @@ export const offerScriptFrom = (
   const emulatorPubkey = xOnlyPubkey(deps.emulatorPubkey)
   return (terms, contractVersion) => {
     const version = derivableVersion(contractVersion)
-    // v2 refuses a taker key outright, so only the directed tree is handed one.
     const offer = offerFromTerms(
       terms,
       emulatorPubkey,
       deps.exitDelay,
-      version === RFQ_ASSET_SWAP_DIRECTED ? deps.taker : undefined,
+      version === RFQ_ASSET_SWAP_V2 ? undefined : deps.taker,
     )
+    if (version === RFQ_ASSET_SWAP_DIRECTED_NONCE) {
+      if (terms.rfqId === undefined) throw new Error(`${version} requires an RFQ id`)
+      offer.nonce = assetRfqNonce(terms.rfqId)
+    }
     const script = offerVtxoScript(offer, deps.serverPubkey, version)
     // Both from the SAME compiled script: the address is what the client is
     // told and the pkScript is what the deposit is recognised by, so two

@@ -51,8 +51,8 @@ out of scope for this spec — the Lightning legs use RFQ permanently.
   (`contract_versions`, § 4.1). A request that names none gets the pair's
   baseline contract, the one every client predating the field derives, so a
   solver rolling out a new contract version never hands it to a client that did not
-  ask for it. Asset RFQ is the exception: it serves `asset-swap-directed` alone and
-  refuses a request that names none (§ 7.2.1). Open discovery carries no
+  ask for it. Asset RFQ serves the negotiated directed versions and refuses a
+  request that names none (§ 7.2.1). Open discovery carries no
   `contract_versions` field: a solver bids only where it serves a contract version
   for the route, and the directed negotiation that follows settles which one
   (§ 4.6).
@@ -1362,8 +1362,8 @@ not a product role — the funder is the client here, not a market maker.
   it has executed the covenant — which constrains the spend to pay output 0 at
   least `wantAmount` to `makerWP`. A solver cannot take the deposit without
   delivering. No client signature and no client availability are required,
-  which is the sense in which the fill is non-interactive. On `asset-swap-directed`,
-  the tree asset RFQ quotes, `fulfill` also needs the quoting solver's
+  which is the sense in which the fill is non-interactive. On the directed
+  versions that asset RFQ quotes, `fulfill` also needs the quoting solver's
   signature (§ 7.2.1).
 - **`cancel`** is a **2-of-2 of the funder and the Arkade Service**. No solver
   signature is involved, so the refund never depends on the counterparty being
@@ -1522,18 +1522,28 @@ funding transaction → solver observes the deposit, re-checks its gates, and
 spends through `fulfill`, paying the client in the same transaction. The client
 may go offline after funding; the fill needs no client signature.
 
-**Contract version: `asset-swap-directed` only.** Its `fulfill` leaf needs a third
-signature, from `taker`, which is the quote's `solver_pubkey`, so only the solver
+**Contract versions `asset-swap-directed-nonce` and `asset-swap-directed`.** In
+both versions, `fulfill` needs a third signature from `taker`, the quote's
+`solver_pubkey`, so only the solver
 that quoted a deposit can fill it. A third party reading the funding packet
 cannot, and `cancel` and the exit leaf are unchanged, so an unfilled deposit is
 still the client's to reclaim. The client derives the address with that key, and
-the quote echoes `contract_version`. A request naming no `contract_versions` is
+the quote echoes `contract_version`. Clients that support both prefer
+`asset-swap-directed-nonce`. It commits to `SHA256(UTF8("arkade/asset-rfq-nonce/v1") || hex_decode(rfq_id))`
+in the fulfillment covenant. Independent requests with identical trade terms
+then derive different scripts. The funding packet carries the commitment for
+recovery. The RFQ identifier stays in the negotiation, and reuse of that ID
+still refuses as `quote_conflict`. A request naming no `contract_versions` is
 refused as `unsupported_pair`, and one naming only versions this solver does not
 serve gets `contract_version_unsupported` (§ 10). `asset-swap-v2` is still
 derived, but only to settle deposits quoted before this, and a stored
 `asset-swap-v3` row reads as an unsupported version and is never derived. Public
-offers on the packet path (§ 7.2) are unchanged, except that a packet directed at
-another solver is skipped.
+offers on the packet path (§ 7.2) are unchanged. The watcher skips packets
+directed at another solver and leaves nonce-bearing deposits to the RFQ handler.
+
+To pause new nonce-bearing quotes, remove `asset-swap-directed-nonce` from the
+configured version list. Keep a solver build that can read the new version
+while those deposits can still settle or be recovered.
 
 **Late funding, and who can undo it.** § 5's rule holds: a deposit first
 observed after `valid_until` MUST NOT be filled. It bites harder here than on a

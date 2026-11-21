@@ -13,7 +13,11 @@ import { describe, it, expect, vi } from 'vitest'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
 import { offerExitDelay, offerScriptFrom } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
-import { RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_DIRECTED } from '@arkade-os/solver-core/core/rfqContract.js'
+import {
+  RFQ_ASSET_SWAP_V2,
+  RFQ_ASSET_SWAP_DIRECTED,
+  RFQ_ASSET_SWAP_DIRECTED_NONCE,
+} from '@arkade-os/solver-core/core/rfqContract.js'
 import { quotedOfferSettleFor, type QuotedOfferIntent } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
 import type { OfferOutpoint } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
 import { OfferNotSubmittedError, type fulfillOffer } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
@@ -35,6 +39,7 @@ const TXID = 'a'.repeat(64)
 /** A BTC deposit buying the asset — the direction the e2e drives. */
 const intent = (over: Partial<QuotedOfferIntent> = {}): QuotedOfferIntent => {
   const base = {
+    rfqId: 'f'.repeat(64),
     fromAssetId: null,
     fromAmount: 20_000n,
     toAssetId: USDA,
@@ -48,6 +53,7 @@ const intent = (over: Partial<QuotedOfferIntent> = {}): QuotedOfferIntent => {
   }
   const derived = offerScriptFrom(derivation)(
     {
+      rfqId: base.rfqId,
       wantAmount: base.toAmount,
       wantAssetId: base.toAssetId,
       offerAssetId: base.fromAssetId,
@@ -141,6 +147,7 @@ describe('quotedOfferSettleFor', () => {
   })
 
   it.each([
+    ['directed with nonce', RFQ_ASSET_SWAP_DIRECTED_NONCE],
     ['directed', RFQ_ASSET_SWAP_DIRECTED],
     ['v2', RFQ_ASSET_SWAP_V2],
     ['NULL (baseline)', null],
@@ -157,6 +164,13 @@ describe('quotedOfferSettleFor', () => {
     await settle(intent({ contractVersion: RFQ_ASSET_SWAP_V2 }))
     expect(fulfill.mock.calls[0]![2].taker).toEqual(TAKER)
     expect(fulfill.mock.calls[1]![2].taker).toBeUndefined()
+  })
+
+  it('refuses to fill a different RFQ at the same terms', async () => {
+    const { settle, fulfill } = settleWith([funded()])
+    const row = intent({ contractVersion: RFQ_ASSET_SWAP_DIRECTED_NONCE })
+    await expect(settle({ ...row, rfqId: 'e'.repeat(64) })).rejects.toThrow(/derive .*, not the offer script/)
+    expect(fulfill).not.toHaveBeenCalled()
   })
 
   it('refuses a stored asset-swap-v3 row as unsupported, before reading the chain', async () => {

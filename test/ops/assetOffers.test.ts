@@ -1301,6 +1301,17 @@ describe('a directed offer packet', () => {
     expect(await service.consider(directedTo(SOLVER))).toEqual({ fill: true, id: 'fill-1' })
   })
 
+  it('leaves a nonce-bound RFQ deposit to the RFQ corridor even without a live row', async () => {
+    const rfqHolds = vi.fn(async () => false)
+    const { service, store } = await build({ rfqHolds })
+    const directed = directedTo(SOLVER)
+    const rfq = { ...directed, offer: { ...directed.offer, nonce: new Uint8Array(32).fill(1) } }
+    expect(await service.consider(rfq)).toEqual({ fill: false, reason: 'offer_held_by_rfq' })
+    expect(await store.listNonTerminal()).toHaveLength(0)
+    expect(rfqHolds).not.toHaveBeenCalled()
+    await store.close()
+  })
+
   it('is wired the identity key the card advertises', () => {
     expect(servicesSource).toMatch(/rfqHolds: [^\n]+\n\s+solverPubkey: arkadeOps\.providerPubkey,/)
   })

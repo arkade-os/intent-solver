@@ -64,6 +64,9 @@
     "zod-to-json-schema": "^3.25.2"
   },
   "pnpm": {
+    "overrides": {
+      "@arkade-os/swap": "file:vendor/arkade-os-swap-0.1.12-repeat-asset-rfq-5ca2e1c28303.tgz"
+    },
     "onlyBuiltDependencies": [
       "better-sqlite3",
       "esbuild",

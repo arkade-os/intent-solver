@@ -18,7 +18,11 @@ import {
 import { recoverReadableMarkets } from '@arkade-os/solver-app/ops/assetRfqMarkets.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { AssetRfqSwapService, type AssetRfqDeps } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
-import { RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_DIRECTED } from '@arkade-os/solver-core/core/rfqContract.js'
+import {
+  RFQ_ASSET_SWAP_V2,
+  RFQ_ASSET_SWAP_DIRECTED,
+  RFQ_ASSET_SWAP_DIRECTED_NONCE,
+} from '@arkade-os/solver-core/core/rfqContract.js'
 
 const ASSET_A = `${'aa'.repeat(32)}0100`
 const ASSET_B = `${'bb'.repeat(32)}0000`
@@ -134,7 +138,7 @@ describe('corridorSetFromDeps — the serving set', () => {
   })
 })
 
-describe('asset RFQ negotiates the directed covenant and nothing else', () => {
+describe('asset RFQ negotiates only directed covenants', () => {
   const PAIR = `arkade:BTC->arkade:${ASSET_A}`
   const RFQ_ID = 'a'.repeat(64)
   const request = (over: Record<string, unknown> = {}) => ({
@@ -153,19 +157,21 @@ describe('asset RFQ negotiates the directed covenant and nothing else', () => {
     const derived: (string | undefined)[] = []
     const { store, service } = await built({
       balance: async () => new Map([[ASSET_A, 10n ** 18n]]),
-      deriveOffer: (_terms, version) => {
+      deriveOffer: (terms, version) => {
+        expect(terms.rfqId).toBe(RFQ_ID)
         derived.push(version)
         return { pkScript: `5120${'d'.repeat(64)}`, address: 'ark1q' }
       },
     })
-    const set = corridorSetFromDeps({
-      ...base(),
-      assetRfqService: service,
-      assetRfqStore: store,
-      assetRfqMarkets: [market(ASSET_A, 'USDA')],
-      rfqContractVersions: servedContractVersions(null, []),
-    })
-    return { store, derived, corridor: set.get(PAIR)! }
+    const corridorFor = (versions: readonly string[] | null) =>
+      corridorSetFromDeps({
+        ...base(),
+        assetRfqService: service,
+        assetRfqStore: store,
+        assetRfqMarkets: [market(ASSET_A, 'USDA')],
+        rfqContractVersions: servedContractVersions(versions, []),
+      }).get(PAIR)!
+    return { store, derived, corridor: corridorFor(null), corridorFor }
   }
 
   it('refuses a request that does not negotiate, and says which version it needs', async () => {
@@ -194,12 +200,21 @@ describe('asset RFQ negotiates the directed covenant and nothing else', () => {
     await store.close()
   })
 
-  it('quotes the directed covenant, derives that tree, records it and names it', async () => {
-    const { store, derived, corridor } = await serving()
-    const outcome = await corridor.quote(request({ contract_versions: [RFQ_ASSET_SWAP_DIRECTED] }))
-    expect(outcome).toMatchObject({ kind: 'quote', payload: { contract_version: RFQ_ASSET_SWAP_DIRECTED } })
-    expect(derived).toEqual([RFQ_ASSET_SWAP_DIRECTED])
-    expect((await store.findByRfqId(RFQ_ID))?.contractVersion).toBe(RFQ_ASSET_SWAP_DIRECTED)
+  it.each([
+    ['a nonce-capable client', [RFQ_ASSET_SWAP_DIRECTED_NONCE, RFQ_ASSET_SWAP_DIRECTED], RFQ_ASSET_SWAP_DIRECTED_NONCE],
+    ['an older client', [RFQ_ASSET_SWAP_DIRECTED], RFQ_ASSET_SWAP_DIRECTED],
+  ])('selects and records the version for %s', async (_client, wanted, version) => {
+    const { store, derived, corridor, corridorFor } = await serving()
+    const outcome = await corridor.quote(request({ contract_versions: wanted }))
+    expect(outcome).toMatchObject({ kind: 'quote', payload: { contract_version: version } })
+    expect(derived).toEqual([version])
+    expect((await store.findByRfqId(RFQ_ID))?.contractVersion).toBe(version)
+
+    const otherVersion = version === RFQ_ASSET_SWAP_DIRECTED ? RFQ_ASSET_SWAP_DIRECTED_NONCE : RFQ_ASSET_SWAP_DIRECTED
+    const narrowed = corridorFor([otherVersion])
+    const next = await narrowed.quote(request({ contract_versions: [version] }))
+    expect(next).toMatchObject({ kind: 'refused', payload: { error_code: 'contract_version_unsupported' } })
+    expect(await narrowed.statusFor(RFQ_ID)).toMatchObject({ type: 'rfq_status', state: 'quoted' })
     await store.close()
   })
 })
