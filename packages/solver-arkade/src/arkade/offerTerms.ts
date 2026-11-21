@@ -17,7 +17,7 @@ import {
   RFQ_ASSET_SWAP_DIRECTED,
   RFQ_ASSET_SWAP_DIRECTED_NONCE,
 } from '@arkade-os/solver-core/core/rfqContract.js'
-import { assetRfqNonce, offerVtxoScript, type Offer } from '@arkade-os/swap/protocol'
+import { assetRfqNonce, offerVtxoScript, type AssetSwapContractVersion, type Offer } from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
 
 /**
@@ -36,7 +36,7 @@ export interface QuotedOfferTerms {
   offerAssetId: string | null
   makerPkScript: string
   makerPublicKey: string
-  rfqId?: string
+  rfqId: string
 }
 
 export interface OfferDerivation {
@@ -93,7 +93,7 @@ export const xOnlyPubkey = (pubkey: Uint8Array): Uint8Array => {
 
 /** The offer these terms describe, less the script. `exitDelay` is required, not optional: omitted, the tree moves. */
 export const offerFromTerms = (
-  terms: QuotedOfferTerms,
+  terms: Omit<QuotedOfferTerms, 'rfqId'>,
   emulatorPubkey: Uint8Array,
   exitDelay: RelativeTimelock,
   taker?: Uint8Array,
@@ -109,7 +109,7 @@ export const offerFromTerms = (
 })
 
 // Keep the persisted baseline independent of the SDK's default.
-const derivableVersion = (id: string | undefined) => {
+const derivableVersion = (id: string | undefined): AssetSwapContractVersion => {
   if (id === undefined || id === RFQ_ASSET_SWAP_V2) return RFQ_ASSET_SWAP_V2
   if (id === RFQ_ASSET_SWAP_DIRECTED || id === RFQ_ASSET_SWAP_DIRECTED_NONCE) return id
   throw new Error(`unsupported contract version ${id}`)
@@ -134,7 +134,6 @@ export const offerScriptFrom = (
       version === RFQ_ASSET_SWAP_V2 ? undefined : deps.taker,
     )
     if (version === RFQ_ASSET_SWAP_DIRECTED_NONCE) {
-      if (terms.rfqId === undefined) throw new Error(`${version} requires an RFQ id`)
       offer.nonce = assetRfqNonce(terms.rfqId)
     }
     const script = offerVtxoScript(offer, deps.serverPubkey, version)

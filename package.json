@@ -51,7 +51,7 @@
   },
   "devDependencies": {
     "@arkade-os/solver-discovery": "0.3.0",
-    "@arkade-os/swap": "0.1.11",
+    "@arkade-os/swap": "0.1.13",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^24.13.3",
     "@types/ws": "^8.18.1",
@@ -64,9 +64,6 @@
     "zod-to-json-schema": "^3.25.2"
   },
   "pnpm": {
-    "overrides": {
-      "@arkade-os/swap": "file:vendor/arkade-os-swap-0.1.12-directed-nonce-ark-9d7636e7e545.tgz"
-    },
     "onlyBuiltDependencies": [
       "better-sqlite3",
       "esbuild",

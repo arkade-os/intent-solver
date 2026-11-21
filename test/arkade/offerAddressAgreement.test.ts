@@ -31,6 +31,7 @@ const MAKER_SCRIPT = hex.encode(ArkAddress.decode(MAKER_ADDRESS).pkScript)
 const ARKD_URL = 'http://arkd.test'
 
 const terms: QuotedOfferTerms = {
+  rfqId: 'a'.repeat(64),
   wantAmount: 19_900n,
   wantAssetId: USDA,
   offerAssetId: null,

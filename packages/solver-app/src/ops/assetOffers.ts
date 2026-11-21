@@ -332,7 +332,7 @@ export class AssetOfferService {
     if (offer.taker !== undefined && hex.encode(offer.taker) !== this.deps.solverPubkey) {
       return { fill: false, reason: 'offer_directed_elsewhere' }
     }
-    // An expired RFQ deposit must not become a standing offer.
+    // The RFQ corridor owns nonce-bearing deposits and enforces their quote deadlines.
     if (offer.nonce !== undefined) return { fill: false, reason: 'offer_held_by_rfq' }
     const outpoint = `${txid}:${vout}`
     if (!this.deps.serverPubkey && this.contractVersions.size < OFFER_CONTRACT_VERSIONS.length) {
