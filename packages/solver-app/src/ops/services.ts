@@ -911,6 +911,7 @@ export const createServices = async (
         }),
         approvalGate: gateFor('arkade offer fill'),
         // A store opened below on purpose (markets resolve before any file); called only after discovery.
+        rfqOwnsLegacyScript: (pkScript) => assetRfqStore.hasLegacyDirectedQuote(pkScript),
         rfqHolds: (pkScript) => assetRfqStore.heldByLiveNegotiation(pkScript),
         solverPubkey: arkadeOps.providerPubkey,
         onError: (id, error) => log(`offer ${id} failed:`, error instanceof Error ? error.message : String(error)),

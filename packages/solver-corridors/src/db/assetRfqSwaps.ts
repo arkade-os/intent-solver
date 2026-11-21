@@ -50,6 +50,7 @@ import {
   type StoreShape,
 } from './baseSwapStore.js'
 import { pageQuery, takePage, type PageOptions, type PageRawFields } from '@arkade-os/solver-core/core/page.js'
+import { RFQ_ASSET_SWAP_DIRECTED } from '@arkade-os/solver-core/core/rfqContract.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { announceTransition } from '@arkade-os/solver-core/core/businessEvent.js'
 import { AssetRfqMachine, type AssetRfqSwapState } from '../machines/assetRfq.js'
@@ -59,6 +60,7 @@ export type { AssetRfqSwapState }
 
 export const NON_TERMINAL: readonly AssetRfqSwapState[] = AssetRfqMachine.live
 export const EXPOSED: readonly AssetRfqSwapState[] = AssetRfqMachine.exposed
+const LEGACY_DIRECTED_QUOTE = `contract_version = '${RFQ_ASSET_SWAP_DIRECTED}'`
 
 /**
  * Columns a transition may set.
@@ -332,6 +334,8 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
       ['fill_phase', 'TEXT'],
       ['contract_version', 'TEXT'],
     ])
+    await this.driver.exec(`CREATE INDEX IF NOT EXISTS idx_asset_rfq_swap_legacy_directed_offer
+      ON asset_rfq_swap(offer_pk_script) WHERE ${LEGACY_DIRECTED_QUOTE}`)
   }
 
   /**
@@ -437,6 +441,14 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
   async heldByLiveNegotiation(offerPkScript: string): Promise<boolean> {
     const raw = await this.driver.get<Raw>(
       `SELECT 1 AS held FROM asset_rfq_swap WHERE offer_pk_script = ? AND state IN (${AssetRfqMachine.sqlList(AssetRfqMachine.live)})`,
+      [offerPkScript],
+    )
+    return raw !== undefined && raw !== null
+  }
+
+  async hasLegacyDirectedQuote(offerPkScript: string): Promise<boolean> {
+    const raw = await this.driver.get(
+      `SELECT 1 FROM asset_rfq_swap WHERE offer_pk_script = ? AND ${LEGACY_DIRECTED_QUOTE} LIMIT 1`,
       [offerPkScript],
     )
     return raw !== undefined && raw !== null

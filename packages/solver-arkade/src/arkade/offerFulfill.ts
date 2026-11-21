@@ -251,9 +251,7 @@ export const fulfillOffer = async (
         tapTree: coin.tapTree,
         assets: assetsOn(coin),
       })),
-      // The deposit this fill was admitted against. Identical offers share one
-      // address, so without it `fillOffer` refuses rather than guessing.
-      fundingTxid: deposit.txid,
+      fundingOutpoint: { txid: deposit.txid, vout: deposit.vout },
       assetCarrierSats: carrierSats,
       emulator: emulatorUrl,
       // No `emulatorPubkey`: that override is 33-byte COMPRESSED and an offer
