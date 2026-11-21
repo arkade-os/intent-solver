@@ -14,6 +14,7 @@
 import { z } from 'zod'
 import type { SendSwapRow } from '../db/swaps.js'
 import { amountSatsOf } from '@arkade-os/solver-core/invoice/decode.js'
+import { isLockupRefusal, LOCKUP_REFUSAL } from '@arkade-os/solver-core/core/clientLockup.js'
 
 // --------------------------------------------------------------------------
 // RFQ v1 — the one and only family (docs/rfq-protocol.md). The pre-RFQ
@@ -115,8 +116,7 @@ export type RfqState =
 
 // The reasons `fail()` stamps on a quoted swap that timed out rather than being
 // declined — the wire-level `expired` refinement of the legacy `refused`.
-const EXPIRY_REASONS =
-  /^(lockup timeout|invoice expired before funding completed|lockup arrived after the funding deadline)/
+const EXPIRY_REASONS = [LOCKUP_REFUSAL.timeout, LOCKUP_REFUSAL.invoiceExpired, LOCKUP_REFUSAL.arrivedLate]
 
 /** Map a row to the RFQ state vocabulary — the § 8 table, in code. */
 export const rfqStateFromRow = (row: SendSwapRow): RfqState => {
@@ -143,7 +143,7 @@ export const rfqStateFromRow = (row: SendSwapRow): RfqState => {
       return 'stuck'
     case 'refused':
       if (row.refundOutcome !== null) return 'refunded'
-      if (row.failureReason !== null && EXPIRY_REASONS.test(row.failureReason)) return 'expired'
+      if (isLockupRefusal(row.failureReason, EXPIRY_REASONS)) return 'expired'
       return 'refused'
   }
 }

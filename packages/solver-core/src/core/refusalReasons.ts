@@ -22,6 +22,7 @@
 import type { SendAcceptanceRefusal, SendPaymentRefusal } from './send.js'
 import type { ReceiveFundingRefusal } from './receive.js'
 import type { InvoiceRejection } from '../invoice/decode.js'
+import { LOCKUP_REFUSAL } from './clientLockup.js'
 
 export interface RefusalExplanation {
   /** What the gate actually checked, and what it found. */
@@ -258,7 +259,7 @@ export const REFUSAL_EXPLANATIONS: Record<RefusalReason, RefusalExplanation> = {
  */
 const FREE_TEXT_FAILURES: readonly (readonly [string, RefusalExplanation])[] = [
   [
-    'overfunded lockup',
+    LOCKUP_REFUSAL.overfunded,
     {
       meaning:
         'More arrived at the swap address than the swap asked for. The claim leaf sweeps WHOLE vtxos, so paying this would hand us the excess with no path for the client to recover it.',
@@ -266,14 +267,14 @@ const FREE_TEXT_FAILURES: readonly (readonly [string, RefusalExplanation])[] = [
     },
   ],
   [
-    'invoice expired before funding completed',
+    LOCKUP_REFUSAL.invoiceExpired,
     {
       meaning: 'The client funded, or part-funded, but the invoice lapsed before we could pay it.',
       whatToDo: 'Nothing. The sweep refunds whatever arrived.',
     },
   ],
   [
-    'lockup arrived after the funding deadline',
+    LOCKUP_REFUSAL.arrivedLate,
     {
       meaning:
         'A full lockup was first seen after the quote’s funding window closed. The refund deadline is anchored at quote time, so paying a late lockup eats the claim window we quoted against.',
@@ -281,7 +282,7 @@ const FREE_TEXT_FAILURES: readonly (readonly [string, RefusalExplanation])[] = [
     },
   ],
   [
-    'lockup timeout',
+    LOCKUP_REFUSAL.timeout,
     {
       meaning: 'The quote was never funded (or only partly) before its funding window closed, so it was abandoned.',
       whatToDo:
