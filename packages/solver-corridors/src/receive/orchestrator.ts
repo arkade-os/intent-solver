@@ -684,15 +684,15 @@ export class ReceiveSwapService {
 
   /** Asks the planner, reading each fact it asks for, until it names something to do. */
   private async decide(row: ReceiveSwapRow, seen: Seen): Promise<ReceiveAction> {
-    let asked: ReceiveRead | null = null
+    const asked = new Set<ReceiveRead>()
     for (;;) {
       seen.nowSeconds = this.now()
       seen.acceptUnilateralGap = this.deps.acceptUnilateralGap
       const next = planReceive(row, seen)
       if (next.do !== 'read') return next
-      // A backend that answers `undefined` would otherwise be asked for ever.
-      if (next.what === asked) throw new Error(`swap ${row.id}: reading ${asked} gave no answer`)
-      asked = next.what
+      // The planner asks for each fact once. A second ask means the read left it unset.
+      if (asked.has(next.what)) throw new Error(`swap ${row.id}: reading ${next.what} gave no answer`)
+      asked.add(next.what)
       await this.read(row, next.what, seen)
     }
   }
