@@ -32,6 +32,8 @@ export interface QuotedOfferTerms {
   offerAssetId: string | null
   makerPkScript: string
   makerPublicKey: string
+  /** The co-signer key, x-only hex. Absent or null: the derivation's own. */
+  emulatorPubkey?: string | null
 }
 
 export interface OfferDerivation {
@@ -122,9 +124,13 @@ const derivableVersion = (id: string | undefined): typeof RFQ_ASSET_SWAP_V2 | ty
  */
 export const offerScriptFrom = (
   deps: OfferDerivation,
-): ((terms: QuotedOfferTerms, contractVersion?: string) => { pkScript: string; address: string; offer: Offer }) => {
-  const emulatorPubkey = xOnlyPubkey(deps.emulatorPubkey)
+): ((
+  terms: QuotedOfferTerms,
+  contractVersion?: string,
+) => { pkScript: string; address: string; offer: Offer; emulatorPubkey: string }) => {
+  const fallback = xOnlyPubkey(deps.emulatorPubkey)
   return (terms, contractVersion) => {
+    const emulatorPubkey = terms.emulatorPubkey ? xOnlyPubkey(hex.decode(terms.emulatorPubkey)) : fallback
     const version = derivableVersion(contractVersion)
     // v2 refuses a taker key outright, so only the directed tree is handed one.
     const offer = offerFromTerms(
@@ -141,6 +147,7 @@ export const offerScriptFrom = (
       pkScript: hex.encode(script.pkScript),
       address: script.address(deps.hrp, deps.serverPubkey).encode(),
       offer: { ...offer, swapPkScript: script.pkScript },
+      emulatorPubkey: hex.encode(emulatorPubkey),
     }
   }
 }

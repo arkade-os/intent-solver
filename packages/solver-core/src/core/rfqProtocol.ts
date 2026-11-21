@@ -29,6 +29,12 @@ export const AMOUNT_SIDE = z.enum(['from', 'to'])
 // § 2.1: a canonical decimal string of atomic units, with a JSON number
 // accepted only where it is provably lossless. @see ./wireAmount.ts
 export const RFQ_AMOUNT = WIRE_AMOUNT
+/** The covenant co-signer key a client derived with, x-only. Absent: the solver's default key. */
+export const EMULATOR_PUBKEY = z
+  .string()
+  .length(64)
+  .regex(/^[0-9a-f]{64}$/)
+  .optional()
 
 /** `rfq_request.contract_versions` (§ 4.1): the contract versions a client can derive, most preferred first. */
 export const RFQ_CONTRACT_VERSIONS_FIELD = z
@@ -144,6 +150,7 @@ export const RFQ_REFUSAL_ERROR_CODE_VALUES = [
   'invoice_sub_satoshi_amount',
   'invoice_too_long',
   'invoice_wrong_network',
+  'unsupported_emulator_pubkey',
 ] as const
 
 export type RfqRefusalErrorCode = (typeof RFQ_REFUSAL_ERROR_CODE_VALUES)[number]
@@ -172,6 +179,7 @@ type ClientSafeErrorReason =
   | 'invalid_evm_amount'
   | 'invalid_payout_address'
   | 'invalid_refund_address'
+  | 'unsupported_emulator_pubkey'
   | 'wrong_network'
   | 'zero_amount_invoice'
 
@@ -181,6 +189,7 @@ const CLIENT_SAFE_ERRORS = {
   invalid_evm_amount: { error_code: 'invalid_amount', field: 'amount' },
   invalid_payout_address: { error_code: 'invalid_payout_address', field: 'profile.payout_address' },
   invalid_refund_address: { error_code: 'invalid_refund_address', field: 'profile.refund_address' },
+  unsupported_emulator_pubkey: { error_code: 'unsupported_emulator_pubkey', field: 'profile.emulator_pubkey' },
   wrong_network: { error_code: 'invoice_wrong_network', field: 'profile.invoice' },
   zero_amount_invoice: { error_code: 'invoice_missing_amount', field: 'profile.invoice' },
 } satisfies Record<ClientSafeErrorReason, RfqRefusalError>
@@ -211,6 +220,7 @@ export const RFQ_REFUSAL_REASONS: Record<string, RfqRefusalReason> = {
   // moment someone changes the fallback.
   invalid_payout_address: 'unsupported_payload',
   invalid_claim_packet: 'unsupported_payload',
+  unsupported_emulator_pubkey: 'unsupported_payload',
   unsupported_payload: 'unsupported_payload',
   invoice_expired: 'invoice_expired',
   invoice_expires_too_soon: 'invoice_expired',

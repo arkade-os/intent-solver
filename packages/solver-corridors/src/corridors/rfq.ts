@@ -110,6 +110,7 @@ export const respondToLightningReceiveRfqRequest = async (
     payoutAddress: request.profile.payout_address,
     payoutPubkey: request.profile.payout_pubkey,
     claimPacket: request.profile.claim_packet ?? null,
+    emulatorPubkey: request.profile.emulator_pubkey,
     rfqId: request.rfq_id,
     requesterKey: options?.requesterKey,
   })
@@ -200,6 +201,7 @@ export const respondToLightningRfqRequest = async (
       rfqId: request.rfq_id,
       requesterKey: options?.requesterKey,
       clientRefundPubkey: request.profile.client_refund_pubkey,
+      emulatorPubkey: request.profile.emulator_pubkey,
     })
   } catch (error) {
     if (error instanceof InvalidInvoice) {
@@ -239,7 +241,8 @@ export const respondToLightningRfqRequest = async (
     if (
       existing?.state === 'quoted' &&
       existing.clientRefundPubkey === request.profile.client_refund_pubkey &&
-      existing.refundPkScript === hex.encode(ArkAddress.decode(request.profile.refund_address).pkScript)
+      existing.refundPkScript === hex.encode(ArkAddress.decode(request.profile.refund_address).pkScript) &&
+      existing.emulatorPubkey === (await service.cosignerKey(request.profile.emulator_pubkey))
     ) {
       return {
         kind: 'quote',
@@ -289,6 +292,7 @@ export const respondToOnchainRfqRequest = async (
     payoutPubkey: request.profile.payout_pubkey,
     refundAddress: request.profile.refund_address,
     clientRefundPubkey: request.profile.client_refund_pubkey,
+    emulatorPubkey: request.profile.emulator_pubkey,
     rfqId: request.rfq_id,
     requesterKey: options?.requesterKey,
   })

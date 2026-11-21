@@ -37,6 +37,8 @@ export interface QuotedOfferIntent {
   depositVout: number | null
   /** The negotiated contract version; null is the baseline, asset-swap-v2. */
   contractVersion: string | null
+  /** Null on a row quoted before the key was stored: it was derived with the deployment's own. */
+  emulatorPubkey?: string | null
 }
 
 export interface QuotedOfferSettleDeps {
@@ -54,6 +56,7 @@ const termsOf = (intent: QuotedOfferIntent): QuotedOfferTerms => ({
   offerAssetId: intent.fromAssetId,
   makerPkScript: intent.makerPkScript,
   makerPublicKey: intent.makerPublicKey,
+  emulatorPubkey: intent.emulatorPubkey,
 })
 
 export const quotedOfferSettleFor = (

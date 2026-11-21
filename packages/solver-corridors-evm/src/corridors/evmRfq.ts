@@ -50,6 +50,7 @@ export const respondToEvmSendRfqRequest = async (
     evmClaimAddress: request.profile.evm_claim_address,
     refundAddress: request.profile.refund_address,
     clientRefundPubkey: request.profile.client_refund_pubkey,
+    emulatorPubkey: request.profile.emulator_pubkey,
     requesterKey: options?.requesterKey,
     rfqId: request.rfq_id,
   })
@@ -89,6 +90,7 @@ export const respondToEvmReceiveRfqRequest = async (
     evmRefundAddress: request.profile.evm_refund_address,
     payoutAddress: request.profile.payout_address,
     payoutPubkey: request.profile.payout_pubkey,
+    emulatorPubkey: request.profile.emulator_pubkey,
     requesterKey: options?.requesterKey,
     rfqId: request.rfq_id,
   })
