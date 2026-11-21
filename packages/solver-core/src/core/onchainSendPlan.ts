@@ -9,6 +9,7 @@
 
 import { hex } from '@scure/base'
 import type { OnchainTxOutcome } from '../ports/onchain.js'
+import { judgeClientLockup } from './clientLockup.js'
 import {
   ARKADE_CLAIM_WINDOW_SECONDS,
   DEFAULT_ONCHAIN_LOCKUP_TIMEOUT,
@@ -137,39 +138,22 @@ export const lockupShortfall = (row: OnchainSendPlanRow, held: number): string |
 
 const whenQuoted = (row: OnchainSendPlanRow, seen: OnchainSendObservation): OnchainSendAction => {
   if (seen.lockups === undefined) return read('lockups')
-  const { held, spendable } = seen.lockups
-  const locked = spendable.reduce((sum, o) => sum + o.value, 0)
-  const timedOut = seen.nowSeconds >= row.createdAt + DEFAULT_ONCHAIN_LOCKUP_TIMEOUT
-
-  if (locked > row.amountSats) {
-    return { do: 'fail', reason: `overfunded lockup: ${locked} > ${row.amountSats} sats`, lockupValue: held }
-  }
-  if (locked === row.amountSats && spendable.length > seen.maxLockupOutputs) {
-    return fail(`lockup funded in ${spendable.length} outputs, over ${seen.maxLockupOutputs}`)
-  }
-  // Refused at once rather than at the timeout: the refund sweep returns the whole lockup either way.
-  if (locked < row.amountSats && held >= row.amountSats) {
-    return {
-      do: 'fail',
-      reason: `lockup funded on an asset vtxo a claim cannot spend: ${held} held, ${locked} spendable`,
-      lockupValue: held,
-    }
-  }
-  if (locked === row.amountSats && !timedOut) {
-    const expiresTooSoon = seen.checksLockupExpiry ? expiryBeforeClaimDeadline(spendable, row.htlcLocktime) : null
-    if (expiresTooSoon !== null) {
-      return fail(
-        `lockup expires at ${expiresTooSoon}, before ${lockupExpiryFloor(row.htlcLocktime)} — the last moment ` +
+  const expiresTooSoon = seen.checksLockupExpiry
+    ? expiryBeforeClaimDeadline(seen.lockups.spendable, row.htlcLocktime)
+    : null
+  return judgeClientLockup(seen.lockups, {
+    amountSats: row.amountSats,
+    maxOutputs: seen.maxLockupOutputs,
+    tooLate: seen.nowSeconds >= row.createdAt + DEFAULT_ONCHAIN_LOCKUP_TIMEOUT,
+    lateReason: (claimable) => (claimable > 0 ? `lockup timeout with partial ${claimable} sats` : 'lockup timeout'),
+    refusal:
+      expiresTooSoon === null
+        ? null
+        : `lockup expires at ${expiresTooSoon}, before ${lockupExpiryFloor(row.htlcLocktime)} — the last moment ` +
           'a claim answering this swap could still need it',
-      )
-    }
-    return { do: 'adopt_lockup' }
-  }
-  if (timedOut) {
-    const reason = locked > 0 ? `lockup timeout with partial ${locked} sats` : 'lockup timeout'
-    return held > 0 ? { do: 'fail', reason, lockupValue: held } : fail(reason)
-  }
-  return WAIT
+    recordOnOverfund: 'held',
+    recordOnTooManyOutputs: false,
+  })
 }
 
 const whenFunded = (row: OnchainSendPlanRow, seen: OnchainSendObservation): OnchainSendAction => {

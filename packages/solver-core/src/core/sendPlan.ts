@@ -7,6 +7,7 @@
  */
 
 import { decodeInvoice } from '../invoice/decode.js'
+import { judgeClientLockup } from './clientLockup.js'
 import { evaluateSendPayment, lockupDeadlineFor, refundWithoutReceiverDelayCovers } from './send.js'
 
 export const SEND_KEY_ROTATED = 'provider key rotated since quote; refusing to pay an unclaimable lockup'
@@ -108,26 +109,19 @@ export const planSend = (row: SendPlanRow, seen: SendObservation): SendAction =>
 
 const whenQuoted = (row: SendPlanRow, seen: SendObservation): SendAction => {
   if (seen.lockups === undefined) return read('lockups')
-  const { held, spendable } = seen.lockups
-  const claimable = spendable.reduce((sum, o) => sum + o.value, 0)
   const tooLate =
     seen.nowSeconds >= lockupDeadlineFor(row.createdAt, row.invoiceExpiresAt, seen.lockupTimeout) ||
     seen.nowSeconds >= row.invoiceExpiresAt
-
-  // A claim takes whole vtxos, so paying an overfunded lockup would keep the excess from the client.
-  if (claimable > row.amountSats) return fail(`overfunded lockup: ${claimable} > ${row.amountSats} sats`, claimable)
-  if (claimable === row.amountSats && spendable.length > seen.maxLockupOutputs) {
-    return fail(`lockup funded in ${spendable.length} outputs, over ${seen.maxLockupOutputs}`, claimable)
-  }
-  const fundedWhereAClaimCannotSpend = claimable < row.amountSats && held >= row.amountSats
-  if (fundedWhereAClaimCannotSpend) {
-    return fail(`lockup funded on an asset vtxo a claim cannot spend: ${held} held, ${claimable} spendable`, held)
-  }
-  if (!tooLate) return claimable === row.amountSats ? { do: 'adopt_lockup' } : WAIT
-
-  // A full lockup that lands late is refused too: the refund locktime was fixed at the quote.
-  const reason = lateFundingReason(row, claimable, seen.nowSeconds)
-  return held > 0 ? fail(reason, held) : fail(reason)
+  return judgeClientLockup(seen.lockups, {
+    amountSats: row.amountSats,
+    maxOutputs: seen.maxLockupOutputs,
+    tooLate,
+    // A full lockup that lands late is refused too: the refund locktime was fixed at the quote.
+    lateReason: (claimable) => lateFundingReason(row, claimable, seen.nowSeconds),
+    refusal: null,
+    recordOnOverfund: 'claimable',
+    recordOnTooManyOutputs: true,
+  })
 }
 
 const lateFundingReason = (row: SendPlanRow, claimable: number, nowSeconds: number): string => {
