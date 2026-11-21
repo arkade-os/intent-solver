@@ -1054,14 +1054,14 @@ export class SendSwapService {
 
   /** Asks the planner, reading each fact it asks for, until it names something to do. */
   private async decide(row: SendSwapRow, seen: Seen): Promise<SendAction> {
-    let asked: SendRead | null = null
+    const asked = new Set<SendRead>()
     for (;;) {
       seen.nowSeconds = this.now()
       const next = planSend(row, seen)
       if (next.do !== 'read') return next
-      // A backend that answers `undefined` would otherwise be asked for ever.
-      if (next.what === asked) throw new Error(`swap ${row.id}: reading ${asked} gave no answer`)
-      asked = next.what
+      // The planner asks for each fact once. A second ask means the read left it unset.
+      if (asked.has(next.what)) throw new Error(`swap ${row.id}: reading ${next.what} gave no answer`)
+      asked.add(next.what)
       await this.read(row, next.what, seen)
     }
   }
@@ -1100,6 +1100,9 @@ export class SendSwapService {
         seen.currentWallet = (await ln.walletFingerprint?.()) ?? null
         return
       case 'own_invoice': {
+        if (!ln.getOwnInvoiceState && !ln.getKnownInvoiceState) {
+          throw new Error(`swap ${row.id}: this backend cannot be asked about its own invoice`)
+        }
         const own: HoldState | null | undefined = ln.getOwnInvoiceState
           ? await ln.getOwnInvoiceState(row.paymentHash)
           : await ln.getKnownInvoiceState?.(row.paymentHash)

@@ -850,16 +850,15 @@ export class OnchainSendSwapService {
 
   /** Asks the planner, reading each fact it asks for, until it names something to do. */
   private async decide(row: OnchainSendSwapRow, seen: Seen): Promise<OnchainSendAction> {
-    let asked: OnchainSendRead | null = null
+    const asked = new Set<OnchainSendRead>()
     for (;;) {
       seen.nowSeconds = this.now()
       seen.providerKeyCurrent = providerKeyCurrent(row.providerPubkey, this.deps.arkade.providerPubkey)
       const next = planOnchainSend(row, seen)
       if (next.do !== 'read') return next
-      // A backend that answers `undefined` would otherwise be asked for ever. Only the last read needs
-      // remembering: the planner never asks again for a fact that is set.
-      if (next.what === asked) throw new Error(`swap ${row.id}: reading ${asked} gave no answer`)
-      asked = next.what
+      // The planner asks for each fact once. A second ask means the read left it unset.
+      if (asked.has(next.what)) throw new Error(`swap ${row.id}: reading ${next.what} gave no answer`)
+      asked.add(next.what)
       await this.read(row, next.what, seen)
     }
   }
