@@ -158,9 +158,10 @@ const spentByUs = async (
 }
 
 /** Never `claimed` while an adopted output is out: retried until the refund deadline, then parked. */
-export const awaitLeftover = async (
-  store: Pick<BaseSwapStore<unknown, string>, 'patch' | 'fail'>,
+export const awaitLeftover = async <S extends string>(
+  store: Pick<BaseSwapStore<unknown, S>, 'patch' | 'fail'>,
   id: string,
+  from: S,
   claimTxid: string | null,
   leftover: readonly string[],
   pastDeadline: boolean,
@@ -170,7 +171,7 @@ export const awaitLeftover = async (
   if (!pastDeadline) throw new Error(`swap ${id}: lockup output(s) ${leftover.join(', ')} not yet collected`)
   await store.fail(
     id,
-    'claiming',
+    from,
     `lockup output(s) ${leftover.join(', ')} uncollected at the refund deadline — ${recourse()}`,
   )
   return false

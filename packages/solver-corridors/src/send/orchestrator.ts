@@ -77,6 +77,7 @@ import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
 import type { CovenantScriptRow } from '@arkade-os/solver-arkade/arkade/covenantRow.js'
 import { adoptedOnly, outpointKey, unadopted } from '../legs/arkadeLockup.js'
+import { claimClientLockup } from '../legs/clientLockupClaim.js'
 export type { CovenantScriptRow }
 
 import type { ArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
@@ -1797,92 +1798,19 @@ export class SendSwapService {
       const seenSwept = await arkade.findSweptLockups!(row.pkScript)
       return this.whenClaimingSwept(row, adopted, seenSwept)
     }
-    // An unrolled output is already off Arkade, so its claim is not parked behind the vtxo read.
-    const lockupsP = capture(arkade.findLockups(row.pkScript))
-    const unrolled = await advanceUnrolledClaims(store, row, arkade, row, row.preimage)
-    const lockups = unwrap(await lockupsP)
-    const outputs = claimOutputs(adoptedOnly(lockups, row.lockupOutpoints), row.amountSats)
-    // claimOutputs falls back to EVERY adopted output when the asset-free ones fall short, so a
-    // dust asset vtxo left after the clean funding was swept reads non-empty yet still
-    // cannot cover the amount. Guard on value, not emptiness — held 0 is the empty case.
-    const held = outputs.reduce((sum, o) => sum + o.value, 0)
-    if (held < row.amountSats && unrolled === null) {
-      // We hold no claim txid, so NO positive proof our claim landed, and not enough to
-      // deliver even if we swept what is here. `findLockups` returns [] for a swept,
-      // renewed or lagging vtxo exactly as after our own spend (`spendableOnly` excludes a
-      // swept-but-unspent vtxo, and an empty indexer page maps to []), so a short read is
-      // NOT "claimed". Recording success here — or claiming a leftover dust asset vtxo and
-      // recording it — buries a full-amount loss as `claimed`. Route to `stuck`: a false
-      // `stuck` costs a glance, a false `claimed` costs the funds. The only paths that
-      // record `claimed` are below, each with our own claim txids in hand — not a lagging
-      // view (`stuck` is terminal, so parking it ends collection we are owed).
-      const evidenceP = arkade.lockupSpendEvidence(row.pkScript)
-      const deadlineP = capture(refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip))
-      const evidence = await evidenceP
-      if (evidence !== 'spent' && !unwrap(await deadlineP)) {
-        throw new Error(
-          `swap ${row.id}: lockup holds ${held} < ${row.amountSats} while claiming but no spend is provable (${evidence})`,
-        )
-      }
-      // A throw keeps the row claiming, so the sweep retries a finalize arkd refused.
-      const pending = evidence === 'spent' ? await arkade.finalizePendingClaim?.(row, row.preimage) : null
-      if (pending) return store.transition(row.id, 'claiming', 'claimed', { claim_ark_txid: pending })
-      await store.fail(
-        row.id,
-        'claiming',
-        `lockup holds ${held} < amount ${row.amountSats} while claiming; no claim txid recorded; needs review`,
-      )
-      return false
-    }
-
-    // Funds still present. Try the collaborative claim.
-    let txid: string | null = null
-    try {
-      if (outputs.length > 0) txid = await arkade.claim(row, outputs, row.preimage)
-    } catch (error) {
-      // Past the deadline, a persistently failing claim means the Arkade Service
-      // is censoring or down while the client's refund is open and racing us.
-      // Nothing COLLABORATIVE is left to retry that could win, so escalate to a
-      // human rather than loop silently. Before the deadline the failure is
-      // transient: rethrow so tickAll records it and the next sweep retries.
-      //
-      // What IS left is the server-independent exit, and the parked row names
-      // it. On this leg the client funds and the solver is the covenant
-      // receiver, so the solo path is `unilateralClaim` — the leaf that reveals
-      // the preimage this row already holds. `unilateralExitRecourse` reads that
-      // off the row's own roles rather than assuming the leg, and never throws,
-      // so it cannot turn an escalation into an error about the escalation.
-      if (await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip)) {
-        const detail = error instanceof Error ? error.message : String(error)
-        const recourse = unilateralExitRecourse(row, { solverPubkey: arkade.providerPubkey })
-        await store.fail(row.id, 'claiming', `claim failing past the refund deadline: ${detail} — ${recourse}`)
-        return false
-      }
-      throw error
-    }
-    const extra = unadopted(lockups, row.lockupOutpoints)
-    if (txid !== null && extra.length > 0) {
-      await arkade.refund(row, extra).catch((error: unknown) => this.onTickError?.(row.id, error))
-    }
-    const recourse = () => unilateralExitRecourse(row, { solverPubkey: arkade.providerPubkey })
-    if (unrolled === null || unrolled.settled) {
-      const leftover = await lockupLeftover(
-        arkade,
-        row,
-        txid === null ? [] : boundedSpendInputs(outputs, this.now()),
-        unrolled,
-      )
-      if (leftover.length > 0) {
-        const pastDeadline = await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip)
-        return awaitLeftover(store, row.id, txid, leftover, pastDeadline, recourse)
-      }
-    }
-    if (unrolled === null) {
-      await store.transition(row.id, 'claiming', 'claimed', { claim_ark_txid: txid })
-      return false
-    }
-    if (txid !== null) await store.patch(row.id, { claim_ark_txid: txid })
-    return settleUnrolledClaims(store, row.id, { from: 'claiming', to: 'claimed' }, unrolled, recourse)
+    return claimClientLockup({
+      store,
+      arkade,
+      row,
+      covenantRow: row,
+      preimage: row.preimage,
+      edge: { from: 'claiming', to: 'claimed' },
+      now: this.now,
+      refundDeadlineReached: () => refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip),
+      readsDeadlineWithEvidence: true,
+      recognisesOwnClaim: false,
+      onTickError: (id, error) => this.onTickError?.(id, error),
+    })
   }
 
   private async whenClaimingSwept(
@@ -2155,6 +2083,7 @@ export class SendSwapService {
       return awaitLeftover(
         store,
         row.id,
+        'claiming',
         txid,
         leftover,
         await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip),

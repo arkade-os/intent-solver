@@ -73,6 +73,7 @@ import {
   type OnchainSendReads,
 } from '@arkade-os/solver-core/core/onchainSendPlan.js'
 import { adoptedOnly, providerKeyCurrent, unadopted } from '../legs/arkadeLockup.js'
+import { claimClientLockup } from '../legs/clientLockupClaim.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
@@ -1046,83 +1047,19 @@ export class OnchainSendSwapService {
       await store.fail(row.id, 'claiming', 'claiming state with no preimage')
       return false
     }
-    const lockupsP = capture(arkade.findLockups(row.pkScript))
-    const unrolled = await advanceUnrolledClaims(store, row, arkade, covenantRowFor(row), row.preimage)
-    const lockups = unwrap(await lockupsP)
-    const outputs = claimOutputs(adoptedOnly(lockups, row.lockupOutpoints), row.amountSats)
-    // claimOutputs falls back to EVERY adopted output when the asset-free ones fall short, so a
-    // dust asset vtxo left after the clean funding was swept reads non-empty yet cannot
-    // cover the amount. Guard on value, not emptiness — held 0 is the empty case.
-    const held = outputs.reduce((sum, o) => sum + o.value, 0)
-    if (held < row.amountSats && unrolled === null) {
-      // Proof of neither our claim nor enough value to deliver: `findLockups` is
-      // spendableOnly, and claimOutputs may fall back to a dust asset vtxo that cannot
-      // cover the amount. {@link pushRefund}'s refusal applies — `stuck` has no `step`
-      // case, so parking ends collection after we paid out.
-      const evidenceP = arkade.lockupSpendEvidence(row.pkScript)
-      const outpointsP = capture(
-        arkade.findLockupOutpoints ? arkade.findLockupOutpoints(row.pkScript) : Promise.resolve([]),
-      )
-      const evidence = await evidenceP
-      if (evidence !== 'spent' && this.now() < row.refundLocktime) {
-        throw new Error(
-          `swap ${row.id}: lockup holds ${held} < ${row.amountSats} while claiming but no spend is provable (${evidence})`,
-        )
-      }
-      const pending =
-        evidence === 'spent' ? await arkade.finalizePendingClaim?.(covenantRowFor(row), row.preimage) : null
-      if (pending) return store.transition(row.id, 'claiming', 'claimed', { claim_ark_txid: pending })
-      // A spend revealing OUR preimage is our own claim that landed before a crash took the txid.
-      // Like the normal path, never `claimed` while an adopted output is still out.
-      const outpoints = unwrap(await outpointsP)
-      const ours = outpoints.length > 0 && (await arkade.findClaimPreimage?.(outpoints, row.paymentHash))
-      // A legacy row (null outpoints) has no adopted set, so `lockupLeftover` is
-      // vacuously empty — booking `claimed` off one claimed output would abandon
-      // the rest of a multi-output lockup. Send it to review instead.
-      if (ours && row.lockupOutpoints !== null && (await lockupLeftover(arkade, row, [], null)).length === 0) {
-        return store.transition(row.id, 'claiming', 'claimed', { claim_ark_txid: null })
-      }
-      await store.fail(
-        row.id,
-        'claiming',
-        `lockup holds ${held} < amount ${row.amountSats} while claiming; no claim txid recorded; needs review`,
-      )
-      return false
-    }
-    let txid: string | null = null
-    try {
-      if (outputs.length > 0) txid = await arkade.claim(covenantRowFor(row), outputs, row.preimage)
-    } catch (error) {
-      if (this.now() >= row.refundLocktime) {
-        const detail = error instanceof Error ? error.message : String(error)
-        const recourse = unilateralExitRecourse(covenantRowFor(row), { solverPubkey: arkade.providerPubkey })
-        await store.fail(row.id, 'claiming', `claim failing past the refund deadline: ${detail} — ${recourse}`)
-        return false
-      }
-      throw error
-    }
-    const extra = unadopted(lockups, row.lockupOutpoints)
-    if (txid !== null && extra.length > 0) {
-      await arkade.refund(covenantRowFor(row), extra).catch((error: unknown) => this.onTickError?.(row.id, error))
-    }
-    const recourse = () => unilateralExitRecourse(covenantRowFor(row), { solverPubkey: arkade.providerPubkey })
-    if (unrolled === null || unrolled.settled) {
-      const leftover = await lockupLeftover(
-        arkade,
-        row,
-        txid === null ? [] : boundedSpendInputs(outputs, this.now()),
-        unrolled,
-      )
-      if (leftover.length > 0) {
-        return awaitLeftover(store, row.id, txid, leftover, this.now() >= row.refundLocktime, recourse)
-      }
-    }
-    if (unrolled === null) {
-      await store.transition(row.id, 'claiming', 'claimed', { claim_ark_txid: txid })
-      return false
-    }
-    if (txid !== null) await store.patch(row.id, { claim_ark_txid: txid })
-    return settleUnrolledClaims(store, row.id, { from: 'claiming', to: 'claimed' }, unrolled, recourse)
+    return claimClientLockup({
+      store,
+      arkade,
+      row,
+      covenantRow: covenantRowFor(row),
+      preimage: row.preimage,
+      edge: { from: 'claiming', to: 'claimed' },
+      now: this.now,
+      refundDeadlineReached: async () => this.now() >= row.refundLocktime,
+      readsDeadlineWithEvidence: false,
+      recognisesOwnClaim: true,
+      onTickError: (id, error) => this.onTickError?.(id, error),
+    })
   }
 
   /**

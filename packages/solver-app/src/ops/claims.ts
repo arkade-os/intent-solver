@@ -16,6 +16,7 @@
  */
 
 import { preimageMatchesHash } from '@arkade-os/solver-core/core/preimage.js'
+import { CLAIM_UNPROVEN } from '@arkade-os/solver-corridors/legs/clientLockupClaim.js'
 import { requireLn } from './rails.js'
 import type { Services } from './services.js'
 
@@ -74,7 +75,7 @@ export const claimNow = async (services: Services, id: string, preimageHex?: str
 export const rearmPendingClaims = async (store: Pick<Services['store'], 'findByStates' | 'transition'>) => {
   const rearmed: string[] = []
   for (const row of await store.findByStates(['stuck'])) {
-    if (!row.failureReason?.includes('while claiming; no claim txid recorded')) continue
+    if (!row.failureReason?.includes(CLAIM_UNPROVEN)) continue
     if (!row.preimage || !preimageMatchesHash(row.preimage, row.paymentHash)) continue
     if (await store.transition(row.id, 'stuck', 'claiming', {})) rearmed.push(row.id)
   }
