@@ -39,9 +39,9 @@ import {
 import { MIN_CLAIM_WINDOW, refundWithoutReceiverDelayCovers } from '@arkade-os/solver-core/core/send.js'
 import {
   planReceive,
-  type ReceiveAction,
-  type ReceiveObservation,
-  type ReceiveRead,
+  planRefundFailed,
+  planSettleFailed,
+  type ReceiveReads,
 } from '@arkade-os/solver-core/core/receivePlan.js'
 import type { ChainTipProvider } from '@arkade-os/solver-rails/onchain/chainTip.js'
 import { absoluteLocktimeFor, refundDeadlineReached, refundDeadlineSeconds } from '../chainClock.js'
@@ -236,12 +236,10 @@ export type CoupledSendRow = Pick<
 
 type HistoryOutpoint = LockupOutpoint & { unrolled: boolean }
 
-/** The planner's observation, with the full objects the orchestrator needs to act on. */
-interface Seen extends ReceiveObservation {
-  coupled?: CoupledSendRow | null
-  funding?: LockupOutpoint | null
-  spendable?: FundedOutput[]
-  claim?: { history: HistoryOutpoint[]; preimage: string | null }
+/** The planner's reads for one tick, and the two lists it read that a refund then needs in full. */
+interface TickReads extends ReceiveReads {
+  outputs: FundedOutput[]
+  history: HistoryOutpoint[]
 }
 
 export interface ReceiveQuoteRequest {
@@ -674,178 +672,62 @@ export class ReceiveSwapService {
     }
   }
 
-  private newSeen(): Seen {
-    return {
-      nowSeconds: this.now(),
-      acceptUnilateralGap: this.deps.acceptUnilateralGap,
-      canRefundUnrolled: this.deps.arkade.refundUnrolled !== undefined,
-    }
-  }
-
-  /** Asks the planner, reading each fact it asks for, until it names something to do. */
-  private async decide(row: ReceiveSwapRow, seen: Seen): Promise<ReceiveAction> {
-    const asked = new Set<ReceiveRead>()
-    for (;;) {
-      seen.nowSeconds = this.now()
-      seen.acceptUnilateralGap = this.deps.acceptUnilateralGap
-      const next = planReceive(row, seen)
-      if (next.do !== 'read') return next
-      // The planner asks for each fact once. A second ask means the read left it unset.
-      if (asked.has(next.what)) throw new Error(`swap ${row.id}: reading ${next.what} gave no answer`)
-      asked.add(next.what)
-      await this.read(row, next.what, seen)
-    }
-  }
-
-  private async read(row: ReceiveSwapRow, what: ReceiveRead, seen: Seen): Promise<void> {
-    const { ln, arkade, chainTip } = this.deps
-    switch (what) {
-      case 'hold':
-        seen.hold = await ln.getHoldState(row.paymentHash)
-        return
-      case 'coupled':
-        seen.coupled = (await this.deps.coupledSendStore?.findLiveByPaymentHash(row.paymentHash)) ?? null
-        return
-      case 'funding':
-        seen.funding = adoptFunding(await arkade.findLockupOutpoints(row.pkScript), row.payoutSats)
-        return
-      case 'refund_deadline':
-        seen.refundDeadlineSeconds = await refundDeadlineSeconds(
-          row.refundLocktime,
-          this.now,
-          chainTip,
-          DEADLINE_SECONDS_PURPOSE,
-        )
-        return
-      case 'coupled_refund_deadline':
-        if (!seen.coupled) throw new Error(`swap ${row.id}: no coupled send read to take a refund deadline from`)
-        seen.coupledRefundDeadlineSeconds = await refundDeadlineSeconds(
-          seen.coupled.refundLocktime,
-          this.now,
-          chainTip,
-          DEADLINE_SECONDS_PURPOSE,
-        )
-        return
-      case 'spendable':
-        seen.spendable = await arkade.findLockups(row.pkScript)
-        return
-      case 'refund_open':
-        seen.refundOpen = await refundDeadlineReached(row.refundLocktime, this.now, chainTip)
-        return
-      case 'claim': {
+  private readsFor(row: ReceiveSwapRow): TickReads {
+    const { ln, arkade, chainTip, coupledSendStore } = this.deps
+    const deadlineOf = (locktime: number) =>
+      refundDeadlineSeconds(locktime, this.now, chainTip, DEADLINE_SECONDS_PURPOSE)
+    const reads: TickReads = {
+      outputs: [],
+      history: [],
+      now: this.now,
+      acceptsUnilateralGap: () => this.deps.acceptUnilateralGap,
+      canRefundUnrolled: () => arkade.refundUnrolled !== undefined,
+      hold: () => ln.getHoldState(row.paymentHash),
+      coupledSend: async () => (await coupledSendStore?.findLiveByPaymentHash(row.paymentHash)) ?? null,
+      coupledRefundDeadline: (send) => deadlineOf(send.refundLocktime),
+      coupledLockupFunded: async (send) =>
+        satsOutputs(await arkade.findLockups(send.pkScript)).some((o) => o.value === send.amountSats),
+      earlierFunding: async () => adoptFunding(await arkade.findLockupOutpoints(row.pkScript), row.payoutSats),
+      refundDeadline: () => deadlineOf(row.refundLocktime),
+      spendable: async () => (reads.outputs = await arkade.findLockups(row.pkScript)),
+      refundOpen: () => refundDeadlineReached(row.refundLocktime, this.now, chainTip),
+      claim: async () => {
         if (row.arkadeLockupTxid === null || row.arkadeLockupVout === null) {
           throw new Error(`swap ${row.id}: no funded outpoint recorded to look for a claim of`)
         }
         // ALL historical outpoints: a row adopted out of a crashed funding may have more than one, and
         // the preimage only has to appear in one of their spends. An empty read falls back to the
         // recorded outpoint, so indexer lag never narrows the search.
-        const history = await arkade.findLockupOutpoints(row.pkScript)
+        reads.history = await arkade.findLockupOutpoints(row.pkScript)
         const recorded = { txid: row.arkadeLockupTxid, vout: row.arkadeLockupVout }
-        const preimage = await this.preimages.find(row, history.length > 0 ? history : [recorded])
-        seen.claim = { history, preimage: preimage ? hex.encode(preimage) : null }
-        return
-      }
-      case 'own_refund':
-        // A throw keeps the row refunding, so the sweep retries a finalize arkd refused.
-        seen.ownRefund = (await arkade.finalizePendingRefund?.(receiveCovenantRowFor(row))) ?? null
-        return
-      case 'hold_settled':
-        seen.holdSettled = await ln
+        const preimage = await this.preimages.find(row, reads.history.length > 0 ? reads.history : [recorded])
+        return { history: reads.history, preimage: preimage ? hex.encode(preimage) : null }
+      },
+      // A throw keeps the row refunding, so the sweep retries a finalize arkd refused.
+      ownRefund: async () => (await arkade.finalizePendingRefund?.(receiveCovenantRowFor(row))) ?? null,
+      holdSettled: () =>
+        ln
           .getHoldState(row.paymentHash)
           .then((state) => state.status === 'settled')
-          .catch(() => false)
-        return
+          .catch(() => false),
     }
+    return reads
   }
 
   private async whenQuoted(row: ReceiveSwapRow): Promise<boolean> {
-    const { store, arkade } = this.deps
-    const seen = this.newSeen()
-    const next = await this.decide(row, seen)
+    const { store } = this.deps
+    const next = await planReceive(row, this.readsFor(row))
     if (next.do === 'arm') {
       const armed = await store.transition(row.id, 'quoted', 'armed', { htlc_expires_at: next.htlcExpiresAt })
       if (armed) await this.noteCltvHeadroom(row, next.htlcExpiresAt)
       return armed
     }
-
-    const coupled = seen.coupled
-    // Coupled: no htlc will ever arrive, because the invoice is one we minted
-    // and cannot pay. We arm against the client's SEND lockup instead — but
-    // only once it is funded and holds what it promised, so we never go first.
-    if (next.do === 'couple' && coupled) {
-      // Send lockup vs our payout. The send corridor already couples only on
-      // our bolt11, so both legs price off one A and lockup ≥ A ≥ payout —
-      // this is false. That gate lives in another file; this is the leg that
-      // pays. Also the quote-time race: two stores, so both looks can miss and
-      // a 1k send plus a 50k receive can both commit. Fail, don't stall — these
-      // numbers cannot improve on a later tick.
-      if (coupled.amountSats < row.payoutSats) {
-        await store.fail(
-          row.id,
-          'quoted',
-          `refused to fund: coupled send lockup of ${coupled.amountSats} sats cannot cover a ${row.payoutSats} sat payout`,
-        )
-        return false
-      }
-      // A funded refusal still answers `findLiveByPaymentHash` but never reaches `funded`; stop
-      // waiting, or it pins this row in `quoted` and holds its capacity for a swap that cannot be.
-      if (coupled.state === 'refused') {
-        await this.retireInvoice(row.paymentHash)
-        await store.fail(row.id, 'quoted', 'coupled send was refused; the receive leg can never fund against it')
-        return false
-      }
-      if (coupled.state !== 'funded') return false
-      if (
-        !refundWithoutReceiverDelayCovers(
-          coupled.refundWithoutReceiverDelay,
-          await refundDeadlineSeconds(coupled.refundLocktime, this.now, this.deps.chainTip, DEADLINE_SECONDS_PURPOSE),
-          coupled.createdAt,
-        )
-      ) {
-        await store.fail(row.id, 'quoted', 'refused to fund: coupled send refund timing is unsafe')
-        return false
-      }
-      // Asset-free only: the coupled send refuses a lockup whose sats sit on an
-      // asset vtxo, so an asset-carrying output must not count toward the
-      // payout this receive leg is about to make.
-      const outputs = satsOutputs(await arkade.findLockups(coupled.pkScript))
-      // Exact value, not a minimum, for the same reason the funding guard
-      // below filters exactly: a lockup a sat short is not a smaller swap, it
-      // is a swap whose collect leg would not cover this payout.
-      if (!outputs.some((o) => o.value === coupled.amountSats)) return false
-      // The quotes are concluded and we are about to pay out, so retire the
-      // invoice: from here it must never be payable.
-      //
-      // It is OUR bolt11, and anyone can pay a bolt11 — so a client could hand
-      // it to a third party and have us settle an htlc AND claim their lockup,
-      // collecting twice off one preimage. Cancelling closes that off, and it
-      // is safe to do exactly here: `getHoldState` above said nothing is armed,
-      // which is the only case the port makes any promise about.
-      //
-      // Deliberately not fatal, and deliberately not earlier. Not fatal because
-      // the degradation is mild: past `quoted` this path never settles an htlc,
-      // so a late one simply fails back at `E` instead of immediately — untidy,
-      // not unsafe. Not earlier because until their lockup is funded the client
-      // has committed to nothing, and paying this invoice the ordinary way is
-      // still a legitimate thing for them to do.
+    if (next.do === 'arm_coupled') {
       await this.retireInvoice(row.paymentHash)
-      // `htlc_expires_at` stays NULL, and that null is what marks the row
-      // coupled for `whenArmed` — there is no `E` on this path to record.
       return store.transition(row.id, 'quoted', 'armed', { htlc_expires_at: null })
     }
-
     if (next.do === 'fail') {
-      // Retire the invoice as well as the row. The row is ours and the
-      // invoice is the BACKEND's: failing one does not touch the other, so
-      // without this the mint outlives the quote and sits on the node until
-      // ITS own expiry. LND holds every unpaid invoice against
-      // `maxpendinginvoices` (default 1000) until settled, cancelled or
-      // expired, so a stream of quotes nobody pays is a slow way to fill that
-      // table — and none of those quotes has to be malicious to do it.
-      //
-      // Safe here for the reason the coupled path above gives: the row is
-      // being failed, so nothing downstream will ever settle this htlc.
-      await this.retireInvoice(row.paymentHash)
+      if (next.retireInvoice) await this.retireInvoice(row.paymentHash)
       await store.fail(row.id, 'quoted', next.reason)
     }
     return false
@@ -887,15 +769,14 @@ export class ReceiveSwapService {
   private async whenArmed(row: ReceiveSwapRow): Promise<boolean> {
     const { store, arkade } = this.deps
     const armedStarted = performance.now()
-    const seen = this.newSeen()
-    const next = await this.decide(row, seen)
-    if (next.do === 'adopt' && seen.funding) {
+    const next = await planReceive(row, this.readsFor(row))
+    if (next.do === 'adopt') {
       // Transition rather than wait in `armed`: `funded` already owns the
       // "learn P, or recover/refund past the deadline" obligation.
       return store.transition(row.id, 'armed', 'funded', {
-        arkade_lockup_txid: seen.funding.txid,
-        arkade_lockup_vout: seen.funding.vout,
-        arkade_lockup_value: seen.funding.value,
+        arkade_lockup_txid: next.funding.txid,
+        arkade_lockup_vout: next.funding.vout,
+        arkade_lockup_value: next.funding.value,
       })
     }
     if (next.do === 'stuck') {
@@ -997,7 +878,7 @@ export class ReceiveSwapService {
   private async whenFunded(row: ReceiveSwapRow): Promise<boolean> {
     const { store } = this.deps
     const observeStarted = performance.now()
-    const next = await this.decide(row, this.newSeen())
+    const next = await planReceive(row, this.readsFor(row))
     if (next.do === 'fail') {
       await store.fail(row.id, 'funded', next.reason)
       return false
@@ -1019,8 +900,8 @@ export class ReceiveSwapService {
 
   private async whenClaimed(row: ReceiveSwapRow): Promise<boolean> {
     const { store, ln } = this.deps
-    const seen = this.newSeen()
-    const next = await this.decide(row, seen)
+    const reads = this.readsFor(row)
+    const next = await planReceive(row, reads)
     if (next.do === 'fail') {
       await store.fail(row.id, 'claimed', next.reason)
       return false
@@ -1046,8 +927,8 @@ export class ReceiveSwapService {
       await ln.settleHold(row.preimage)
       return store.transition(row.id, 'claimed', 'settled', {})
     } catch (error) {
-      seen.settleFailed = String(error instanceof Error ? error.message : error)
-      const after = await this.decide(row, seen)
+      const detail = String(error instanceof Error ? error.message : error)
+      const after = await planSettleFailed(row, reads, detail)
       if (after.do === 'record_settled') return store.transition(row.id, 'claimed', 'settled', {})
       if (after.do === 'fail') {
         await store.fail(row.id, 'claimed', after.reason)
@@ -1059,8 +940,8 @@ export class ReceiveSwapService {
 
   private async whenRefunding(row: ReceiveSwapRow): Promise<boolean> {
     const { store, arkade } = this.deps
-    const seen = this.newSeen()
-    const next = await this.decide(row, seen)
+    const reads = this.readsFor(row)
+    const next = await planReceive(row, reads)
     if (next.do === 'fail') {
       await store.fail(row.id, 'refunding', next.reason)
       return false
@@ -1073,7 +954,7 @@ export class ReceiveSwapService {
     }
     if (next.do === 'refund_unrolled') {
       const covenantRow = receiveCovenantRowFor(row)
-      const unrolled = seen.claim?.history.find(
+      const unrolled = reads.history.find(
         (o) => o.unrolled && o.txid === row.arkadeLockupTxid && o.vout === row.arkadeLockupVout,
       )
       if (!unrolled || !arkade.refundUnrolled) return false
@@ -1088,19 +969,18 @@ export class ReceiveSwapService {
         () => unilateralExitRecourse(covenantRow, { solverPubkey: arkade.solverPubkey }),
       )
     }
-    if (next.do !== 'refund' || !seen.spendable) return false
+    if (next.do !== 'refund') return false
 
     const covenantRow = receiveCovenantRowFor(row)
     try {
-      const txid = await arkade.refund(covenantRow, seen.spendable)
+      const txid = await arkade.refund(covenantRow, reads.outputs)
       return store.transition(row.id, 'refunding', 'refunded', { refund_ark_txid: txid })
     } catch (error) {
       // The server-independent recourse goes ON THE ROW, not only in a log line: this is the row a
       // human reads days later. `unilateralExitRecourse` never throws.
       const detail = error instanceof Error ? error.message : String(error)
       const recourse = unilateralExitRecourse(covenantRow, { solverPubkey: arkade.solverPubkey })
-      seen.refundFailed = `${detail} — ${recourse}`
-      const after = await this.decide(row, seen)
+      const after = planRefundFailed(row, this.now(), `${detail} — ${recourse}`)
       if (after.do === 'fail') {
         await store.fail(row.id, 'refunding', after.reason)
         return false
