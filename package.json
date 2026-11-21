@@ -65,7 +65,7 @@
   },
   "pnpm": {
     "overrides": {
-      "@arkade-os/swap": "file:vendor/arkade-os-swap-0.1.12-repeat-asset-rfq-5ca2e1c28303.tgz"
+      "@arkade-os/swap": "file:vendor/arkade-os-swap-0.1.12-directed-nonce-ark-9d7636e7e545.tgz"
     },
     "onlyBuiltDependencies": [
       "better-sqlite3",
