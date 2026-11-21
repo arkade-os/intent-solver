@@ -71,6 +71,7 @@ import type { ReceiveSwapRow } from '../db/receiveSwaps.js'
 import type { SendSwapRow, SendSwapState, SwapStore } from '../db/swaps.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { sweep } from '@arkade-os/solver-core/util/sweep.js'
+import { wasRead } from '@arkade-os/solver-core/util/wasRead.js'
 import { planSend, SEND_COUPLED_REFUSED, type SendReads } from '@arkade-os/solver-core/core/sendPlan.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
@@ -414,7 +415,7 @@ const stuckBecause = (refunded: boolean, verdict: SelfPaymentVerdict): string =>
 
 /** The planner's reads for one tick, and the lockup outputs it read, which adopting them needs in full. */
 interface TickReads extends SendReads {
-  lockupOutputs: FundedOutput[]
+  lockupOutputs: FundedOutput[] | null
 }
 
 export class SendSwapService {
@@ -1032,7 +1033,7 @@ export class SendSwapService {
   private readsFor(row: SendSwapRow): TickReads {
     const { ln, arkade, coupling } = this.deps
     const reads: TickReads = {
-      lockupOutputs: [],
+      lockupOutputs: null,
       now: this.now,
       lockupTimeout: () => this.lockupTimeout,
       maxLockupOutputs: () => MAX_LOCKUP_SPEND_INPUTS,
@@ -1044,8 +1045,9 @@ export class SendSwapService {
       hintDenylist: () => this.sendHintScidDenylist,
       lockups: async () => {
         const all = await this.availableLockups(row)
-        reads.lockupOutputs = satsOutputs(all)
-        return { held: all.reduce((sum, o) => sum + o.value, 0), spendable: reads.lockupOutputs }
+        const spendable = satsOutputs(all)
+        reads.lockupOutputs = spendable
+        return { held: all.reduce((sum, o) => sum + o.value, 0), spendable }
       },
       refundDeadline: () =>
         refundDeadlineSeconds(row.refundLocktime, this.now, this.deps.chainTip, DEADLINE_SECONDS_PURPOSE),
@@ -1083,7 +1085,7 @@ export class SendSwapService {
       return false
     }
     if (next.do !== 'adopt_lockup') return false
-    const outputs = reads.lockupOutputs
+    const outputs = wasRead(reads.lockupOutputs, 'lockups')
     const [first] = outputs
     // Every funding output gets its own history entry: the transition marks the state change and cannot
     // name an outpoint. Before the transition, so a crash between them leaves a recorded funding.
