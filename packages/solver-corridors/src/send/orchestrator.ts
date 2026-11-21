@@ -2083,6 +2083,7 @@ export class SendSwapService {
       return awaitLeftover(
         store,
         row.id,
+        'claiming',
         txid,
         leftover,
         await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip),

@@ -7,6 +7,12 @@ import type { BaseSwapStore } from '../db/baseSwapStore.js'
 import { advanceUnrolledClaims, awaitLeftover, lockupLeftover, settleUnrolledClaims } from '../unrolledSpendStep.js'
 import { adoptedOnly, unadopted } from './arkadeLockup.js'
 
+/**
+ * Marks a row parked because its lockup read short mid-claim. `rearmPendingClaims` finds rows by this text
+ * at boot and puts them back on the claim path, so it must not change apart from there.
+ */
+export const CLAIM_UNPROVEN = 'while claiming; no claim txid recorded'
+
 export interface ClientLockupClaim<S extends string> {
   store: Pick<BaseSwapStore<unknown, S>, 'patch' | 'transition' | 'fail'>
   arkade: ArkadeOps
@@ -70,7 +76,7 @@ export const claimClientLockup = async <S extends string>(claim: ClientLockupCla
     const leftover = await lockupLeftover(arkade, row, claimedNow, unrolled)
     if (leftover.length > 0) {
       const pastDeadline = await claim.refundDeadlineReached()
-      return awaitLeftover(store, row.id, txid, leftover, pastDeadline, recourse)
+      return awaitLeftover(store, row.id, edge.from, txid, leftover, pastDeadline, recourse)
     }
   }
   if (unrolled === null) {
@@ -115,10 +121,6 @@ const whenLockupIsShort = async <S extends string>(claim: ClientLockupClaim<S>, 
       return store.transition(row.id, edge.from, edge.to, { claim_ark_txid: null })
     }
   }
-  await store.fail(
-    row.id,
-    edge.from,
-    `lockup holds ${held} < amount ${row.amountSats} while claiming; no claim txid recorded; needs review`,
-  )
+  await store.fail(row.id, edge.from, `lockup holds ${held} < amount ${row.amountSats} ${CLAIM_UNPROVEN}; needs review`)
   return false
 }
