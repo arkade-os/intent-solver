@@ -16,6 +16,7 @@ import { SendSwapService } from '@arkade-os/solver-corridors/send/orchestrator.j
 import type { OpenRfq } from '@arkade-os/solver-core/core/openRfq.js'
 import {
   RFQ_ASSET_SWAP_DIRECTED,
+  RFQ_ASSET_SWAP_DIRECTED_NONCE,
   RFQ_ASSET_SWAP_V2,
   RFQ_CONTRACT_VERSIONS,
   RFQ_EVM_RECEIVE_V1,
@@ -386,7 +387,11 @@ describe('public price previews', () => {
     expect(await priced(all, `${btc}->${ln}`, '10000')).toBeDefined()
 
     expect(await priced(without(RFQ_ASSET_SWAP_V2), `${btc}->${tokenId}`, '100000')).toBeDefined()
-    expect(await priced(without(RFQ_ASSET_SWAP_DIRECTED), `${btc}->${tokenId}`, '100000')).toBeUndefined()
+    expect(await priced(without(RFQ_ASSET_SWAP_DIRECTED), `${btc}->${tokenId}`, '100000')).toBeDefined()
+    expect(await priced(without(RFQ_ASSET_SWAP_DIRECTED_NONCE), `${btc}->${tokenId}`, '100000')).toBeDefined()
+    expect(
+      await priced(without(RFQ_ASSET_SWAP_DIRECTED, RFQ_ASSET_SWAP_DIRECTED_NONCE), `${btc}->${tokenId}`, '100000'),
+    ).toBeUndefined()
     expect(await priced(without(RFQ_EVM_SEND_V1), `${btc}->${evm}`, '10000')).toBeUndefined()
     expect(await priced(without(RFQ_EVM_RECEIVE_V1), `${evm}->${btc}`, '10000000')).toBeUndefined()
     expect(await priced(without(RFQ_EVM_RECEIVE_V1), `${btc}->${evm}`, '10000')).toBeDefined()

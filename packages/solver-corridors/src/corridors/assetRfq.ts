@@ -33,7 +33,11 @@
 
 import { parkVia, type Corridor, type CorridorReader } from '@arkade-os/solver-core/core/corridor.js'
 import type { CorridorDescriptor } from '@arkade-os/solver-core/core/corridorDescriptor.js'
-import { RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_DIRECTED } from '@arkade-os/solver-core/core/rfqContract.js'
+import {
+  RFQ_ASSET_SWAP_V2,
+  RFQ_ASSET_SWAP_DIRECTED,
+  RFQ_ASSET_SWAP_DIRECTED_NONCE,
+} from '@arkade-os/solver-core/core/rfqContract.js'
 import { diagnose, phaseOfStates, type AdminSwap } from '@arkade-os/solver-core/core/swapView.js'
 import type { CorridorRfqOutcome as RfqOutcome, QuoteOptions } from '@arkade-os/solver-core/core/corridor.js'
 import { rfqRefusalPayload } from '../wire/payloads.js'
@@ -97,7 +101,7 @@ const ASSET_RFQ_STATES: CorridorDescriptor<AssetRfqSwapState>['states'] = {
 
 /** Every contract version the asset RFQ corridor quotes. Only the directed tree's `fulfill` needs this
  * solver's key; on v2 anyone reading the deposit could fill it. Rows already on v2 settle off their own version. */
-export const ASSET_RFQ_CONTRACT_VERSIONS = [RFQ_ASSET_SWAP_DIRECTED] as const
+export const ASSET_RFQ_CONTRACT_VERSIONS = [RFQ_ASSET_SWAP_DIRECTED_NONCE, RFQ_ASSET_SWAP_DIRECTED] as const
 
 export const assetRfqDescriptor = (
   market: ReadableAssetRfqMarket,

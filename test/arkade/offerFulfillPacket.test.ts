@@ -27,6 +27,7 @@ import { RFQ_ASSET_SWAP_DIRECTED } from '@arkade-os/solver-core/core/rfqContract
 const state = vi.hoisted(() => ({
   vtxos: [] as unknown[],
   arkTx: undefined as string | undefined,
+  checkpointTxs: [] as string[],
   prevTxs: new Map<string, string>(),
   submitError: undefined as Error | undefined,
 }))
@@ -65,6 +66,7 @@ vi.mock('@arkade-os/sdk', async (importOriginal) => {
       async submitTx(arkTx: string, checkpointTxs: string[]) {
         if (state.submitError) throw state.submitError
         state.arkTx = arkTx
+        state.checkpointTxs = checkpointTxs
         return { signedArkTx: arkTx, signedCheckpointTxs: checkpointTxs }
       }
     },
@@ -107,12 +109,13 @@ const ctx = (spendable: unknown[], read: () => Promise<unknown[]> = async () => 
   }) as unknown as ArkadeContext
 
 let minted = 0
-const mintCoin = (value: number) => {
+const mintCoin = (value: number, siblingValue?: number) => {
   const seed = ++minted
   const key = new Uint8Array([0x51, 0x20, ...schnorr.getPublicKey(new Uint8Array(32).fill(seed))])
   const tx = new Transaction({ version: 3 })
   tx.addInput({ txid: new Uint8Array(32).fill(seed), index: seed, witnessUtxo: { script: key, amount: BigInt(value) } })
   tx.addOutput({ script: key, amount: BigInt(value) })
+  if (siblingValue !== undefined) tx.addOutput({ script: key, amount: BigInt(siblingValue) })
   state.prevTxs.set(tx.id, base64.encode(tx.toPSBT()))
   return { txid: tx.id, vout: 0, value }
 }
@@ -215,6 +218,23 @@ describe('the asset packet fulfillOffer submits', () => {
     )
 
     expect(packetGroups()).toEqual([ASSET_B])
+  })
+
+  it('spends the checked outpoint when two deposits share a funding transaction', async () => {
+    const first = mintCoin(60_000, 70_000)
+    const deposit = { ...first, vout: 1, value: 70_000 }
+    state.vtxos = [first, deposit]
+    await fulfillOffer(
+      ctx([fundingCoin(80_000, [{ assetId: ASSET_A, amount: 600n }])]),
+      'http://emulator.test',
+      offerFor({ wantAsset: asset.AssetId.fromString(ASSET_A) }),
+      deposit,
+    )
+    const checkpoint = Transaction.fromPSBT(base64.decode(state.checkpointTxs[0]!))
+    expect(checkpoint.getInput(0).index).toBe(deposit.vout)
+    expect(vi.mocked(fillOffer).mock.lastCall?.[3]).toMatchObject({
+      fundingOutpoint: { txid: deposit.txid, vout: deposit.vout },
+    })
   })
 
   it('submits once, and refuses the other fill, when two race for one coin', async () => {

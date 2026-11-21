@@ -381,6 +381,7 @@ describe('the fill phase', () => {
     }
     const maker = { script: `5120${'cc'.repeat(32)}`, key: hex.encode(xonly(3)) }
     const v2 = offerScriptFrom(derivation)({
+      rfqId: 'r',
       wantAmount: 2n,
       wantAssetId: ASSET_A,
       offerAssetId: null,
@@ -647,6 +648,7 @@ describe('a deposit already gone when the adapter looked', () => {
 
   it('refuses typed, so the claimed row walks back instead of needing a human', async () => {
     const terms = {
+      rfqId: 'a'.repeat(64),
       wantAmount: 99_500_000_000n,
       wantAssetId: ASSET_A,
       offerAssetId: null,

@@ -35,6 +35,7 @@ const EXIT = offerExitDelay(605_184)
 const derivation = { serverPubkey: SERVER, emulatorPubkey: EMULATOR, hrp: 'tark', exitDelay: EXIT, taker: xonly(9) }
 
 const terms = (over: Partial<QuotedOfferTerms> = {}): QuotedOfferTerms => ({
+  rfqId: 'a'.repeat(64),
   wantAmount: 1_000n,
   wantAssetId: USDA,
   offerAssetId: null,

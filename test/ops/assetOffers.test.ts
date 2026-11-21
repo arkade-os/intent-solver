@@ -31,6 +31,7 @@ import { Transaction } from '@scure/btc-signer'
 import { base64, hex } from '@scure/base'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { OFFER_CONTRACT_V1, OFFER_CONTRACT_V2 } from '@arkade-os/solver-core/core/offerContract.js'
+import { RFQ_ASSET_SWAP_DIRECTED } from '@arkade-os/solver-core/core/rfqContract.js'
 
 const USDT = '11'.repeat(34)
 const SCRIPT = new Uint8Array(34).fill(0xab)
@@ -1211,6 +1212,27 @@ describe('tickAll classifies a fill arkd rejected as already spent', () => {
 })
 
 describe('an offer an RFQ negotiation already holds', () => {
+  const quoted = async (contractVersion?: string, offerPkScript = SCRIPT_HEX) => {
+    const rfq = await AssetRfqSwapStore.open(betterSqliteDriver(':memory:'))
+    await rfq.insertQuote({
+      id: 'rfq-1',
+      rfqId: 'a'.repeat(64),
+      pair: `arkade:${USDT}->arkade:BTC`,
+      fromAssetId: USDT,
+      fromAmount: 900n,
+      toAssetId: null,
+      toAmount: 1_000n,
+      makerPkScript: `5120${'c'.repeat(64)}`,
+      makerPublicKey: 'b'.repeat(64),
+      offerPkScript,
+      offerAddress: 'ark1qoffer',
+      solverPubkey: 'e'.repeat(64),
+      validUntil: 2_000,
+      contractVersion,
+    })
+    return rfq
+  }
+
   it('is skipped silently, with no row and no refusal recorded', async () => {
     const refused: unknown[] = []
     const { store, service } = await build({
@@ -1246,23 +1268,11 @@ describe('an offer an RFQ negotiation already holds', () => {
   })
 
   it('reads liveness from the RFQ machine, so a filled negotiation releases the script', async () => {
-    const rfq = await AssetRfqSwapStore.open(betterSqliteDriver(':memory:'))
-    await rfq.insertQuote({
-      id: 'rfq-1',
-      rfqId: 'a'.repeat(64),
-      pair: `arkade:${USDT}->arkade:BTC`,
-      fromAssetId: USDT,
-      fromAmount: 900n,
-      toAssetId: null,
-      toAmount: 1_000n,
-      makerPkScript: `5120${'c'.repeat(64)}`,
-      makerPublicKey: 'b'.repeat(64),
-      offerPkScript: SCRIPT_HEX,
-      offerAddress: 'ark1qoffer',
-      solverPubkey: 'e'.repeat(64),
-      validUntil: 2_000,
+    const rfq = await quoted()
+    const { service, store } = await build({
+      rfqOwnsLegacyScript: (pkScript) => rfq.hasLegacyDirectedQuote(pkScript),
+      rfqHolds: (pkScript) => rfq.heldByLiveNegotiation(pkScript),
     })
-    const { service } = await build({ rfqHolds: (pkScript) => rfq.heldByLiveNegotiation(pkScript) })
     expect(await service.consider(found)).toEqual({ fill: false, reason: 'offer_held_by_rfq' })
 
     await rfq.transition('rfq-1', 'quoted', 'funded')
@@ -1270,6 +1280,53 @@ describe('an offer an RFQ negotiation already holds', () => {
     await rfq.transition('rfq-1', 'filling', 'filled')
     expect(await rfq.findLiveByOfferScript(SCRIPT_HEX)).toBeDefined()
     expect(await service.consider(found)).toEqual({ fill: true, id: 'fill-1' })
+    await store.close()
+    await rfq.close()
+  })
+
+  it('leaves a late legacy directed RFQ deposit for client recovery', async () => {
+    const rfq = await quoted(RFQ_ASSET_SWAP_DIRECTED)
+    await rfq.fail('rfq-1', 'quoted', 'quote expired before the deposit was observed')
+    const { service, store } = await build({
+      rfqOwnsLegacyScript: (pkScript) => rfq.hasLegacyDirectedQuote(pkScript),
+      rfqHolds: (pkScript) => rfq.heldByLiveNegotiation(pkScript),
+    })
+    const packet = { ...found, offer: offer({ taker: hex.decode(SOLVER) }) }
+    expect(await service.consider(packet)).toEqual({ fill: false, reason: 'offer_held_by_rfq' })
+    expect(await store.listNonTerminal()).toHaveLength(0)
+    await store.close()
+    await rfq.close()
+  })
+
+  it('accepts a standalone directed offer at a script the RFQ corridor never quoted', async () => {
+    const rfq = await quoted(RFQ_ASSET_SWAP_DIRECTED, 'ef'.repeat(34))
+    await rfq.fail('rfq-1', 'quoted', 'quote expired before the deposit was observed')
+    const { service, store } = await build({
+      rfqOwnsLegacyScript: (pkScript) => rfq.hasLegacyDirectedQuote(pkScript),
+      rfqHolds: (pkScript) => rfq.heldByLiveNegotiation(pkScript),
+    })
+    const packet = { ...found, offer: offer({ taker: hex.decode(SOLVER) }) }
+    expect(await service.consider(packet)).toEqual({ fill: true, id: 'fill-1' })
+    await store.close()
+    await rfq.close()
+  })
+
+  it('does not submit a public intent previously opened for a late legacy RFQ deposit', async () => {
+    const rfq = await quoted(RFQ_ASSET_SWAP_DIRECTED)
+    await rfq.fail('rfq-1', 'quoted', 'quote expired before the deposit was observed')
+    const settle = vi.fn(async () => 'f'.repeat(64))
+    const { deps, service, store } = await build({
+      rfqOwnsLegacyScript: (pkScript) => rfq.hasLegacyDirectedQuote(pkScript),
+      rfqHolds: (pkScript) => rfq.heldByLiveNegotiation(pkScript),
+      settle,
+    })
+    const oldWatcher = new AssetOfferService({ ...deps, rfqOwnsLegacyScript: undefined })
+    const packet = { ...found, offer: offer({ taker: hex.decode(SOLVER) }) }
+    expect(await oldWatcher.consider(packet)).toEqual({ fill: true, id: 'fill-1' })
+    expect(await service.tickAll()).toBe(0)
+    expect(settle).not.toHaveBeenCalled()
+    expect(await store.findById('fill-1')).toMatchObject({ state: 'refused', failureReason: 'offer_held_by_rfq' })
+    await store.close()
     await rfq.close()
   })
 })
@@ -1299,6 +1356,17 @@ describe('a directed offer packet', () => {
   it('is considered like any other offer when it names this solver', async () => {
     const { service } = await build()
     expect(await service.consider(directedTo(SOLVER))).toEqual({ fill: true, id: 'fill-1' })
+  })
+
+  it('leaves a nonce-bound RFQ deposit to the RFQ corridor even without a live row', async () => {
+    const rfqHolds = vi.fn(async () => false)
+    const { service, store } = await build({ rfqHolds })
+    const directed = directedTo(SOLVER)
+    const rfq = { ...directed, offer: { ...directed.offer, nonce: new Uint8Array(32).fill(1) } }
+    expect(await service.consider(rfq)).toEqual({ fill: false, reason: 'offer_held_by_rfq' })
+    expect(await store.listNonTerminal()).toHaveLength(0)
+    expect(rfqHolds).not.toHaveBeenCalled()
+    await store.close()
   })
 
   it('is wired the identity key the card advertises', () => {
