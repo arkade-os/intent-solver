@@ -510,6 +510,20 @@ export const boundedSpendInputs = (funded: readonly FundedOutput[], now: number)
   return usable.filter((output) => kept.has(output))
 }
 
+/**
+ * What to write down after a refund of `outputs` went out. One spend takes only what
+ * {@link boundedSpendInputs} selects, and `refund_outcome` takes the row out of every sweep for good, so it is
+ * recorded only when that was all of them. Otherwise the row stays refundable for the rest.
+ */
+export const refundRecord = (
+  outputs: readonly FundedOutput[],
+  txid: string,
+  now: number,
+): { refund_ark_txid: string; refund_outcome?: 'pushed' } =>
+  boundedSpendInputs(outputs, now).length === outputs.length
+    ? { refund_outcome: 'pushed', refund_ark_txid: txid }
+    : { refund_ark_txid: txid }
+
 const spendable = (funded: readonly FundedOutput[], verb: string): FundedOutput[] => {
   const inputs = boundedSpendInputs(funded, nowSeconds())
   if (inputs.length === 0) {
