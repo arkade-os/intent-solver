@@ -22,7 +22,7 @@ import { ASSET_ID_HEX, ASSET_ID_HEX_LENGTH, ASSETS } from './marketKey.js'
 import { isSwapNetwork } from './networks.js'
 import { defaultPricePath } from './priceFeed.js'
 import type { AssetMarketPricingView } from './assetMarketConfig.js'
-import type { Corridor, Fee } from './corridorPolicy.js'
+import { payoutSatsFor, type Corridor, type Fee } from './corridorPolicy.js'
 import type { Limits } from './limits.js'
 import type { SwapNetwork } from './networks.js'
 
@@ -81,6 +81,16 @@ export interface SolverCardInputs {
    * express. OPTIONAL, so a deployment with none publishes the card it did before.
    */
   assetMarkets?: readonly AssetCardMarket[]
+  evmMarkets?: readonly EvmCardMarket[]
+}
+
+export interface EvmCardMarket {
+  chainId: number
+  token: { address: string; symbol: string; decimals: number }
+  priceFeed: string
+  pricePath: string
+  send?: { limits: Limits; fee: Fee; tokenLimits?: { minUnits: bigint; maxUnits: bigint } }
+  receive?: { limits: Limits; fee: Fee; tokenLimits?: { minUnits: bigint; maxUnits: bigint } }
 }
 
 /** As `assetMarketPolicy` produces it. Both legs are on the unmarked arkade corridor. */
@@ -120,12 +130,8 @@ export interface SolverCardTransports {
 }
 
 export interface SolverCard {
-  /** Stays 0 though the ids are now CAIP-19: the registry bumps on CORRIDOR,
-   * not encoding — `cardVersionErrors` wants 1 only for a rail postdating 0
-   * (today `eip155`), which `unpublishableCorridors` is why we never emit, and
-   * declaring it anyway would shut out v0 consumers, which reject such a card
-   * whole. Bump it, and this type, when an `eip155:` id is first emitted. */
-  version: 0
+  /** EVM markets require version 1; BTC and Arkade-only cards retain version 0. */
+  version: 0 | 1
   name: string
   discovery_pubkey: string
   transports: SolverCardTransports
@@ -368,18 +374,123 @@ export const publishableAssetMarkets = (
   return { publishable, omitted }
 }
 
-/**
- * Served corridors no card can name, so an unadvertisable market is legible as
- * one. An ERC20 fits neither the schema's `asset.id` nor its corridor enum, and
- * a card validates WHOLE — one unrecognised market drops the Lightning and
- * onchain ones too. Hence omitted, and reported rather than hidden.
- */
+const evmMarketEntry = (market: EvmCardMarket, network: SwapNetwork): Record<string, unknown> => {
+  if (!Number.isSafeInteger(market.chainId) || market.chainId <= 0) throw new Error('EVM chain id must be positive')
+  if (!/^0x[0-9a-f]{40}$/.test(market.token.address)) throw new Error('ERC20 address must be canonical lowercase hex')
+  if (!Number.isInteger(market.token.decimals) || market.token.decimals < 0 || market.token.decimals > 8) {
+    throw new Error('the feed needs a non-negative price_decimals value; ERC20 decimals above 8 are not representable')
+  }
+  if (market.receive && market.receive.fee.flatSats > 0) {
+    throw new Error('the receive flat fee is in BTC output units and cannot be stated as an ERC20 input flat fee')
+  }
+  const receive = market.receive
+  const send = market.send
+  if (!receive && !send) throw new Error('neither EVM direction is enabled')
+  if (!market.priceFeed.trim() || !(market.pricePath || defaultPricePath(market.priceFeed)))
+    throw new Error('EVM price feed and resolved pointer are required')
+  const feedUrl = new URL(market.priceFeed)
+  // Card feeds must be public; arbitrary parameter names and URL paths can hide credentials
+  // that this recognized-name check cannot identify.
+  if (
+    feedUrl.username ||
+    feedUrl.password ||
+    [...feedUrl.searchParams.keys()].some((key) => /(?:key|token|secret|auth|password)/i.test(key))
+  )
+    throw new Error('a private price-feed credential cannot be published in a solver card')
+  for (const direction of [receive, send]) {
+    if (!direction) continue
+    if (
+      !Number.isSafeInteger(direction.limits.minSats) ||
+      !Number.isSafeInteger(direction.limits.maxSats) ||
+      direction.limits.minSats <= 0 ||
+      direction.limits.maxSats < direction.limits.minSats
+    )
+      throw new Error('EVM BTC limits must be positive safe integers in order')
+    if (
+      !Number.isInteger(direction.fee.bps) ||
+      direction.fee.bps < 0 ||
+      direction.fee.bps >= 10_000 ||
+      !Number.isSafeInteger(direction.fee.flatSats) ||
+      direction.fee.flatSats < 0
+    )
+      throw new Error('EVM fees must be non-negative and representable')
+  }
+  // Registry amount fields admit at most thirty decimal digits, below the ERC20 uint256 limit.
+  const cardAmountMax = 10n ** 30n - 1n
+  const configuredTokenMax = send?.tokenLimits?.maxUnits ?? cardAmountMax
+  const quote = cardAmounts(
+    'EVM send',
+    send
+      ? {
+          min: send.tokenLimits?.minUnits ?? 1n,
+          max: configuredTokenMax < cardAmountMax ? configuredTokenMax : cardAmountMax,
+        }
+      : undefined,
+  )
+  const base = cardAmounts(
+    'EVM receive',
+    receive
+      ? {
+          min: BigInt(Math.max(1, payoutSatsFor(receive.limits.minSats, receive.fee))),
+          max: BigInt(payoutSatsFor(receive.limits.maxSats, receive.fee)),
+        }
+      : undefined,
+  )
+  return {
+    base_asset: btcAsset(ARKADE, network),
+    quote_asset: {
+      id: `eip155:${market.chainId}/erc20:${market.token.address}`,
+      name: market.token.symbol,
+      ticker: market.token.symbol,
+      decimals: market.token.decimals,
+    },
+    fee_bps: Math.max(send?.fee.bps ?? 0, receive?.fee.bps ?? 0),
+    ...solverFeeField(
+      { bps: send?.fee.bps ?? 0, flat: BigInt(send?.fee.flatSats ?? 0) },
+      { bps: receive?.fee.bps ?? 0, flat: 0n },
+    ),
+    price_feed: market.priceFeed,
+    price_feed_schema: { type: 'json', price_path: market.pricePath || defaultPricePath(market.priceFeed) || '' },
+    price_decimals: 8 - market.token.decimals,
+    min_base_amount: base.min,
+    max_base_amount: base.max,
+    min_quote_amount: quote.min,
+    max_quote_amount: quote.max,
+  }
+}
+
+export const publishableEvmMarkets = (
+  markets: readonly EvmCardMarket[],
+  network: SwapNetwork,
+): { publishable: EvmCardMarket[]; omitted: string[] } => {
+  const publishable: EvmCardMarket[] = []
+  const omitted: string[] = []
+  for (const market of markets) {
+    const candidate = { ...market }
+    if (candidate.receive && candidate.receive.fee.flatSats > 0) {
+      omitted.push(
+        `ethereum:${market.token.address}->arkade:BTC is served but cannot be advertised: its BTC-output flat fee cannot be stated as an ERC20-input flat fee`,
+      )
+      delete candidate.receive
+    }
+    if (!candidate.send && !candidate.receive) continue
+    try {
+      evmMarketEntry(candidate, network)
+      publishable.push(candidate)
+    } catch (error) {
+      omitted.push(
+        `eip155:${market.chainId}/erc20:${market.token.address} is served but cannot be advertised: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+  }
+  return { publishable, omitted }
+}
+
+/** @deprecated Bare corridor names lack the metadata required by publishableEvmMarkets. */
 export const unpublishableCorridors = (corridors: readonly string[]): string[] =>
   corridors.map(
     (corridor) =>
-      `${corridor} is served but cannot be advertised: the registry card schema admits no ERC20 asset id and ` +
-      `no ethereum corridor, and a card carrying one is rejected whole rather than per market. ` +
-      `Tracked in arkade-os/solver-registry#23.`,
+      `${corridor} cannot be advertised from its name alone: EVM chain, token precision, feed and directional limits are required.`,
   )
 
 /**
@@ -440,6 +551,7 @@ export const buildSolverCard = (inputs: SolverCardInputs): SolverCard => {
     }
   }
   const assetMarkets = assetMarketEntries(inputs.assetMarkets ?? [], inputs.network)
+  const evmMarkets = (inputs.evmMarkets ?? []).map((market) => evmMarketEntry(market, inputs.network))
   const markets = MARKETS.flatMap((market) => {
     const base = market.baseFrom === null ? undefined : inputs.corridors[market.baseFrom]
     const quote = inputs.corridors[market.quoteFrom]
@@ -468,17 +580,17 @@ export const buildSolverCard = (inputs: SolverCardInputs): SolverCard => {
       },
     ]
   })
-  if (markets.length === 0 && assetMarkets.length === 0) {
+  if (markets.length === 0 && assetMarkets.length === 0 && evmMarkets.length === 0) {
     throw new Error('no corridor is enabled, so there is no honest card to publish')
   }
 
   return {
-    version: 0,
+    version: evmMarkets.length ? 1 : 0,
     name: inputs.name,
     discovery_pubkey: inputs.discoveryPubkey,
     transports: { nostr: { relays } },
     // Corridor markets first: adding one must not reorder, and so resign, the rest.
-    markets: [...markets, ...assetMarkets],
+    markets: [...markets, ...assetMarkets, ...evmMarkets],
   }
 }
 

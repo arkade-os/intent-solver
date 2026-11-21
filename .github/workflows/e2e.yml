@@ -204,6 +204,8 @@ jobs:
         timeout-minutes: 25
         env:
           SECONDS_TYPED: ${{ matrix.arkdTimelocks == 'seconds' }}
+          NBXPLORER_PORT: '22838'
+          POSTGRES_PORT: '29372'
         run: |
           set -eu
           sed -i 's/DATABASE_ENABLED: "true"/DATABASE_ENABLED: "false"/' docker/compose.base.yml

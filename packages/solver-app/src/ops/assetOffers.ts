@@ -146,6 +146,10 @@ export interface AssetOfferDeps {
   /** Whether a live asset-RFQ negotiation of ours holds this script: its deposit carries a
    * public offer packet, so it arrives here too, and both paths would race to fill it. */
   rfqHolds?: (offerPkScript: string) => Promise<boolean>
+  /** A recorded legacy directed RFQ owns its script after the negotiation closes. */
+  rfqOwnsLegacyScript?: (offerPkScript: string) => Promise<boolean>
+  /** This solver's x-only key, hex. A directed packet naming another taker is skipped. */
+  solverPubkey: string
   onError?: (id: string, error: unknown) => void
   /**
    * A fill put back for a later sweep because the float was pinned or short.
@@ -204,9 +208,11 @@ const termsOf = (row: OfferFillRow): OfferFillInput => ({
 const ourOwnFill = (error: { spentBy?: string }, row: OfferFillRow): boolean =>
   error.spentBy !== undefined && row.fillTxid !== null && error.spentBy === row.fillTxid.toLowerCase()
 
-/** The decision, plus the row id when the intent was recorded. `offer_held_by_rfq` never
- * reaches `onRefused`, so it stays off the `OfferFillRefusal` union forks consume. */
-export type ConsiderOutcome = (OfferFillDecision | { fill: false; reason: 'offer_held_by_rfq' }) & { id?: string }
+/** The decision, plus the row id when the intent was recorded. Neither skip reaches `onRefused`,
+ * so both stay off the `OfferFillRefusal` union forks consume. */
+export type ConsiderOutcome = (
+  OfferFillDecision | { fill: false; reason: 'offer_held_by_rfq' } | { fill: false; reason: 'offer_directed_elsewhere' }
+) & { id?: string }
 
 export class AssetOfferService {
   private readonly newId: () => string
@@ -324,6 +330,12 @@ export class AssetOfferService {
   }
 
   private async considerInner({ offer, txid, vout }: DiscoveredOffer): Promise<ConsiderOutcome> {
+    // Silently, like `offer_held_by_rfq`: another solver's directed deposit is routine traffic.
+    if (offer.taker !== undefined && hex.encode(offer.taker) !== this.deps.solverPubkey) {
+      return { fill: false, reason: 'offer_directed_elsewhere' }
+    }
+    // The RFQ corridor owns nonce-bearing deposits and enforces their quote deadlines.
+    if (offer.nonce !== undefined) return { fill: false, reason: 'offer_held_by_rfq' }
     const outpoint = `${txid}:${vout}`
     if (!this.deps.serverPubkey && this.contractVersions.size < OFFER_CONTRACT_VERSIONS.length) {
       return this.refuse(
@@ -358,7 +370,8 @@ export class AssetOfferService {
     // `OfferOutputView.script` and the store persists.
     const pkScript = hex.encode(offer.swapPkScript)
     // Silently: a refusal row would read as someone else's offer declined.
-    if (await this.deps.rfqHolds?.(pkScript)) return { fill: false, reason: 'offer_held_by_rfq' }
+    if ((await this.deps.rfqOwnsLegacyScript?.(pkScript)) || (await this.deps.rfqHolds?.(pkScript)))
+      return { fill: false, reason: 'offer_held_by_rfq' }
     const [outputs, available] = await Promise.all([this.deps.outputsAt(pkScript), this.deps.balance()])
     const input = offerFillInputFrom(offer, offerDepositFrom(pkScript, outputs))
     const bounds = this.boundsIn(input)
@@ -439,6 +452,10 @@ export class AssetOfferService {
     for (const row of rows) if (row.state === 'filling') await this.recoverFilling(row)
     for (const row of rows) {
       if (row.state !== 'fillable') continue
+      if (await this.deps.rfqOwnsLegacyScript?.(row.offerPkScript)) {
+        await this.deps.store.fail(row.id, 'fillable', 'offer_held_by_rfq')
+        continue
+      }
       if (row.contractVersion === null && this.contractVersions.size < OFFER_CONTRACT_VERSIONS.length) {
         this.deps.onRefused?.(
           `${row.offerTxid}:${row.offerVout}`,

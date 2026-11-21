@@ -112,9 +112,13 @@ export const payoutSatsFor = (giveSats: number, fee: Fee): number => giveSats - 
  * Solved by inverting the bps term and then correcting, rather than in closed
  * form: `feeSatsFor` rounds up, so the algebraic inverse lands one sat low
  * about as often as not. The correction loop runs at most twice.
+ * An unrepresentable correction returns Infinity for callers to refuse.
  */
 export const giveSatsFor = (payoutSats: number, fee: Fee): number => {
   let give = Math.ceil(((payoutSats + fee.flatSats) * 10_000) / (10_000 - fee.bps))
-  while (payoutSatsFor(give, fee) < payoutSats) give++
+  while (payoutSatsFor(give, fee) < payoutSats) {
+    if (give >= Number.MAX_SAFE_INTEGER) return Infinity
+    give++
+  }
   return give
 }

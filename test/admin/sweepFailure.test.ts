@@ -35,4 +35,9 @@ describe('stateCell', () => {
   it('adds nothing to a row the sweep is not failing on', () => {
     expect(text(stateCell({ phase: 'exposed', state: 'claiming' }))).toBe('claiming')
   })
+
+  it('wraps inside its table cell instead of widening the column', () => {
+    const css = readFileSync(new URL('../../packages/solver-app/src/admin/static/styles.css', import.meta.url), 'utf8')
+    expect(css).toMatch(/td div\.at-risk \{\s*max-width: 56ch;\s*white-space: normal;\s*overflow-wrap: anywhere;/)
+  })
 })

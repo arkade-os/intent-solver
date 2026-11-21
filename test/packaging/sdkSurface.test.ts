@@ -15,6 +15,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import * as sdk from '@arkade-os/solver-app/index.js'
+import { buildSolverCard } from '@arkade-os/solver-core/core/registryCard.js'
 import type {
   Corridor,
   CorridorReader,
@@ -24,7 +25,11 @@ import type {
   QuoteOptions,
   PricingStrategy,
   AdmissionStrategy,
-  BiddingStrategy,
+  OpenRfq,
+  OpenRfqPrice,
+  OpenRfqBidderDeps,
+  RfqOpenPayload,
+  RfqBid,
   Rail,
   RailId,
   CovenantScriptRow,
@@ -43,7 +48,11 @@ type _Surface = [
   QuoteOptions,
   PricingStrategy,
   AdmissionStrategy,
-  BiddingStrategy,
+  OpenRfq,
+  OpenRfqPrice,
+  OpenRfqBidderDeps,
+  RfqOpenPayload,
+  RfqBid,
   Rail,
   RailId,
   CovenantScriptRow,
@@ -61,7 +70,9 @@ describe('the solver SDK surface', () => {
     'phaseOfStates',
     'diagnose',
     'fixedFeePricing',
-    'defaultBidding',
+    'OpenRfqBidder',
+    'RfqOpen',
+    'rfqBidPayload',
     'readRails',
     'balanceOfRail',
     'createServices',
@@ -82,6 +93,38 @@ describe('the solver SDK surface', () => {
     'parseDocument',
   ])('exports %s, so a consumer can build against it', (name) => {
     expect(sdk[name as keyof typeof sdk]).toBeDefined()
+  })
+
+  it('lets a consumer build the canonical open RFQ and atomic bid through the entrypoint', () => {
+    const open: OpenRfq = sdk.RfqOpen.parse({
+      v: 1,
+      type: 'rfq_open',
+      open_id: 'a'.repeat(64),
+      pair: 'arkade:bitcoin/slip44:0->bolt11:bitcoin/slip44:0',
+      amount_side: 'from',
+      amount: '100000000000000000001',
+      bids_until: 1_800_000_005,
+    })
+    const request: RfqOpenPayload = open
+    const price: OpenRfqPrice = {
+      from_amount: request.amount,
+      to_amount: '100000000000000000000',
+      valid_until: 1_800_000_030,
+    }
+    const bid: RfqBid = sdk.rfqBidPayload(request, {
+      ...price,
+      card: buildSolverCard({
+        name: 'consumer',
+        network: 'bitcoin',
+        discoveryPubkey: 'b'.repeat(64),
+        relays: ['wss://relay.example'],
+        corridors: {
+          [sdk.RFQ_PAIR_SEND]: { limits: { minSats: 1, maxSats: 100_000 }, fee: { bps: 0, flatSats: 0 } },
+        },
+      }),
+    })
+    expect(bid).toMatchObject({ v: 1, open_id: request.open_id, amount_side: 'from', ...price })
+    expect(typeof sdk.OpenRfqBidder).toBe('function')
   })
 
   /**

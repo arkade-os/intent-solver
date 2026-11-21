@@ -103,9 +103,10 @@ describe('what must agree with the quoted terms reads policy, not env', () => {
     }
   })
 
-  it('the open-RFQ bidder, so a bid cannot promise terms the corridor refuses', () => {
-    expect(cliSource).toContain("limits: services.policy.corridorLimits['arkade:BTC->lightning:BTC']")
-    expect(cliSource).toContain("fee: services.policy.corridorFees['arkade:BTC->lightning:BTC']")
+  it('the open-RFQ bidder uses the shared preview with effective services', () => {
+    const at = cliSource.indexOf('new OpenRfqBidder({')
+    expect(at).toBeGreaterThan(-1)
+    expect(cliSource.slice(at, at + 850)).toContain('preview: openRfqPreview(services)')
   })
 
   it('the registry card, which would otherwise advertise a fee nobody charges', () => {

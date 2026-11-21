@@ -144,6 +144,7 @@ const derivation = (): OfferDerivation => ({
   emulatorPubkey: emulatorXOnly(),
   hrp: arkade.profile.arkadeHrp,
   exitDelay: offerExitDelay(arkade.ctx.advertisedExitDelay),
+  taker: hex.decode(makerPublicKey),
 })
 
 const offerFrom = (terms: OfferTerms): Omit<Offer, 'swapPkScript'> => {
@@ -154,6 +155,7 @@ const offerFrom = (terms: OfferTerms): Omit<Offer, 'swapPkScript'> => {
 const deriveOffer = (terms: OfferTerms): { pkScript: string; address: string } => offerScriptFrom(derivation())(terms)
 
 const termsOf = (row: AssetRfqSwapRow): OfferTerms => ({
+  rfqId: row.rfqId,
   wantAmount: row.toAmount,
   wantAssetId: row.toAssetId,
   offerAssetId: row.fromAssetId,

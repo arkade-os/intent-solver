@@ -35,6 +35,13 @@ export interface PricingStrategy {
    * a sat low about as often as not.
    */
   giveFor(input: { pair: string; payoutSats: number }): number
+
+  /**
+   * The most this strategy can charge, for a price that binds nothing but must
+   * never be undercut by the quote that follows it (an open-RFQ bid). Absent:
+   * the strategy is its own ceiling.
+   */
+  readonly ceiling?: PricingStrategy
 }
 
 /**
@@ -166,5 +173,6 @@ export const networkFeePricing = ({ base, costSats, capSats, minSats = 0 }: Netw
     // proxy, and it understates the give by exactly the fee. Corridors whose
     // cost is amount-independent — every onchain one — are unaffected.
     giveFor: ({ pair, payoutSats }) => giveSatsFor(payoutSats, feeNow({ pair, giveSats: payoutSats })),
+    ceiling: fixedFeePricing({ bps: base.bps, flatSats: capSats }),
   }
 }

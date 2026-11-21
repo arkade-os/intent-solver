@@ -857,6 +857,13 @@ td.num {
   white-space: nowrap;
 }
 
+/* The sweep's error under a row's state wraps: unwrapped, one failing row pushed every other column off-screen. */
+td div.at-risk {
+  max-width: 56ch;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 /* ---- phase, the only coloured thing ------------------------------------ */
 
 .phase {

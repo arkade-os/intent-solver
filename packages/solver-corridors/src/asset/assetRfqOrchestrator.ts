@@ -110,6 +110,7 @@ export interface OfferTerms {
   offerAssetId: AssetLeg
   makerPkScript: string
   makerPublicKey: string
+  rfqId: string
 }
 
 export interface AssetRfqDeps {
@@ -324,6 +325,7 @@ export class AssetRfqSwapService {
         offerAssetId: pair.from,
         makerPkScript: request.makerPkScript,
         makerPublicKey: request.makerPublicKey,
+        rfqId: request.rfqId,
       },
       request.contractVersion,
     )

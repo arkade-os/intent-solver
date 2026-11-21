@@ -12,7 +12,12 @@
  */
 import { asset, type RelativeTimelock } from '@arkade-os/sdk'
 import { isEncodableRelativeDelay, relativeDelayFrom } from '@arkade-os/solver-core/core/timelocks.js'
-import { assetSwapContractVersion, offerVtxoScript, type Offer } from '@arkade-os/swap/protocol'
+import {
+  RFQ_ASSET_SWAP_V2,
+  RFQ_ASSET_SWAP_DIRECTED,
+  RFQ_ASSET_SWAP_DIRECTED_NONCE,
+} from '@arkade-os/solver-core/core/rfqContract.js'
+import { assetRfqNonce, offerVtxoScript, type AssetSwapContractVersion, type Offer } from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
 
 /**
@@ -31,6 +36,7 @@ export interface QuotedOfferTerms {
   offerAssetId: string | null
   makerPkScript: string
   makerPublicKey: string
+  rfqId: string
 }
 
 export interface OfferDerivation {
@@ -42,6 +48,9 @@ export interface OfferDerivation {
   hrp: string
   /** The maker's solo exit leaf. @see offerExitDelay */
   exitDelay: RelativeTimelock
+  /** This solver's x-only identity key, the quote's `solver_pubkey`: the directed covenant's
+   * `fulfill` needs its signature. Without it a directed derivation throws. */
+  taker: Uint8Array
 }
 
 /** The exit closure a client's `createOffer` defaults to, from swap 0.0.12 on.
@@ -84,9 +93,10 @@ export const xOnlyPubkey = (pubkey: Uint8Array): Uint8Array => {
 
 /** The offer these terms describe, less the script. `exitDelay` is required, not optional: omitted, the tree moves. */
 export const offerFromTerms = (
-  terms: QuotedOfferTerms,
+  terms: Omit<QuotedOfferTerms, 'rfqId'>,
   emulatorPubkey: Uint8Array,
   exitDelay: RelativeTimelock,
+  taker?: Uint8Array,
 ): Omit<Offer, 'swapPkScript'> => ({
   wantAmount: terms.wantAmount,
   ...(terms.wantAssetId !== null ? { wantAsset: asset.AssetId.fromString(terms.wantAssetId) } : {}),
@@ -95,7 +105,15 @@ export const offerFromTerms = (
   makerPublicKey: hex.decode(terms.makerPublicKey),
   emulatorPubkey,
   exitDelay,
+  ...(taker ? { taker } : {}),
 })
+
+// Keep the persisted baseline independent of the SDK's default.
+const derivableVersion = (id: string | undefined): AssetSwapContractVersion => {
+  if (id === undefined || id === RFQ_ASSET_SWAP_V2) return RFQ_ASSET_SWAP_V2
+  if (id === RFQ_ASSET_SWAP_DIRECTED || id === RFQ_ASSET_SWAP_DIRECTED_NONCE) return id
+  throw new Error(`unsupported contract version ${id}`)
+}
 
 /**
  * Bind a derivation to this deployment's keys and network.
@@ -105,18 +123,27 @@ export const offerFromTerms = (
  */
 export const offerScriptFrom = (
   deps: OfferDerivation,
-): ((terms: QuotedOfferTerms, contractVersion?: string) => { pkScript: string; address: string }) => {
+): ((terms: QuotedOfferTerms, contractVersion?: string) => { pkScript: string; address: string; offer: Offer }) => {
   const emulatorPubkey = xOnlyPubkey(deps.emulatorPubkey)
   return (terms, contractVersion) => {
-    const script = offerVtxoScript(
-      offerFromTerms(terms, emulatorPubkey, deps.exitDelay),
-      deps.serverPubkey,
-      // Explicit, not the SDK default: absent is the wire baseline; an unknown id throws.
-      assetSwapContractVersion(contractVersion),
+    const version = derivableVersion(contractVersion)
+    const offer = offerFromTerms(
+      terms,
+      emulatorPubkey,
+      deps.exitDelay,
+      version === RFQ_ASSET_SWAP_V2 ? undefined : deps.taker,
     )
+    if (version === RFQ_ASSET_SWAP_DIRECTED_NONCE) {
+      offer.nonce = assetRfqNonce(terms.rfqId)
+    }
+    const script = offerVtxoScript(offer, deps.serverPubkey, version)
     // Both from the SAME compiled script: the address is what the client is
     // told and the pkScript is what the deposit is recognised by, so two
     // compilations could disagree about one covenant.
-    return { pkScript: hex.encode(script.pkScript), address: script.address(deps.hrp, deps.serverPubkey).encode() }
+    return {
+      pkScript: hex.encode(script.pkScript),
+      address: script.address(deps.hrp, deps.serverPubkey).encode(),
+      offer: { ...offer, swapPkScript: script.pkScript },
+    }
   }
 }

@@ -345,13 +345,17 @@ const walletAssets = (wallet) =>
 
 /* ---- end assets block --------------------------------------------------- */
 
-/** Corridor label short enough for a table cell. */
-const corridorLabel = (corridor) =>
-  ({
-    'arkade:BTC->lightning:BTC': 'arkade→ln',
-    'lightning:BTC->arkade:BTC': 'ln→arkade',
-    'arkade:BTC->onchain:BTC': 'arkade→L1',
-  })[corridor] ?? corridor
+/** Corridor label short enough for a table cell. An Arkade asset pair, or a P&L leg (`btc-><id>`), reads by unit. */
+const corridorLabel = (corridor) => {
+  const pair = /^(?:arkade:)?(\w+)->(?:arkade:)?(\w+)$/.exec(corridor)
+  return (
+    {
+      'arkade:BTC->lightning:BTC': 'arkade→ln',
+      'lightning:BTC->arkade:BTC': 'ln→arkade',
+      'arkade:BTC->onchain:BTC': 'arkade→L1',
+    }[corridor] ?? (pair ? `${unitName(pair[1])}→${unitName(pair[2])}` : corridor)
+  )
+}
 
 /** Ended with nothing out — no delivery, but no harm — so the `failed` chip drops its colour. */
 const NO_HARM = new Set(['refused', 'refunded'])
@@ -1037,15 +1041,18 @@ const quotesView = () => {
       ? h('p.muted', 'No bids since this process started.')
       : h(
           'table',
-          h('thead', h('tr', h('th', 'pair'), h('th.right', 'amount'), h('th.right', 'bps'), h('th', 'age'))),
+          h(
+            'thead',
+            h('tr', h('th', 'pair'), h('th.right', 'from (atomic)'), h('th.right', 'to (atomic)'), h('th', 'age')),
+          ),
           h(
             'tbody',
             d.bids.entries.map((bid) =>
               h(
                 'tr',
                 h('td.muted', bid.pair),
-                h('td.num', sats(bid.amountSats)),
-                h('td.num', String(bid.feeBps)),
+                h('td.num', bid.fromAmount),
+                h('td.num', bid.toAmount),
                 h('td.muted', ago(bid.at)),
               ),
             ),
@@ -1784,6 +1791,25 @@ const legNode = (leg) => liveLeg(leg, assetLabel)
 
 /** Ticker alone, id on hover: where the leg only names a unit. */
 const legName = (leg) => liveLeg(leg, (asset) => h('span', { title: asset.assetId }, asset.ticker ?? asset.shortId))
+
+/** A unit in plain text (an SVG label, a title): text has no node to refill, so the first landed label repaints. */
+const unitName = (unit) => {
+  if (/^btc$/i.test(unit)) return 'BTC'
+  if (!ASSET_ID.test(unit)) return unit
+  const entry = assetEntry(unit)
+  // Success only: a failed lookup drops its entry, and repainting on that would re-ask in a loop. Never where the
+  // `swaps` listener holds off either; the next render there picks the label up from the cache.
+  if (!entry.label) {
+    entry.repaint ??= entry.ready.then(
+      () => entry.label && !state.dialog && !['pricing', 'settings', 'markets'].includes(state.view) && render(),
+    )
+  }
+  const label = entry.label
+  if (!label?.ticker) return label?.shortId ?? shortId(unit)
+  // A ticker is the issuer's choice, not an identity.
+  const shared = [...assetLabels.values()].some((e) => e.label?.ticker === label.ticker && e.label.assetId !== unit)
+  return shared ? `${label.ticker} ${label.shortId}` : label.ticker
+}
 
 const carrierRfqPriced = () => state.data.markets?.carrier?.rfqPriced === true
 
@@ -4685,7 +4711,13 @@ const pnlBasis = (coverage) =>
     ' A swap keeps the spread between what it receives and delivers; that spread includes our fee and market margin. ',
     'Only fees a rail actually reported are deducted. Native asset revenue is never converted into BTC.',
     coverage.unmeasured.length > 0
-      ? h('span', h('br'), h('b', 'Not measured: '), coverage.unmeasured.join(', '), ' — unknown, not zero.')
+      ? h(
+          'span',
+          h('br'),
+          h('b', 'Not measured: '),
+          coverage.unmeasured.map(corridorLabel).join(', '),
+          ' — unknown, not zero.',
+        )
       : null,
     // A corridor that HAS the capability and threw is a fault, not a gap, and
     // someone should go and look. Shown separately from `unmeasured` for that
@@ -4696,7 +4728,7 @@ const pnlBasis = (coverage) =>
           'span',
           h('br'),
           h('b', 'Failed to read: '),
-          coverage.failed.map((entry) => `${entry.corridor} (${entry.reason})`).join('; '),
+          coverage.failed.map((entry) => `${corridorLabel(entry.corridor)} (${entry.reason})`).join('; '),
           ' — these are missing from every total above.',
         )
       : null,
@@ -4705,7 +4737,7 @@ const pnlBasis = (coverage) =>
           'span',
           h('br'),
           h('b', 'Truncated: '),
-          `${coverage.truncated.join(', ')} had more rows than were read; narrow the window.`,
+          `${coverage.truncated.map(corridorLabel).join(', ')} had more rows than were read; narrow the window.`,
         )
       : null,
   )
@@ -4813,7 +4845,12 @@ const corridorTable = (corridors) =>
       ...corridors.map((row) =>
         h(
           'tr',
-          h('td.mono', row.corridor, row.crossAsset ? h('span.faint', ' fx') : null),
+          h(
+            'td.mono',
+            { title: row.corridor },
+            corridorLabel(row.corridor),
+            row.crossAsset ? h('span.faint', ' fx') : null,
+          ),
           h('td.right', row.pricedCount === 0 ? h('span.faint', '—') : signedSats(row.grossSats)),
           h('td.right', bps(row.marginBps)),
           h(
@@ -4931,6 +4968,9 @@ const durationPanel = (bands) =>
  */
 const fxPanel = (leg) => {
   const worst = [...leg.points].sort((a, b) => (a.driftBps ?? 0) - (b.driftBps ?? 0)).slice(0, 5)
+  const name = corridorLabel(leg.leg)
+  const where = corridorLabel(leg.corridor)
+  const on = where === name ? '' : ` on ${where}`
   return h(
     'section.panel',
     h(
@@ -4940,8 +4980,8 @@ const fxPanel = (leg) => {
           'Drift is measured against this window’s volume-weighted mean rate — this solver’s own book. ' +
           'Below the line is a fill that came in worse than its peers.',
       },
-      leg.leg,
-      h('span.faint', ` · ${leg.count} fill${leg.count === 1 ? '' : 's'} on ${leg.corridor}`),
+      name,
+      h('span.faint', ` · ${leg.count} fill${leg.count === 1 ? '' : 's'}${on}`),
     ),
     // The leg-level verdict peer drift cannot give. Coloured only against the
     // solver, and it carries its own denominator: a median over an unstated
@@ -4962,7 +5002,7 @@ const fxPanel = (leg) => {
         ),
     // Named per leg, so N of these are distinguishable in a screen reader's
     // list of figures rather than N repeats of one sentence.
-    decayChart(leg.points, { title: `Rate drift against time to fill, ${leg.leg} on ${leg.corridor}` }),
+    decayChart(leg.points, { title: `Rate drift against time to fill, ${name}${on}` }),
     worst.length === 0
       ? null
       : h(
@@ -5163,14 +5203,14 @@ const reconExplanation = (data) =>
     'Those are related, but a balance also moves for deposits, withdrawals, transfers, and funds still in flight. ',
     'A missing reported fee means unknown, not zero.',
     data.coverage.unmeasured.length > 0
-      ? h('span', h('br'), h('b', 'Not measured: '), data.coverage.unmeasured.join(', '), '.')
+      ? h('span', h('br'), h('b', 'Not measured: '), data.coverage.unmeasured.map(corridorLabel).join(', '), '.')
       : null,
     data.coverage.failed.length > 0
       ? h(
           'span',
           h('br'),
           h('b', 'Failed to read: '),
-          data.coverage.failed.map((entry) => `${entry.corridor} (${entry.reason})`).join('; '),
+          data.coverage.failed.map((entry) => `${corridorLabel(entry.corridor)} (${entry.reason})`).join('; '),
           '.',
         )
       : null,
@@ -5523,7 +5563,7 @@ const pnlView = () => {
       h('h2', 'by corridor'),
       categoryChart(data.corridors, {
         title: 'Spread kept by corridor, in sats',
-        label: (row) => row.corridor,
+        label: (row) => corridorLabel(row.corridor),
         value: (row) => row.grossSats,
         note: (row) =>
           `${row.corridor}: ${signedSats(row.grossSats)} sats kept over ${row.realizedCount} settled swap(s)`,
