@@ -10,14 +10,21 @@
 (*                                 findRecoverable().  transition(),       *)
 (*                                 patch(), fail() and committedSats()     *)
 (*                                 come from db/baseSwapStore.ts.          *)
-(*     send/onchainOrchestrator.ts the whole state machine: step(),        *)
+(*     send/onchainOrchestrator.ts the reads, sends and writes: step(),    *)
 (*                                 whenQuoted, whenFunded,                 *)
-(*                                 whenFundingOnchain, recoverFunding,     *)
+(*                                 whenFundingOnchain,                     *)
 (*                                 submitFunding, whenAwaitingClaim,       *)
 (*                                 whenClaiming, whenRefundingOnchain,     *)
 (*                                 pushOnchainHtlcRefund, tick()           *)
 (*     send/arkadeOps.ts           claim() and assertScriptMatchesRow      *)
+(*     legs/clientLockupClaim.ts   claimClientLockup: whenClaiming's body  *)
 (*   packages/solver-core/src/                                             *)
+(*     core/onchainSendPlan.ts     planOnchainSend: what whenQuoted,       *)
+(*                                 whenFunded, whenFundingOnchain,         *)
+(*                                 whenAwaitingClaim and                   *)
+(*                                 whenRefundingOnchain decide; the        *)
+(*                                 same names, one per state               *)
+(*     core/clientLockup.ts        judgeClientLockup: whenQuoted's rules   *)
 (*     core/onchainSend.ts         DEFAULT_ONCHAIN_LOCKUP_TIMEOUT,         *)
 (*                                 MIN_ONCHAIN_FUND_WINDOW,                *)
 (*                                 htlcLocktimeFor,                        *)
@@ -107,8 +114,8 @@
 (*    committed address, so on the contested Arkade output it is           *)
 (*    indistinguishable from the client's own refund; both are             *)
 (*    `ClientRefundLockup` here.                                           *)
-(*  - checkFunded (funding_onchain -> awaiting_claim with funding_txid     *)
-(*    already non-null, in submitFunding).  DEAD EDGE: no code path        *)
+(*  - record_funded (funding_onchain -> awaiting_claim with funding_txid   *)
+(*    already non-null, in whenFundingOnchain).  DEAD EDGE: no code path   *)
 (*    writes funding_txid without moving the state in the same UPDATE, so  *)
 (*    it is unreachable through the store's API.  Marked, not modelled.    *)
 (*                                                                         *)
@@ -228,7 +235,7 @@
 (*  (A8) THE `awaiting_claim -> stuck` EDGE IS NOT MODELLED, though it is  *)
 (*       in Edges and the code takes it twice, both in whenAwaitingClaim:  *)
 (*       no funding txid/vout (unreachable through the store's API for     *)
-(*       the same reason checkFunded is), and a spend that is not a        *)
+(*       the same reason record_funded is), and a spend that is not a      *)
 (*       recognisable claim.  The second is reachable in reality and is    *)
 (*       the (A5) hazard — an unparseable-but-valid client claim — for     *)
 (*       which this model has no third spend kind.  Marked so its absence  *)
@@ -349,7 +356,7 @@ VARIABLES
                 \* > 1 == the solver paid the same HTLC twice out of its own wallet.
     fundConf,   \* [Swaps -> 0..MinConfirmations] depth of the funding output.
                 \* 0 also stands for "not yet visible to findOutputs" — the
-                \* residual crash window recoverFunding documents.
+                \* residual crash window whenFundingOnchain documents.
     l1,         \* [Swaps -> L1Status] the L1 HTLC outpoint: what has been
                 \* broadcast for it and what the chain has confirmed.
     unrolledAt, \* [Swaps -> 0..MaxClock+1] the +1-shifted confirm tick of an unroll; 0 = none
@@ -511,7 +518,7 @@ ClientFunds(s) ==
 
 \* A block lands on top of the solver's funding transaction.  Depth 0 means
 \* the output is not even visible to findOutputs yet, which is the residual
-\* crash window recoverFunding concedes — small on LND, and wider on
+\* crash window whenFundingOnchain concedes — small on LND, and wider on
 \* any backend whose send call returns before the transaction is broadcast.
 ConfirmFunding(s) ==
     /\ fundOut[s] >= 1
@@ -742,7 +749,7 @@ RefuseFund(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED OsVars
 
-(***** submitFunding / recoverFunding **************************************)
+(***** submitFunding / whenFundingOnchain **********************************)
 
 \* TWO ENTRY POINTS, and this is the race the CAS does NOT cover.
 \*   (a) the funded->funding_onchain winner, straight from whenFunded;
@@ -755,9 +762,9 @@ RefuseFund(w, s) ==
 \* code cannot tell those apart — which is the whole residual window.
 \* `funding_txid IS NULL` needs no variable of its own: funding_txid and
 \* funding_vout are written in the SAME UPDATE as the move out of
-\* funding_onchain (submitFunding, recoverFunding), so the column is a pure
+\* funding_onchain (submitFunding, whenFundingOnchain), so the column is a pure
 \* function of the state — and that is itself the property that makes
-\* recoverFunding's
+\* whenFundingOnchain's
 \* branch selection sound.  A Go rewrite that writes the txid in a separate
 \* statement breaks this equivalence and needs the variable back.
 CanSubmitFunding(w, s) ==
@@ -848,7 +855,7 @@ LeaseExpires(s) ==
     /\ UNCHANGED << chainTime, lockup, fundOut, fundConf, l1, unrolledAt, fundTx, fundSent >>
 
 \* fund() threw after the backend may already have paid: submitFunding's catch
-\* hands the lease back and leaves the ambiguity to recoverFunding.  Unfair.
+\* hands the lease back and leaves the ambiguity to whenFundingOnchain.  Unfair.
 FundThrows(w, s) ==
     /\ At(w, s, "fundCalled")
     /\ leased' = [leased EXCEPT ![s] = FALSE]
@@ -876,7 +883,7 @@ RefuseCommitted(w, s) ==
 
 \* funding_txid AND funding_vout are written in the SAME UPDATE as the state
 \* change (submitFunding's CAS), so a lost CAS records nothing — which leaves the
-\* row re-drivable through recoverFunding rather than half-written.
+\* row re-drivable through whenFundingOnchain rather than half-written.
 RecordFunding(w, s) ==
     /\ At(w, s, "fundCalled")
     /\ \/ CasWon(s, "funding_onchain", "awaiting_claim")
@@ -885,7 +892,7 @@ RecordFunding(w, s) ==
     /\ UNCHANGED << clock, conf, serverUp >>
     /\ UNCHANGED OsVars
 
-\* recoverFunding's happy path: ask the CHAIN what already happened rather
+\* whenFundingOnchain's happy path: ask the CHAIN what already happened rather
 \* than trusting process memory, and adopt the txid/vout of an output for
 \* exactly amountSats.  The amount filter is load-bearing anti-grief and is
 \* abstracted here into "this is our own funding output" — see the header.
