@@ -856,7 +856,8 @@ export class OnchainSendSwapService {
       seen.providerKeyCurrent = providerKeyCurrent(row.providerPubkey, this.deps.arkade.providerPubkey)
       const next = planOnchainSend(row, seen)
       if (next.do !== 'read') return next
-      // A backend that answers `undefined` would otherwise be asked for ever.
+      // A backend that answers `undefined` would otherwise be asked for ever. Only the last read needs
+      // remembering: the planner never asks again for a fact that is set.
       if (next.what === asked) throw new Error(`swap ${row.id}: reading ${asked} gave no answer`)
       asked = next.what
       await this.read(row, next.what, seen)
@@ -1180,6 +1181,7 @@ export class OnchainSendSwapService {
       previousFeeRate: null,
     })
     if (attempt.broadcast) return false
+    // Asked again with what just happened. Everything else is already in `seen`, so nothing is read twice.
     // `refunding_onchain` is recoverable, so a throw lets the next sweep read the rate again.
     seen.refundNotSent = { reason: attempt.reason, retry: attempt.retry }
     const after = await this.decide(row, seen)
