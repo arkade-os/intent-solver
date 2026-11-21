@@ -61,6 +61,7 @@ import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { unilateralLadderFor } from '@arkade-os/solver-core/core/send.js'
 import { askApproval, type ApprovalCheck } from '@arkade-os/solver-core/core/approvalGate.js'
 import { guardedTick, sweep } from '@arkade-os/solver-core/util/sweep.js'
+import { wasRead } from '@arkade-os/solver-core/util/wasRead.js'
 import { stepFor } from '@arkade-os/solver-core/core/stateMachine.js'
 import { OnchainSendMachine } from '../machines/onchainSend.js'
 import {
@@ -263,7 +264,7 @@ type FailAction = Extract<OnchainSendAction, { do: 'fail' }>
 
 /** The planner's reads for one tick, and the lockup outputs it read, which adopting them needs in full. */
 interface TickReads extends OnchainSendReads {
-  lockupOutputs: FundedOutput[]
+  lockupOutputs: FundedOutput[] | null
 }
 
 export class OnchainSendSwapService {
@@ -842,15 +843,16 @@ export class OnchainSendSwapService {
   private readsFor(row: OnchainSendSwapRow): TickReads {
     const { arkade, onchain } = this.deps
     const reads: TickReads = {
-      lockupOutputs: [],
+      lockupOutputs: null,
       now: this.now,
       providerKeyCurrent: () => providerKeyCurrent(row.providerPubkey, arkade.providerPubkey),
       checksLockupExpiry: () => this.deps.network !== 'regtest',
       maxLockupOutputs: () => MAX_LOCKUP_SPEND_INPUTS,
       lockups: async () => {
         const all = await arkade.findLockups(row.pkScript)
-        reads.lockupOutputs = satsOutputs(all)
-        return { held: all.reduce((sum, o) => sum + o.value, 0), spendable: reads.lockupOutputs }
+        const spendable = satsOutputs(all)
+        reads.lockupOutputs = spendable
+        return { held: all.reduce((sum, o) => sum + o.value, 0), spendable }
       },
       approved: async () => Boolean(await askApproval(this.deps.approvalGate, row.id, row.amountSats)),
       lockupHeld: () => this.lockupHeld(row),
@@ -887,7 +889,7 @@ export class OnchainSendSwapService {
     const next = await planOnchainSend(row, reads)
     if (next.do === 'fail') return this.failAs(row, next)
     if (next.do !== 'adopt_lockup') return false
-    const outputs = reads.lockupOutputs
+    const outputs = wasRead(reads.lockupOutputs, 'lockups')
     const [first] = outputs
     return this.deps.store.transition(row.id, 'quoted', 'funded', {
       onchain_lockup_txid: first?.txid ?? null,
