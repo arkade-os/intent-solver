@@ -67,6 +67,7 @@ import { EXPOSED, type ReceiveSwapRow, type ReceiveSwapStore } from '../db/recei
 import type { SendSwapRow } from '../db/swaps.js'
 import { GiveUp, json, log, messageOf, nowSeconds, poll } from '@arkade-os/solver-core/util/poll.js'
 import { sweep } from '@arkade-os/solver-core/util/sweep.js'
+import { wasRead } from '@arkade-os/solver-core/util/wasRead.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 import { adoptFunding, type LockupOutpoint } from '../legs/arkadeLockup.js'
@@ -238,8 +239,8 @@ type HistoryOutpoint = LockupOutpoint & { unrolled: boolean }
 
 /** The planner's reads for one tick, and the two lists it read that a refund then needs in full. */
 interface TickReads extends ReceiveReads {
-  outputs: FundedOutput[]
-  history: HistoryOutpoint[]
+  outputs: FundedOutput[] | null
+  history: HistoryOutpoint[] | null
 }
 
 export interface ReceiveQuoteRequest {
@@ -677,8 +678,8 @@ export class ReceiveSwapService {
     const deadlineOf = (locktime: number) =>
       refundDeadlineSeconds(locktime, this.now, chainTip, DEADLINE_SECONDS_PURPOSE)
     const reads: TickReads = {
-      outputs: [],
-      history: [],
+      outputs: null,
+      history: null,
       now: this.now,
       acceptsUnilateralGap: () => this.deps.acceptUnilateralGap,
       canRefundUnrolled: () => arkade.refundUnrolled !== undefined,
@@ -698,10 +699,11 @@ export class ReceiveSwapService {
         // ALL historical outpoints: a row adopted out of a crashed funding may have more than one, and
         // the preimage only has to appear in one of their spends. An empty read falls back to the
         // recorded outpoint, so indexer lag never narrows the search.
-        reads.history = await arkade.findLockupOutpoints(row.pkScript)
+        const history = await arkade.findLockupOutpoints(row.pkScript)
+        reads.history = history
         const recorded = { txid: row.arkadeLockupTxid, vout: row.arkadeLockupVout }
-        const preimage = await this.preimages.find(row, reads.history.length > 0 ? reads.history : [recorded])
-        return { history: reads.history, preimage: preimage ? hex.encode(preimage) : null }
+        const preimage = await this.preimages.find(row, history.length > 0 ? history : [recorded])
+        return { history, preimage: preimage ? hex.encode(preimage) : null }
       },
       // A throw keeps the row refunding, so the sweep retries a finalize arkd refused.
       ownRefund: async () => (await arkade.finalizePendingRefund?.(receiveCovenantRowFor(row))) ?? null,
@@ -954,7 +956,7 @@ export class ReceiveSwapService {
     }
     if (next.do === 'refund_unrolled') {
       const covenantRow = receiveCovenantRowFor(row)
-      const unrolled = reads.history.find(
+      const unrolled = wasRead(reads.history, 'claim').find(
         (o) => o.unrolled && o.txid === row.arkadeLockupTxid && o.vout === row.arkadeLockupVout,
       )
       if (!unrolled || !arkade.refundUnrolled) return false
@@ -972,8 +974,9 @@ export class ReceiveSwapService {
     if (next.do !== 'refund') return false
 
     const covenantRow = receiveCovenantRowFor(row)
+    const outputs = wasRead(reads.outputs, 'spendable')
     try {
-      const txid = await arkade.refund(covenantRow, reads.outputs)
+      const txid = await arkade.refund(covenantRow, outputs)
       return store.transition(row.id, 'refunding', 'refunded', { refund_ark_txid: txid })
     } catch (error) {
       // The server-independent recourse goes ON THE ROW, not only in a log line: this is the row a

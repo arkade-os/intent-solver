@@ -80,7 +80,7 @@ const readsOf = (world: World) => {
   return { reads, made }
 }
 
-/** The action the planner picks, and the reads it made on the way, in order. */
+/** The action the planner picks, and the async reads it made on the way, in order. */
 const run = async (subject: ReceivePlanRow, world: World) => {
   const { reads, made } = readsOf(world)
   return { next: await planReceive(subject, reads), reads: made }
