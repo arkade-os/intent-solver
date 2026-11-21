@@ -1,3 +1,4 @@
+import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
 import { resolveAssetQuote } from '@arkade-os/solver-core/core/assetRfq.js'
 import { giveSatsFor, payoutSatsFor, isCorridor } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { convertAmount, convertQuoteToBase, type Price } from '@arkade-os/solver-core/core/priceFeed.js'
@@ -75,6 +76,9 @@ export const openRfqPreview = (
         dustSats: source.arkade.dustSats,
       })
       if (!result.ok) return undefined
+      if (legs.to === null && result.toAmount < source.arkade.vtxoMinSats) return undefined
+      const available = offerInventoryFrom(await source.arkade.wallet.getBalance())
+      if ((available.get(legs.to) ?? 0n) < result.toAmount) return undefined
       fromAmount = result.fromAmount
       toAmount = result.toAmount
     } else if (isCorridor(pair)) {
