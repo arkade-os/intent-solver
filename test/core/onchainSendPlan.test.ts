@@ -133,7 +133,11 @@ describe('planOnchainSend: quoted', () => {
 
   it('refuses a lockup spread over more outputs than one claim spends', async () => {
     const spread = lockups(...Array.from({ length: 17 }, (_, i) => (i === 0 ? 50_000 - 16 : 1)))
-    expect((await run(row('quoted'), { lockups: spread })).next).toEqual(fail('lockup funded in 17 outputs, over 16'))
+    expect((await run(row('quoted'), { lockups: spread })).next).toEqual({
+      do: 'fail',
+      reason: 'lockup funded in 17 outputs, over 16',
+      lockupValue: 50_000,
+    })
     expect((await run(row('quoted'), { lockups: spread }, { maxLockupOutputs: 17 })).next).toEqual({
       do: 'adopt_lockup',
     })
@@ -150,7 +154,7 @@ describe('planOnchainSend: quoted', () => {
 
   it('refuses a lockup that expires before a claim could still need it, except where expiry is not checked', async () => {
     const early = { lockups: { held: 50_000, spendable: [{ value: 50_000, expiresAt: NOW + HOUR }] } }
-    expect((await run(row('quoted'), early)).next.do).toBe('fail')
+    expect((await run(row('quoted'), early)).next).toMatchObject({ do: 'fail', lockupValue: 50_000 })
     expect((await run(row('quoted'), early, { checksLockupExpiry: false })).next).toEqual({ do: 'adopt_lockup' })
   })
 })

@@ -18,19 +18,16 @@ export interface ClientLockupRules {
   lateReason(claimable: number): string
   /** A reason to refuse a lockup that is otherwise good, or null. */
   refusal: string | null
-  /** Which total the refund sweep is told about when an overfunded lockup is refused. */
-  recordOnOverfund: 'claimable' | 'held'
-  recordOnTooManyOutputs: boolean
 }
 
 export type ClientLockupVerdict =
   | { do: 'adopt_lockup' }
   | { do: 'wait' }
-  /** `lockupValue`, when given, is written first so the refund sweep returns all of it. */
+  /** `lockupValue` is everything the lockup holds. It is written first, for the refund sweep and the books. */
   | { do: 'fail'; reason: string; lockupValue?: number }
 
-const fail = (reason: string, lockupValue?: number): ClientLockupVerdict =>
-  lockupValue === undefined ? { do: 'fail', reason } : { do: 'fail', reason, lockupValue }
+const refuse = (reason: string, held: number): ClientLockupVerdict =>
+  held > 0 ? { do: 'fail', reason, lockupValue: held } : { do: 'fail', reason }
 
 export const judgeClientLockup = (lockup: ClientLockup, rules: ClientLockupRules): ClientLockupVerdict => {
   const { held, spendable } = lockup
@@ -38,22 +35,17 @@ export const judgeClientLockup = (lockup: ClientLockup, rules: ClientLockupRules
   const claimable = spendable.reduce((sum, o) => sum + o.value, 0)
 
   // A claim takes whole vtxos, so paying an overfunded lockup would keep the excess from the client.
-  if (claimable > amountSats) {
-    const recorded = rules.recordOnOverfund === 'held' ? held : claimable
-    return fail(`overfunded lockup: ${claimable} > ${amountSats} sats`, recorded)
-  }
+  if (claimable > amountSats) return refuse(`overfunded lockup: ${claimable} > ${amountSats} sats`, held)
   if (claimable === amountSats && spendable.length > rules.maxOutputs) {
-    const reason = `lockup funded in ${spendable.length} outputs, over ${rules.maxOutputs}`
-    return rules.recordOnTooManyOutputs ? fail(reason, claimable) : fail(reason)
+    return refuse(`lockup funded in ${spendable.length} outputs, over ${rules.maxOutputs}`, held)
   }
   const fundedWhereAClaimCannotSpend = claimable < amountSats && held >= amountSats
   if (fundedWhereAClaimCannotSpend) {
-    return fail(`lockup funded on an asset vtxo a claim cannot spend: ${held} held, ${claimable} spendable`, held)
+    return refuse(`lockup funded on an asset vtxo a claim cannot spend: ${held} held, ${claimable} spendable`, held)
   }
   if (!rules.tooLate) {
     if (claimable !== amountSats) return { do: 'wait' }
-    return rules.refusal === null ? { do: 'adopt_lockup' } : fail(rules.refusal)
+    return rules.refusal === null ? { do: 'adopt_lockup' } : refuse(rules.refusal, held)
   }
-  const reason = rules.lateReason(claimable)
-  return held > 0 ? fail(reason, held) : fail(reason)
+  return refuse(rules.lateReason(claimable), held)
 }
