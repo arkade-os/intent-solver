@@ -131,6 +131,15 @@ describe('refundNow refuses a swap the solver may already have paid out', () => 
     expect(patch).not.toHaveBeenCalled()
   })
 
+  it('does not record a refund as complete when one spend could not take every output', async () => {
+    const many = Array.from({ length: 17 }, (_, i) => ({ txid: String(i).padStart(64, '0'), vout: 0, value: 100 }))
+    findLockups.mockResolvedValue(many)
+    const { services, patch } = servicesWith('funded')
+
+    expect(await refundNow(services as never, 'swap-1')).toEqual({ txid: 'offchain-txid' })
+    expect(patch).toHaveBeenCalledWith('swap-1', { refund_ark_txid: 'offchain-txid' })
+  })
+
   it('leaves a failed refund send in refused for a safe manual retry', async () => {
     const { services, transition, patch, stateNow } = servicesWith('funded')
     refundSwapScript.mockRejectedValueOnce(new Error('arkd unavailable'))

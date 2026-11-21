@@ -13,10 +13,16 @@
  */
 
 import { hex } from '@scure/base'
-import { findLockups, findSweptLockups, refundSwapScript } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import {
+  findLockups,
+  findSweptLockups,
+  refundRecord,
+  refundSwapScript,
+} from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { refundSweptSwapScript } from '@arkade-os/solver-arkade/arkade/sweptRefund.js'
 import { covenantScriptFromRow } from '@arkade-os/solver-corridors/send/arkadeOps.js'
 import { EXPOSED } from '@arkade-os/solver-corridors/db/swaps.js'
+import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { paymentVerdict } from './paymentVerdict.js'
 import type { Services } from './services.js'
 
@@ -104,7 +110,7 @@ export const refundNow = async (services: Services, id: string): Promise<RefundO
     outputs,
     hex.decode(row.refundPkScript),
   )
-  await services.store.patch(row.id, { refund_outcome: 'pushed', refund_ark_txid: txid })
+  await services.store.patch(row.id, refundRecord(outputs, txid, nowSeconds()))
 
   return { txid }
 }
