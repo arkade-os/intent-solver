@@ -106,8 +106,6 @@ const whenQuoted = async (row: SendPlanRow, reads: SendReads): Promise<SendActio
     // A full lockup that lands late is refused too: the refund locktime was fixed at the quote.
     lateReason: (claimable) => lateFundingReason(row, claimable, now),
     refusal: null,
-    recordOnOverfund: 'claimable',
-    recordOnTooManyOutputs: true,
   })
 }
 

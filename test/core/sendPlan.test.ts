@@ -134,9 +134,9 @@ describe('planSend: quoted', () => {
     )
   })
 
-  it('refuses an overfunded lockup and records what a claim would have taken', async () => {
+  it('refuses an overfunded lockup and records all it holds', async () => {
     const world = { lockups: { held: 2_500, spendable: [{ value: 2_101 }] } }
-    expect((await run(row('quoted'), world)).next).toEqual(fail('overfunded lockup: 2101 > 2100 sats', 2_101))
+    expect((await run(row('quoted'), world)).next).toEqual(fail('overfunded lockup: 2101 > 2100 sats', 2_500))
   })
 
   it('refuses a lockup spread over more outputs than one claim spends', async () => {
