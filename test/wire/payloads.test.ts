@@ -21,6 +21,9 @@ import {
 import type { QuoteRefusal as SendQuoteRefusal } from '@arkade-os/solver-corridors/send/orchestrator.js'
 import type { QuoteRefusal as ReceiveQuoteRefusal } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import type { QuoteRefusal as OnchainSendQuoteRefusal } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
+import type { EvmSendQuoteRefusal } from '@arkade-os/solver-corridors-evm/send/evmOrchestrator.js'
+import type { EvmReceiveQuoteRefusal } from '@arkade-os/solver-corridors-evm/receive/evmOrchestrator.js'
+import type { AssetRfqQuoteRefusal } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import type { RfqOpenPayload } from '@arkade-os/solver-core/core/rfqProtocol.js'
 import { buildSolverCard } from '@arkade-os/solver-core/core/registryCard.js'
 
@@ -82,23 +85,38 @@ describe('client-safe refusal details', () => {
  */
 const QUOTE_REFUSALS = [
   'amount_out_of_range',
+  'claim_window_too_short',
+  'client_claim_window_too_short',
   'cltv_too_large',
   'coupled_deadline_unsafe',
   'coupled_invoice_mismatch',
+  'deadlines_cannot_be_ordered',
   'duplicate_swap',
+  'evm_lock_expired',
+  'evm_timeout_in_past',
+  'evm_timeout_too_far_out',
+  'exact_out_unsupported',
+  'execution_unavailable',
   'fee_consumes_swap',
   'insufficient_float',
+  'insufficient_inventory',
   'invalid_claim_packet',
+  'invalid_evm_amount',
   'invalid_payout_address',
   'invalid_refund_address',
   'invoice_expired',
   'invoice_expires_too_soon',
   'payable_amount_unmatchable',
   'payout_below_dust',
+  'price_unavailable',
   'provider_at_capacity',
   'rate_limited',
+  'recourse_after_evm_timeout',
+  'recourse_after_refund_deadline',
   'recourse_window_unservable',
+  'unsupported_pair',
   'unsupported_payload',
+  'unsupported_token',
   'wrong_network',
   'zero_amount_invoice',
 ] as const
@@ -107,6 +125,9 @@ type Mapped<T extends (typeof QUOTE_REFUSALS)[number]> = T
 type _SendMapped = Mapped<SendQuoteRefusal>
 type _ReceiveMapped = Mapped<ReceiveQuoteRefusal>
 type _OnchainSendMapped = Mapped<OnchainSendQuoteRefusal>
+type _EvmSendMapped = Mapped<EvmSendQuoteRefusal>
+type _EvmReceiveMapped = Mapped<EvmReceiveQuoteRefusal>
+type _AssetMapped = Mapped<AssetRfqQuoteRefusal>
 
 const open = (overrides: Partial<RfqOpenPayload> = {}): RfqOpenPayload => ({
   v: 1,
@@ -248,6 +269,10 @@ describe('toRfqReason', () => {
 
   it('retains the coarse reason for an invoice this rail cannot contain', () => {
     expect(toRfqReason('cltv_too_large')).toBe('unsupported_payload')
+  })
+
+  it('tells a client it may retry when the EVM payout cannot be prepared', () => {
+    expect(toRfqReason('execution_unavailable')).toBe('pricing_unavailable')
   })
 
   it('maps every corridor refusal explicitly, never through the fallback', () => {

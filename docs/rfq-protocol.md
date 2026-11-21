@@ -1789,6 +1789,7 @@ The reference implementation's internal refusal names map onto the closed set
 | `payout_below_dust`          | `pricing_unavailable` |
 | `recourse_window_unservable` | `pricing_unavailable` |
 | `payable_amount_unmatchable` | `pricing_unavailable` |
+| `execution_unavailable`      | `pricing_unavailable` |
 | `duplicate_swap`             | `quote_conflict`      |
 | `provider_at_capacity`       | `exposure_cap`        |
 | `rate_limited`               | `rate_limited`        |
@@ -1797,6 +1798,12 @@ The reference implementation's internal refusal names map onto the closed set
 deployment whose backend wraps the hold invoice it publishes could not find a
 hold amount whose wrapped invoice asks exactly the requested `amount`. Unlike
 `recourse_window_unservable` it is per-request, so a client may retry.
+
+`execution_unavailable` is the EVM send leg's "the payout cannot be prepared
+right now": the chain could not be asked for what the claim check needs, or the
+payout provider would not hold these terms. The request is well-formed, so it
+is `pricing_unavailable`, which a client may retry, and not
+`unsupported_payload`.
 
 `recourse_window_unservable` is the one mapping that is a judgement rather than
 a rename. It means the operator's Arkade exit delay is too long for any invoice
