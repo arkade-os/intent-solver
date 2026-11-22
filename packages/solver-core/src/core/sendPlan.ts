@@ -1,6 +1,6 @@
 /**
  * What an `arkade:BTC->lightning:BTC` swap should do next, up to the moment it submits the payment. Pure: the
- * orchestrator reads, this decides, the orchestrator acts. Same shape as `receivePlan.ts`: the planner asks
+ * orchestrator reads, this decides, the orchestrator acts. Same shape as `receivePlan.ts`: the planner
  * reads the outside world through `SendReads`, in the order the rules need it.
  *
  * Of `paying` and `paid`: the gates in front of the payment (`planPayment`), what a polled payment means

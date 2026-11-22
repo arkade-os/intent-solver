@@ -398,8 +398,13 @@ describe('planPayment: the gates in front of the payment', () => {
     expect(next.do === 'pay' && next.maxCltvBlocks).toBeGreaterThan(0)
     expect(asked).toEqual(['refundDeadline', 'payDeadline(5000)'])
     expect(next).toMatchObject({ maxFeeSats: maxRoutingFeeSats(2_100) })
-    expect(await planPayment(paying({ quotedRoutingFeeSats: 7 }), true, reads)).toMatchObject({ maxFeeSats: 7 })
-    expect(await planPayment(paying({ quotedRoutingFeeSats: 0 }), true, reads)).toMatchObject({ maxFeeSats: 0 })
+    for (const quoted of [7, 0]) {
+      const again = world()
+      expect(await planPayment(paying({ quotedRoutingFeeSats: quoted }), true, again.reads)).toMatchObject({
+        maxFeeSats: quoted,
+      })
+      expect(again.asked).toEqual(asked)
+    }
   })
 
   it('fails a row with no idempotency key whatever the caller proved, before any read', async () => {
