@@ -168,9 +168,8 @@ export const d1Driver = (db: D1Like): SqlDriver => ({
     return results
   },
   // D1 has no interactive BEGIN/COMMIT across discrete exec calls, so run the
-  // body as-is. This is only reached by the legacy table rebuild, which a fresh
-  // D1 database never needs; issuing a bare `BEGIN` here would instead throw and
-  // brick the isolate.
+  // body as-is: a body that fails part-way keeps its earlier writes. Issuing a
+  // bare `BEGIN` here would instead throw and brick the isolate.
   transaction: <T>(fn: () => Promise<T>): Promise<T> => fn(),
   // A D1 binding has no close: its lifetime is the isolate's, not ours.
   close: async () => {},

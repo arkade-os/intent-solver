@@ -10,6 +10,7 @@ import { EvmSendSwapStore, type EvmSendQuoteRecord } from '@arkade-os/solver-cor
 import { EvmSwapStore } from '@arkade-os/solver-corridors-evm/db/evmSwapStore.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { seedState } from '../evm/fixtures/seedState.js'
+import { failingEventInserts, rowCount } from './failingEventInserts.js'
 
 const TOKEN = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
 const TOKEN_B = '0x6b175474e89094c44da98b954eedeac495271d0f'
@@ -221,4 +222,12 @@ describe('EvmSwapStore', () => {
     }
     await expect(new Probe().insertWith({ 'x) VALUES (1); --': 'y' })).rejects.toThrow(/not a plain SQL identifier/)
   })
+})
+
+it('insertQuote() leaves no row behind when its event cannot be written', async () => {
+  const driver = failingEventInserts()
+  const broken = await EvmSendSwapStore.open(driver, () => now)
+  await expect(broken.insertQuote(quote())).rejects.toThrow('event insert failed')
+  expect(await rowCount(driver, 'send_evm_swap')).toBe(0)
+  await broken.close()
 })

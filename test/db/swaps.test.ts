@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { NON_TERMINAL, SwapStore, type QuoteRecord } from '@arkade-os/solver-corridors/db/swaps.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
+import { failingEventInserts, rowCount } from './failingEventInserts.js'
 
 let store: SwapStore
 let clock = 1_800_000_000
@@ -711,4 +712,31 @@ describe('the wallet a payment was made from', () => {
     expect(row.paymentBackend).toBeNull()
     expect(row.paymentWallet).toBeNull()
   })
+})
+
+it('insertQuote() leaves no row behind when its event cannot be written', async () => {
+  const driver = failingEventInserts()
+  const broken = await SwapStore.open(driver, () => clock)
+  await expect(broken.insertQuote(quote())).rejects.toThrow('event insert failed')
+  expect(await rowCount(driver, 'send_swap')).toBe(0)
+  await broken.close()
+})
+
+it('insertQuote() takes its turn when three arrive together', async () => {
+  const rows = await Promise.all(
+    ['a', 'b', 'c'].map((id) => store.insertQuote(quote({ id, paymentHash: id.repeat(64) }))),
+  )
+  expect(rows.map((row) => row.state)).toEqual(['quoted', 'quoted', 'quoted'])
+})
+
+it('insertQuote() that loses to a duplicate does not undo a transition waiting behind it', async () => {
+  await store.insertQuote(quote({ id: 'earlier', paymentHash: 'e'.repeat(64) }))
+  const first = store.insertQuote(quote({ id: 'first', paymentHash: 'f'.repeat(64) }))
+  const duplicate = store.insertQuote(quote({ id: 'duplicate', paymentHash: 'f'.repeat(64) }))
+  const moved = store.transition('earlier', 'quoted', 'funded')
+
+  await expect(duplicate).rejects.toBeInstanceOf(UniqueConstraintError)
+  await first
+  expect(await moved).toBe(true)
+  expect((await store.get('earlier')).state).toBe('funded')
 })

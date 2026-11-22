@@ -8,6 +8,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { EvmReceiveSwapStore, type EvmReceiveQuoteRecord } from '@arkade-os/solver-corridors-evm/db/evmReceiveSwaps.js'
 import { seedState } from '../evm/fixtures/seedState.js'
+import { failingEventInserts, rowCount } from './failingEventInserts.js'
 
 let now = 1_000_000
 const clock = () => now
@@ -171,4 +172,12 @@ describe('EvmReceiveSwapStore', () => {
     expect(await store.committedSats(TOKEN_B)).toBe(30_000)
     expect(await store.committedSats()).toBe(80_000)
   })
+})
+
+it('insertQuote() leaves no row behind when its event cannot be written', async () => {
+  const driver = failingEventInserts()
+  const broken = await EvmReceiveSwapStore.open(driver, clock)
+  await expect(broken.insertQuote(quote)).rejects.toThrow('event insert failed')
+  expect(await rowCount(driver, 'receive_evm_swap')).toBe(0)
+  await broken.close()
 })

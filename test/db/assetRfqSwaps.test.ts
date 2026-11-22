@@ -19,6 +19,7 @@ import { hex } from '@scure/base'
 import { offerExitDelay, offerScriptFrom } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
 import { quotedOfferSettleFor } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
 import { OfferNotSubmittedError } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
+import { failingEventInserts, rowCount } from './failingEventInserts.js'
 
 const ASSET_A = `${'aa'.repeat(32)}0100`
 const ASSET_B = `${'bb'.repeat(32)}0100`
@@ -687,4 +688,12 @@ describe('a deposit already gone when the adapter looked', () => {
     expect((await store.get('swap-1')).state).toBe('funded')
     await store.close()
   })
+})
+
+it('insertQuote() leaves no row behind when its event cannot be written', async () => {
+  const driver = failingEventInserts()
+  const broken = await AssetRfqSwapStore.open(driver, () => 1_000)
+  await expect(broken.insertQuote(quote())).rejects.toThrow('event insert failed')
+  expect(await rowCount(driver, 'asset_rfq_swap')).toBe(0)
+  await broken.close()
 })
