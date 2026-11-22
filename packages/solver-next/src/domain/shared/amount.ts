@@ -25,7 +25,7 @@ export class Amount {
   }
 
   plus(other: Amount): Amount {
-    return new Amount(this.asset, this.units + this.sameAsset(other).units)
+    return Amount.of(this.asset, this.units + this.sameAsset(other).units)
   }
 
   minus(other: Amount): Amount {
