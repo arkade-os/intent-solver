@@ -371,6 +371,10 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
    * against — the client would fund an address nothing is watching.
    */
   async insertQuote(record: AssetRfqQuoteRecord): Promise<AssetRfqSwapRow> {
+    return this.driver.transaction(() => this.insertQuoteRows(record))
+  }
+
+  private async insertQuoteRows(record: AssetRfqQuoteRecord): Promise<AssetRfqSwapRow> {
     const at = this.now()
     await this.driver.run(
       `INSERT INTO asset_rfq_swap (

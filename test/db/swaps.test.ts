@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { NON_TERMINAL, SwapStore, type QuoteRecord } from '@arkade-os/solver-corridors/db/swaps.js'
 import { betterSqliteDriver } from '@arkade-os/solver-corridors/db/driver.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
+import { failingEventInserts, rowCount } from './failingEventInserts.js'
 
 let store: SwapStore
 let clock = 1_800_000_000
@@ -711,4 +712,12 @@ describe('the wallet a payment was made from', () => {
     expect(row.paymentBackend).toBeNull()
     expect(row.paymentWallet).toBeNull()
   })
+})
+
+it('insertQuote() leaves no row behind when its event cannot be written', async () => {
+  const driver = failingEventInserts()
+  const broken = await SwapStore.open(driver, () => clock)
+  await expect(broken.insertQuote(quote())).rejects.toThrow('event insert failed')
+  expect(await rowCount(driver, 'send_swap')).toBe(0)
+  await broken.close()
 })

@@ -105,6 +105,11 @@ export abstract class EvmSwapStore<Row, State extends string> {
   }
 
   protected async insert(quote: CommonQuote, extra: Record<string, string | number | null> = {}): Promise<Row> {
+    Object.keys(extra).forEach(assertIdentifier)
+    return this.driver.transaction(() => this.insertRows(quote, extra))
+  }
+
+  private async insertRows(quote: CommonQuote, extra: Record<string, string | number | null>): Promise<Row> {
     const { table } = this.shape
     const values: Record<string, string | number | null> = {
       payment_hash: quote.paymentHash,
@@ -138,7 +143,6 @@ export abstract class EvmSwapStore<Row, State extends string> {
       ...extra,
     }
     const columns = Object.keys(values)
-    Object.keys(extra).forEach(assertIdentifier)
     const at = this.now()
     await this.driver.run(
       `INSERT INTO ${table} (id, state, created_at, updated_at, ${columns.join(', ')})

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import Database from 'better-sqlite3'
 import { ReceiveSwapStore } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
 import type { SqlDriver } from '@arkade-os/solver-corridors/db/driver.js'
+import { failingEventInserts, rowCount } from './failingEventInserts.js'
 
 let now = 1_800_000_000
 const clock = () => now
@@ -448,4 +449,12 @@ describe('ReceiveSwapStore — migration', () => {
     expect((await store.get('null-packet-row')).claimPacket).toBeNull()
     await store.close()
   })
+})
+
+it('insertQuote() leaves no row behind when its event cannot be written', async () => {
+  const driver = failingEventInserts()
+  const broken = await ReceiveSwapStore.open(driver, clock)
+  await expect(broken.insertQuote(baseQuote)).rejects.toThrow('event insert failed')
+  expect(await rowCount(driver, 'receive_swap')).toBe(0)
+  await broken.close()
 })

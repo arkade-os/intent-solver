@@ -576,6 +576,10 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
    * lockup claimed with a valid preimage and no refund.
    */
   async insertQuote(quote: QuoteRecord): Promise<SendSwapRow> {
+    return this.driver.transaction(() => this.insertQuoteRows(quote))
+  }
+
+  private async insertQuoteRows(quote: QuoteRecord): Promise<SendSwapRow> {
     const at = this.now()
     const inserted = await this.driver.run(
       `INSERT INTO send_swap (

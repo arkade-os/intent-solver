@@ -465,6 +465,10 @@ export class OnchainSendSwapStore extends BaseSwapStore<OnchainSendSwapRow, Onch
   }
 
   async insertQuote(quote: OnchainQuoteRecord): Promise<OnchainSendSwapRow> {
+    return this.driver.transaction(() => this.insertQuoteRows(quote))
+  }
+
+  private async insertQuoteRows(quote: OnchainQuoteRecord): Promise<OnchainSendSwapRow> {
     const at = this.now()
     await this.driver.run(
       `INSERT INTO send_onchain_swap (

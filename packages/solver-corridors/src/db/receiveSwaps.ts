@@ -387,6 +387,10 @@ export class ReceiveSwapStore extends BaseSwapStore<ReceiveSwapRow, ReceiveSwapS
    * mean a race whichever side loses cannot recover from.
    */
   async insertQuote(quote: ReceiveQuoteRecord): Promise<ReceiveSwapRow> {
+    return this.driver.transaction(() => this.insertQuoteRows(quote))
+  }
+
+  private async insertQuoteRows(quote: ReceiveQuoteRecord): Promise<ReceiveSwapRow> {
     const at = this.now()
     await this.driver.run(
       `INSERT INTO receive_swap (
