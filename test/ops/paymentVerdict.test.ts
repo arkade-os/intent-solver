@@ -146,6 +146,63 @@ describe('paymentVerdict falls back to the payment hash when the id cannot settl
     })
   })
 
+  it('refuses to decide for a row with no id whose payment another backend attempted', async () => {
+    const probe = vi.fn(async () => null)
+    const services = servicesWith({ backend: 'lnd' })
+    ;(services.ln as unknown as { getSendHtlcState: unknown }).getSendHtlcState = probe
+    const verdict = await paymentVerdict(services, { ...ROW, paymentId: null, paymentBackend: 'other-backend' })
+    expect(verdict.verdict).toBe('other-wallet-push-nothing')
+    expect(probe).not.toHaveBeenCalled()
+  })
+
+  it('refuses to decide for a row with no id attempted from another seed on the same backend', async () => {
+    const services = servicesWith({ backend: 'lnd', noHashProbe: true })
+    ;(services.ln as unknown as { walletFingerprint: unknown }).walletFingerprint = async () => 'wallet-now'
+    const verdict = await paymentVerdict(services, {
+      ...ROW,
+      paymentId: null,
+      paymentBackend: 'lnd',
+      paymentWallet: 'wallet-then',
+    })
+    expect(verdict.verdict).toBe('other-wallet-push-nothing')
+  })
+
+  it.each([null, 'pay-1'])(
+    'stays undecided when the paying wallet is known and the live one cannot be read (id %s)',
+    async (paymentId) => {
+      const services = servicesWith({ backend: 'lnd', status: 'failed', ownInvoice: null })
+      ;(services.ln as unknown as { walletFingerprint: unknown }).walletFingerprint = async () => {
+        throw new Error('node unreachable')
+      }
+      const verdict = await paymentVerdict(services, {
+        ...ROW,
+        paymentId,
+        paymentBackend: 'lnd',
+        paymentWallet: 'wallet-then',
+      })
+      expect(verdict.verdict).toBe('undecided-push-nothing')
+    },
+  )
+
+  it('still asks by hash for a row with no id attempted on the backend and wallet running now', async () => {
+    const services = servicesWith({ backend: 'lnd', byHash: { status: 'returned' } })
+    ;(services.ln as unknown as { walletFingerprint: unknown }).walletFingerprint = async () => 'wallet-now'
+    const verdict = await paymentVerdict(services, {
+      ...ROW,
+      paymentId: null,
+      paymentBackend: 'lnd',
+      paymentWallet: 'wallet-now',
+    })
+    expect(verdict).toMatchObject({ verdict: 'not-paid-refund-is-safe', commitment: 'returned' })
+  })
+
+  it('still reads a row that never reached a payment as never submitted', async () => {
+    const services = servicesWith({ backend: 'lnd' })
+    ;(services.ln as unknown as { walletFingerprint: unknown }).walletFingerprint = async () => 'wallet-now'
+    const verdict = await paymentVerdict(services, { ...ROW, paymentId: null })
+    expect(verdict).toMatchObject({ verdict: 'never-submitted', commitment: 'none' })
+  })
+
   it('refuses without a Lightning rail rather than guessing', async () => {
     await expect(paymentVerdict({ ln: null } as unknown as Services, ROW)).rejects.toThrow(/Lightning rail/)
   })

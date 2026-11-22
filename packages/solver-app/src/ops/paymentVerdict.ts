@@ -68,6 +68,27 @@ export const paymentVerdict = async (services: Services, row: PaymentVerdictRow)
   const ln = services.ln
   if (!ln) throw new Error('the Lightning rail is not available; a payment cannot be read without it')
 
+  // Before any probe, with or without an id: the row is stamped when the payment is attempted, and a node
+  // that did not attempt it knows nothing of it. A row with no recorded node cannot be compared.
+  const running = await ln.walletFingerprint?.().catch(() => undefined)
+  const foreignWallet = Boolean(running && row.paymentWallet && row.paymentWallet !== running)
+  const foreignBackend = Boolean(row.paymentBackend && row.paymentBackend !== services.config.lnBackend)
+  if (foreignWallet || foreignBackend) {
+    return {
+      paymentId: row.paymentId,
+      paidBy: { backend: row.paymentBackend, wallet: row.paymentWallet },
+      runningNow: { backend: services.config.lnBackend, wallet: running ?? null },
+      verdict: 'other-wallet-push-nothing',
+    }
+  }
+  if (row.paymentWallet && !running) {
+    return {
+      paymentId: row.paymentId,
+      error: 'cannot read which wallet is answering',
+      verdict: 'undecided-push-nothing',
+    }
+  }
+
   if (!row.paymentId) {
     // NOT proof nothing was submitted: a backend can commit against the hash
     // one call BEFORE it mints the id.
@@ -83,20 +104,6 @@ export const paymentVerdict = async (services: Services, row: PaymentVerdictRow)
     if (seen.status === 'settled') return { ...byHash, verdict: 'paid-do-not-refund' }
     if (seen.status === 'returned') return { ...byHash, verdict: 'not-paid-refund-is-safe' }
     return { ...byHash, verdict: 'undecided-push-nothing' }
-  }
-
-  // After a provider or seed change this lookup fails EXACTLY like a sick
-  // database; null on either side is UNKNOWN, never a match.
-  const running = await ln.walletFingerprint?.().catch(() => undefined)
-  const foreignWallet = Boolean(running && row.paymentWallet && row.paymentWallet !== running)
-  const foreignBackend = Boolean(row.paymentBackend && row.paymentBackend !== services.config.lnBackend)
-  if (foreignWallet || foreignBackend) {
-    return {
-      paymentId: row.paymentId,
-      paidBy: { backend: row.paymentBackend, wallet: row.paymentWallet },
-      runningNow: { backend: services.config.lnBackend, wallet: running ?? null },
-      verdict: 'other-wallet-push-nothing',
-    }
   }
 
   let payment
