@@ -1,4 +1,4 @@
-/** Every SQL statement the Lightning send store runs. The store picks one and binds its parameters. */
+/** Every SQL statement the Lightning send store runs. */
 
 // The unique index on payment_hash is PARTIAL on purpose: one LIVE swap per
 // hash, but a 'refused' swap never moved money and never learned a preimage, so
@@ -7,7 +7,7 @@
 // KNOW: re-quoting one would invite a lockup the provider could take without
 // paying again. (No SQL comments in this string: the D1 driver's exec flattens
 // newlines, which would turn a `--` comment into a statement-eater.)
-export const SEND_SWAP_COLUMNS = `
+const SEND_SWAP_COLUMNS = `
   id                            TEXT PRIMARY KEY,
   state                         TEXT NOT NULL,
   created_at                    INTEGER NOT NULL,
@@ -83,6 +83,29 @@ CREATE TABLE IF NOT EXISTS send_swap_event (
 );
 CREATE INDEX IF NOT EXISTS idx_send_swap_event_swap ON send_swap_event(swap_id);
 `
+
+/**
+ * Columns an operator search matches against, for this corridor.
+ *
+ * Identifiers only — every one is something a user can hand you: the swap
+ * id, the payment hash, the invoice, an address, a txid, the rfq id. Amounts
+ * and timestamps are deliberately absent; they are filters, not identifiers,
+ * and a substring match on a number matches far too much to be a search.
+ *
+ * Interpolated into SQL, so it lives here beside the schema rather than
+ * anywhere a request can reach.
+ */
+export const SEND_SEARCH_COLUMNS: readonly string[] = [
+  'id',
+  'payment_hash',
+  'invoice',
+  'lockup_address',
+  'lockup_txid',
+  'claim_ark_txid',
+  'refund_ark_txid',
+  'unrolled_claim',
+  'rfq_id',
+]
 
 /** Columns a database created before they existed is given on open. */
 export const ADDED_COLUMNS: readonly (readonly [column: string, type: string])[] = [

@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs'
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
 import { suffixed } from './layout.js'
+import * as sql from './onchainReceiveDrainGuard.sql.js'
 
 // #292 removed the onchain-receive corridor with no boot guard, so an upgrade
 // past it silently strands any row still mid-swap in the dead table below.
@@ -17,11 +18,8 @@ const LIVE_STATES = [
 
 const liveRowsIn = async (driver: SqlDriver): Promise<number> => {
   // PRAGMA answers empty for a missing table rather than throwing.
-  if ((await driver.all(`PRAGMA table_info(${TABLE})`)).length === 0) return 0
-  const placeholders = LIVE_STATES.map(() => '?').join(',')
-  const row = await driver.get<{ n: number }>(`SELECT COUNT(*) AS n FROM ${TABLE} WHERE state IN (${placeholders})`, [
-    ...LIVE_STATES,
-  ])
+  if ((await driver.all(sql.tableInfo(TABLE))).length === 0) return 0
+  const row = await driver.get<{ n: number }>(sql.countInStates(TABLE, LIVE_STATES), [...LIVE_STATES])
   return row?.n ?? 0
 }
 

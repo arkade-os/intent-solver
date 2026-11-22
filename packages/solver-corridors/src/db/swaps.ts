@@ -303,35 +303,14 @@ export interface QuoteRecord {
   rfqId?: string
 }
 
-/**
- * Columns an operator search matches against, for this corridor.
- *
- * Identifiers only — every one is something a user can hand you: the swap
- * id, the payment hash, the invoice, an address, a txid, the rfq id. Amounts
- * and timestamps are deliberately absent; they are filters, not identifiers,
- * and a substring match on a number matches far too much to be a search.
- *
- * Interpolated into SQL, so it lives here beside the schema rather than
- * anywhere a request can reach.
- */
-export const SEND_SEARCH_COLUMNS: readonly string[] = [
-  'id',
-  'payment_hash',
-  'invoice',
-  'lockup_address',
-  'lockup_txid',
-  'claim_ark_txid',
-  'refund_ark_txid',
-  'unrolled_claim',
-  'rfq_id',
-]
+export { SEND_SEARCH_COLUMNS } from './swaps.sql.js'
 
 const SHAPE: StoreShape<SendSwapRow, SendSwapState> = {
   table: 'send_swap',
   eventTable: 'send_swap_event',
   noun: 'swap',
   lifecycleLabel: 'swap lifecycle',
-  searchColumns: SEND_SEARCH_COLUMNS,
+  searchColumns: sql.SEND_SEARCH_COLUMNS,
   legalEdges: LnSendMachine.edges,
   transitionColumns: TRANSITION_COLUMNS,
   patchColumns: PATCH_COLUMNS,
@@ -365,7 +344,7 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
   /**
    * Additive migration for databases created before a column existed.
    * `CREATE TABLE IF NOT EXISTS` never alters an existing table, so columns
-   * added to the schema must also be added here. The column check goes through
+   * added to the schema must also be added to `ADDED_COLUMNS`. The column check goes through
    * the driver's prepared `all` because that form works on both runtimes —
    * D1 serves `PRAGMA table_info` via prepare().all() like any query.
    */

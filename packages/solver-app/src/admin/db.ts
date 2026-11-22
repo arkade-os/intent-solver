@@ -9,7 +9,7 @@
  * with them. Losing this file loses preferences and history; losing a swap
  * database loses funds. The two deserve different blast radii.
  *
- * Follows the same shape as the swap stores (module-scoped SCHEMA, private
+ * Follows the same shape as the swap stores (SCHEMA in a sibling `.sql.ts`, private
  * constructor, `open()` taking a driver or a path) so it is read and
  * maintained like the rest of `src/db/`.
  */
@@ -26,139 +26,7 @@ import {
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { servingFor, type AssetRfqToken, type ServingFields } from '../ops/assetRfqMarkets.js'
 import type { BalanceCheckpoint } from '../ops/balanceCheckpoints.js'
-
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS admin_override (
-  key        TEXT PRIMARY KEY,
-  value      TEXT NOT NULL,
-  updated_at INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS admin_action (
-  id      INTEGER PRIMARY KEY AUTOINCREMENT,
-  at      INTEGER NOT NULL,
-  action  TEXT NOT NULL,
-  target  TEXT,
-  params  TEXT NOT NULL,
-  outcome TEXT NOT NULL,
-  detail  TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_admin_action_at ON admin_action(at);
-
-CREATE TABLE IF NOT EXISTS operator_withdrawal (
-  id          TEXT PRIMARY KEY,
-  scope       TEXT NOT NULL,
-  source      TEXT NOT NULL,
-  address     TEXT NOT NULL,
-  amount_sats TEXT NOT NULL,
-  fee_sats    TEXT,
-  reference   TEXT,
-  state       TEXT NOT NULL,
-  created_at  INTEGER NOT NULL,
-  updated_at  INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_operator_withdrawal_scope_at ON operator_withdrawal(scope, created_at);
-
-CREATE TABLE IF NOT EXISTS balance_checkpoint (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  scope TEXT NOT NULL,
-  complete INTEGER NOT NULL,
-  snapshot TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_balance_checkpoint_scope ON balance_checkpoint(scope, complete, id);
-CREATE INDEX IF NOT EXISTS idx_balance_checkpoint_latest ON balance_checkpoint(scope, id);
-
-CREATE TABLE IF NOT EXISTS balance_report_checkpoint (
-  scope TEXT PRIMARY KEY,
-  checkpoint_id INTEGER NOT NULL
-);
-
--- The asset markets this deployment trades, one row per PAIR.
---
--- Its own table rather than rows in admin_override, which is a scalar key/value
--- store: a market is a record of eleven fields, and getOverrides() hands
--- settings.ts a Record<string, string> it layers onto a Config field by field.
--- Packing a market into one JSON value would have to be special-cased out of
--- that path, and deleting ONE market is not "clearing a key" -- the two shapes
--- only look alike.
---
--- In THIS database rather than a sixth file, for the reason db/layout.ts gives
--- for the EVM tables: a table with no previous release has no file it already
--- has, so nothing can be stranded by putting it here, and a new suffixed path
--- would be another file for an operator to discover, back up and eventually
--- consolidate in service of a history it does not have. It lands in the
--- consolidated swap file or in the -admin one exactly as the two tables above
--- already do.
---
--- The key is DERIVED from the legs (see assetMarketConfig.assetMarketKey), so a
--- PRIMARY KEY on it is what makes one pair unrepresentable twice -- including
--- with its legs swapped, which would otherwise be two rows describing one market
--- with two different feeds.
-CREATE TABLE IF NOT EXISTS admin_market (
-  market_key      TEXT PRIMARY KEY,
-  base            TEXT,
-  quote           TEXT,
-  base_decimals   INTEGER NOT NULL,
-  quote_decimals  INTEGER NOT NULL,
-  feed_url        TEXT NOT NULL,
-  price_path      TEXT NOT NULL,
-  tolerance_bps   INTEGER NOT NULL,
-  fee_bps         INTEGER NOT NULL,
-  sell_base_fee_flat TEXT NOT NULL DEFAULT '0',
-  buy_base_fee_flat  TEXT NOT NULL DEFAULT '0',
-  sell_base_fee_bps  INTEGER,
-  buy_base_fee_bps   INTEGER,
-  sell_base_min   TEXT,
-  sell_base_max   TEXT,
-  buy_base_min    TEXT,
-  buy_base_max    TEXT,
-  enabled         INTEGER NOT NULL,
-  symbol          TEXT,
-  serves_offer    INTEGER NOT NULL DEFAULT 0,
-  serves_rfq      INTEGER NOT NULL DEFAULT 1,
-  rfq_sell_base   INTEGER NOT NULL DEFAULT 1,
-  rfq_buy_base    INTEGER NOT NULL DEFAULT 1,
-  carrier_mode    TEXT NOT NULL DEFAULT 'inherit',
-  created_at      INTEGER NOT NULL,
-  updated_at      INTEGER NOT NULL
-);
-
--- One row per swap the approval gate has held. HERE rather than a column on
--- each swap table: that is why the gate needs no migration on the money path.
--- A NULL approved_at is the pending state, which the gate reads directly.
--- amount is TEXT and asset_id NULL-for-BTC for the reason assetRfqSwaps.ts
--- gives: an asset's atomic units outrun SQLite's signed 64-bit INTEGER.
-CREATE TABLE IF NOT EXISTS admin_swap_approval (
-  swap_id      TEXT PRIMARY KEY,
-  corridor     TEXT NOT NULL,
-  asset_id     TEXT,
-  amount       TEXT NOT NULL,
-  requested_at INTEGER NOT NULL,
-  approved_at  INTEGER
-);
-
--- Scalar notifier state. Not a row in admin_override: getOverrides() hands
--- settings.ts a Record it layers onto Config. The balance-change key is no
--- longer written; the table stays so a database that has it still opens.
-CREATE TABLE IF NOT EXISTS admin_notify_state (
-  key        TEXT PRIMARY KEY,
-  value      TEXT NOT NULL,
-  updated_at INTEGER NOT NULL
-);
-
--- One-shot DATA migrations, by name. NOT a schema version: the ALTER loop below
--- is idempotent, so only a seed reading the ENVIRONMENT needs an explicit marker.
-CREATE TABLE IF NOT EXISTS admin_migration (
-  name TEXT PRIMARY KEY,
-  at   INTEGER NOT NULL
-);
-`
-
-// Exec'd AFTER migrate(): a table that shipped without `symbol` has no such
-// column when SCHEMA runs. Partial, so an offer-only deployment's NULLs survive.
-const MIGRATED_SCHEMA = `
-CREATE UNIQUE INDEX IF NOT EXISTS idx_admin_market_symbol ON admin_market(symbol) WHERE symbol IS NOT NULL;
-`
+import * as sql from './db.sql.js'
 
 export const MARKET_SERVING_SEED = 'market-serving-seed-v1'
 
@@ -319,37 +187,16 @@ export const adminDbPath = (swapDbPath: string): string =>
 const dropLegacyApprovals = async (driver: SqlDriver): Promise<void> => {
   let columns: { name: string }[]
   try {
-    columns = await driver.all<{ name: string }>("SELECT name FROM pragma_table_info('admin_swap_approval')")
+    columns = await driver.all<{ name: string }>(sql.approvalColumns)
   } catch {
     // A driver that cannot answer the pragma leaves the table alone rather than
     // failing the boot: `d1Driver` is a SqlDriver too, and this runs at startup.
     return
   }
   if (columns.some((column) => column.name === 'amount_sats')) {
-    await driver.exec('DROP TABLE admin_swap_approval')
+    await driver.exec(sql.dropApprovals)
   }
 }
-const MIGRATIONS: ReadonlyArray<readonly [string, ReadonlyArray<readonly [string, string]>]> = [
-  [
-    'admin_market',
-    [
-      ['sell_base_fee_flat', "TEXT NOT NULL DEFAULT '0'"],
-      ['buy_base_fee_flat', "TEXT NOT NULL DEFAULT '0'"],
-      ['sell_base_fee_bps', 'INTEGER'],
-      ['buy_base_fee_bps', 'INTEGER'],
-      ['symbol', 'TEXT'],
-      // What a row an OLDER binary inserted means on roll-forward: offers have
-      // always needed declaring, RFQ has always served any enabled one-leg row.
-      ['serves_offer', 'INTEGER NOT NULL DEFAULT 0'],
-      ['serves_rfq', 'INTEGER NOT NULL DEFAULT 1'],
-      ['rfq_sell_base', 'INTEGER NOT NULL DEFAULT 1'],
-      ['rfq_buy_base', 'INTEGER NOT NULL DEFAULT 1'],
-      ['carrier_mode', "TEXT NOT NULL DEFAULT 'inherit'"],
-    ],
-  ],
-  ['admin_action', [['revision', 'TEXT']]],
-]
-
 export class AdminStore {
   private repaired: readonly string[] = []
   private seeded: readonly string[] = []
@@ -380,10 +227,10 @@ export class AdminStore {
   ): Promise<AdminStore> {
     const store = new AdminStore(typeof driver === 'string' ? betterSqliteDriver(driver) : driver, now)
     await dropLegacyApprovals(store.driver)
-    await store.driver.exec(SCHEMA)
+    await store.driver.exec(sql.SCHEMA)
     await store.migrate()
     // MUST stay: the symbol index names a column the ALTER loop adds, so SCHEMA cannot carry it.
-    await store.driver.exec(MIGRATED_SCHEMA)
+    await store.driver.exec(sql.MIGRATED_SCHEMA)
     if (seed) await store.seedServing(seed)
     // AFTER the seed, and unconditional: a pre-upgrade row is old, not unhealthy,
     // and judging one before the seed resolves it reports a repair it overwrites.
@@ -404,7 +251,7 @@ export class AdminStore {
       const marker = `market-seed:${key}`
       // Every read inside the write: another opener may have made the marker, the pair or the symbol meanwhile.
       await this.driver.transaction(async () => {
-        if (await this.driver.get('SELECT name FROM admin_migration WHERE name = ?', [marker])) return
+        if (await this.driver.get(sql.migrationByName, [marker])) return
         if ((await this.getMarket(key)) === null) {
           const held = (await this.listMarkets()).find((row) => market.symbol !== null && row.symbol === market.symbol)
           if (held) {
@@ -423,7 +270,7 @@ export class AdminStore {
           })
           notes.push(`${key}: created from the config document`)
         }
-        await this.driver.run('INSERT OR IGNORE INTO admin_migration (name, at) VALUES (?, ?)', [marker, this.now()])
+        await this.driver.run(sql.markMigrationDoneOnce, [marker, this.now()])
       })
     }
     this.seeded = notes
@@ -436,7 +283,7 @@ export class AdminStore {
    * done. `carrier_mode` is left out: `inherit` IS the environment's answer.
    */
   private async seedServing(seed: ServingSeed): Promise<void> {
-    const done = await this.driver.get('SELECT name FROM admin_migration WHERE name = ?', [MARKET_SERVING_SEED])
+    const done = await this.driver.get(sql.migrationByName, [MARKET_SERVING_SEED])
     if (done) return
     const rows = await this.listMarkets()
     const taken = new Set<string>()
@@ -444,25 +291,21 @@ export class AdminStore {
       for (const row of rows) {
         const serving = servingFor(row, seed, taken)
         if (serving.symbol !== null) taken.add(serving.symbol)
-        await this.driver.run(
-          'UPDATE admin_market SET symbol = ?, serves_offer = ?, serves_rfq = ?, rfq_sell_base = ?, ' +
-            'rfq_buy_base = ? WHERE market_key = ?',
-          [
-            serving.symbol,
-            serving.servesOffer ? 1 : 0,
-            serving.servesRfq ? 1 : 0,
-            serving.rfqSellBase ? 1 : 0,
-            serving.rfqBuyBase ? 1 : 0,
-            row.marketKey,
-          ],
-        )
+        await this.driver.run(sql.seedMarketServing, [
+          serving.symbol,
+          serving.servesOffer ? 1 : 0,
+          serving.servesRfq ? 1 : 0,
+          serving.rfqSellBase ? 1 : 0,
+          serving.rfqBuyBase ? 1 : 0,
+          row.marketKey,
+        ])
       }
-      await this.driver.run('INSERT INTO admin_migration (name, at) VALUES (?, ?)', [MARKET_SERVING_SEED, this.now()])
+      await this.driver.run(sql.markMigrationDone, [MARKET_SERVING_SEED, this.now()])
     })
   }
 
   private async migrate(): Promise<void> {
-    for (const [table, columns] of MIGRATIONS) await addColumns(this.driver, table, columns)
+    for (const [table, columns] of sql.MIGRATIONS) await addColumns(this.driver, table, columns)
   }
 
   /**
@@ -497,13 +340,13 @@ export class AdminStore {
             `${row.marketKey}: no symbol stored; wrote symbol = ${symbol} to the row, the stem an older binary ` +
               `served when the config named no asset for it.`,
           )
-          await this.driver.run('UPDATE admin_market SET symbol = ? WHERE market_key = ?', [symbol, row.marketKey])
+          await this.driver.run(sql.setMarketSymbol, [symbol, row.marketKey])
           continue
         }
       } else if (!row.rfqSellBase && !row.rfqBuyBase) {
         close('both RFQ directions are closed')
       } else continue
-      await this.driver.run('UPDATE admin_market SET serves_rfq = 0 WHERE market_key = ?', [row.marketKey])
+      await this.driver.run(sql.closeMarketRfq, [row.marketKey])
     }
     this.repaired = notes
   }
@@ -514,7 +357,7 @@ export class AdminStore {
 
   /** Every override, as raw strings. Interpreting them is `settings.ts`'s job. */
   async getOverrides(): Promise<Record<string, string>> {
-    const rows = await this.driver.all<{ key: string; value: string }>('SELECT key, value FROM admin_override')
+    const rows = await this.driver.all<{ key: string; value: string }>(sql.allOverrides)
     return Object.fromEntries(rows.map((row) => [String(row.key), String(row.value)]))
   }
 
@@ -527,14 +370,10 @@ export class AdminStore {
    */
   async setOverride(key: string, value: string | null): Promise<void> {
     if (value === null) {
-      await this.driver.run('DELETE FROM admin_override WHERE key = ?', [key])
+      await this.driver.run(sql.deleteOverride, [key])
       return
     }
-    await this.driver.run(
-      'INSERT INTO admin_override (key, value, updated_at) VALUES (?, ?, ?) ' +
-        'ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
-      [key, value, this.now()],
-    )
+    await this.driver.run(sql.upsertOverride, [key, value, this.now()])
   }
 
   async setOverrideWithAudit(key: string, value: string | null, entry: AuditEntry): Promise<void> {
@@ -553,22 +392,18 @@ export class AdminStore {
     await this.driver.transaction(async () => {
       // Symbols first, all of them: a symbol moving between rows would otherwise meet itself in the unique index.
       for (const { marketKey } of serving) {
-        await this.driver.run('UPDATE admin_market SET symbol = NULL WHERE market_key = ?', [marketKey])
+        await this.driver.run(sql.clearMarketSymbol, [marketKey])
       }
       for (const { marketKey, fields } of serving) {
-        await this.driver.run(
-          'UPDATE admin_market SET symbol = ?, serves_offer = ?, serves_rfq = ?, rfq_sell_base = ?, ' +
-            'rfq_buy_base = ?, updated_at = ? WHERE market_key = ?',
-          [
-            fields.symbol,
-            fields.servesOffer ? 1 : 0,
-            fields.servesRfq ? 1 : 0,
-            fields.rfqSellBase ? 1 : 0,
-            fields.rfqBuyBase ? 1 : 0,
-            this.now(),
-            marketKey,
-          ],
-        )
+        await this.driver.run(sql.revertMarketServing, [
+          fields.symbol,
+          fields.servesOffer ? 1 : 0,
+          fields.servesRfq ? 1 : 0,
+          fields.rfqSellBase ? 1 : 0,
+          fields.rfqBuyBase ? 1 : 0,
+          this.now(),
+          marketKey,
+        ])
       }
       for (const key of overrideKeys) await this.setOverride(key, null)
       await this.recordAction(entry)
@@ -587,12 +422,12 @@ export class AdminStore {
    * un-deletable from the console.
    */
   async listMarkets(): Promise<AssetMarketRow[]> {
-    const rows = await this.driver.all<MarketRaw>('SELECT * FROM admin_market ORDER BY market_key')
+    const rows = await this.driver.all<MarketRaw>(sql.allMarkets)
     return rows.map(marketFrom)
   }
 
   async getMarket(marketKey: string): Promise<AssetMarketRow | null> {
-    const rows = await this.driver.all<MarketRaw>('SELECT * FROM admin_market WHERE market_key = ?', [marketKey])
+    const rows = await this.driver.all<MarketRaw>(sql.marketByKey, [marketKey])
     return rows[0] ? marketFrom(rows[0]) : null
   }
 
@@ -608,55 +443,36 @@ export class AdminStore {
   async putMarket(market: AssetMarketConfig): Promise<AssetMarketRow> {
     const key = assetMarketKey(market.base, market.quote)
     const at = this.now()
-    await this.driver.run(
-      'INSERT INTO admin_market (market_key, base, quote, base_decimals, quote_decimals, feed_url, price_path, ' +
-        'tolerance_bps, fee_bps, sell_base_fee_flat, buy_base_fee_flat, sell_base_fee_bps, buy_base_fee_bps, ' +
-        'sell_base_min, sell_base_max, buy_base_min, buy_base_max, enabled, symbol, serves_offer, serves_rfq, ' +
-        'rfq_sell_base, rfq_buy_base, carrier_mode, created_at, updated_at) ' +
-        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
-        'ON CONFLICT(market_key) DO UPDATE SET base = excluded.base, quote = excluded.quote, ' +
-        'base_decimals = excluded.base_decimals, quote_decimals = excluded.quote_decimals, ' +
-        'feed_url = excluded.feed_url, price_path = excluded.price_path, ' +
-        'tolerance_bps = excluded.tolerance_bps, fee_bps = excluded.fee_bps, ' +
-        'sell_base_fee_flat = excluded.sell_base_fee_flat, buy_base_fee_flat = excluded.buy_base_fee_flat, ' +
-        'sell_base_fee_bps = excluded.sell_base_fee_bps, buy_base_fee_bps = excluded.buy_base_fee_bps, ' +
-        'sell_base_min = excluded.sell_base_min, sell_base_max = excluded.sell_base_max, ' +
-        'buy_base_min = excluded.buy_base_min, buy_base_max = excluded.buy_base_max, ' +
-        'symbol = excluded.symbol, serves_offer = excluded.serves_offer, serves_rfq = excluded.serves_rfq, ' +
-        'rfq_sell_base = excluded.rfq_sell_base, rfq_buy_base = excluded.rfq_buy_base, ' +
-        'carrier_mode = excluded.carrier_mode, ' +
-        'enabled = excluded.enabled, updated_at = excluded.updated_at',
-      [
-        key,
-        market.base,
-        market.quote,
-        market.baseDecimals,
-        market.quoteDecimals,
-        market.feedUrl,
-        market.pricePath,
-        market.toleranceBps,
-        market.feeBps,
-        String(market.sellBaseFeeFlat ?? 0n),
-        String(market.buyBaseFeeFlat ?? 0n),
-        market.sellBaseFeeBps ?? null,
-        market.buyBaseFeeBps ?? null,
-        // Decimal strings, per the note on `boundsFrom`. `null` for both halves
-        // when the direction inherits the deployment-wide pair.
-        market.sellBase === null ? null : String(market.sellBase.min),
-        market.sellBase === null ? null : String(market.sellBase.max),
-        market.buyBase === null ? null : String(market.buyBase.min),
-        market.buyBase === null ? null : String(market.buyBase.max),
-        market.enabled ? 1 : 0,
-        market.symbol ?? null,
-        market.servesOffer ? 1 : 0,
-        market.servesRfq ? 1 : 0,
-        market.rfqSellBase ? 1 : 0,
-        market.rfqBuyBase ? 1 : 0,
-        market.carrierMode,
-        at,
-        at,
-      ],
-    )
+    await this.driver.run(sql.upsertMarket, [
+      key,
+      market.base,
+      market.quote,
+      market.baseDecimals,
+      market.quoteDecimals,
+      market.feedUrl,
+      market.pricePath,
+      market.toleranceBps,
+      market.feeBps,
+      String(market.sellBaseFeeFlat ?? 0n),
+      String(market.buyBaseFeeFlat ?? 0n),
+      market.sellBaseFeeBps ?? null,
+      market.buyBaseFeeBps ?? null,
+      // Decimal strings, per the note on `boundsFrom`. `null` for both halves
+      // when the direction inherits the deployment-wide pair.
+      market.sellBase === null ? null : String(market.sellBase.min),
+      market.sellBase === null ? null : String(market.sellBase.max),
+      market.buyBase === null ? null : String(market.buyBase.min),
+      market.buyBase === null ? null : String(market.buyBase.max),
+      market.enabled ? 1 : 0,
+      market.symbol ?? null,
+      market.servesOffer ? 1 : 0,
+      market.servesRfq ? 1 : 0,
+      market.rfqSellBase ? 1 : 0,
+      market.rfqBuyBase ? 1 : 0,
+      market.carrierMode,
+      at,
+      at,
+    ])
     // Read back rather than returned from the argument: `created_at` is the
     // ORIGINAL insert's on an edit, and echoing `at` would report a market as
     // added at the moment its spread was last nudged.
@@ -669,67 +485,54 @@ export class AdminStore {
   async deleteMarket(marketKey: string): Promise<boolean> {
     const before = await this.getMarket(marketKey)
     if (!before) return false
-    await this.driver.run('DELETE FROM admin_market WHERE market_key = ?', [marketKey])
+    await this.driver.run(sql.deleteMarket, [marketKey])
     return true
   }
 
   async recordBalanceCheckpoint(entry: Omit<BalanceCheckpoint, 'id'>): Promise<BalanceCheckpoint> {
-    const row = await this.driver.get<{ id: number }>(
-      'INSERT INTO balance_checkpoint (scope, complete, snapshot) VALUES (?, ?, ?) RETURNING id',
-      [entry.scope, entry.totalSats === null ? 0 : 1, JSON.stringify(entry)],
-    )
+    const row = await this.driver.get<{ id: number }>(sql.insertBalanceCheckpoint, [
+      entry.scope,
+      entry.totalSats === null ? 0 : 1,
+      JSON.stringify(entry),
+    ])
     if (!row) throw new Error('balance checkpoint insert returned no id')
     return { ...entry, id: row.id }
   }
 
   async latestCompleteBalanceCheckpoint(scope: string): Promise<BalanceCheckpoint | undefined> {
-    const row = await this.driver.get<{ id: number; snapshot: string }>(
-      'SELECT id, snapshot FROM balance_checkpoint WHERE scope = ? AND complete = 1 ORDER BY id DESC LIMIT 1',
-      [scope],
-    )
+    const row = await this.driver.get<{ id: number; snapshot: string }>(sql.latestCompleteBalanceCheckpoint, [scope])
     return row ? { ...JSON.parse(row.snapshot), id: row.id } : undefined
   }
 
   async latestBalanceCheckpoint(scope: string): Promise<BalanceCheckpoint | undefined> {
-    const row = await this.driver.get<{ id: number; snapshot: string }>(
-      'SELECT id, snapshot FROM balance_checkpoint WHERE scope = ? ORDER BY id DESC LIMIT 1',
-      [scope],
-    )
+    const row = await this.driver.get<{ id: number; snapshot: string }>(sql.latestBalanceCheckpoint, [scope])
     return row ? { ...JSON.parse(row.snapshot), id: row.id } : undefined
   }
 
   async previousBalanceReportCheckpoint(scope: string): Promise<BalanceCheckpoint | undefined> {
-    const row = await this.driver.get<{ id: number; snapshot: string }>(
-      'SELECT c.id, c.snapshot FROM balance_checkpoint c JOIN balance_report_checkpoint r ' +
-        'ON c.id = r.checkpoint_id AND c.scope = r.scope WHERE r.scope = ?',
-      [scope],
-    )
+    const row = await this.driver.get<{ id: number; snapshot: string }>(sql.previousBalanceReportCheckpoint, [scope])
     return row ? { ...JSON.parse(row.snapshot), id: row.id } : undefined
   }
 
   async markBalanceReportCheckpoint(id: number): Promise<void> {
-    await this.driver.run(
-      'INSERT INTO balance_report_checkpoint (scope, checkpoint_id) ' +
-        'SELECT scope, id FROM balance_checkpoint WHERE id = ? AND complete = 1 ' +
-        'ON CONFLICT(scope) DO UPDATE SET checkpoint_id = excluded.checkpoint_id ' +
-        'WHERE excluded.checkpoint_id > balance_report_checkpoint.checkpoint_id',
-      [id],
-    )
+    await this.driver.run(sql.markBalanceReportCheckpoint, [id])
   }
 
   async listBalanceCheckpoints(scope: string, limit = 100): Promise<BalanceCheckpoint[]> {
-    const rows = await this.driver.all<{ id: number; snapshot: string }>(
-      'SELECT id, snapshot FROM balance_checkpoint WHERE scope = ? ORDER BY id DESC LIMIT ?',
-      [scope, limit],
-    )
+    const rows = await this.driver.all<{ id: number; snapshot: string }>(sql.listBalanceCheckpoints, [scope, limit])
     return rows.map((row) => ({ ...JSON.parse(row.snapshot), id: row.id }))
   }
 
   async recordAction(entry: AuditEntry): Promise<void> {
-    await this.driver.run(
-      'INSERT INTO admin_action (at, action, target, params, outcome, detail, revision) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [this.now(), entry.action, entry.target, entry.params, entry.outcome, entry.detail, entry.revision ?? null],
-    )
+    await this.driver.run(sql.insertAction, [
+      this.now(),
+      entry.action,
+      entry.target,
+      entry.params,
+      entry.outcome,
+      entry.detail,
+      entry.revision ?? null,
+    ])
   }
 
   async createOperatorWithdrawal(input: {
@@ -745,21 +548,23 @@ export class AdminStore {
     nonnegativeSats(input.amountSats, 'operator withdrawal amount')
     if (input.amountSats === 0) throw new Error('operator withdrawal amount must be positive')
     const at = this.now()
-    await this.driver.run(
-      'INSERT INTO operator_withdrawal (id, scope, source, address, amount_sats, state, created_at, updated_at) ' +
-        'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [input.id, input.scope, input.source, input.address, String(input.amountSats), 'preparing', at, at],
-    )
+    await this.driver.run(sql.insertOperatorWithdrawal, [
+      input.id,
+      input.scope,
+      input.source,
+      input.address,
+      String(input.amountSats),
+      'preparing',
+      at,
+      at,
+    ])
     const row = await this.getOperatorWithdrawal(input.id)
     if (!row) throw new Error('operator withdrawal insert returned no row')
     return row
   }
 
   async getOperatorWithdrawal(id: string): Promise<OperatorWithdrawal | undefined> {
-    const row = await this.driver.get<Record<string, string | number | null>>(
-      'SELECT * FROM operator_withdrawal WHERE id = ?',
-      [id],
-    )
+    const row = await this.driver.get<Record<string, string | number | null>>(sql.operatorWithdrawalById, [id])
     return row ? operatorWithdrawalFrom(row) : undefined
   }
 
@@ -778,10 +583,14 @@ export class AdminStore {
     const reference = data.reference ?? previous.reference
     if (to === 'sent' && (feeSats === null || !reference))
       throw new Error('sent operator withdrawal requires fee and transaction reference')
-    const result = await this.driver.run(
-      'UPDATE operator_withdrawal SET state = ?, fee_sats = ?, reference = ?, updated_at = ? WHERE id = ? AND state = ?',
-      [to, feeSats === null ? null : String(feeSats), reference, this.now(), id, from],
-    )
+    const result = await this.driver.run(sql.transitionOperatorWithdrawal, [
+      to,
+      feeSats === null ? null : String(feeSats),
+      reference,
+      this.now(),
+      id,
+      from,
+    ])
     if (result.changes !== 1) throw new Error(`operator withdrawal ${id} changed before transition`)
     const row = await this.getOperatorWithdrawal(id)
     if (!row) throw new Error(`operator withdrawal ${id} vanished after transition`)
@@ -792,11 +601,10 @@ export class AdminStore {
   async listOperatorWithdrawals(scope: string, since: number): Promise<OperatorWithdrawal[]> {
     if (!scope) throw new Error('operator withdrawal scope is required')
     if (!Number.isSafeInteger(since) || since < 0) throw new Error('operator withdrawal cursor must be non-negative')
-    const rows = await this.driver.all<Record<string, string | number | null>>(
-      "SELECT * FROM operator_withdrawal WHERE scope = ? AND (created_at >= ? OR state IN ('sending', 'uncertain')) " +
-        'ORDER BY created_at, id',
-      [scope, since],
-    )
+    const rows = await this.driver.all<Record<string, string | number | null>>(sql.listOperatorWithdrawals, [
+      scope,
+      since,
+    ])
     return rows.map(operatorWithdrawalFrom)
   }
 
@@ -806,11 +614,13 @@ export class AdminStore {
    * `requested_at` — its age is the operator's remaining window.
    */
   async recordApprovalRequest(request: SwapApprovalRequest): Promise<boolean> {
-    const result = await this.driver.run(
-      'INSERT INTO admin_swap_approval (swap_id, corridor, asset_id, amount, requested_at, approved_at) ' +
-        'VALUES (?, ?, ?, ?, ?, NULL) ON CONFLICT(swap_id) DO NOTHING',
-      [request.swapId, request.corridor, request.assetId, request.amount.toString(), this.now()],
-    )
+    const result = await this.driver.run(sql.insertApprovalRequest, [
+      request.swapId,
+      request.corridor,
+      request.assetId,
+      request.amount.toString(),
+      this.now(),
+    ])
     return result.changes === 1
   }
 
@@ -820,45 +630,31 @@ export class AdminStore {
    * through before anyone saw it.
    */
   async approveSwap(swapId: string): Promise<boolean> {
-    const result = await this.driver.run('UPDATE admin_swap_approval SET approved_at = ? WHERE swap_id = ?', [
-      this.now(),
-      swapId,
-    ])
+    const result = await this.driver.run(sql.approveSwap, [this.now(), swapId])
     return result.changes === 1
   }
 
   /** THROWS on a sick database rather than answering false — the caller turns that into a HOLD. */
   async isSwapApproved(swapId: string): Promise<boolean> {
-    const row = await this.driver.get<{ approved_at: number | null }>(
-      'SELECT approved_at FROM admin_swap_approval WHERE swap_id = ?',
-      [swapId],
-    )
+    const row = await this.driver.get<{ approved_at: number | null }>(sql.swapApprovedAt, [swapId])
     return row !== undefined && row !== null && row.approved_at !== null
   }
 
   /** Nothing in the notifier reads this anymore. Zero stays distinct from absent. */
   async getLastAnnouncedBalance(): Promise<number | null> {
-    const row = await this.driver.get<{ value: string }>('SELECT value FROM admin_notify_state WHERE key = ?', [
-      LAST_BALANCE_KEY,
-    ])
+    const row = await this.driver.get<{ value: string }>(sql.notifyStateByKey, [LAST_BALANCE_KEY])
     if (row === undefined || row === null) return null
     const value = Number(row.value)
     return Number.isFinite(value) ? value : null
   }
 
   async setLastAnnouncedBalance(sats: number): Promise<void> {
-    await this.driver.run(
-      'INSERT INTO admin_notify_state (key, value, updated_at) VALUES (?, ?, ?) ' +
-        'ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
-      [LAST_BALANCE_KEY, String(sats), this.now()],
-    )
+    await this.driver.run(sql.upsertNotifyState, [LAST_BALANCE_KEY, String(sats), this.now()])
   }
 
   /** What is waiting on a human, oldest first — the order they should be answered in. */
   async listPendingApprovals(): Promise<SwapApprovalRow[]> {
-    const rows = await this.driver.all<Record<string, string | number | null>>(
-      'SELECT * FROM admin_swap_approval WHERE approved_at IS NULL ORDER BY requested_at, swap_id',
-    )
+    const rows = await this.driver.all<Record<string, string | number | null>>(sql.pendingApprovals)
     return rows.map((row) => ({
       swapId: String(row.swap_id),
       corridor: String(row.corridor),
@@ -874,10 +670,7 @@ export class AdminStore {
    * them in the order they happened.
    */
   async listActions(limit = 200): Promise<AuditRow[]> {
-    const rows = await this.driver.all<Record<string, string | number | null>>(
-      'SELECT * FROM admin_action ORDER BY at DESC, id DESC LIMIT ?',
-      [limit],
-    )
+    const rows = await this.driver.all<Record<string, string | number | null>>(sql.listActions, [limit])
     return rows.map((row) => ({
       id: Number(row.id),
       at: Number(row.at),
