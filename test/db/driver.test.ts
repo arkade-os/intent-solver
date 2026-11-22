@@ -414,6 +414,30 @@ describe('a transaction on the shared connection', () => {
     await driver.close()
   })
 
+  it('lets three transactions started together each take their turn', async () => {
+    const { driver, names } = await opened()
+    await Promise.all(
+      ['a', 'b', 'c'].map((name) => driver.transaction(() => driver.run('INSERT INTO t VALUES (?)', [name]))),
+    )
+    expect(await names()).toEqual(['a', 'b', 'c'])
+    await driver.close()
+  })
+
+  it('does not roll back a write that waited behind two transactions, the second of which fails', async () => {
+    const { driver, names } = await opened()
+    const first = driver.transaction(() => driver.run("INSERT INTO t VALUES ('first')"))
+    const failing = driver.transaction(async () => {
+      await driver.run("INSERT INTO t VALUES ('rolled back')")
+      throw new Error('fails')
+    })
+    const outside = driver.run("INSERT INTO t VALUES ('outside')")
+
+    await expect(failing).rejects.toThrow('fails')
+    await Promise.all([first, outside])
+    expect(await names()).toEqual(['first', 'outside'])
+    await driver.close()
+  })
+
   it('still refuses a transaction opened inside another, and rolls the outer one back', async () => {
     const { driver, names } = await opened()
     const nested = driver.transaction(async () => {

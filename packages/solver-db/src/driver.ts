@@ -33,16 +33,18 @@ export const betterSqliteDriver = (path: string): SqlDriver => {
   const transactionOf = new AsyncLocalStorage<object>()
   let open: { readonly ended: Promise<void> } | null = null
   const foreign = (): boolean => open !== null && transactionOf.getStore() !== open
+  // Callers loop on this. A waiter resumes a step after the transaction ends, and by then another waiter may
+  // have opened the next one.
   const untilFree = async (): Promise<void> => {
-    while (open !== null && transactionOf.getStore() !== open) await open.ended
+    if (open !== null) await open.ended
   }
   return {
     exec: async (sql) => {
-      if (foreign()) await untilFree()
+      while (foreign()) await untilFree()
       db.exec(sql)
     },
     run: async (sql, params = []) => {
-      if (foreign()) await untilFree()
+      while (foreign()) await untilFree()
       try {
         return { changes: db.prepare(sql).run(...(params as never[])).changes }
       } catch (error) {
@@ -54,17 +56,17 @@ export const betterSqliteDriver = (path: string): SqlDriver => {
       }
     },
     get: async <T>(sql: string, params: unknown[] = []) => {
-      if (foreign()) await untilFree()
+      while (foreign()) await untilFree()
       return db.prepare(sql).get(...(params as never[])) as T | undefined
     },
     all: async <T>(sql: string, params: unknown[] = []) => {
-      if (foreign()) await untilFree()
+      while (foreign()) await untilFree()
       return db.prepare(sql).all(...(params as never[])) as T[]
     },
     // `fn` must issue its statements on this driver itself. If it awaits work that was started outside it and
     // that work then needs the database, that work waits for this transaction and the transaction waits for it.
     transaction: async <T>(fn: () => Promise<T>): Promise<T> => {
-      if (foreign()) await untilFree()
+      while (foreign()) await untilFree()
       // Manual BEGIN/COMMIT rather than db.transaction(), which wraps a SYNC
       // function — our driver surface is async. A failure rolls back and rethrows.
       db.exec('BEGIN IMMEDIATE')
