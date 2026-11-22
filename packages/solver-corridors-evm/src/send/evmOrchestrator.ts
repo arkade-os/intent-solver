@@ -52,6 +52,7 @@ import {
   type EvmSendAcceptanceRefusal,
 } from '@arkade-os/solver-core/core/evmSend.js'
 import { arkadeAddressPkScript, clientFundedLockupScript } from '@arkade-os/solver-arkade/arkade/quoteLockup.js'
+import { refundRecord } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { evmSendCovenantRowFor } from '../evm/covenantRow.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 import { EvmPayoutFundingQuarantinedError } from '@arkade-os/solver-core/ports/evmPayoutFunding.js'
@@ -894,7 +895,7 @@ export class EvmSendSwapService {
           continue
         }
         const txid = await arkade.refund(evmSendCovenantRowFor(row), outputs)
-        await store.patch(row.id, { refund_outcome: 'pushed', refund_ark_txid: txid })
+        await store.patch(row.id, refundRecord(outputs, txid, this.now()))
         pushed.push(row.id)
       } catch (error) {
         this.deps.onTickError?.(row.id, error)

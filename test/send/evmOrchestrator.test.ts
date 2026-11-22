@@ -1488,6 +1488,20 @@ describe('refundSweep', () => {
     expect(row.refundArkTxid).toBe('ark-refund-txid')
   })
 
+  it('keeps a row refundable when one spend could not take every output', async () => {
+    const many = Array.from({ length: 17 }, (_, i) => ({ txid: String(i).padStart(64, '0'), vout: 0, value: 100 }))
+    const { store, service } = await build({
+      arkade: sweepableArkade({ findLockups: vi.fn().mockResolvedValue(many) }),
+    })
+    await store.transition('swap-1', 'quoted', 'refused')
+
+    expect(await service.refundSweep()).toEqual(['swap-1'])
+    const row = await store.get('swap-1')
+    expect(row.refundOutcome).toBeNull()
+    expect(row.refundArkTxid).toBe('ark-refund-txid')
+    expect((await store.findRefundable()).map((r) => r.id)).toEqual(['swap-1'])
+  })
+
   it('keeps looking when the script reads empty and nothing proves a spend', async () => {
     // One empty read is NOT evidence of a spend — recording "external" on it
     // would report a refunded swap whose sats still sit at the script.

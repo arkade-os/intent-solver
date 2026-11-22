@@ -63,7 +63,7 @@ import {
 import { SWEPT_REFUND_BATCH_TIMEOUT_MS } from '@arkade-os/solver-arkade/arkade/sweptRefund.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
 import { advanceUnrolledClaims, awaitLeftover, lockupLeftover, settleUnrolledClaims } from '../unrolledSpendStep.js'
-import { boundedSpendInputs, MAX_LOCKUP_SPEND_INPUTS } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { boundedSpendInputs, MAX_LOCKUP_SPEND_INPUTS, refundRecord } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import type { HoldState, ReceiveBackend, SendBackend, SendHtlcState } from '@arkade-os/solver-core/ports/lightning.js'
 import { PaymentHashRegistered, PaymentNotStarted } from '@arkade-os/solver-core/ports/lightning.js'
 import type { ReceiveSwapRow } from '../db/receiveSwaps.js'
@@ -955,9 +955,7 @@ export class SendSwapService {
       return false
     }
     const txid = await arkade.refund(row, outputs)
-    // The wallet spends only what boundedSpendInputs selects: the row stays refundable for what it left.
-    const all = boundedSpendInputs(outputs, this.now()).length === outputs.length
-    await store.patch(row.id, all ? { refund_outcome: 'pushed', refund_ark_txid: txid } : { refund_ark_txid: txid })
+    await store.patch(row.id, refundRecord(outputs, txid, this.now()))
     return true
   }
 
@@ -1274,7 +1272,7 @@ export class SendSwapService {
     // happened — an empty script written up as a broken refund, or worse, a
     // refund that broadcast written up as failed.
     let txid: string
-    let all = false
+    let record: { refund_ark_txid: string; refund_outcome?: 'pushed' }
     try {
       const outputs = await arkade.findLockups(row.pkScript)
       if (outputs.length === 0) {
@@ -1288,7 +1286,7 @@ export class SendSwapService {
         return false
       }
       txid = await arkade.refund(row, outputs)
-      all = boundedSpendInputs(outputs, this.now()).length === outputs.length
+      record = refundRecord(outputs, txid, this.now())
     } catch (error) {
       // Recorded on the row: `stuck` is excluded from `findRefundable`, so the
       // operator is the retry, and a bare `refund_outcome` null would read as
@@ -1305,17 +1303,10 @@ export class SendSwapService {
     // human reads it and acts. The txid goes into the log instead, which is the
     // only other durable place it can go.
     // Only a full refund earns the one-way `refund_outcome`; a partial one stays refundable for the sweep.
-    await store
-      .patch(
-        row.id,
-        all
-          ? { refund_outcome: 'pushed', refund_ark_txid: txid, refund_attempt: 'pushed' }
-          : { refund_ark_txid: txid, refund_attempt: 'pushed' },
-      )
-      .catch((error: unknown) => {
-        const reason = error instanceof Error ? error.message : String(error)
-        this.onTickError?.(row.id, new Error(`refund ${txid} broadcast but could not be recorded: ${reason}`))
-      })
+    await store.patch(row.id, { ...record, refund_attempt: 'pushed' }).catch((error: unknown) => {
+      const reason = error instanceof Error ? error.message : String(error)
+      this.onTickError?.(row.id, new Error(`refund ${txid} broadcast but could not be recorded: ${reason}`))
+    })
     return true
   }
 
