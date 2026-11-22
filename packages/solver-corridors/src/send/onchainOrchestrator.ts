@@ -516,8 +516,21 @@ export class OnchainSendSwapService {
     return { fromAmount, toAmount }
   }
 
-  async canBid(fromAmount: number, toAmount: number): Promise<boolean> {
-    return (await this.admission.canAdmit?.(this.admissionRequest(fromAmount, toAmount))) ?? false
+  async canBid(fromAmount: number, toAmount: number, side: 'from' | 'to'): Promise<boolean> {
+    if (!this.admission.canAdmit) return false
+    const giveSats =
+      side === 'to' ? this.pricing.giveFor({ pair: RFQ_PAIR_ONCHAIN_SEND, payoutSats: toAmount }) : fromAmount
+    const payoutSats = side === 'from' ? this.pricing.payoutFor({ pair: RFQ_PAIR_ONCHAIN_SEND, giveSats }) : toAmount
+    const { minSats, maxSats } = this.deps.limits
+    if (
+      !Number.isSafeInteger(giveSats) ||
+      giveSats < minSats ||
+      giveSats > maxSats ||
+      !Number.isSafeInteger(payoutSats) ||
+      payoutSats < this.refundablePayoutFloor()
+    )
+      return false
+    return this.admission.canAdmit(this.admissionRequest(giveSats, payoutSats))
   }
 
   tick(id: string): Promise<OnchainSendSwapRow> {

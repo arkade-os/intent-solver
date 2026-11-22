@@ -466,7 +466,10 @@ export class SendSwapService {
 
   async canBid(fromAmount: number, toAmount: number): Promise<boolean> {
     if (!this.admission.canAdmit) return false
-    const routingFeeSats = Math.min(maxRoutingFeeSats(toAmount), fromAmount - toAmount)
+    // An estimate can charge routing against the spread. The invoice that determines it is private at bid time.
+    const routingFeeSats = this.deps.ln.estimateSendFee
+      ? fromAmount - toAmount
+      : Math.min(maxRoutingFeeSats(toAmount), fromAmount - toAmount)
     const float = await this.lightningFloatRequirement(toAmount + routingFeeSats)
     return this.admission.canAdmit(this.admissionRequest(fromAmount, float))
   }

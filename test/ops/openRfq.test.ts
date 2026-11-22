@@ -15,6 +15,7 @@ import { giveSatsFor, payoutSatsFor, type Fee } from '@arkade-os/solver-core/cor
 import { SendSwapService } from '@arkade-os/solver-corridors/send/orchestrator.js'
 import { OnchainSendSwapService } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
+import { networkFeePricing } from '@arkade-os/solver-core/core/pricing.js'
 import type { OpenRfq } from '@arkade-os/solver-core/core/openRfq.js'
 import {
   RFQ_ASSET_SWAP_DIRECTED,
@@ -218,6 +219,67 @@ describe('public price previews', () => {
     expect(await preview(request)).toMatchObject({ to_amount: '2000' })
     expect(admission.outstandingSats).toBe(0)
     expect(admission.outstandingFloatSats).toBe(0)
+  })
+
+  it('checks the live onchain payout and funding fee while retaining ceiling prices in the bid', async () => {
+    const base = source()
+    const pair = 'arkade:BTC->onchain:BTC'
+    let available = 10_000
+    let committed = 0
+    const services = {
+      ...base,
+      bootPolicy: {
+        ...base.bootPolicy,
+        corridorFees: { ...base.bootPolicy.corridorFees, [pair]: fee },
+        corridorLimits: { ...base.bootPolicy.corridorLimits, [pair]: bounds },
+      },
+      onchainService: new OnchainSendSwapService({
+        admission: new AdmissionControl(),
+        limits: bounds,
+        maxExposedSats: 10_000,
+        totalCommitted: async () => committed,
+        network: 'bitcoin',
+        refundDestinationScript: new Uint8Array([0, 20, ...new Uint8Array(20)]),
+        pricing: networkFeePricing({ base: { bps: 0, flatSats: 0 }, costSats: () => 100, capSats: 200 }),
+        float: { read: () => ({ sats: available, ageMs: 0 }), fundingFeeSats: () => 200 },
+        store: { owedPayoutSats: async () => 0 },
+      } as never),
+    }
+    const preview = openRfqPreview(services as unknown as Services, { now: () => 1800000000 })
+    const route = `${btc}->bitcoin:bitcoin/slip44:0`
+    const exactIn = open(route, '10000', 'from')
+
+    expect(await preview(exactIn)).toBeUndefined()
+    available = 10_100
+    expect(await preview(exactIn)).toMatchObject({ from_amount: '10000', to_amount: '9800' })
+    committed = 50
+    expect(await preview(open(route, '9850', 'to'))).toMatchObject({ from_amount: '10050', to_amount: '9850' })
+  })
+
+  it('checks float for the full Lightning bid when routing can be subsidized by the spread', async () => {
+    const base = source()
+    let available = 2_025
+    const services = {
+      ...base,
+      service: new SendSwapService({
+        admission: new AdmissionControl(),
+        limits: bounds,
+        fee: { bps: 100, flatSats: 0 },
+        maxExposedSats: 100_000,
+        totalCommitted: async () => 0,
+        ln: {
+          getBalance: async () => ({ availableSats: available }),
+          estimateSendFee: vi.fn(async () => ({ feeSats: 35, billableFeeSats: 0 })),
+        },
+        store: { findByStates: async () => [] },
+      } as never),
+    }
+    const preview = openRfqPreview(services as unknown as Services, { now: () => 1800000000 })
+    const request = open(`${btc}->bolt11:bitcoin/slip44:0`, '2000', 'to')
+
+    expect(await preview(request)).toBeUndefined()
+    available = 2_046
+    expect(await preview(request)).toMatchObject({ from_amount: '2046', to_amount: '2000' })
   })
 
   it('refuses unsafe exact-out inversions while preserving safe maximum free previews', async () => {
