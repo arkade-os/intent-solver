@@ -22,7 +22,6 @@
 import { randomUUID } from 'node:crypto'
 import type { AdmissionStrategy } from '@arkade-os/solver-core/core/admissionStrategy.js'
 import { RFQ_PAIR_SEND } from '../wire/payloads.js'
-import { ArkAddress } from '@arkade-os/sdk'
 import { hex } from '@scure/base'
 import {
   DEFAULT_LOCKUP_TIMEOUT,
@@ -52,8 +51,8 @@ import {
   paymentHashOf,
   type DroppedHint,
 } from '@arkade-os/solver-core/invoice/decode.js'
-import { preimageMatchesHash, scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
-import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { preimageMatchesHash } from '@arkade-os/solver-core/core/preimage.js'
+import { arkadeAddressPkScript, clientFundedLockupScript } from '@arkade-os/solver-arkade/arkade/quoteLockup.js'
 import { claimOutputs, satsOutputs } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import type { FundedOutput } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import {
@@ -524,24 +523,9 @@ export class SendSwapService {
       })
     }
 
-    let refundPkScript: Uint8Array
-    try {
-      const address = ArkAddress.decode(refundAddress)
-      refundPkScript = address.pkScript
-      if (!refundAddress.toLowerCase().startsWith(`${arkade.hrp}1`)) {
-        return { accepted: false, reason: 'invalid_refund_address' }
-      }
-      // An Arkade address embeds the server its vtxo lives on. A covenant
-      // refund pushed to an address of a DIFFERENT deployment lands somewhere
-      // the client can only spend with that other server's cooperation — the
-      // "anyone can push it back" story silently stops holding. Only refunds to
-      // THIS server are recoverable, so anything else is refused at quote time.
-      if (hex.encode(address.serverPubKey) !== arkade.serverPubkey) {
-        return { accepted: false, reason: 'invalid_refund_address' }
-      }
-    } catch {
-      return { accepted: false, reason: 'invalid_refund_address' }
-    }
+    // Only a refund to THIS server is recoverable without another deployment's cooperation.
+    const refundPkScript = arkadeAddressPkScript(refundAddress, arkade.hrp, arkade.serverPubkey)
+    if (refundPkScript === null) return { accepted: false, reason: 'invalid_refund_address' }
 
     const quotedAt = this.now()
     let acceptance = evaluateSendAcceptance({
@@ -716,23 +700,12 @@ export class SendSwapService {
         this.now,
         this.deps.chainTip,
       )
-      const script = new CovenantSwapScript({
-        receiver: hex.decode(arkade.providerPubkey),
-        server: serverKey,
-        preimageHash: scriptHashFromPaymentHash(decoded.paymentHash),
+      const script = clientFundedLockupScript(arkade, {
+        paymentHash: decoded.paymentHash,
         refundLocktime,
-        claimDelay: ladder.unilateralClaimDelay,
-        client: hex.decode(options.clientRefundPubkey),
-        clientRefundDelay: ladder.unilateralRefundWithoutReceiverDelay,
-        refundWithoutServerDelay: ladder.unilateralRefundDelay,
-        // Every quote from here on carries the current, full covenant suite —
-        // no legacy selector. See `NonInteractiveParameters.legacy`'s own doc comment
-        // for why that is not simply always omitted.
-        nonInteractiveParameters: {
-          emulatorPubkey: hex.decode(arkade.emulatorPubkey),
-          receiverPkScript: hex.decode(arkade.receiverPkScript),
-          senderPkScript: refundPkScript,
-        },
+        delays: ladder,
+        clientRefundPubkey: options.clientRefundPubkey,
+        refundPkScript,
       })
 
       try {
