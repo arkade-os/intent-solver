@@ -58,8 +58,8 @@ describe('Endpoint', () => {
 })
 
 describe('checkBps', () => {
-  it('takes whole basis points from 0 up to the given ceiling, 9999 unless told otherwise', () => {
-    expect([checkBps('fee', 0), checkBps('fee', 9_999), checkBps('fee', 10_000, 10_000)]).toEqual([0, 9_999, 10_000])
+  it('takes whole basis points from 0 to 9999, never the whole amount', () => {
+    expect([checkBps('fee', 0), checkBps('fee', 9_999)]).toEqual([0, 9_999])
     for (const bad of [-1, 1.5, 10_000, Number.NaN])
       expect(() => checkBps('fee', bad)).toThrow('fee must be 0..9999 bps')
   })
