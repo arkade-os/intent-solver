@@ -1,16 +1,24 @@
 /**
- * What an `arkade:BTC->lightning:BTC` swap should do next, up to the moment it starts paying. Pure: the
+ * What an `arkade:BTC->lightning:BTC` swap should do next, up to the moment it submits the payment. Pure: the
  * orchestrator reads, this decides, the orchestrator acts. Same shape as `receivePlan.ts`: the planner asks
  * reads the outside world through `SendReads`, in the order the rules need it.
  *
- * Of `paying` and `paid`, the rules for a polled payment and for closing a failed one are here; the sends,
- * the crash recovery and `claiming` stay in the orchestrator for now.
+ * Of `paying` and `paid`: the gates in front of the payment (`planPayment`), what a polled payment means
+ * and how a failed one closes. The sends, the crash recovery and `claiming` stay in the orchestrator for now.
  */
 
 import { decodeInvoice } from '../invoice/decode.js'
 import type { PaymentResult } from '../ports/lightning.js'
 import { judgeClientLockup, type ClientLockup } from './clientLockup.js'
-import { evaluateSendPayment, lockupDeadlineFor, refundWithoutReceiverDelayCovers } from './send.js'
+import { maxRoutingFeeSats } from './limits.js'
+import {
+  deadlineContainsHtlc,
+  evaluateSendPayment,
+  hintCltvBlocks,
+  lockupDeadlineFor,
+  payableCltvBlocks,
+  refundWithoutReceiverDelayCovers,
+} from './send.js'
 
 export const SEND_KEY_ROTATED = 'provider key rotated since quote; refusing to pay an unclaimable lockup'
 export const SEND_COUPLED_REFUSED = 'coupled receive refused before funding; client refund pending'
@@ -192,6 +200,88 @@ const payOrRefuse = async (row: SendPlanRow, refundDeadline: number, reads: Send
   })
   if (!decision.pay) return fail(`refused to pay: ${decision.reason}`)
   return (await reads.approved()) ? { do: 'start_paying' } : WAIT
+}
+
+export interface PaymentPlanRow {
+  idempotencyKey: string | null
+  createdAt: number
+  invoice: string
+  refundWithoutReceiverDelay: number
+  quotedRefundDeadline: number | null
+  quotedRoutingFeeSats: number | null
+}
+
+export type PaymentReads = Pick<
+  SendReads,
+  | 'now'
+  | 'providerKeyCurrent'
+  | 'refundDeadline'
+  | 'hintDenylist'
+  | 'routeCltvBudgetBlocks'
+  | 'enforcesRouteCltv'
+  | 'payDeadline'
+>
+
+export type PaymentAction =
+  | { do: 'pay'; idempotencyKey: string; maxFeeSats: number; maxCltvBlocks: number }
+  /** Closed with nothing owed: the caller proved no payment is committed. */
+  | { do: 'refuse'; reason: string }
+  /** A payment may be out; the store decides where an exposed row is parked. */
+  | { do: 'fail'; reason: string }
+
+/**
+ * The gates in front of every submission, the first and each re-submission after a crash.
+ *
+ * `nothingCommitted` is the caller's proof, from a read earlier in the same tick, that no payment is
+ * committed against this hash. It is not read again here.
+ */
+export const planPayment = async (
+  row: PaymentPlanRow,
+  nothingCommitted: boolean,
+  reads: PaymentReads,
+): Promise<PaymentAction> => {
+  // Unreachable by construction; refusing to pay without one is the point.
+  if (!row.idempotencyKey) return { do: 'fail', reason: 'paying state with no idempotency key' }
+  const refuse = (reason: string): PaymentAction => ({ do: nothingCommitted ? 'refuse' : 'fail', reason })
+
+  // A row recovered in `paying` re-submits on whatever key is configured now, and the claim throws on a
+  // mismatch rather than reaching for a retained key.
+  if (!reads.providerKeyCurrent()) return refuse('refused to pay: provider key rotated since quote')
+  const refundDeadline = await reads.refundDeadline()
+  if (
+    !refundWithoutReceiverDelayCovers(
+      row.refundWithoutReceiverDelay,
+      row.quotedRefundDeadline ?? refundDeadline,
+      row.createdAt,
+    )
+  ) {
+    return refuse('refused to pay: client_solo_refund_too_soon')
+  }
+  const invoice = decodeInvoice(row.invoice, reads.hintDenylist())
+  const cltv = {
+    minFinalCltvBlocks: invoice.minFinalCltvBlocks,
+    worstRouteHintCltvBlocks: invoice.worstRouteHintCltvBlocks,
+    bestRouteHintCltvBlocks: invoice.bestRouteHintCltvBlocks,
+    routeCltvBudgetBlocks: reads.routeCltvBudgetBlocks(),
+    enforcesRouteCltv: reads.enforcesRouteCltv(),
+  }
+  // The rail may have changed since the quote, and a re-submission asks none of the pay-time gates of
+  // `funded`. Seconds: the CLTV budget is Lightning's wall clock.
+  const payDeadline = await reads.payDeadline(refundDeadline)
+  if (!reads.enforcesRouteCltv() && !deadlineContainsHtlc(cltv, payDeadline, reads.now())) {
+    return refuse('refused to pay: uncapped_route_deadline_too_short')
+  }
+  const maxCltvBlocks = payableCltvBlocks(cltv, payDeadline, reads.now())
+  // A budget this short is a refusal, not a ceiling (see `payableCltvBlocks`).
+  if (maxCltvBlocks <= cltv.minFinalCltvBlocks + hintCltvBlocks(cltv)) {
+    return refuse('refused to pay: cltv_budget_too_short')
+  }
+  return {
+    do: 'pay',
+    idempotencyKey: row.idempotencyKey,
+    maxFeeSats: row.quotedRoutingFeeSats ?? maxRoutingFeeSats(invoice.amountSats),
+    maxCltvBlocks,
+  }
 }
 
 /**

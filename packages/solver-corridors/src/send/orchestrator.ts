@@ -29,11 +29,7 @@ import {
   evaluateCouplingDeadlines,
   evaluateSendAcceptance,
   evaluateSendPayment,
-  payableCltvBlocks,
-  deadlineContainsHtlc,
-  hintCltvBlocks,
   unilateralLadderFor,
-  refundWithoutReceiverDelayCovers,
   type SendAcceptanceRefusal,
 } from '@arkade-os/solver-core/core/send.js'
 import { maxRoutingFeeSats, type Limits } from '@arkade-os/solver-core/core/limits.js'
@@ -75,6 +71,7 @@ import {
   closeFailedPayment,
   NO_RECORD_GRACE_SECONDS,
   ownNodeMayCollect,
+  planPayment,
   planPolledPayment,
   planSend,
   SEND_COUPLED_REFUSED,
@@ -1366,79 +1363,27 @@ export class SendSwapService {
 
   /**
    * @param nothingCommitted proof, held by the caller, that no payment is
-   * committed against this row's hash — see the route-deadline gate below,
-   * which is the only thing that reads it.
+   * committed against this row's hash — read by `planPayment`'s gates and by
+   * the `PaymentNotStarted` catch below.
    */
   private async submitPayment(row: SendSwapRow, nothingCommitted: boolean): Promise<boolean> {
     const { store, ln } = this.deps
-    if (!row.idempotencyKey) {
-      // Unreachable by construction; refusing to pay without one is the point.
-      await store.fail(row.id, row.state, 'paying state with no idempotency key')
+    const next = await planPayment(row, nothingCommitted, this.readsFor(row))
+    if (next.do === 'fail') {
+      await store.fail(row.id, row.state, next.reason)
       return false
     }
-    // A row recovered in `paying` re-submits on whatever key is configured now, and
-    // `ArkadeOps.claim` throws on a mismatch rather than reaching for a retained key.
-    if (row.receiverPubkey !== this.deps.arkade.providerPubkey) {
-      const reason = 'refused to pay: provider key rotated since quote'
-      if (nothingCommitted) await store.transition(row.id, row.state, 'refused', { failure_reason: reason })
-      else await store.fail(row.id, row.state, reason)
-      return false
-    }
-    const refundDeadlineForCltv = await refundDeadlineSeconds(
-      row.refundLocktime,
-      this.now,
-      this.deps.chainTip,
-      DEADLINE_SECONDS_PURPOSE,
-    )
-    if (
-      !refundWithoutReceiverDelayCovers(
-        row.refundWithoutReceiverDelay,
-        row.quotedRefundDeadline ?? refundDeadlineForCltv,
-        row.createdAt,
-      )
-    ) {
-      const reason = 'refused to pay: client_solo_refund_too_soon'
-      if (nothingCommitted) await store.transition(row.id, row.state, 'refused', { failure_reason: reason })
-      else await store.fail(row.id, row.state, reason)
-      return false
-    }
-    // Decoded once for every field below — same reasoning as `whenFunded`'s.
-    const invoice = decodeInvoice(row.invoice, this.sendHintScidDenylist)
-    const cltv = {
-      minFinalCltvBlocks: invoice.minFinalCltvBlocks,
-      worstRouteHintCltvBlocks: invoice.worstRouteHintCltvBlocks,
-      bestRouteHintCltvBlocks: invoice.bestRouteHintCltvBlocks,
-      routeCltvBudgetBlocks: ln.routeCltvBudgetBlocks,
-      enforcesRouteCltv: ln.enforcesRouteCltv,
-    }
-    // The rail-change gate's second door: `whenPaying` re-submits a row that died
-    // before `payInvoice` on whatever backend runs NOW, without re-asking pay-time
-    // gates. Refuse only on `nothingCommitted` (the caller's proof nothing was paid);
-    // a backend with no probe has proved nothing, so that row still parks `stuck`.
-    // Seconds, as in `whenFunded`: the CLTV budget is Lightning's wall clock.
-    const payDeadline = await this.payDeadline(row, refundDeadlineForCltv)
-    if (!ln.enforcesRouteCltv && !deadlineContainsHtlc(cltv, payDeadline, this.now())) {
-      const reason = 'refused to pay: uncapped_route_deadline_too_short'
-      if (nothingCommitted) await store.transition(row.id, row.state, 'refused', { failure_reason: reason })
-      else await store.fail(row.id, row.state, reason)
-      return false
-    }
-    const maxCltvBlocks = payableCltvBlocks(cltv, payDeadline, this.now())
-    // `evaluateSendPayment`'s floor, which `whenPaying` never asks: a budget this short is
-    // a refusal, not a ceiling (see `payableCltvBlocks`).
-    if (maxCltvBlocks <= cltv.minFinalCltvBlocks + hintCltvBlocks(cltv)) {
-      const reason = 'refused to pay: cltv_budget_too_short'
-      if (nothingCommitted) await store.transition(row.id, row.state, 'refused', { failure_reason: reason })
-      else await store.fail(row.id, row.state, reason)
+    if (next.do === 'refuse') {
+      await store.transition(row.id, row.state, 'refused', { failure_reason: next.reason })
       return false
     }
     let result
     try {
       result = await ln.payInvoice({
         invoice: row.invoice,
-        maxFeeSats: row.quotedRoutingFeeSats ?? maxRoutingFeeSats(invoice.amountSats),
-        idempotencyKey: row.idempotencyKey,
-        maxCltvBlocks,
+        maxFeeSats: next.maxFeeSats,
+        idempotencyKey: next.idempotencyKey,
+        maxCltvBlocks: next.maxCltvBlocks,
       })
     } catch (error) {
       if (!(error instanceof PaymentNotStarted) || !nothingCommitted) throw error
