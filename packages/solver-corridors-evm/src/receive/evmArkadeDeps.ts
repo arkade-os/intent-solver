@@ -99,8 +99,15 @@ export const evmReceiveArkadeDeps = (
      * the EVM claim as a string - the shape the row's `preimage` column holds.
      */
     arkadePreimage: async (row) => {
-      const preimage = await preimages.find(row, await arkade.findLockupOutpoints(row.pkScript))
-      return preimage === null ? null : hex.encode(preimage)
+      const outpoints = await arkade.findLockupOutpoints(row.pkScript)
+      if (outpoints.length === 0) return null
+      const claimed = await arkade.findClaimPreimage(outpoints, row.paymentHash)
+      if (claimed !== null) return hex.encode(claimed)
+      // An L1 read that fails is reported and read as "nothing yet": a throw here would stop the tick, and
+      // with it the refund of whatever is still on Arkade. The next tick asks again.
+      const unrolled = outpoints.filter((outpoint) => outpoint.unrolled)
+      const onL1 = await preimages.find(row, unrolled).catch((error: Error) => (report(row.id, error), null))
+      return onL1 === null ? null : hex.encode(onL1)
     },
     lockFor: receiveLockFromRow,
   }

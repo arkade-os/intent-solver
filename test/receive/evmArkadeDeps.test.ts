@@ -160,6 +160,19 @@ describe('arkadePreimage', () => {
       expect(await evmReceiveArkadeDeps(ops, onchain).arkadePreimage(paidTo)).toBeNull()
     })
 
+    it('is null while the L1 output is still unspent', async () => {
+      const { ops, onchain } = claimedOnL1(null)
+      expect(await evmReceiveArkadeDeps(ops, onchain).arkadePreimage(paidTo)).toBeNull()
+      expect(onchain.findSpendWitness).toHaveBeenCalledOnce()
+    })
+
+    it('prefers a claim made on Arkade and does not look on L1', async () => {
+      const { ops, onchain } = claimedOnL1([preimage])
+      vi.mocked(ops.findClaimPreimage).mockResolvedValue(preimage)
+      expect(await evmReceiveArkadeDeps(ops, onchain).arkadePreimage(paidTo)).toBe(hex.encode(preimage))
+      expect(onchain.findSpendWitness).not.toHaveBeenCalled()
+    })
+
     it('says once that it cannot look, and answers null, with no L1 backend', async () => {
       const { ops } = claimedOnL1(null)
       const report = vi.fn()
@@ -169,10 +182,37 @@ describe('arkadePreimage', () => {
       expect(report).toHaveBeenCalledOnce()
     })
 
-    it('throws when the L1 read fails, so the tick asks again', async () => {
-      const { ops } = claimedOnL1(null)
+    it('reports an L1 read that fails and answers null, so the refund of what is still on Arkade goes on', async () => {
+      const ops = opsWith({
+        findLockupOutpoints: vi
+          .fn()
+          .mockResolvedValue([{ txid: 'ours', vout: 0, value: 99_000, spent: false }, unrolled]),
+        findClaimPreimage: vi.fn().mockResolvedValue(null),
+      })
       const onchain = { findSpendWitness: vi.fn().mockRejectedValue(new Error('esplora down')) }
-      await expect(evmReceiveArkadeDeps(ops, onchain).arkadePreimage(paidTo)).rejects.toThrow('esplora down')
+      const report = vi.fn()
+      expect(await evmReceiveArkadeDeps(ops, onchain, report).arkadePreimage(paidTo)).toBeNull()
+      expect(report).toHaveBeenCalledWith(paidTo.id, expect.objectContaining({ message: 'esplora down' }))
+    })
+
+    it('still throws when the Arkade read itself fails', async () => {
+      const ops = opsWith({
+        findLockupOutpoints: vi.fn().mockResolvedValue([unrolled]),
+        findClaimPreimage: vi.fn().mockRejectedValue(new Error('indexer down')),
+      })
+      const onchain = { findSpendWitness: vi.fn() }
+      await expect(evmReceiveArkadeDeps(ops, onchain).arkadePreimage(paidTo)).rejects.toThrow('indexer down')
+      expect(onchain.findSpendWitness).not.toHaveBeenCalled()
+    })
+
+    it('does not look on L1 for a lockup that never left Arkade', async () => {
+      const ops = opsWith({
+        findLockupOutpoints: vi.fn().mockResolvedValue([{ txid: 'ours', vout: 0, value: 99_000, spent: true }]),
+        findClaimPreimage: vi.fn().mockResolvedValue(null),
+      })
+      const onchain = { findSpendWitness: vi.fn() }
+      expect(await evmReceiveArkadeDeps(ops, onchain).arkadePreimage(paidTo)).toBeNull()
+      expect(onchain.findSpendWitness).not.toHaveBeenCalled()
     })
   })
 
