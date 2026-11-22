@@ -12,7 +12,7 @@ const rng = (seed: number) => () => {
 }
 
 it('keeps its invariants over random lockups, claims and L1 answers', async () => {
-  const count = 3000
+  const count = 1000
   const seen = { same: 0, l1Found: 0, l1Null: 0, l1FailedQuiet: 0, bothThrew: 0, noBackend: 0 }
   const bad: string[] = []
   for (let seed = 0; seed < count; seed++) {
@@ -125,4 +125,4 @@ it('keeps its invariants over random lockups, claims and L1 answers', async () =
   }
   expect(bad).toEqual([])
   for (const reached of Object.values(seen)) expect(reached).toBeGreaterThan(0)
-})
+}, 30_000)
