@@ -24,6 +24,8 @@
 (*                           decide (the same names, one per state)        *)
 (*                           planPayment: the gates in front of the        *)
 (*                           payment, asked by submitPayment               *)
+(*                           planPolledPayment, closeFailedPayment: what   *)
+(*                           settleFromBackend decides                     *)
 (*     core/clientLockup.ts  judgeClientLockup: whenQuoted's rules         *)
 (*     core/send.ts          MIN_INVOICE_WINDOW, MIN_CLAIM_WINDOW,         *)
 (*                           DEFAULT_LOCKUP_TIMEOUT, evaluateSendPayment,  *)
