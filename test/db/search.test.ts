@@ -21,7 +21,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { pageQuery, MIN_SEARCH_LENGTH, PageRequestError } from '@arkade-os/solver-core/core/page.js'
 
@@ -158,7 +158,12 @@ describe('each corridor searches columns it actually has', () => {
   }
 
   const declaredBy = (path: string): Set<string> => {
-    const source = readFileSync(fileURLToPath(new URL(`../../${path}`, import.meta.url)), 'utf8')
+    // The schema sits beside the store, in `<store>.sql.ts`, once a store's SQL has been named.
+    const named = fileURLToPath(new URL(`../../${path.replace(/\.ts$/, '.sql.ts')}`, import.meta.url))
+    const source = readFileSync(
+      existsSync(named) ? named : fileURLToPath(new URL(`../../${path}`, import.meta.url)),
+      'utf8',
+    )
     return new Set(
       [...source.matchAll(/^\s{2}([a-z_]+)\s+(?:TEXT|INTEGER)/gm)]
         .map((m) => m[1])
