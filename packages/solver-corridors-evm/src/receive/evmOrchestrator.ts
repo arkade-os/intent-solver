@@ -25,7 +25,6 @@ import type { EvmBroadcaster } from '../send/evmOrchestrator.js'
 import type { EvmHtlcBackend, EvmTransactionOutcome, TimelockHeight } from '@arkade-os/solver-core/ports/evm.js'
 import type { Erc20SwapLock } from '@arkade-os/solver-rails-evm/evm/erc20Swap.js'
 import { hex } from '@scure/base'
-import { ArkAddress } from '@arkade-os/sdk'
 import type { ReceiveArkadeOps } from '@arkade-os/solver-arkade/arkade/arkadeOps.js'
 import { provenDepth } from '@arkade-os/solver-rails-evm/evm/lockDepth.js'
 import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
@@ -43,6 +42,7 @@ import {
 } from '@arkade-os/solver-core/core/evmReceive.js'
 import { deadlineSecondsForBlock, type EvmBlockCadence } from '@arkade-os/solver-rails-evm/evm/blockTime.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { arkadeAddressPkScript } from '@arkade-os/solver-arkade/arkade/quoteLockup.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
@@ -337,15 +337,8 @@ export class EvmReceiveSwapService {
     if (served === undefined) return { accepted: false, reason: 'unsupported_token' }
     const { token, market, limits, fee } = served
 
-    let payoutPkScript: Uint8Array
-    try {
-      payoutPkScript = ArkAddress.decode(request.payoutAddress).pkScript
-      if (!request.payoutAddress.toLowerCase().startsWith(`${arkade.hrp}1`)) {
-        return { accepted: false, reason: 'invalid_payout_address' }
-      }
-    } catch {
-      return { accepted: false, reason: 'invalid_payout_address' }
-    }
+    const payoutPkScript = arkadeAddressPkScript(request.payoutAddress, arkade.hrp, null)
+    if (payoutPkScript === null) return { accepted: false, reason: 'invalid_payout_address' }
 
     // The client's own figure, parsed rather than trusted: a non-decimal would
     // otherwise reach `BigInt` and throw out of the quote instead of being

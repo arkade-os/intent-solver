@@ -27,7 +27,6 @@
 
 import { randomUUID } from 'node:crypto'
 import type { AdmissionStrategy } from '@arkade-os/solver-core/core/admissionStrategy.js'
-import { ArkAddress } from '@arkade-os/sdk'
 import { hex } from '@scure/base'
 import {
   evaluateReceiveFunding,
@@ -51,6 +50,7 @@ import { fixedFeePricing, type PricingStrategy } from '@arkade-os/solver-core/co
 import { RFQ_PAIR_RECEIVE } from '../wire/lightningReceivePayloads.js'
 import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { arkadeAddressPkScript } from '@arkade-os/solver-arkade/arkade/quoteLockup.js'
 import { satsOutputs, type FundedOutput } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
 import { parseUnrolledSpend, type UnrolledSpendRecord } from '@arkade-os/solver-arkade/arkade/unrolledSpend.js'
@@ -374,16 +374,8 @@ export class ReceiveSwapService {
     }
     if (payoutSats < (arkade.minOutputSats ?? 0)) return { accepted: false, reason: 'payout_below_dust' }
 
-    let payoutPkScript: Uint8Array
-    try {
-      const address = ArkAddress.decode(request.payoutAddress)
-      payoutPkScript = address.pkScript
-      if (!request.payoutAddress.toLowerCase().startsWith(`${arkade.hrp}1`)) {
-        return { accepted: false, reason: 'invalid_payout_address' }
-      }
-    } catch {
-      return { accepted: false, reason: 'invalid_payout_address' }
-    }
+    const payoutPkScript = arkadeAddressPkScript(request.payoutAddress, arkade.hrp, null)
+    if (payoutPkScript === null) return { accepted: false, reason: 'invalid_payout_address' }
 
     // Before the mint below: a hash live anywhere is spoken for, and a declined
     // quote must not leave a hold invoice.
