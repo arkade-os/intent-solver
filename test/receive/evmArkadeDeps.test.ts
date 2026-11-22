@@ -9,6 +9,7 @@
 
 import { describe, it, expect, vi } from 'vitest'
 import { hex } from '@scure/base'
+import { sha256 } from '@noble/hashes/sha2.js'
 import { evmReceiveArkadeDeps } from '@arkade-os/solver-corridors-evm/receive/evmArkadeDeps.js'
 import type { ReceiveArkadeOps } from '@arkade-os/solver-corridors/receive/arkadeOps.js'
 import type { EvmReceiveSwapRow } from '@arkade-os/solver-corridors-evm/db/evmReceiveSwaps.js'
@@ -134,6 +135,45 @@ describe('arkadePreimage', () => {
       findClaimPreimage: vi.fn().mockResolvedValue(null),
     })
     expect(await evmReceiveArkadeDeps(ops).arkadePreimage(row)).toBeNull()
+  })
+
+  describe('when the lockup left Arkade', () => {
+    const preimage = new Uint8Array(32).fill(7)
+    const unrolled = { txid: 'a', vout: 0, value: 99_000, spent: true, unrolled: true }
+    const claimedOnL1 = (witness: Uint8Array[] | null) => ({
+      ops: opsWith({
+        findLockupOutpoints: vi.fn().mockResolvedValue([unrolled]),
+        findClaimPreimage: vi.fn().mockResolvedValue(null),
+      }),
+      onchain: { findSpendWitness: vi.fn().mockResolvedValue(witness) },
+    })
+    const paidTo = { ...row, paymentHash: hex.encode(sha256(preimage)) }
+
+    it('reads the preimage from the witness of the L1 spend', async () => {
+      const { ops, onchain } = claimedOnL1([new Uint8Array(64), preimage])
+      expect(await evmReceiveArkadeDeps(ops, onchain).arkadePreimage(paidTo)).toBe(hex.encode(preimage))
+      expect(onchain.findSpendWitness).toHaveBeenCalledWith(expect.objectContaining({ txid: 'a', vout: 0 }))
+    })
+
+    it('takes no witness item that does not hash to the payment hash', async () => {
+      const { ops, onchain } = claimedOnL1([new Uint8Array(32).fill(8)])
+      expect(await evmReceiveArkadeDeps(ops, onchain).arkadePreimage(paidTo)).toBeNull()
+    })
+
+    it('says once that it cannot look, and answers null, with no L1 backend', async () => {
+      const { ops } = claimedOnL1(null)
+      const report = vi.fn()
+      const deps = evmReceiveArkadeDeps(ops, undefined, report)
+      expect(await deps.arkadePreimage(paidTo)).toBeNull()
+      expect(await deps.arkadePreimage(paidTo)).toBeNull()
+      expect(report).toHaveBeenCalledOnce()
+    })
+
+    it('throws when the L1 read fails, so the tick asks again', async () => {
+      const { ops } = claimedOnL1(null)
+      const onchain = { findSpendWitness: vi.fn().mockRejectedValue(new Error('esplora down')) }
+      await expect(evmReceiveArkadeDeps(ops, onchain).arkadePreimage(paidTo)).rejects.toThrow('esplora down')
+    })
   })
 
   it('does not ask for a preimage when the script has never held anything', async () => {
