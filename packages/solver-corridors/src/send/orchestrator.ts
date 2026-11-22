@@ -1108,6 +1108,38 @@ export class SendSwapService {
     return this.submitPayment(await store.get(row.id), true)
   }
 
+  /** The live Lightning node compared with the one this row paid on. */
+  private async payingNode(row: SendSwapRow): Promise<{ other: string | null; unconfirmed: boolean }> {
+    const liveWallet = await this.deps.ln.walletFingerprint?.().catch(() => undefined)
+    // A side that recorded nothing cannot be compared, so it does not count as different.
+    const foreignBackend = Boolean(
+      row.paymentBackend && this.deps.backendName && row.paymentBackend !== this.deps.backendName,
+    )
+    const foreignWallet = Boolean(row.paymentWallet && liveWallet && row.paymentWallet !== liveWallet)
+    const other =
+      foreignBackend || foreignWallet
+        ? `payment attempted on ${row.paymentBackend ?? '?'}/${row.paymentWallet ?? '?'}, ` +
+          `now on ${this.deps.backendName ?? '?'}/${liveWallet ?? '?'}; a payment there is invisible here`
+        : null
+    return { other, unconfirmed: Boolean(row.paymentWallet && !liveWallet) }
+  }
+
+  /**
+   * Throws unless the node answering is the one that paid. Thrown, not parked: `stuck` has no way back, and
+   * a node that was wrong for a minute would strand every payment in flight.
+   */
+  private async believeFailureOnlyFromPayingNode(row: SendSwapRow): Promise<void> {
+    const { other, unconfirmed } = await this.payingNode(row)
+    if (other !== null) {
+      throw new Error(`swap ${row.id}: not believing that the payment failed: ${other}`)
+    }
+    if (unconfirmed) {
+      throw new Error(
+        `swap ${row.id}: not believing that the payment failed: cannot read which Lightning node is answering`,
+      )
+    }
+  }
+
   /** Recovery path: the process died (or the call threw) somewhere around payInvoice. */
   private async whenPaying(row: SendSwapRow): Promise<boolean> {
     if (row.paymentId) return this.settleFromBackend(row, 'paying')
@@ -1117,18 +1149,9 @@ export class SendSwapService {
     // human — the same identity guard the coupled refund and `paymentVerdict`
     // apply, here on a row that has no id yet. `stuck`, not `refused`: a payment
     // may exist on the other node, so a refund is not safe.
-    const liveWallet = await this.deps.ln.walletFingerprint?.().catch(() => undefined)
-    const foreignBackend = Boolean(
-      row.paymentBackend && this.deps.backendName && row.paymentBackend !== this.deps.backendName,
-    )
-    const foreignWallet = Boolean(row.paymentWallet && liveWallet && row.paymentWallet !== liveWallet)
-    if (foreignBackend || foreignWallet) {
-      await this.deps.store.fail(
-        row.id,
-        'paying',
-        `refused to re-submit: payment attempted on ${row.paymentBackend ?? '?'}/${row.paymentWallet ?? '?'}, ` +
-          `now on ${this.deps.backendName ?? '?'}/${liveWallet ?? '?'}; a payment there is invisible here — reconcile before retry`,
-      )
+    const { other } = await this.payingNode(row)
+    if (other !== null) {
+      await this.deps.store.fail(row.id, 'paying', `refused to re-submit: ${other} — reconcile before retry`)
       return false
     }
     // No payment id on disk: the payInvoice call may or may not have gone out.
@@ -1675,6 +1698,8 @@ export class SendSwapService {
       return row.preimage ? this.claimWithPreimage(row.id, row.paymentHash, row.preimage) : false
     }
     const polled = await ln.getPayment(row.paymentId)
+    // Before anything of this answer is recorded. A success needs no such check: its preimage proves it.
+    if (polled.status === 'failed') await this.believeFailureOnlyFromPayingNode(row)
     // Record what the backend knew before acting on it, so a fill that has
     // stalled is legible to an operator and to the client instead of reading
     // exactly like a healthy one. Only on a CHANGE: this poll runs every tick,
