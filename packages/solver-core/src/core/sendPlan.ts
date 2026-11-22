@@ -3,10 +3,12 @@
  * orchestrator reads, this decides, the orchestrator acts. Same shape as `receivePlan.ts`: the planner asks
  * reads the outside world through `SendReads`, in the order the rules need it.
  *
- * `paying`, `paid` and `claiming` keep their rules in the orchestrator for now.
+ * Of `paying` and `paid`, the rules for a polled payment and for closing a failed one are here; the sends,
+ * the crash recovery and `claiming` stay in the orchestrator for now.
  */
 
 import { decodeInvoice } from '../invoice/decode.js'
+import type { PaymentResult } from '../ports/lightning.js'
 import { judgeClientLockup, type ClientLockup } from './clientLockup.js'
 import { evaluateSendPayment, lockupDeadlineFor, refundWithoutReceiverDelayCovers } from './send.js'
 
@@ -190,4 +192,56 @@ const payOrRefuse = async (row: SendPlanRow, refundDeadline: number, reads: Send
   })
   if (!decision.pay) return fail(`refused to pay: ${decision.reason}`)
   return (await reads.approved()) ? { do: 'start_paying' } : WAIT
+}
+
+/**
+ * `payInvoice` answers `pending` for an unrecognised error because the request may
+ * still be executing, and a lookup inside that window reports "never heard of this
+ * hash" either way — acting on it refunds a client whose payment then settles.
+ */
+export const NO_RECORD_GRACE_SECONDS = 60
+
+/** Whether a submission is recent enough that a backend may not have recorded it yet. */
+export const submittedWithinGrace = (payAttemptedAt: number | null, now: () => number): boolean =>
+  payAttemptedAt !== null && now() - payAttemptedAt < NO_RECORD_GRACE_SECONDS
+
+/** `advance`: not failed, so the row is `paid` and claims as soon as the poll carries a preimage. */
+export type PolledPaymentAction = 'wait' | 'settle_failure' | 'advance'
+
+/** What one poll of the payment means for a row that has a payment id. */
+export const planPolledPayment = (
+  row: { payAttemptedAt: number | null },
+  polled: Pick<PaymentResult, 'status' | 'evidence'>,
+  now: () => number,
+): PolledPaymentAction => {
+  if (polled.status !== 'failed') return 'advance'
+  return polled.evidence === 'no_record' && submittedWithinGrace(row.payAttemptedAt, now) ? 'wait' : 'settle_failure'
+}
+
+/** Whether our own node, holding an invoice in this status, can still collect against the hash. */
+export const ownNodeMayCollect = (ownInvoiceStatus: string): boolean =>
+  ownInvoiceStatus !== 'pending' && ownInvoiceStatus !== 'cancelled'
+
+/**
+ * What the self-payment probe allows after a failed payment: `withhold` keeps the refund back, `not-ours`
+ * is the probe's answer that the invoice is someone else's, `unknown` is a probe that could not be asked.
+ */
+export type FailedPaymentRecourse = 'withhold' | 'not-ours' | 'unknown'
+
+/**
+ * How a terminally failed payment closes. `refused` only when the client was refunded and the probe
+ * said the invoice is not ours; every other case is left to a person, and says why.
+ */
+export const closeFailedPayment = (
+  refunded: boolean,
+  recourse: FailedPaymentRecourse,
+): { do: 'refuse' | 'fail'; reason: string } => {
+  const said = (why: string) => `lightning payment failed terminally; ${why}`
+  if (refunded && recourse === 'not-ours') return { do: 'refuse', reason: said('client refunded') }
+  // Most urgent first: withheld is money still in play, unlanded is a client still short.
+  if (recourse === 'withhold') {
+    return { do: 'fail', reason: said('refund withheld — our own node may still collect against this hash') }
+  }
+  if (!refunded) return { do: 'fail', reason: said('the refund did not land — see refund_attempt') }
+  return { do: 'fail', reason: said('client refunded, but the self-payment probe could not be asked') }
 }

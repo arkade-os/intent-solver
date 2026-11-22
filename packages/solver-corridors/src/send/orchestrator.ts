@@ -71,7 +71,17 @@ import type { SendSwapRow, SendSwapState, SwapStore } from '../db/swaps.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { sweep } from '@arkade-os/solver-core/util/sweep.js'
 import { wasRead } from '@arkade-os/solver-core/util/wasRead.js'
-import { planSend, SEND_COUPLED_REFUSED, type SendReads } from '@arkade-os/solver-core/core/sendPlan.js'
+import {
+  closeFailedPayment,
+  NO_RECORD_GRACE_SECONDS,
+  ownNodeMayCollect,
+  planPolledPayment,
+  planSend,
+  SEND_COUPLED_REFUSED,
+  submittedWithinGrace,
+  type FailedPaymentRecourse,
+  type SendReads,
+} from '@arkade-os/solver-core/core/sendPlan.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 
 import type { CovenantScriptRow } from '@arkade-os/solver-arkade/arkade/covenantRow.js'
@@ -347,12 +357,7 @@ const HOT_STATES: readonly SendSwapState[] = ['paying', 'paid']
  */
 export const ORPHANED_REGISTRATION_SECONDS = 3600
 
-/**
- * `payInvoice` answers `pending` for an unrecognised error because the request may
- * still be executing, and a lookup inside that window reports "never heard of this
- * hash" either way — acting on it refunds a client whose payment then settles.
- */
-export const NO_RECORD_GRACE_SECONDS = 60
+export { NO_RECORD_GRACE_SECONDS }
 
 /** The pure acceptance gate's refusals, plus the ones only the orchestrator can decide. */
 export type QuoteRefusal =
@@ -400,18 +405,6 @@ type SelfPaymentVerdict =
    * keeps `stuck` for a human even after the refund lands.
    */
   | 'unknown'
-
-/**
- * Why a terminally-failed row is being handed to a human, in the row's own words.
- * Three cases wanting three different actions, all of which used to write the one
- * sentence a genuinely un-refunded row writes. Ordered by urgency: withheld is
- * money still in play, unlanded is a client still short, unasked is neither.
- */
-const stuckBecause = (refunded: boolean, verdict: SelfPaymentVerdict): string => {
-  if (verdict === 'withhold') return 'refund withheld — our own node may still collect against this hash'
-  if (!refunded) return 'the refund did not land — see refund_attempt'
-  return 'client refunded, but the self-payment probe could not be asked'
-}
 
 /** The planner's reads for one tick, and the lockup outputs it read, which adopting them needs in full. */
 interface TickReads extends SendReads {
@@ -1174,13 +1167,7 @@ export class SendSwapService {
     // A probe that reaches the backend before the submission it follows is
     // recorded answers null either way, so inside the grace it is not yet the
     // proof the gates in `submitPayment` treat it as.
-    if (
-      ln.getSendHtlcState !== undefined &&
-      row.payAttemptedAt !== null &&
-      this.now() - row.payAttemptedAt < NO_RECORD_GRACE_SECONDS
-    ) {
-      return false
-    }
+    if (ln.getSendHtlcState !== undefined && submittedWithinGrace(row.payAttemptedAt, this.now)) return false
 
     try {
       // The probe above answering falsy is only PROOF on a backend that has a
@@ -1350,7 +1337,7 @@ export class SendSwapService {
    * verdict therefore means terminal, and a terminal payment cannot later
    * settle. The refund is safe and the row is finished.
    *
-   * The cases that DO still need a human keep `stuck`, and {@link stuckBecause}
+   * The cases that DO still need a human keep `stuck`, and `closeFailedPayment`
    * writes which one onto the row:
    *   - the refund did not land (`refunded` false) — the client is not whole;
    *   - the self-payment probe withheld it — our own node may still collect,
@@ -1369,16 +1356,12 @@ export class SendSwapService {
     row: SendSwapRow,
     from: 'paying' | 'paid',
     refunded: boolean,
-    verdict: SelfPaymentVerdict,
+    verdict: FailedPaymentRecourse,
   ): Promise<void> {
     const { store } = this.deps
-    if (!(refunded && verdict === 'not-ours')) {
-      await store.fail(row.id, from, `lightning payment failed terminally; ${stuckBecause(refunded, verdict)}`)
-      return
-    }
-    await store.transition(row.id, from, 'refused', {
-      failure_reason: 'lightning payment failed terminally; client refunded',
-    })
+    const close = closeFailedPayment(refunded, verdict)
+    if (close.do === 'fail') await store.fail(row.id, from, close.reason)
+    else await store.transition(row.id, from, 'refused', { failure_reason: close.reason })
   }
 
   /**
@@ -1615,7 +1598,7 @@ export class SendSwapService {
     // the lockup back while the payee side may still collect would pay twice.
     // So this verdict withholds the ordinary refund as well — the only case
     // that is stricter than the rule it sits in front of.
-    if (own.status !== 'pending' && own.status !== 'cancelled') return 'withhold'
+    if (ownNodeMayCollect(own.status)) return 'withhold'
 
     // Provably unpaid. Refused, not stuck: nothing of the payee's ever moved,
     // which is exactly the fact `refused` already records everywhere else.
@@ -1730,14 +1713,9 @@ export class SendSwapService {
     if (polled.feePaidSats !== undefined && polled.feePaidSats !== row.routingFeePaidSats) {
       await store.patch(row.id, { routing_fee_paid_sats: polled.feePaidSats })
     }
-    if (polled.status === 'failed') {
-      if (
-        polled.evidence === 'no_record' &&
-        row.payAttemptedAt !== null &&
-        this.now() - row.payAttemptedAt < NO_RECORD_GRACE_SECONDS
-      ) {
-        return false
-      }
+    const next = planPolledPayment(row, polled, this.now)
+    if (next === 'wait') return false
+    if (next === 'settle_failure') {
       // The self-payment exception applies to the polled failure exactly as to
       // the immediate one: from either non-terminal payment state, "failed"
       // plus our own node saying it was never paid is the same provable fact.

@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { sha256 } from '@noble/hashes/sha2.js'
 import {
+  closeFailedPayment,
+  NO_RECORD_GRACE_SECONDS,
+  ownNodeMayCollect,
+  planPolledPayment,
   planSend,
   SEND_KEY_ROTATED,
   type SendAction,
@@ -353,5 +357,71 @@ describe('planSend: other states', () => {
     for (const state of ['claimed', 'refused', 'stuck']) {
       expect(await run(row(state), {})).toEqual({ reads: [], next: WAIT })
     }
+  })
+})
+
+describe('planPolledPayment', () => {
+  const submitted = { payAttemptedAt: NOW - NO_RECORD_GRACE_SECONDS + 1 }
+  const never = () => {
+    throw new Error('the clock was read')
+  }
+
+  it('advances on anything that is not a failure, without reading the clock', () => {
+    expect(planPolledPayment(submitted, { status: 'pending' }, never)).toBe('advance')
+    expect(planPolledPayment(submitted, { status: 'succeeded' }, never)).toBe('advance')
+    expect(planPolledPayment(submitted, { status: 'pending', evidence: 'no_record' }, never)).toBe('advance')
+    expect(planPolledPayment(submitted, { status: 'not-a-status' as never }, never)).toBe('advance')
+  })
+
+  it('waits on "no record" only inside the grace after a submission', () => {
+    const noRecord = { status: 'failed', evidence: 'no_record' } as const
+    let reads = 0
+    expect(planPolledPayment(submitted, noRecord, () => (reads++, NOW))).toBe('wait')
+    expect(reads).toBe(1)
+    expect(planPolledPayment(submitted, noRecord, () => NOW + 1)).toBe('settle_failure')
+    expect(planPolledPayment({ payAttemptedAt: null }, noRecord, never)).toBe('settle_failure')
+  })
+
+  it('settles any other failure at once, without reading the clock', () => {
+    for (const evidence of [undefined, 'terminal', 'in_flight'] as const) {
+      expect(planPolledPayment(submitted, { status: 'failed', evidence }, never)).toBe('settle_failure')
+    }
+  })
+})
+
+describe('ownNodeMayCollect', () => {
+  it('is false only for an invoice still pending or cancelled', () => {
+    expect(['pending', 'cancelled', 'armed', 'settled', 'anything-else'].map(ownNodeMayCollect)).toEqual([
+      false,
+      false,
+      true,
+      true,
+      true,
+    ])
+  })
+})
+
+describe('closeFailedPayment', () => {
+  const said = (why: string) => `lightning payment failed terminally; ${why}`
+
+  it('closes as refused only when refunded and the invoice is not ours', () => {
+    expect(closeFailedPayment(true, 'not-ours')).toEqual({ do: 'refuse', reason: said('client refunded') })
+  })
+
+  it('does not close as refused on an answer it does not know', () => {
+    expect(closeFailedPayment(true, 'resolved' as never).do).toBe('fail')
+  })
+
+  it('leaves every other case to a person, most urgent reason first', () => {
+    const withheld = said('refund withheld — our own node may still collect against this hash')
+    const unlanded = said('the refund did not land — see refund_attempt')
+    expect(closeFailedPayment(true, 'withhold')).toEqual({ do: 'fail', reason: withheld })
+    expect(closeFailedPayment(false, 'withhold')).toEqual({ do: 'fail', reason: withheld })
+    expect(closeFailedPayment(false, 'not-ours')).toEqual({ do: 'fail', reason: unlanded })
+    expect(closeFailedPayment(false, 'unknown')).toEqual({ do: 'fail', reason: unlanded })
+    expect(closeFailedPayment(true, 'unknown')).toEqual({
+      do: 'fail',
+      reason: said('client refunded, but the self-payment probe could not be asked'),
+    })
   })
 })
