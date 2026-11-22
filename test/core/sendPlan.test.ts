@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { sha256 } from '@noble/hashes/sha2.js'
 import {
+  planPayment,
   planSend,
+  type PaymentPlanRow,
+  type PaymentReads,
   SEND_KEY_ROTATED,
   type SendAction,
   type ClientLockup,
@@ -13,6 +16,7 @@ import {
   MIN_INVOICE_WINDOW,
   ROUTE_CLTV_BUDGET_BLOCKS,
 } from '@arkade-os/solver-core/core/send.js'
+import { maxRoutingFeeSats } from '@arkade-os/solver-core/core/limits.js'
 import { forgeInvoice } from '@arkade-os/solver-rails-fake/ln/fake/bolt11.js'
 
 const NOW = 1_800_000_000
@@ -353,5 +357,107 @@ describe('planSend: other states', () => {
     for (const state of ['claimed', 'refused', 'stuck']) {
       expect(await run(row(state), {})).toEqual({ reads: [], next: WAIT })
     }
+  })
+})
+
+describe('planPayment: the gates in front of the payment', () => {
+  const paying = (over: Partial<PaymentPlanRow> = {}): PaymentPlanRow => ({
+    idempotencyKey: 'swap-key',
+    createdAt: NOW,
+    invoice: INVOICE,
+    refundWithoutReceiverDelay: 5_120,
+    quotedRefundDeadline: NOW + 5_000,
+    quotedRoutingFeeSats: null,
+    ...over,
+  })
+  const world = (over: { keyCurrent?: boolean; payDeadline?: number; enforces?: boolean } = {}) => {
+    const asked: string[] = []
+    const reads: PaymentReads = {
+      now: () => NOW,
+      providerKeyCurrent: () => over.keyCurrent ?? true,
+      hintDenylist: () => new Set(),
+      routeCltvBudgetBlocks: () => ROUTE_CLTV_BUDGET_BLOCKS,
+      enforcesRouteCltv: () => over.enforces ?? true,
+      refundDeadline: async () => (asked.push('refundDeadline'), NOW + 5_000),
+      payDeadline: async (refundDeadline) => (
+        asked.push(`payDeadline(${refundDeadline - NOW})`),
+        over.payDeadline ?? NOW + 100 * HOUR
+      ),
+    }
+    return { reads, asked }
+  }
+
+  it('pays with the quoted fee cap, or the default one, and a CLTV ceiling', async () => {
+    const { reads, asked } = world()
+    const next = await planPayment(paying(), true, reads)
+    expect(next).toMatchObject({ do: 'pay', idempotencyKey: 'swap-key' })
+    expect(next.do === 'pay' && next.maxCltvBlocks).toBeGreaterThan(0)
+    expect(asked).toEqual(['refundDeadline', 'payDeadline(5000)'])
+    expect(next).toMatchObject({ maxFeeSats: maxRoutingFeeSats(2_100) })
+    expect(await planPayment(paying({ quotedRoutingFeeSats: 7 }), true, reads)).toMatchObject({ maxFeeSats: 7 })
+    expect(await planPayment(paying({ quotedRoutingFeeSats: 0 }), true, reads)).toMatchObject({ maxFeeSats: 0 })
+  })
+
+  it('fails a row with no idempotency key whatever the caller proved, before any read', async () => {
+    const { reads, asked } = world({ keyCurrent: false })
+    expect(await planPayment(paying({ idempotencyKey: null }), true, reads)).toEqual({
+      do: 'fail',
+      reason: 'paying state with no idempotency key',
+    })
+    expect(asked).toEqual([])
+  })
+
+  const refusals = [
+    ['a rotated provider key', {}, { keyCurrent: false }, 'refused to pay: provider key rotated since quote', []],
+    [
+      'a client solo refund that opens too soon',
+      { refundWithoutReceiverDelay: 1 },
+      {},
+      'refused to pay: client_solo_refund_too_soon',
+      ['refundDeadline'],
+    ],
+    [
+      'an uncapped route that cannot fit before the deadline',
+      {},
+      { enforces: false, payDeadline: NOW },
+      'refused to pay: uncapped_route_deadline_too_short',
+      ['refundDeadline', 'payDeadline(5000)'],
+    ],
+    [
+      'a CLTV budget too short to be a ceiling',
+      {},
+      { payDeadline: NOW },
+      'refused to pay: cltv_budget_too_short',
+      ['refundDeadline', 'payDeadline(5000)'],
+    ],
+  ] as const
+
+  it.each(refusals)(
+    'on %s: refuses when nothing is committed, fails otherwise',
+    async (_, over, state, reason, order) => {
+      const proven = world(state)
+      expect(await planPayment(paying(over), true, proven.reads)).toEqual({ do: 'refuse', reason })
+      expect(proven.asked).toEqual(order)
+      expect(await planPayment(paying(over), false, world(state).reads)).toEqual({ do: 'fail', reason })
+    },
+  )
+
+  it('judges the solo refund against the quoted deadline when the row has one', async () => {
+    const { reads } = world()
+    const soon = { refundWithoutReceiverDelay: 6_000 }
+    expect((await planPayment(paying({ ...soon, quotedRefundDeadline: NOW + 5_000 }), true, reads)).do).toBe('pay')
+    expect((await planPayment(paying({ ...soon, quotedRefundDeadline: NOW + 7_000 }), true, reads)).do).toBe('refuse')
+  })
+
+  it('throws on an invoice it cannot decode, after the refund deadline and before the pay deadline', async () => {
+    const { reads, asked } = world()
+    await expect(planPayment(paying({ invoice: 'not-an-invoice' }), true, reads)).rejects.toThrow()
+    expect(asked).toEqual(['refundDeadline'])
+  })
+
+  it('uses the refund deadline it read when the row quoted none', async () => {
+    const { reads } = world()
+    const next = await planPayment(paying({ quotedRefundDeadline: null, refundWithoutReceiverDelay: 1 }), true, reads)
+    expect(next).toEqual({ do: 'refuse', reason: 'refused to pay: client_solo_refund_too_soon' })
   })
 })
