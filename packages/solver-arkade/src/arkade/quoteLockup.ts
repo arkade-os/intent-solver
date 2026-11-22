@@ -30,7 +30,11 @@ export interface ClientFundedLockup {
   refundPkScript: Uint8Array
 }
 
-/** The covenant script of a lockup the client funds and the solver claims with the preimage. */
+/**
+ * The covenant script of a lockup the client funds and the solver claims with the preimage.
+ *
+ * Always the full covenant suite, no legacy selector: see `NonInteractiveParameters.legacy`.
+ */
 export const clientFundedLockupScript = (
   arkade: { providerPubkey: string; serverPubkey: string; emulatorPubkey: string; receiverPkScript: string },
   lockup: ClientFundedLockup,
