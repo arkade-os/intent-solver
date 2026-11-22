@@ -721,3 +721,22 @@ it('insertQuote() leaves no row behind when its event cannot be written', async 
   expect(await rowCount(driver, 'send_swap')).toBe(0)
   await broken.close()
 })
+
+it('insertQuote() takes its turn when three arrive together', async () => {
+  const rows = await Promise.all(
+    ['a', 'b', 'c'].map((id) => store.insertQuote(quote({ id, paymentHash: id.repeat(64) }))),
+  )
+  expect(rows.map((row) => row.state)).toEqual(['quoted', 'quoted', 'quoted'])
+})
+
+it('insertQuote() that loses to a duplicate does not undo a transition waiting behind it', async () => {
+  await store.insertQuote(quote({ id: 'earlier', paymentHash: 'e'.repeat(64) }))
+  const first = store.insertQuote(quote({ id: 'first', paymentHash: 'f'.repeat(64) }))
+  const duplicate = store.insertQuote(quote({ id: 'duplicate', paymentHash: 'f'.repeat(64) }))
+  const moved = store.transition('earlier', 'quoted', 'funded')
+
+  await expect(duplicate).rejects.toBeInstanceOf(UniqueConstraintError)
+  await first
+  expect(await moved).toBe(true)
+  expect((await store.get('earlier')).state).toBe('funded')
+})
