@@ -106,6 +106,7 @@ export const evmReceiveArkadeDeps = (
       // An L1 read that fails is reported and read as "nothing yet": a throw here would stop the tick, and
       // with it the refund of whatever is still on Arkade. The next tick asks again.
       const unrolled = outpoints.filter((outpoint) => outpoint.unrolled)
+      if (unrolled.length === 0) return null
       const onL1 = await preimages.find(row, unrolled).catch((error: Error) => (report(row.id, error), null))
       return onL1 === null ? null : hex.encode(onL1)
     },
