@@ -54,6 +54,9 @@ export interface FloatRequirement {
 }
 
 export interface AdmissionStrategy {
+  /** Check current headroom for a public bid without holding it. */
+  canAdmit?(request: AdmissionRequest): Promise<boolean>
+
   /**
    * Claim headroom for a quote, or refuse it.
    *

@@ -20,7 +20,11 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { AdmissionStrategy } from '@arkade-os/solver-core/core/admissionStrategy.js'
+import type {
+  AdmissionRequest,
+  AdmissionStrategy,
+  FloatRequirement,
+} from '@arkade-os/solver-core/core/admissionStrategy.js'
 import { RFQ_PAIR_SEND } from '../wire/payloads.js'
 import { hex } from '@scure/base'
 import {
@@ -460,6 +464,23 @@ export class SendSwapService {
     return { fromAmount, toAmount }
   }
 
+  async canBid(fromAmount: number, toAmount: number): Promise<boolean> {
+    if (!this.admission.canAdmit) return false
+    const routingFeeSats = Math.min(maxRoutingFeeSats(toAmount), fromAmount - toAmount)
+    const float = await this.lightningFloatRequirement(toAmount + routingFeeSats)
+    return this.admission.canAdmit(this.admissionRequest(fromAmount, float))
+  }
+
+  private admissionRequest(giveSats: number, float?: FloatRequirement): AdmissionRequest {
+    return {
+      pair: RFQ_PAIR_SEND,
+      giveSats,
+      capSats: this.deps.maxExposedSats,
+      committedSats: this.deps.totalCommitted,
+      ...(float ? { float } : {}),
+    }
+  }
+
   /**
    * Quote a send swap and persist it BEFORE returning the lockup address.
    *
@@ -663,11 +684,10 @@ export class SendSwapService {
       feeEstimate?.feeSats ?? Math.min(maxRoutingFeeSats(decoded.amountSats), lockupSats - decoded.amountSats)
     const refusal: { ceiling?: 'exposure' | 'float' } = {}
     const reservation = await this.admission.admit({
-      pair: RFQ_PAIR_SEND,
-      giveSats: lockupSats,
-      capSats: this.deps.maxExposedSats,
-      committedSats: this.deps.totalCommitted,
-      ...(coupled ? {} : { float: await this.lightningFloatRequirement(decoded.amountSats + routingFeeSats) }),
+      ...this.admissionRequest(
+        lockupSats,
+        coupled ? undefined : await this.lightningFloatRequirement(decoded.amountSats + routingFeeSats),
+      ),
       onRefused: (ceiling) => {
         refusal.ceiling = ceiling
       },
