@@ -932,8 +932,9 @@ overview, newest first, each linking to its detail.
    | `not-paid-refund-is-safe`    | terminal failure, and our own node is not holding an htlc for it. The sats never left.                                         |
    | `paid-do-not-refund`         | settled, or a preimage exists. **You paid.**                                                                                   |
    | `self-payment-do-not-refund` | the payer side failed, but **our own node holds an armed or settled htlc** for this invoice. The payee side may still collect. |
-   | `undecided-push-nothing`     | neither — including a backend that has no record of the payment id. Do not act on it.                                          |
+   | `undecided-push-nothing`     | neither — including a backend with no record of the payment id, or a wallet that cannot be read. Do not act on it.             |
    | `never-submitted`            | no payment id on the row; nothing was ever sent.                                                                               |
+   | `other-wallet-push-nothing`  | the row records another backend or wallet than the one running now. This node cannot say what became of the payment.           |
 
    The response also carries `ownInvoice`, which says how the self-payment
    question was answered: a hold status, `not-ours`, `probe-failed` (the node
