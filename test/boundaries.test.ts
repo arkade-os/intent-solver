@@ -181,6 +181,8 @@ const PACKAGE_LAYER: Record<string, Layer> = {
   'solver-corridors': 'corridor',
   'solver-corridors-evm': 'corridor',
   'solver-transport': 'transport',
+  // The domain model. It imports nothing of ours.
+  'solver-next': 'core',
 }
 
 /**
@@ -207,6 +209,7 @@ const LAYER_OF_SPECIFIER: Record<string, Layer> = {
   '@arkade-os/solver-corridors': 'corridor',
   '@arkade-os/solver-corridors-evm': 'corridor',
   '@arkade-os/solver-transport': 'transport',
+  '@arkade-os/solver-next': 'core',
   /**
    * Nothing imports the app today — it is the deployable, and the Dockerfile
    * runs its `dist/cli.js` by path. The entry is here so that the day a package
