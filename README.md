@@ -172,6 +172,8 @@ packages/solver-corridors/      the three BTC corridors — send and receive orc
                                 store per corridor, and the RFQ payload schemas and
                                 quote/status mappers, one module per pair
 packages/solver-corridors-evm/  the same shape, for arkade <-> ERC20
+packages/solver-next/           the domain model the corridors are being moved onto: value
+                                types today, nothing runs on it yet
 packages/solver-transport/      the ingress seam: the Hono app (inbound HTTP, bus-shaped
                                 versioned payloads, runs on Node and Workers) and the
                                 outbound relay client (WebSocket, reconnect + subscription

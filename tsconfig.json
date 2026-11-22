@@ -27,6 +27,7 @@
     "paths": {
       "@arkade-os/solver-core/*.js": ["./packages/solver-core/src/*.ts"],
       "@arkade-os/solver-db/*.js": ["./packages/solver-db/src/*.ts"],
+      "@arkade-os/solver-next/*.js": ["./packages/solver-next/src/*.ts"],
       "@arkade-os/solver-arkade/*.js": ["./packages/solver-arkade/src/*.ts"],
       "@arkade-os/solver-rails/*.js": ["./packages/solver-rails/src/*.ts"],
       "@arkade-os/solver-rails-esplora/*.js": ["./packages/solver-rails-esplora/src/*.ts"],
