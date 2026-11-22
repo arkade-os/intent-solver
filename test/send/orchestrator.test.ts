@@ -2521,6 +2521,107 @@ describe('tick: failure and recovery', () => {
     expect(row.failureReason).toContain('reconcile before retry')
   })
 
+  describe('a row with a payment id, polled as failed', () => {
+    const polledAsFailed = async (
+      state: 'paying' | 'paid',
+      stamped: { payment_backend?: string; payment_wallet?: string },
+      liveWallet?: () => Promise<string>,
+    ) => {
+      if (liveWallet) Object.defineProperty(ln, 'walletFingerprint', { value: liveWallet, configurable: true })
+      const svc = new SendSwapService({
+        store,
+        ln,
+        arkade,
+        backendName: 'node-b',
+        limits: { minSats: 500, maxSats: 10_000 },
+        invoicePrefix: 'bc',
+        maxExposedSats: 5_000,
+        totalCommitted: () => store.committedSats(),
+        admission: new AdmissionControl(),
+        now: () => clock,
+      })
+      const outcome = await svc.quote(FORGED.invoice, REFUND_ADDRESS, { clientRefundPubkey: CLIENT_REFUND_PUBKEY })
+      if (!outcome.accepted) throw new Error(`quote refused: ${outcome.reason}`)
+      const id = outcome.swap.id
+      arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
+      await store.transition(id, 'quoted', 'funded', { lockup_value: AMOUNT })
+      await store.transition(id, 'funded', 'paying', {
+        pay_attempted_at: clock - NO_RECORD_GRACE_SECONDS,
+        idempotency_key: `swap-${outcome.swap.paymentHash}`,
+        payment_id: 'pay-1',
+        ...stamped,
+      })
+      if (state === 'paid') await store.transition(id, 'paying', 'paid')
+      ln.payments.set('pay-1', { id: 'pay-1', status: 'failed', evidence: 'no_record' })
+      return { svc, id }
+    }
+    const untouched = async (id: string, state: string) => {
+      const row = await store.get(id)
+      expect(arkade.refundCalls).toHaveLength(0)
+      expect(row.state).toBe(state)
+      expect(row.paymentEvidence).toBeNull()
+    }
+
+    it.each(['paying', 'paid'] as const)('waits in %s when a different backend answers', async (state) => {
+      const { svc, id } = await polledAsFailed(state, { payment_backend: 'node-a' })
+      await expect(svc.tick(id)).rejects.toThrow('not believing that the payment failed')
+      await untouched(id, state)
+    })
+
+    it('waits when the backend has the same name but another wallet', async () => {
+      const { svc, id } = await polledAsFailed(
+        'paid',
+        { payment_backend: 'node-b', payment_wallet: 'wallet-a' },
+        async () => 'wallet-b',
+      )
+      await expect(svc.tick(id)).rejects.toThrow('wallet-a')
+      await untouched(id, 'paid')
+    })
+
+    it('waits when the paying wallet is known and the live one cannot be read', async () => {
+      const { svc, id } = await polledAsFailed(
+        'paid',
+        { payment_backend: 'node-b', payment_wallet: 'wallet-a' },
+        async () => {
+          throw new Error('node unreachable')
+        },
+      )
+      await expect(svc.tick(id)).rejects.toThrow('cannot read which Lightning node is answering')
+      await untouched(id, 'paid')
+    })
+
+    it('resumes by itself once the paying node answers again', async () => {
+      let wallet = 'wallet-b'
+      const { svc, id } = await polledAsFailed(
+        'paid',
+        { payment_backend: 'node-b', payment_wallet: 'wallet-a' },
+        async () => wallet,
+      )
+      await expect(svc.tick(id)).rejects.toThrow('not believing')
+      wallet = 'wallet-a'
+      ln.payments.set('pay-1', { id: 'pay-1', status: 'succeeded', preimage: FORGED_PREIMAGE })
+
+      expect((await svc.tick(id)).state).toBe('claimed')
+    })
+
+    it('still refunds a failure reported by the node that paid', async () => {
+      const { svc, id } = await polledAsFailed(
+        'paid',
+        { payment_backend: 'node-b', payment_wallet: 'wallet-a' },
+        async () => 'wallet-a',
+      )
+      const row = await svc.tick(id)
+      expect(row.state).toBe('refused')
+      expect(arkade.refundCalls).toHaveLength(1)
+    })
+
+    it('still claims on a success from a different backend, which its preimage proves', async () => {
+      const { svc, id } = await polledAsFailed('paid', { payment_backend: 'node-a' })
+      ln.payments.set('pay-1', { id: 'pay-1', status: 'succeeded', preimage: FORGED_PREIMAGE })
+      expect((await svc.tick(id)).state).toBe('claimed')
+    })
+  })
+
   it('does not re-submit a recovered row until its last submission is old enough to be absent', async () => {
     const { swap } = await quoted()
     arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
