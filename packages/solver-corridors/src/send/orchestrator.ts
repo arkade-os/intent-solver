@@ -1111,6 +1111,7 @@ export class SendSwapService {
   /** The live Lightning node compared with the one this row paid on. */
   private async payingNode(row: SendSwapRow): Promise<{ other: string | null; unconfirmed: boolean }> {
     const liveWallet = await this.deps.ln.walletFingerprint?.().catch(() => undefined)
+    // A side that recorded nothing cannot be compared, so it does not count as different.
     const foreignBackend = Boolean(
       row.paymentBackend && this.deps.backendName && row.paymentBackend !== this.deps.backendName,
     )

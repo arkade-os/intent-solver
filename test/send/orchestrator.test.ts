@@ -2615,6 +2615,13 @@ describe('tick: failure and recovery', () => {
       expect(arkade.refundCalls).toHaveLength(1)
     })
 
+    it('still refunds a row that recorded neither backend nor wallet', async () => {
+      const { svc, id } = await polledAsFailed('paid', {}, async () => 'wallet-b')
+      const row = await svc.tick(id)
+      expect(row.state).toBe('refused')
+      expect(arkade.refundCalls).toHaveLength(1)
+    })
+
     it('still claims on a success from a different backend, which its preimage proves', async () => {
       const { svc, id } = await polledAsFailed('paid', { payment_backend: 'node-a' })
       ln.payments.set('pay-1', { id: 'pay-1', status: 'succeeded', preimage: FORGED_PREIMAGE })
