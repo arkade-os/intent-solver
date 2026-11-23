@@ -20,9 +20,9 @@
 import { createServer, type Server } from 'node:http'
 import { randomBytes, randomInt } from 'node:crypto'
 import { join } from 'node:path'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { ArkAddress, DefaultVtxo, Extension, isVtxoSpent, SingleKey, asset, Transaction } from '@arkade-os/sdk'
-import { createOffer, cancelOffer, type Offer } from '@arkade-os/swap/protocol'
+import { createOffer, cancelOffer, type FillOutpoint, type Offer } from '@arkade-os/swap/protocol'
 import { InMemoryAssetSwapRepository } from '@arkade-os/swap'
 import { base64, hex } from '@scure/base'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
@@ -408,11 +408,12 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
 
       const settleBatch = quotedOffersSettleFor({ ctx, emulatorUrl: emulator.url, derivation: derivation() })
       const outpoints = intents.map(({ depositTxid: txid, depositVout: vout }) => ({ txid, vout }))
-      const readDeposits = async () => (await ctx.wallet.indexerProvider.getVtxos({ outpoints })).vtxos
+      const readOutpoints = async (outpoints: FillOutpoint[]) =>
+        (await ctx.wallet.indexerProvider.getVtxos({ outpoints })).vtxos
       const [first, second, third] = intents
-      const announced: string[] = []
-      const recordCandidate = async (txid: string) => {
-        announced.push(txid)
+      const announced: { txid: string; funding: readonly FillOutpoint[] }[] = []
+      const recordCandidate = async (txid: string, funding: readonly FillOutpoint[]) => {
+        announced.push({ txid, funding })
         return false
       }
       await expect(
@@ -423,36 +424,67 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
           markSubmitting: recordCandidate,
         }),
       ).rejects.toThrow()
+      await expect(settleBatch([first!, first!], { markSubmitting: recordCandidate })).rejects.toThrow(
+        /duplicate batch fill input/,
+      )
+      const settleWithHigherMinimum = quotedOffersSettleFor({
+        ctx: { ...ctx, vtxoMinSats: ctx.dustSats + 1n },
+        emulatorUrl: emulator.url,
+        derivation: derivation(),
+      })
+      await expect(settleWithHigherMinimum(intents, { markSubmitting: recordCandidate })).rejects.toThrow(
+        /cannot use its quoted carrier/,
+      )
       expect(announced).toEqual([])
 
       await expect(settleBatch(intents, { markSubmitting: recordCandidate })).rejects.toThrow()
-      expect(announced).toEqual([expect.stringMatching(/^[0-9a-f]{64}$/)])
-      const live = await readDeposits()
-      expect(live).toHaveLength(3)
+      expect(announced).toHaveLength(1)
+      const declined = announced[0]!
+      expect(declined.txid).toMatch(/^[0-9a-f]{64}$/)
+      expect(declined.funding.length).toBeGreaterThan(0)
+      const live = await readOutpoints([...outpoints, ...declined.funding])
+      expect(live).toHaveLength(outpoints.length + declined.funding.length)
       expect(live.every((coin) => !isVtxoSpent(coin))).toBe(true)
 
+      const makerSats = intents.reduce(
+        (sum, intent) => sum + (intent.toAssetId === null ? intent.toAmount : ctx.dustSats),
+        0n,
+      )
+      const expectedChange = live.reduce((sum, coin) => sum + BigInt(coin.value), 0n) - makerSats
+      const outputCap = (expectedChange + 1n) / 2n
+      const operatorInfo = await ctx.wallet.arkProvider.getInfo()
+      const getInfo = vi
+        .spyOn(ctx.wallet.arkProvider, 'getInfo')
+        .mockResolvedValue({ ...operatorInfo, vtxoMaxAmount: outputCap })
       const fillTxid = await settleBatch(intents, {
-        markSubmitting: async (txid) => {
-          announced.push(txid)
+        markSubmitting: async (txid, funding) => {
+          announced.push({ txid, funding })
           return true
         },
-      })
+      }).finally(() => getInfo.mockRestore())
       expect(announced).toHaveLength(2)
-      expect(announced[1]).toBe(fillTxid)
-      const { fill, deposits } = await poll(
+      expect(announced[1]).toEqual({ txid: fillTxid, funding: declined.funding })
+      const submittedOutpoints = [...outpoints, ...announced[1]!.funding]
+      const { fill, spent } = await poll(
         async () => {
-          const deposits = await readDeposits()
-          if (deposits.length !== 3 || deposits.some((coin) => !isVtxoSpent(coin) || coin.arkTxId !== fillTxid))
+          const spent = await readOutpoints(submittedOutpoints)
+          if (
+            spent.length !== submittedOutpoints.length ||
+            spent.some((coin) => !isVtxoSpent(coin) || coin.arkTxId !== fillTxid)
+          )
             return null
           const { txs } = await ctx.wallet.indexerProvider.getVirtualTxs([fillTxid])
-          return txs[0] ? { fill: Transaction.fromPSBT(base64.decode(txs[0])), deposits } : null
+          return txs[0] ? { fill: Transaction.fromPSBT(base64.decode(txs[0])), spent } : null
         },
-        { attempts: 30, intervalMs: 1000, whenExhausted: 'the same fill did not spend all three indexed deposits' },
+        { attempts: 30, intervalMs: 1000, whenExhausted: 'the fill did not spend every recorded input' },
       )
 
+      expect(fill.inputsLength).toBe(submittedOutpoints.length)
+      for (const [i, outpoint] of submittedOutpoints.entries()) {
+        const coin = spent.find(({ txid, vout }) => txid === outpoint.txid && vout === outpoint.vout)
+        expect(hex.encode(fill.getInput(i).txid!)).toBe(coin?.spentBy)
+      }
       for (const [i, intent] of intents.entries()) {
-        const deposit = deposits.find((coin) => coin.txid === intent.depositTxid && coin.vout === intent.depositVout)
-        expect(hex.encode(fill.getInput(i).txid!)).toBe(deposit?.spentBy)
         const output = fill.getOutput(i)
         expect(hex.encode(output.script!)).toBe(intent.makerPkScript)
         expect(output.amount).toBe(intent.toAssetId === null ? intent.toAmount : ctx.dustSats)
@@ -470,7 +502,6 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
       expect(swapped).toHaveLength(1)
       const [group] = swapped
       expect(group!.inputs).toContainEqual(expect.objectContaining({ vin: 1, amount: second!.fromAmount }))
-      const solverPayout = ArkAddress.decode(await ctx.wallet.getAddress()).pkScript
       const paid = first!.toAmount + third!.toAmount
       const walletAssets = group!.inputs.reduce(
         (sum, input) => (input.vin >= intents.length ? sum + input.amount : sum),
@@ -484,7 +515,14 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
         expect.objectContaining({ vout: 2, amount: third!.toAmount }),
         expect.objectContaining({ vout: 3, amount: surplus }),
       ])
-      expect(fill.getOutput(3).script).toEqual(solverPayout)
+      const solverPayout = ArkAddress.decode(await ctx.wallet.getAddress()).pkScript
+      const change = [fill.getOutput(3), fill.getOutput(4)]
+      expect(change.reduce((sum, output) => sum + output.amount!, 0n)).toBe(expectedChange)
+      for (const output of change) {
+        expect(output.script).toEqual(solverPayout)
+        expect(output.amount).toBeLessThanOrEqual(outputCap)
+        expect(output.amount).toBeGreaterThanOrEqual(ctx.dustSats)
+      }
     },
     SWAP_TIMEOUT_MS,
   )

@@ -13,12 +13,14 @@ import {
   bindingFromOffer,
   bindingProgram,
   type FillFunding,
+  type FillOutpoint,
   type Offer,
 } from '@arkade-os/swap/protocol'
 import { base64, hex } from '@scure/base'
 import { vtxoPages } from './indexerPaging.js'
 import { outpointKey } from './lockupFunding.js'
 import { OfferNotSubmittedError, type OfferDepositOutpoint } from './offerFulfill.js'
+import { MAX_SPLIT_OUTPUTS } from './vtxoPool.js'
 import type { ArkadeContext } from './wallet.js'
 
 export interface BatchOfferFill {
@@ -28,22 +30,26 @@ export interface BatchOfferFill {
 
 export interface BatchOfferSubmitOptions {
   /**
-   * Atomically claim every fill row and record the candidate txid just before the emulator request.
-   * Returning false stops submission. A thrown callback leaves its database outcome unknown.
+   * Atomically claim every fill row and record the candidate txid and its wallet funding.
+   * Returning false stops submission. After approval, reconcile an ambiguous result before retrying.
    */
-  markSubmitting?: (txid: string) => Promise<boolean>
+  markSubmitting?: (txid: string, funding: readonly FillOutpoint[]) => Promise<boolean>
 }
 
 class BatchEmulatorProvider extends RestEmulatorProvider {
   constructor(
     url: string,
+    private readonly funding: readonly FillOutpoint[],
     private readonly markSubmitting?: BatchOfferSubmitOptions['markSubmitting'],
   ) {
     super(url)
   }
 
   override async submitTx(arkTx: string, checkpoints: string[]) {
-    if (this.markSubmitting && !(await this.markSubmitting(Transaction.fromPSBT(base64.decode(arkTx)).id))) {
+    if (
+      this.markSubmitting &&
+      !(await this.markSubmitting(Transaction.fromPSBT(base64.decode(arkTx)).id, this.funding))
+    ) {
       throw new OfferNotSubmittedError('another attempt already holds the batch fill')
     }
     return super.submitTx(arkTx, checkpoints)
@@ -54,6 +60,18 @@ const maxAssetAmount = (1n << 64n) - 1n
 const maxSats = BigInt(Number.MAX_SAFE_INTEGER)
 
 const keyOf = ({ txid, vout }: { txid: string; vout: number }): string => outpointKey(txid.toLowerCase(), vout)
+
+const changeAmounts = (value: bigint, minimum: bigint, maximum: bigint): bigint[] => {
+  if (maximum < 0n || value <= maximum) return [value]
+  if (maximum < minimum) throw new OfferNotSubmittedError("the operator's VTXO maximum is below its minimum")
+  const count = (value + maximum - 1n) / maximum
+  const share = value / count
+  if (count > BigInt(MAX_SPLIT_OUTPUTS) || share < minimum) {
+    throw new OfferNotSubmittedError("batch change cannot fit the operator's VTXO limits")
+  }
+  const remainder = value % count
+  return Array.from({ length: Number(count) }, (_, index) => share + (BigInt(index) < remainder ? 1n : 0n))
+}
 
 const amountsOn = (coin: FillFunding | VirtualCoin): Map<string, bigint> => {
   const amounts = new Map<string, bigint>()
@@ -73,7 +91,7 @@ const amountsOn = (coin: FillFunding | VirtualCoin): Map<string, bigint> => {
 
 /**
  * Spend exact directed deposits in one transaction, pairing deposit input i with maker output i.
- * The caller chooses a group that fits the operator's transaction limits and single change output.
+ * The caller chooses a group that fits the operator's transaction limits.
  */
 export const fulfillOffers = async (
   ctx: ArkadeContext,
@@ -131,7 +149,11 @@ export const fulfillOffers = async (
       arkade: { getInfo: async () => operatorInfo },
       indexer: wallet.indexerProvider,
       identity: wallet.identity,
-      emulator: new BatchEmulatorProvider(emulatorUrl, options?.markSubmitting),
+      emulator: new BatchEmulatorProvider(
+        emulatorUrl,
+        funding.map(({ txid, vout }) => ({ txid: txid.toLowerCase(), vout })),
+        options?.markSubmitting,
+      ),
     })
     const maxOutputSats = operatorInfo.vtxoMaxAmount
     const userKey = client.userKey && hex.encode(client.userKey)
@@ -189,7 +211,7 @@ export const fulfillOffers = async (
       const wantedAsset = offer.wantAsset?.toString()
       const sats = wantedAsset === undefined ? offer.wantAmount : ctx.dustSats
       if (sats <= 0n || sats < minOutputSats || sats > maxSats) {
-        throw new Error(`invalid maker output sats for batch deposit ${key}`)
+        throw new OfferNotSubmittedError(`batch payout for ${key} cannot use its quoted carrier or sats amount`)
       }
       if (maxOutputSats >= 0n && sats > maxOutputSats) {
         throw new OfferNotSubmittedError(`maker output for batch deposit ${key} exceeds the operator's VTXO limit`)
@@ -222,11 +244,11 @@ export const fulfillOffers = async (
     if (fundingSats < makerSats || changeSats < minOutputSats) {
       throw new OfferNotSubmittedError('batch funding does not cover maker payouts and a solver change output')
     }
-    if (maxOutputSats >= 0n && changeSats > maxOutputSats) {
-      throw new OfferNotSubmittedError("batch change exceeds the operator's VTXO limit")
-    }
     if (fundingSats + depositSats > maxSats) throw new Error('batch input total exceeds the safe integer domain')
-    builder.fund([...funding]).to(ArkAddress.decode(address).pkScript, changeSats)
+    const changeScript = ArkAddress.decode(address).pkScript
+    builder
+      .fund([...funding])
+      .to(changeAmounts(changeSats, minOutputSats, maxOutputSats).map((amount) => ({ script: changeScript, amount })))
     for (const [id, group] of groups) {
       const paid = group.outputs.reduce((sum, output) => sum + BigInt(output.amount), 0n)
       if ((fundingAssets.get(id) ?? 0n) < paid) {
