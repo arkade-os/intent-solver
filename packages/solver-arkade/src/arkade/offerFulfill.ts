@@ -303,6 +303,7 @@ export const makerScriptHex = (offer: Offer): string => hex.encode(offer.makerPk
 
 /**
  * Assets a coin carries, normalised.
+ * Shared by single-offer and grouped funding selection.
  *
  * `getVtxos` reports asset amounts as STRINGS while the contract manager
  * reports bigints, and an asset amount is 256-bit — so the string form is the

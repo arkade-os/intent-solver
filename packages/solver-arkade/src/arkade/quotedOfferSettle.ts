@@ -16,12 +16,19 @@
 import { selectCoinsWithAsset, selectVirtualCoins, type ExtendedVirtualCoin } from '@arkade-os/sdk'
 import { RFQ_ASSET_SWAP_DIRECTED, RFQ_ASSET_SWAP_DIRECTED_NONCE } from '@arkade-os/solver-core/core/rfqContract.js'
 import type { ArkadeContext } from './wallet.js'
-import { fulfillOffers, type BatchOfferFill, type BatchOfferSubmitOptions } from './batchOfferFulfill.js'
+import {
+  BatchChangeDoesNotFitError,
+  fulfillOffers,
+  type BatchOfferFill,
+  type BatchOfferSubmitOptions,
+} from './batchOfferFulfill.js'
 import { assetsOn, fulfillOffer, OfferNotSubmittedError, type FulfillOptions } from './offerFulfill.js'
 import { heldOf } from './offerFill.js'
 import { outpointKey } from './lockupFunding.js'
 import { liveOfferOutpoints, type OfferOutpoint } from './offerOutpoints.js'
 import { offerScriptFrom, type OfferDerivation, type QuotedOfferTerms } from './offerTerms.js'
+
+const keyOf = ({ txid, vout }: { txid: string; vout: number }): string => outpointKey(txid.toLowerCase(), vout)
 
 const assertSafeSats = (sats: bigint): number => {
   if (sats > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error(`deposit of ${sats} sats exceeds a safe integer`)
@@ -81,8 +88,9 @@ const prepareQuotedOfferFor = (
       throw new Error(`the recorded terms derive ${derived.pkScript}, not the offer script ${intent.offerPkScript}`)
     }
 
+    const txid = intent.depositTxid.toLowerCase()
     const live = await outpointsAt(intent.offerPkScript)
-    const deposit = live.find((o) => o.txid === intent.depositTxid && o.vout === intent.depositVout)
+    const deposit = live.find((o) => o.txid.toLowerCase() === txid && o.vout === intent.depositVout)
     // ABOVE `fulfill`, so nothing is sent. NOT terminal: one absent read is weaker than arkd's
     // refusal, and § 9's gate re-reads next tick and ends the row itself when it is really gone.
     if (!deposit) {
@@ -145,11 +153,11 @@ export const quotedOffersSettleFor = (
 
     const fills = await Promise.all(intents.map(prepare))
     const spendable = (await ctx.wallet.getSpendableVtxos()) as ExtendedVirtualCoin[]
-    const reserved = ctx.reservations.reserved()
+    const reserved = new Set([...ctx.reservations.reserved()].map((key) => key.toLowerCase()))
     const available = new Map(
       spendable
-        .filter((coin) => !reserved.has(outpointKey(coin.txid, coin.vout)))
-        .map((coin) => [outpointKey(coin.txid, coin.vout), { ...coin, assets: assetsOn(coin) }]),
+        .filter((coin) => !reserved.has(keyOf(coin)))
+        .map((coin) => [keyOf(coin), { ...coin, assets: assetsOn(coin) }]),
     )
     const wanted = new Map<string, bigint>()
     let makerSats = 0n
@@ -159,13 +167,16 @@ export const quotedOffersSettleFor = (
       if (assetId !== undefined) wanted.set(assetId, (wanted.get(assetId) ?? 0n) + offer.wantAmount)
       makerSats += assetId === undefined ? offer.wantAmount : ctx.dustSats
       depositSats += BigInt(deposit.value)
-      available.delete(outpointKey(deposit.txid, deposit.vout))
+      available.delete(keyOf(deposit))
     }
 
+    const pool = [...available.values()]
+    const minOutputSats = ctx.dustSats > ctx.vtxoMinSats ? ctx.dustSats : ctx.vtxoMinSats
+    const minFunding = makerSats + (depositSats < minOutputSats ? minOutputSats - depositSats : 0n)
     const selected: ExtendedVirtualCoin[] = []
     const select = (coins: ExtendedVirtualCoin[]) => {
       selected.push(...coins)
-      for (const coin of coins) available.delete(outpointKey(coin.txid, coin.vout))
+      for (const coin of coins) available.delete(keyOf(coin))
     }
     try {
       for (const [assetId, amount] of wanted) {
@@ -175,26 +186,50 @@ export const quotedOffersSettleFor = (
         )
         if (held < amount) select(selectCoinsWithAsset([...available.values()], assetId, amount - held).selected)
       }
-      const minOutputSats = ctx.dustSats > ctx.vtxoMinSats ? ctx.dustSats : ctx.vtxoMinSats
-      const changeTopUp = depositSats < minOutputSats ? minOutputSats - depositSats : 0n
-      const neededSats = makerSats + changeTopUp - selected.reduce((sum, coin) => sum + BigInt(coin.value), 0n)
+      const neededSats = minFunding - selected.reduce((sum, coin) => sum + BigInt(coin.value), 0n)
       if (neededSats > 0n) select(selectVirtualCoins([...available.values()], assertSafeSats(neededSats)).inputs)
     } catch (error) {
       throw new OfferNotSubmittedError('insufficient spendable wallet funding for the grouped fill', { cause: error })
     }
-    return fulfillOffers(
-      ctx,
-      emulatorUrl,
-      fills,
-      selected.map((coin) => ({
-        txid: coin.txid,
-        vout: coin.vout,
-        value: coin.value,
-        tapLeafScript: coin.forfeitTapLeafScript,
-        tapTree: coin.tapTree,
-        assets: assetsOn(coin),
-      })),
-      options,
-    )
+    let enteredSubmission = false
+    const markSubmitting = options?.markSubmitting
+    const pay = (coins: ExtendedVirtualCoin[]) =>
+      fulfillOffers(
+        ctx,
+        emulatorUrl,
+        fills,
+        coins.map((coin) => ({
+          txid: coin.txid,
+          vout: coin.vout,
+          value: coin.value,
+          tapLeafScript: coin.forfeitTapLeafScript,
+          tapTree: coin.tapTree,
+          assets: assetsOn(coin),
+        })),
+        markSubmitting && {
+          markSubmitting: (txid, funding) => {
+            enteredSubmission = true
+            return markSubmitting(txid, funding)
+          },
+        },
+      )
+    try {
+      return await pay(selected)
+    } catch (error) {
+      if (enteredSubmission || !(error instanceof BatchChangeDoesNotFitError)) throw error
+      const selectedSats = selected.reduce((sum, coin) => sum + BigInt(coin.value), 0n)
+      const [alternative] = pool
+        .filter(
+          (coin) =>
+            BigInt(coin.value) >= minFunding &&
+            BigInt(coin.value) < selectedSats &&
+            [...wanted].every(
+              ([id, amount]) => (coin.assets?.find((asset) => asset.assetId === id)?.amount ?? 0n) >= amount,
+            ),
+        )
+        .sort((a, b) => a.value - b.value)
+      if (!alternative) throw error
+      return pay([alternative])
+    }
   }
 }

@@ -36,6 +36,8 @@ export interface BatchOfferSubmitOptions {
   markSubmitting?: (txid: string, funding: readonly FillOutpoint[]) => Promise<boolean>
 }
 
+export class BatchChangeDoesNotFitError extends OfferNotSubmittedError {}
+
 class BatchEmulatorProvider extends RestEmulatorProvider {
   constructor(
     url: string,
@@ -67,12 +69,13 @@ const changeAmounts = (value: bigint, minimum: bigint, maximum: bigint): bigint[
   const count = (value + maximum - 1n) / maximum
   const share = value / count
   if (count > BigInt(MAX_SPLIT_OUTPUTS) || share < minimum) {
-    throw new OfferNotSubmittedError("batch change cannot fit the operator's VTXO limits")
+    throw new BatchChangeDoesNotFitError("batch change cannot fit the operator's VTXO limits")
   }
   const remainder = value % count
   return Array.from({ length: Number(count) }, (_, index) => share + (BigInt(index) < remainder ? 1n : 0n))
 }
 
+// Validate per-input asset declarations before adding them to the shared packet.
 const amountsOn = (coin: FillFunding | VirtualCoin): Map<string, bigint> => {
   const amounts = new Map<string, bigint>()
   for (const entry of coin.assets ?? []) {
@@ -92,6 +95,8 @@ const amountsOn = (coin: FillFunding | VirtualCoin): Map<string, bigint> => {
 /**
  * Spend exact directed deposits in one transaction, pairing deposit input i with maker output i.
  * The caller chooses a group that fits the operator's transaction limits.
+ * Submission errors are unclassified. Check the indexer's recorded spend and Arkade transaction
+ * for each deposit and funding outpoint before retrying any input from an ambiguous attempt.
  */
 export const fulfillOffers = async (
   ctx: ArkadeContext,
@@ -105,7 +110,7 @@ export const fulfillOffers = async (
   }
   const deposits = fills.map(({ deposit }) => deposit)
   const inputs = [...deposits, ...funding]
-  const reservations = ctx.reservations.reserved()
+  const reservations = new Set([...ctx.reservations.reserved()].map((key) => key.toLowerCase()))
   const seen = new Set<string>()
   for (const input of inputs) {
     const key = keyOf(input)

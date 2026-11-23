@@ -9,18 +9,24 @@
  * `fulfill` is injected, so what is exercised here is the decision to spend
  * rather than the spend.
  */
-import { describe, it, expect, vi } from 'vitest'
+import { afterEach, describe, it, expect, vi } from 'vitest'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { hex } from '@scure/base'
+import * as batchOfferFulfill from '@arkade-os/solver-arkade/arkade/batchOfferFulfill.js'
 import { offerExitDelay, offerScriptFrom } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
 import {
   RFQ_ASSET_SWAP_V2,
   RFQ_ASSET_SWAP_DIRECTED,
   RFQ_ASSET_SWAP_DIRECTED_NONCE,
 } from '@arkade-os/solver-core/core/rfqContract.js'
-import { quotedOfferSettleFor, type QuotedOfferIntent } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
+import {
+  quotedOfferSettleFor,
+  quotedOffersSettleFor,
+  type QuotedOfferIntent,
+} from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
 import type { OfferOutpoint } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
 import { OfferNotSubmittedError, type fulfillOffer } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
+import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 
 const xonly = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
 const TAKER = xonly(5)
@@ -275,5 +281,65 @@ describe('an asset DEPOSIT, where the packet declares what vin 0 carries', () =>
     const other = funded({ sats: 330n, assets: [{ assetId: '22'.repeat(34), amount: 10n ** 9n }] })
     const { settle } = settleWith([other])
     await expect(settle(assetIntent())).rejects.toThrow(/holds 0 of the deposit leg/)
+  })
+})
+
+describe('quotedOffersSettleFor', () => {
+  const rows = [1, 2].map((depositVout) =>
+    intent({ contractVersion: RFQ_ASSET_SWAP_DIRECTED_NONCE, toAmount: 5n, depositVout }),
+  )
+  const fundingCoin = (vout: number, value: number, amount: bigint) => ({
+    txid: 'b'.repeat(64),
+    vout,
+    value,
+    assets: [{ assetId: USDA, amount }],
+  })
+  const fragmented = Array.from({ length: 10 }, (_, i) => fundingCoin(i, 1_000, 1n))
+  const compact = fundingCoin(10, 660, 10n)
+  const batchSettle = (coins = [...fragmented, compact]) =>
+    quotedOffersSettleFor({
+      ctx: {
+        dustSats: 330n,
+        vtxoMinSats: 330n,
+        wallet: { getSpendableVtxos: async () => coins },
+        reservations: { reserved: () => new Set<string>() },
+      } as unknown as ArkadeContext,
+      emulatorUrl: 'http://emulator.test',
+      derivation,
+      outpointsAt: async () => [funded(), funded({ vout: 2 })],
+    })
+
+  afterEach(() => vi.restoreAllMocks())
+
+  it('selects fewer funding coins when greedy selection exceeds the change cap', async () => {
+    const spend = vi
+      .spyOn(batchOfferFulfill, 'fulfillOffers')
+      .mockRejectedValueOnce(new batchOfferFulfill.BatchChangeDoesNotFitError('solver change exceeds output limit'))
+      .mockResolvedValueOnce(TXID)
+
+    await expect(batchSettle()(rows)).resolves.toBe(TXID)
+    expect(spend.mock.calls.map(([, , , funding]) => funding.map((coin) => coin.vout))).toEqual([
+      fragmented.map((coin) => coin.vout),
+      [compact.vout],
+    ])
+  })
+
+  it('does not retry an ambiguous submission failure with different funding', async () => {
+    const failure = new Error('emulator response lost')
+    const spend = vi.spyOn(batchOfferFulfill, 'fulfillOffers').mockRejectedValue(failure)
+
+    await expect(batchSettle()(rows)).rejects.toBe(failure)
+    expect(spend).toHaveBeenCalledTimes(1)
+  })
+
+  it('matches the recorded deposit and excludes it from funding across txid casing', async () => {
+    const spend = vi.spyOn(batchOfferFulfill, 'fulfillOffers').mockResolvedValue(TXID)
+    const depositTxid = TXID.toUpperCase()
+    const duplicate = { ...fundingCoin(1, 20_000, 10n), txid: depositTxid }
+
+    await expect(batchSettle([duplicate, compact])([{ ...rows[0]!, depositTxid }, rows[1]!])).resolves.toBe(TXID)
+    const [, , fills, funding] = spend.mock.calls[0]!
+    expect(fills[0]!.deposit.txid.toLowerCase()).toBe(TXID)
+    expect(funding).toEqual([expect.objectContaining(compact)])
   })
 })
