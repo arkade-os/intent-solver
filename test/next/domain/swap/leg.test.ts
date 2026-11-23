@@ -71,13 +71,8 @@ describe('Leg', () => {
   it('moves along its moves without changing the leg it came from', () => {
     const leg = open()
     const locked = leg.moveTo('locked', t(2), { funding: ref('txid') }, t(900))
-    expect([leg.state, leg.since, leg.reference('funding')]).toEqual(['pending', 1, null])
-    expect([locked.state, locked.since, locked.reference('funding'), locked.expiresAt]).toEqual([
-      'locked',
-      2,
-      'txid',
-      900,
-    ])
+    expect([leg.state, leg.since, leg.fact('funding')]).toEqual(['pending', 1, null])
+    expect([locked.state, locked.since, locked.fact('funding'), locked.expiresAt]).toEqual(['locked', 2, 'txid', 900])
     expect(() => leg.moveTo('refunded', t(2))).toThrow(IllegalTransition)
     expect(() => leg.moveTo('refunded', t(2))).toThrow('from leg cannot go pending -> refunded')
   })
@@ -92,18 +87,13 @@ describe('Leg', () => {
       .moveTo('locked', t(2), { funding: ref('txid') })
       .moveTo('refunding', t(3), { refund: ref('refund-1') })
     const bumped = refunding.record({ refund: ref('refund-2') }).record({ refund: ref('refund-2') })
-    expect(bumped.references).toEqual({ funding: ['txid'], claim: [], refund: ['refund-1', 'refund-2'] })
-    expect([bumped.reference('refund'), bumped.reference('claim')]).toEqual(['refund-2', null])
+    expect(bumped.facts).toEqual({ funding: ['txid'], claim: [], refund: ['refund-1', 'refund-2'] })
+    expect([bumped.fact('refund'), bumped.fact('claim')]).toEqual(['refund-2', null])
     expect([bumped.state, refunding.since, bumped.since]).toEqual(['refunding', 3, 3])
   })
 
   it('restores what was stored without checking it again', () => {
     const stored = Leg.restore('to', terms, 'refunded', { funding: [ref('a')], claim: [], refund: [ref('b')] }, t(7))
-    expect([stored.state, stored.since, stored.expiresAt, stored.reference('refund')]).toEqual([
-      'refunded',
-      7,
-      null,
-      'b',
-    ])
+    expect([stored.state, stored.since, stored.expiresAt, stored.fact('refund')]).toEqual(['refunded', 7, null, 'b'])
   })
 })
