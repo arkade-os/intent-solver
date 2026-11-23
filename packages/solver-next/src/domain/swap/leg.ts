@@ -23,7 +23,6 @@ export const ContractKind = {
 
 export type ContractKind = ValueOf<typeof ContractKind>
 
-/** Where a leg may go from each state. A state with no way out is final. */
 export const LEG_MOVES = {
   pending: ['locking', 'locked', 'claiming', 'claimed'],
   locking: ['pending', 'locked', 'claiming', 'claimed', 'refunding'],
@@ -45,17 +44,12 @@ export const ReferenceKind = {
 
 export type ReferenceKind = ValueOf<typeof ReferenceKind>
 
-/** Where a leg shows on its rail: a txid, an outpoint, a payment id. */
 export type Reference = Brand<string, 'Reference'>
 export const Reference = { of: (value: string): Reference => nonEmpty('reference', value) }
 
 export type ContractVersion = Brand<string, 'ContractVersion'>
 export const ContractVersion = { of: (value: string): ContractVersion => nonEmpty('contract version', value) }
 
-/**
- * Oldest first; the last is the current one.
- * A list because transactions get replaced: a refund is fee-bumped, a claim spends several outputs.
- */
 export type ReferenceHistory = Readonly<Record<ReferenceKind, readonly Reference[]>>
 
 export type LegReferences = Partial<Record<ReferenceKind, Reference>>
@@ -64,12 +58,11 @@ export interface LegTerms {
   readonly rail: Rail
   readonly amount: Amount
   readonly contract: ContractKind
-  /** What the leg was agreed under; null where the contract has only ever had one version. */
   readonly version: ContractVersion | null
 }
 
-// ln payment send in flight is `locking`: it is never a lock waiting on chain, and it never refunds.
-const NEVER: Partial<Record<ContractKind, Partial<Record<Side, readonly LegState[]>>>> = {
+// A payment we send is `locking` while in flight: it never waits locked, and never refunds.
+const STATES_NEVER_ENTERED: Partial<Record<ContractKind, Partial<Record<Side, readonly LegState[]>>>> = {
   lightning: { to: ['locked', 'refunding', 'refunded'] },
   offer: { from: ['refunding', 'refunded'], to: ['refunding', 'refunded'] },
   payment: { to: ['locked', 'refunding', 'refunded'] },
@@ -92,9 +85,7 @@ export class Leg {
     readonly terms: LegTerms,
     readonly state: LegState,
     readonly references: ReferenceHistory,
-    /** When the leg entered `state`. Used to tell a send still in progress from one that was never made. */
     readonly since: UnixSeconds,
-    /** When the lock times out, as the rail showed it when the lock was recorded. Null where it was not shown. */
     readonly expiresAt: UnixSeconds | null,
   ) {}
 
@@ -103,7 +94,6 @@ export class Leg {
     return new Leg(side, terms, 'pending', NO_REFERENCES, at, null)
   }
 
-  /** For a repository: what was stored is trusted, not re-validated. */
   static restore(
     side: Side,
     terms: LegTerms,
@@ -125,15 +115,13 @@ export class Leg {
     return this.terms.contract
   }
 
-  /** The current reference of a kind, or null when none was recorded. */
   reference(kind: ReferenceKind): Reference | null {
     return this.references[kind].at(-1) ?? null
   }
 
-  /** The state table, minus the moves this kind of contract cannot make on this side. */
   static canTransition(leg: { side: Side; contract: ContractKind }, from: LegState, to: LegState): boolean {
     const moves: readonly LegState[] = LEG_MOVES[from]
-    return moves.includes(to) && !NEVER[leg.contract]?.[leg.side]?.includes(to)
+    return moves.includes(to) && !STATES_NEVER_ENTERED[leg.contract]?.[leg.side]?.includes(to)
   }
 
   canMoveTo(state: LegState): boolean {
@@ -146,7 +134,6 @@ export class Leg {
     return new Leg(this.side, this.terms, state, withReferences(this.references, references), at, expires)
   }
 
-  /** A reference learned without the leg changing state: a payment id after the intent, a replacement transaction. */
   record(references: LegReferences): Leg {
     return new Leg(
       this.side,

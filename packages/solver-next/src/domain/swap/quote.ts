@@ -15,10 +15,8 @@ export interface Pricing {
   readonly spreadBps: number
 }
 
-/** The terms a swap was agreed on; Market computes them, the swap only keeps them. */
 export class Quote {
   private constructor(
-    /** The first second at which the quote no longer holds. Null for a standing offer, which never expires. */
     readonly validUntil: UnixSeconds | null,
     readonly pricing: Pricing,
   ) {}

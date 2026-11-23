@@ -10,7 +10,6 @@ export const Rail = {
 
 export type Rail = ValueOf<typeof Rail>
 
-/** Where value sits: one asset on one rail. */
 export class Endpoint {
   private constructor(
     readonly rail: Rail,

@@ -13,7 +13,6 @@ type Pair = readonly [from: LegState, to: LegState]
 
 interface Derived {
   readonly pairs: readonly Pair[]
-  /** Paid out `to`, not yet collected `from`. */
   readonly exposed: boolean
   readonly terminal: boolean
 }
@@ -75,7 +74,6 @@ const ENTRIES = Object.entries(DERIVED) as [DerivedSwapState, Derived][]
 const isDerived = (state: SwapState): state is DerivedSwapState => state in DERIVED
 
 export const SwapState = {
-  /** Null for a pair outside the table: legs that disagree about what happened. */
   derive: (from: LegState, to: LegState): DerivedSwapState | null =>
     ENTRIES.find(([, { pairs }]) => pairs.some(([f, t]) => f === from && t === to))?.[0] ?? null,
   isExposed: (state: SwapState): boolean => isDerived(state) && DERIVED[state].exposed,
