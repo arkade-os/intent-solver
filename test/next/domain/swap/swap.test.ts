@@ -7,9 +7,9 @@ import {
 } from '@arkade-os/solver-next/domain/shared/error.js'
 import { SwapId } from '@arkade-os/solver-next/domain/shared/ids.js'
 import { Hashlock, Preimage } from '@arkade-os/solver-next/domain/swap/hashlock.js'
-import { ContractKind, Leg, type LegState, type LegTerms } from '@arkade-os/solver-next/domain/swap/leg.js'
+import { ContractKind, Leg, type LegState, type LegTerms, type Side } from '@arkade-os/solver-next/domain/swap/leg.js'
 import { Quote } from '@arkade-os/solver-next/domain/swap/quote.js'
-import { Swap, type Command, type NewSwap } from '@arkade-os/solver-next/domain/swap/swap.js'
+import { Swap, type NewSwap } from '@arkade-os/solver-next/domain/swap/swap.js'
 import { SwapState } from '@arkade-os/solver-next/domain/swap/swap_state.js'
 import { btc, ref, t } from '../support.js'
 
@@ -39,10 +39,16 @@ const quoted = (over: Partial<NewSwap> = {}): Swap =>
 
 const offer = (): Swap => quoted({ hashlock: null, from: leg('offer'), to: leg('payment') })
 
-const run = (swap: Swap, ...commands: Command[]): Swap =>
-  commands.reduce((current, command, step) => current.apply(command, t(2 + step)).swap, swap)
+type Step = (swap: Swap) => Swap
 
-const FILLED: Command[] = [{ do: 'mark_funded' }, { do: 'start_fill' }, { do: 'mark_filled', preimage: SECRET }]
+const run = (swap: Swap, ...steps: Step[]): Swap => steps.reduce((current, step) => step(current), swap)
+
+const funded: Step = (swap) => swap.markFunded(t(2))
+const filling: Step = (swap) => swap.startFill(t(3))
+const filled: Step = (swap) => swap.markFilled(t(4), SECRET)
+const toLocked: Step = (swap) => swap.markToLocked(t(3))
+const stuck: Step = (swap) => swap.stick('x')
+const onArkade = (): Swap => quoted({ to: leg('vhtlc') })
 
 describe('Swap.quote', () => {
   it('starts quoted, with both legs pending and nothing stored yet', () => {
@@ -67,149 +73,193 @@ describe('Swap.quote', () => {
   })
 })
 
-describe('Swap.apply', () => {
-  it('walks a swap to settled, one transition per command, leaving the earlier swap as it was', () => {
+describe('a swap', () => {
+  it('walks to settled one step at a time, leaving each earlier swap as it was', () => {
     const start = quoted()
+    const steps: Step[] = [funded, filling, filled, (swap) => swap.startSettle(t(5)), (swap) => swap.markSettled(t(6))]
     const states: string[] = []
-    let swap = start
-    for (const command of [...FILLED, { do: 'start_settle' }, { do: 'mark_settled' }] as Command[]) {
-      const { swap: next, transition } = swap.apply(command, t(5))
-      expect([transition?.from, transition?.to, transition?.command]).toEqual([swap.state, next.state, command.do])
-      states.push(next.state)
-      swap = next
-    }
-    expect(states).toEqual(['funded', 'filling', 'filled', 'settling', 'settled'])
-    expect([start.state, swap.preimage, swap.exposed]).toEqual(['quoted', SECRET, false])
+    const end = steps.reduce((swap, step) => {
+      const next = step(swap)
+      states.push(`${swap.state}>${next.state}`)
+      return next
+    }, start)
+    expect(states).toEqual(['quoted>funded', 'funded>filling', 'filling>filled', 'filled>settling', 'settling>settled'])
+    expect([start.state, end.preimage, end.exposed]).toEqual(['quoted', SECRET, false])
   })
 
-  it('keeps the reference and the expiry a command carries on the leg it moves', () => {
-    const swap = run(quoted(), { do: 'mark_funded', reference: ref('lockup:0'), expiresAt: t(900) })
-    expect([swap.from.fact('funding'), swap.from.expiresAt, swap.to.fact('funding')]).toEqual(['lockup:0', 900, null])
+  it('moves the leg each step names and files the reference under the right fact', () => {
+    const seen = quoted().markFundingSeen(t(2), ref('deposit'))
+    expect([seen.state, seen.from.state, seen.from.fact('funding')]).toEqual(['quoted', 'locking', 'deposit'])
+
+    const locked = onArkade().markFunded(t(2), ref('in'), t(900)).markToLocked(t(3), ref('out'), t(800))
+    expect([locked.from.state, locked.to.state, locked.state]).toEqual(['locked', 'locked', 'awaiting_claim'])
+    expect([locked.from.fact('funding'), locked.from.expiresAt]).toEqual(['in', 900])
+    expect([locked.to.fact('funding'), locked.to.expiresAt]).toEqual(['out', 800])
+
+    const refunding = locked.startRefund(t(4), ref('back'))
+    expect([refunding.from.state, refunding.to.state]).toEqual(['locked', 'refunding'])
+    expect([refunding.to.fact('refund'), refunding.to.fact('funding')]).toEqual(['back', 'out'])
+
+    const refunded = refunding.markRefunded(t(5))
+    expect([refunded.from.state, refunded.to.state, refunded.state]).toEqual(['locked', 'refunded', 'refunded'])
+
+    const claimed = locked.markFilled(t(4), SECRET, ref('claim'))
+    expect([claimed.to.fact('claim'), claimed.startSettle(t(5), ref('collect')).from.fact('claim')]).toEqual([
+      'claim',
+      'collect',
+    ])
   })
 
   it('refuses a move the leg does not allow, and a pair of legs that makes no sense', () => {
-    expect(() => quoted().apply({ do: 'mark_refunded' }, t(2))).toThrow(IllegalTransition)
-    expect(() => quoted().apply({ do: 'start_fill' }, t(2))).toThrow('legs pending/locking make no sense')
+    expect(() => quoted().markRefunded(t(2))).toThrow(IllegalTransition)
+    expect(() => quoted().startFill(t(2))).toThrow('legs pending/locking make no sense')
+    expect([
+      quoted().allows('to', 'refunded'),
+      quoted().allows('to', 'locking'),
+      quoted().allows('from', 'locked'),
+    ]).toEqual([false, false, true])
   })
 
   it('takes only the preimage that opens the hashlock, and collects only once it is known', () => {
-    const filling = run(quoted(), { do: 'mark_funded' }, { do: 'start_fill' })
-    expect(() => filling.apply({ do: 'mark_filled', preimage: OTHER_SECRET }, t(9))).toThrow(RuleViolated)
+    const paying = run(quoted(), funded, filling)
+    expect(() => paying.markFilled(t(9), OTHER_SECRET)).toThrow('does not open the hashlock')
     // The legs alone would allow this pair once `to` is claimed; without the preimage there is nothing to claim with.
-    const blind = Swap.restore({ ...run(filling, FILLED[2]!).snapshot, preimage: null }, 3)
-    expect(() => blind.apply({ do: 'start_settle' }, t(9))).toThrow('before the preimage is known')
+    const blind = Swap.restore({ ...filled(paying).snapshot, preimage: null }, 3)
+    expect(() => blind.startSettle(t(9))).toThrow('before the preimage is known')
+    expect(() => stuck(quoted()).markSettled(t(9))).toThrow('before the preimage is known')
   })
 
-  it('records a fact without moving the swap', () => {
-    const funded = run(quoted(), { do: 'mark_funded', reference: ref('a') })
-    const { swap, transition } = funded.apply({ do: 'record_fact', side: 'from', facts: { funding: ref('b') } }, t(9))
-    expect([swap.state, swap.from.fact('funding'), swap.from.since]).toEqual(['funded', 'b', 2])
-    expect([transition?.from, transition?.to]).toEqual(['funded', 'funded'])
+  it('records a fact without moving, and is the same swap when the fact is already on record', () => {
+    const start = quoted().markFunded(t(2), ref('a'))
+    const bumped = start.recordFact('from', { funding: ref('b') })
+    expect([bumped.state, bumped.from.fact('funding'), bumped.from.since]).toEqual(['funded', 'b', 2])
+    expect(start.recordFact('from', { funding: ref('a') })).toBe(start)
+  })
+
+  it('keeps the reference of every step that ends or unwinds a leg', () => {
+    const settled = run(quoted(), funded, filling, filled).startSettle(t(5)).markSettled(t(6), ref('collected'))
+    expect(settled.from.fact('claim')).toBe('collected')
+    const back = run(onArkade(), funded, toLocked).startRefund(t(4)).markRefunded(t(5), ref('ours-back'))
+    expect(back.to.fact('refund')).toBe('ours-back')
+    const released = funded(quoted()).refuse('x').startClientRefund(t(5), ref('sent'))
+    expect([
+      released.from.fact('refund'),
+      released.markClientRefunded(t(6), ref('landed')).from.fact('refund'),
+    ]).toEqual(['sent', 'landed'])
+  })
+
+  it('says the leg cannot move before it looks at the preimage', () => {
+    const claimed = run(quoted(), funded, filling, filled)
+    expect(() => claimed.markFilled(t(9), OTHER_SECRET)).toThrow(IllegalTransition)
+  })
+
+  it('keeps the version it was loaded with', () => {
+    expect(funded(Swap.restore(quoted().snapshot, 7)).version).toBe(7)
   })
 })
 
-describe('abort_fill', () => {
+describe('abortFill', () => {
   it('lets a Lightning payment be tried again', () => {
-    const retried = run(
-      quoted(),
-      { do: 'mark_funded' },
-      { do: 'start_fill', reference: ref('pay-1') },
-      { do: 'abort_fill' },
-    )
+    const retried = funded(quoted()).startFill(t(3), ref('pay-1')).abortFill(t(4))
     expect([retried.state, retried.to.state]).toEqual(['funded', 'pending'])
   })
 
   it('is refused once a transaction that may still land is on record', () => {
-    const onchain = quoted({ to: leg('onchain-htlc') })
-    const unsent = run(onchain, { do: 'mark_funded' }, { do: 'start_fill' })
-    const sent = run(onchain, { do: 'mark_funded' }, { do: 'start_fill', reference: ref('txid') })
-    expect([unsent.canAbortFill, sent.canAbortFill]).toEqual([true, false])
-    expect(() => sent.apply({ do: 'abort_fill' }, t(9))).toThrow('may still land')
-    expect(() => quoted().apply({ do: 'abort_fill' }, t(9))).toThrow(IllegalTransition)
+    const onchain = funded(quoted({ to: leg('onchain-htlc') }))
+    const unsent = onchain.startFill(t(3))
+    const sent = onchain.startFill(t(3), ref('txid'))
+    expect([unsent.canAbortFill, sent.canAbortFill, onchain.canAbortFill]).toEqual([true, false, false])
+    expect(() => sent.abortFill(t(9))).toThrow('may still land')
+    expect(() => quoted().abortFill(t(9))).toThrow(IllegalTransition)
   })
 })
 
 describe('an offer', () => {
   it('ends both legs in its one transaction, and has no preimage', () => {
-    const filling = run(offer(), { do: 'mark_funded' }, { do: 'start_fill' })
-    expect(() => filling.apply({ do: 'mark_filled', preimage: SECRET }, t(9))).toThrow('an offer has no preimage')
-    const filled = run(filling, { do: 'mark_offer_filled', reference: ref('fill') })
-    expect([filled.state, filled.from.fact('claim'), filled.to.fact('claim')]).toEqual(['settled', 'fill', 'fill'])
+    const paying = run(offer(), funded, filling)
+    expect(() => paying.markFilled(t(9), SECRET)).toThrow('an offer has no preimage')
+    const done = paying.markOfferFilled(t(9), ref('fill'))
+    expect([done.state, done.from.fact('claim'), done.to.fact('claim')]).toEqual(['settled', 'fill', 'fill'])
   })
 
-  it('is the only swap filled that way, and only while filling', () => {
-    expect(() =>
-      run(quoted(), { do: 'mark_funded' }, { do: 'start_fill' }).apply({ do: 'mark_offer_filled' }, t(9)),
-    ).toThrow(RuleViolated)
-    expect(() => offer().apply({ do: 'mark_offer_filled' }, t(9))).toThrow(IllegalTransition)
+  it('is the only swap filled that way, only while filling, and not once it failed', () => {
+    expect(() => run(quoted(), funded, filling).markOfferFilled(t(9))).toThrow(RuleViolated)
+    expect(() => offer().markOfferFilled(t(9))).toThrow(IllegalTransition)
+    expect(() => run(offer(), funded, filling, stuck).markOfferFilled(t(9))).toThrow(IllegalTransition)
   })
 })
 
 describe('a failed swap', () => {
-  const funded = (): Swap => run(quoted(), { do: 'mark_funded' })
-  const filling = (): Swap => run(funded(), { do: 'start_fill' })
-
-  it('takes its outcome as its state, and the reason with it', () => {
-    const { swap, transition } = funded().apply({ do: 'refuse', reason: 'quote_expired' }, t(9))
-    expect([swap.state, swap.outcome, swap.outcomeReason, transition?.reason]).toEqual([
-      'refused',
-      'refused',
-      'quote_expired',
-      'quote_expired',
-    ])
+  it('takes its outcome as its state, the reason with it, and is not counted as exposed', () => {
+    const refused = funded(quoted()).refuse('quote_expired')
+    expect([refused.state, refused.outcome, refused.outcomeReason]).toEqual(['refused', 'refused', 'quote_expired'])
+    const out = run(onArkade(), funded, toLocked)
+    expect([out.exposed, stuck(out).exposed]).toEqual([true, false])
   })
 
-  it('cannot be refused while our payout is out', () => {
-    expect(() => filling().apply({ do: 'refuse', reason: 'x' }, t(9))).toThrow('our payout may be out')
-    expect(filling().apply({ do: 'stick', reason: 'x' }, t(9)).swap.state).toBe('stuck')
-  })
-
-  it('changes nothing when told its outcome again', () => {
-    const refused = run(funded(), { do: 'refuse', reason: 'first' })
-    const again = refused.apply({ do: 'refuse', reason: 'second' }, t(9))
-    expect([again.swap, again.transition, again.swap.outcomeReason]).toEqual([refused, null, 'first'])
+  it('is the same swap when told its outcome again', () => {
+    const refused = funded(quoted()).refuse('first')
+    expect(refused.refuse('second')).toBe(refused)
   })
 
   it('may be judged again only while stuck', () => {
-    const stuck = run(filling(), { do: 'stick', reason: 'x' })
-    expect(run(stuck, { do: 'mark_lost', reason: 'y' }).state).toBe('lost')
-    expect(() => run(stuck, { do: 'mark_lost', reason: 'y' }).apply({ do: 'stick', reason: 'z' }, t(9))).toThrow(
-      'already lost',
-    )
-    expect(() => run(funded(), { do: 'refuse', reason: 'x' }).apply({ do: 'stick', reason: 'z' }, t(9))).toThrow(
-      'already refused',
-    )
-    expect(() =>
-      run(quoted(), ...FILLED, { do: 'start_settle' }, { do: 'mark_settled' }).apply(
-        { do: 'stick', reason: 'z' },
-        t(9),
-      ),
-    ).toThrow('already settled')
+    const lost = run(quoted(), funded, filling, stuck).markLost('y')
+    expect(lost.state).toBe('lost')
+    expect(() => lost.stick('z')).toThrow('already lost')
+    expect(() => funded(quoted()).refuse('x').stick('z')).toThrow('already refused')
+    const settled = run(quoted(), funded, filling, filled).startSettle(t(5)).markSettled(t(6))
+    expect(() => settled.stick('z')).toThrow('already settled')
   })
 
   it('still records what the rails do, so the client lock of a refused swap can go back', () => {
-    const released = run(
-      funded(),
-      { do: 'refuse', reason: 'x' },
-      { do: 'start_client_refund' },
-      { do: 'mark_client_refunded' },
-    )
+    const released = funded(quoted()).refuse('x').startClientRefund(t(5)).markClientRefunded(t(6))
     expect([released.state, released.from.state]).toEqual(['refused', 'refunded'])
   })
 
   it('is rearmed once the preimage is known or our payout is back, never before', () => {
-    const stuck = run(filling(), { do: 'stick', reason: 'x' })
-    expect(() => stuck.apply({ do: 'rearm' }, t(9))).toThrow('no preimage is known')
-    expect(() => filling().apply({ do: 'rearm' }, t(9))).toThrow(IllegalTransition)
-    const rearmed = run(stuck, { do: 'mark_filled', preimage: SECRET }, { do: 'rearm' })
-    expect([rearmed.state, rearmed.outcome, rearmed.outcomeReason]).toEqual(['filled', null, null])
+    const waiting = run(quoted(), funded, filling, stuck)
+    expect([waiting.canRearm, filled(waiting).canRearm]).toEqual([false, true])
+    expect(() => waiting.rearm()).toThrow('no preimage is known')
+    expect(() => run(quoted(), funded, filling).rearm()).toThrow(IllegalTransition)
+    const collectable = filled(waiting).rearm()
+    expect([collectable.state, collectable.outcome, collectable.snapshot.outcomeReason]).toEqual(['filled', null, null])
+    const back = run(onArkade(), funded, toLocked, stuck).markRefunded(t(5)).rearm()
+    expect([back.state, back.outcome]).toEqual(['refunded', null])
+  })
+})
+
+describe('refuse', () => {
+  it('is turned down while our payout is out', () => {
+    expect(() => run(quoted(), funded, filling).refuse('x')).toThrow('our payout may be out')
+  })
+
+  it('is turned down on a stuck swap whose payout went out after it stuck', () => {
+    const after: Step[] = [filling, toLocked, filled]
+    for (const step of after) expect(() => run(onArkade(), stuck, step).refuse('y')).toThrow('may be out')
+    const paidAndClientRefunded = run(onArkade(), funded, filling, stuck).markClientRefunded(t(5))
+    expect(() => paidAndClientRefunded.refuse('y')).toThrow('may be out')
+  })
+
+  it('is the same swap when already refused, whatever the rails did since', () => {
+    const refused = funded(onArkade()).refuse('x').startFill(t(5))
+    expect(refused.refuse('again')).toBe(refused)
+  })
+
+  it('says a final swap is final before it looks at the payout', () => {
+    const lost = run(onArkade(), funded, filling).markLost('x')
+    expect(() => lost.refuse('y')).toThrow('already lost')
+  })
+
+  it('is allowed on a stuck swap once nothing of ours is out', () => {
+    expect(run(onArkade(), funded, stuck).refuse('y').state).toBe('refused')
+    expect(run(onArkade(), funded, toLocked, stuck).markRefunded(t(5)).refuse('y').state).toBe('refused')
   })
 })
 
 describe('a restored swap whose legs disagree', () => {
   const stored = (from: LegState, to: LegState): Swap => {
     const { snapshot } = quoted()
-    const at = (side: 'from' | 'to', state: LegState): Leg =>
+    const at = (side: Side, state: LegState): Leg =>
       Leg.restore(side, snapshot[side].terms, state, snapshot[side].facts, t(1))
     return Swap.restore({ ...snapshot, from: at('from', from), to: at('to', to) }, 4)
   }
@@ -222,82 +272,12 @@ describe('a restored swap whose legs disagree', () => {
       'legs claimed/pending contradict each other',
       4,
     ])
-    expect(swap.apply({ do: 'stick', reason: 'operator' }, t(9)).swap.outcomeReason).toBe('operator')
+    expect(swap.stick('operator').outcomeReason).toBe('operator')
   })
 
   it('is not refused while its payout may be out, and its fill is not aborted into another contradiction', () => {
-    expect(() => stored('pending', 'locked').apply({ do: 'refuse', reason: 'x' }, t(9))).toThrow('may be out')
-    expect(() => stored('refunded', 'locking').apply({ do: 'abort_fill' }, t(9))).toThrow('make no sense')
-  })
-})
-
-describe('each command', () => {
-  const awaitingClaim = (): Swap => run(quoted({ to: leg('vhtlc') }), { do: 'mark_funded' }, { do: 'mark_to_locked' })
-
-  it('moves the leg it names and files its reference under the right fact', () => {
-    const locked = run(
-      quoted({ to: leg('vhtlc') }),
-      { do: 'mark_funded' },
-      { do: 'mark_to_locked', reference: ref('out') },
-    )
-    expect([locked.from.state, locked.to.state, locked.to.fact('funding')]).toEqual(['locked', 'locked', 'out'])
-
-    const refunding = run(locked, { do: 'start_refund', reference: ref('back') })
-    expect([refunding.from.state, refunding.to.state]).toEqual(['locked', 'refunding'])
-    expect([refunding.to.fact('refund'), refunding.to.fact('funding')]).toEqual(['back', 'out'])
-
-    const refunded = run(refunding, { do: 'mark_refunded' })
-    expect([refunded.from.state, refunded.to.state, refunded.state]).toEqual(['locked', 'refunded', 'refunded'])
-
-    const filled = run(locked, { do: 'mark_filled', preimage: SECRET, reference: ref('claim') })
-    expect(filled.to.fact('claim')).toBe('claim')
-  })
-
-  it('keeps the version it was loaded with', () => {
-    const stored = Swap.restore(quoted().snapshot, 7)
-    expect(run(stored, { do: 'mark_funded' }).version).toBe(7)
-  })
-
-  it('reports nothing when a fact is already on record', () => {
-    const funded = run(quoted(), { do: 'mark_funded', reference: ref('a') })
-    const again = funded.apply({ do: 'record_fact', side: 'from', facts: { funding: ref('a') } }, t(9))
-    expect([again.swap, again.transition]).toEqual([funded, null])
-  })
-
-  it('is rearmed once our payout is back', () => {
-    const back = run(awaitingClaim(), { do: 'stick', reason: 'x' }, { do: 'mark_refunded' }, { do: 'rearm' })
-    expect([back.state, back.outcome]).toEqual(['refunded', null])
-  })
-
-  it('does not count a failed swap as exposed, nor fill its offer', () => {
-    expect(run(awaitingClaim(), { do: 'stick', reason: 'x' }).exposed).toBe(false)
-    const stuckOffer = run(offer(), { do: 'mark_funded' }, { do: 'start_fill' }, { do: 'stick', reason: 'x' })
-    expect(() => stuckOffer.apply({ do: 'mark_offer_filled' }, t(9))).toThrow(IllegalTransition)
-  })
-})
-
-describe('refuse', () => {
-  const stuck = (...before: Command[]): Swap =>
-    run(quoted({ to: leg('vhtlc') }), ...before, { do: 'stick', reason: 'x' })
-  const refuse: Command = { do: 'refuse', reason: 'y' }
-
-  it('is turned down on a stuck swap whose payout went out after it stuck', () => {
-    const sequences: Command[][] = [
-      [{ do: 'start_fill' }],
-      [{ do: 'mark_to_locked' }],
-      [{ do: 'mark_filled', preimage: SECRET }],
-    ]
-    for (const after of sequences) expect(() => run(stuck(), ...after).apply(refuse, t(9))).toThrow('may be out')
-    const paidAndClientRefunded = run(stuck({ do: 'mark_funded' }, { do: 'start_fill' }), {
-      do: 'mark_client_refunded',
-    })
-    expect(() => paidAndClientRefunded.apply(refuse, t(9))).toThrow('may be out')
-  })
-
-  it('is allowed on a stuck swap once nothing of ours is out', () => {
-    expect(run(stuck({ do: 'mark_funded' }), refuse).state).toBe('refused')
-    const back = run(stuck({ do: 'mark_funded' }, { do: 'mark_to_locked' }), { do: 'mark_refunded' }, refuse)
-    expect(back.state).toBe('refused')
+    expect(() => stored('pending', 'locked').refuse('x')).toThrow('may be out')
+    expect(() => stored('refunded', 'locking').abortFill(t(9))).toThrow('make no sense')
   })
 })
 
@@ -309,57 +289,67 @@ const random = (seed: number) => (): number => {
   return ((x ^ (x >>> 14)) >>> 0) / 4294967296
 }
 
-const COMMANDS: Command[] = [
-  { do: 'mark_funding_seen' },
-  { do: 'mark_funded', reference: ref('lock') },
-  { do: 'start_fill' },
-  { do: 'start_fill', reference: ref('pay') },
-  { do: 'abort_fill' },
-  { do: 'mark_to_locked' },
-  { do: 'mark_filled', preimage: SECRET },
-  { do: 'mark_filled', preimage: OTHER_SECRET },
-  { do: 'start_settle' },
-  { do: 'mark_settled' },
-  { do: 'start_refund' },
-  { do: 'mark_refunded' },
-  { do: 'start_client_refund' },
-  { do: 'mark_client_refunded' },
-  { do: 'mark_offer_filled' },
-  { do: 'refuse', reason: 'r' },
-  { do: 'mark_lost', reason: 'l' },
-  { do: 'stick', reason: 's' },
-  { do: 'rearm' },
-  { do: 'record_fact', side: 'to', facts: { refund: ref('bump') } },
+interface Move {
+  readonly name: string
+  readonly step: Step
+  readonly leg?: readonly [Side, LegState]
+}
+
+const MOVES: Move[] = [
+  { name: 'markFundingSeen', step: (s) => s.markFundingSeen(t(9)), leg: ['from', 'locking'] },
+  { name: 'markFunded', step: (s) => s.markFunded(t(9), ref('lock')), leg: ['from', 'locked'] },
+  { name: 'startFill', step: (s) => s.startFill(t(9)), leg: ['to', 'locking'] },
+  { name: 'startFill sent', step: (s) => s.startFill(t(9), ref('pay')), leg: ['to', 'locking'] },
+  { name: 'abortFill', step: (s) => s.abortFill(t(9)) },
+  { name: 'markToLocked', step: (s) => s.markToLocked(t(9)), leg: ['to', 'locked'] },
+  { name: 'markFilled', step: (s) => s.markFilled(t(9), SECRET) },
+  { name: 'markFilled wrong', step: (s) => s.markFilled(t(9), OTHER_SECRET) },
+  { name: 'startSettle', step: (s) => s.startSettle(t(9)), leg: ['from', 'claiming'] },
+  { name: 'markSettled', step: (s) => s.markSettled(t(9)), leg: ['from', 'claimed'] },
+  { name: 'startRefund', step: (s) => s.startRefund(t(9)), leg: ['to', 'refunding'] },
+  { name: 'markRefunded', step: (s) => s.markRefunded(t(9)), leg: ['to', 'refunded'] },
+  { name: 'startClientRefund', step: (s) => s.startClientRefund(t(9)), leg: ['from', 'refunding'] },
+  { name: 'markClientRefunded', step: (s) => s.markClientRefunded(t(9)), leg: ['from', 'refunded'] },
+  { name: 'markOfferFilled', step: (s) => s.markOfferFilled(t(9)) },
+  { name: 'refuse', step: (s) => s.refuse('r') },
+  { name: 'markLost', step: (s) => s.markLost('l') },
+  { name: 'stick', step: (s) => s.stick('s') },
+  { name: 'rearm', step: (s) => s.rearm() },
+  { name: 'recordFact', step: (s) => s.recordFact('to', { refund: ref('bump') }) },
 ]
 
 const STARTS: (() => Swap)[] = [
   quoted,
   offer,
+  onArkade,
   () => quoted({ to: leg('vhtlc'), from: leg('lightning') }),
   () => quoted({ to: leg('onchain-htlc') }),
   () => quoted({ to: leg('evm-htlc') }),
 ]
 
-describe('any sequence of commands', () => {
+describe('any sequence of steps', () => {
   it('keeps every swap in a state that makes sense', () => {
     const next = random(20261123)
+    const reached = new Set<string>()
     for (let trial = 0; trial < 4_000; trial++) {
       let swap = STARTS[Math.floor(next() * STARTS.length)]!()
-      for (let step = 0; step < 25; step++) {
-        const command = COMMANDS[Math.floor(next() * COMMANDS.length)]!
+      for (let turn = 0; turn < 25; turn++) {
+        const move = MOVES[Math.floor(next() * MOVES.length)]!
         const before = swap
         const snapshot = before.snapshot
-        const accepted = before.accepts(command)
-        let applied: ReturnType<Swap['apply']> | null = null
+        let after: Swap | null = null
         try {
-          applied = before.apply(command, t(10 + step))
+          after = move.step(before)
         } catch (error) {
           expect(error).toBeInstanceOf(DomainError)
         }
-        expect(applied !== null, `accepts disagrees with apply on ${command.do}`).toBe(accepted)
+        if (move.leg) expect(before.allows(...move.leg), `allows disagrees with ${move.name}`).toBe(after !== null)
+        if (move.name === 'rearm') expect(before.canRearm).toBe(after !== null)
+        if (move.name === 'abortFill' && after !== null) expect(before.canAbortFill).toBe(true)
         expect(before.snapshot).toBe(snapshot)
-        if (applied === null) continue
-        swap = applied.swap
+        if (after === null) continue
+        swap = after
+        reached.add(swap.state)
 
         const legs = SwapState.derive(swap.from.state, swap.to.state)
         if (swap.outcome === null)
@@ -369,12 +359,23 @@ describe('any sequence of commands', () => {
         if (swap.to.state === 'claimed' && !swap.isOffer) expect(swap.preimage).not.toBeNull()
         if (swap.from.state === 'claimed' && swap.outcome === null) expect(swap.to.state).toBe('claimed')
         if (before.outcome === 'refused' || before.outcome === 'lost') expect(swap.outcome).toBe(before.outcome)
-        if (command.do === 'refuse' && applied.transition !== null)
-          expect(['pending', 'refunded']).toContain(before.to.state)
-        if (applied.transition !== null) {
-          expect([applied.transition.from, applied.transition.to]).toEqual([before.state, swap.state])
-        }
+        if (move.name === 'refuse' && after !== before) expect(['pending', 'refunded']).toContain(before.to.state)
+        expect(swap.version).toBe(before.version)
       }
     }
+    expect([...reached].sort()).toEqual([
+      'awaiting_claim',
+      'filled',
+      'filling',
+      'funded',
+      'lost',
+      'quoted',
+      'refunded',
+      'refunding',
+      'refused',
+      'settled',
+      'settling',
+      'stuck',
+    ])
   })
 })

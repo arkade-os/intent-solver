@@ -15,54 +15,6 @@ import {
 import type { Quote } from './quote.js'
 import { SwapOutcome, SwapState, type DerivedSwapState } from './swap_state.js'
 
-const LEG_COMMANDS = {
-  mark_funding_seen: { side: Side.From, state: 'locking', fact: FactKind.Funding },
-  mark_funded: { side: Side.From, state: 'locked', fact: FactKind.Funding },
-  start_fill: { side: Side.To, state: 'locking', fact: FactKind.Funding },
-  mark_to_locked: { side: Side.To, state: 'locked', fact: FactKind.Funding },
-  mark_filled: { side: Side.To, state: 'claimed', fact: FactKind.Claim },
-  start_settle: { side: Side.From, state: 'claiming', fact: FactKind.Claim },
-  mark_settled: { side: Side.From, state: 'claimed', fact: FactKind.Claim },
-  start_refund: { side: Side.To, state: 'refunding', fact: FactKind.Refund },
-  mark_refunded: { side: Side.To, state: 'refunded', fact: FactKind.Refund },
-  start_client_refund: { side: Side.From, state: 'refunding', fact: FactKind.Refund },
-  mark_client_refunded: { side: Side.From, state: 'refunded', fact: FactKind.Refund },
-} as const satisfies Record<string, { side: Side; state: LegState; fact: FactKind }>
-
-type LegCommand = keyof typeof LEG_COMMANDS
-type LockCommand = 'mark_funded' | 'mark_to_locked'
-
-const FAILURES = {
-  refuse: SwapOutcome.Refused,
-  mark_lost: SwapOutcome.Lost,
-  stick: SwapOutcome.Stuck,
-} as const
-
-export type Command =
-  | { readonly do: Exclude<LegCommand, LockCommand | 'mark_filled'>; readonly reference?: Reference }
-  | { readonly do: LockCommand; readonly reference?: Reference; readonly expiresAt?: UnixSeconds }
-  | { readonly do: 'mark_filled'; readonly preimage: Preimage; readonly reference?: Reference }
-  | { readonly do: 'abort_fill' }
-  | { readonly do: 'mark_offer_filled'; readonly reference?: Reference }
-  | { readonly do: keyof typeof FAILURES; readonly reason: string }
-  | { readonly do: 'rearm' }
-  | { readonly do: 'record_fact'; readonly side: Side; readonly facts: LegFacts }
-
-export interface Transition {
-  readonly swapId: SwapId
-  readonly at: UnixSeconds
-  readonly from: SwapState
-  readonly to: SwapState
-  readonly command: Command['do']
-  readonly reason: string | null
-}
-
-/** `transition` is null when the command changed nothing, so a repeated one is harmless. */
-export interface Applied {
-  readonly swap: Swap
-  readonly transition: Transition | null
-}
-
 export interface SwapProps {
   readonly id: SwapId
   readonly rfqId: RfqId | null
@@ -85,14 +37,6 @@ export interface NewSwap {
   readonly to: LegTerms
   readonly at: UnixSeconds
 }
-
-interface Refusal {
-  readonly Kind: new (message: string) => DomainError
-  readonly why: string
-}
-
-const illegal = (why: string): Refusal => ({ Kind: IllegalTransition, why })
-const againstRule = (why: string): Refusal => ({ Kind: RuleViolated, why })
 
 const noted = (fact: FactKind, reference?: Reference): LegFacts =>
   reference === undefined ? {} : { [fact]: reference }
@@ -175,133 +119,166 @@ export class Swap {
     return SwapState.isExposed(this.state)
   }
 
+  /** Whether a leg may be recorded in `state` now: its own moves, and the pair it would form. */
+  allows(side: Side, state: LegState): boolean {
+    return this.blocked(side, state) === null
+  }
+
+  /** The client's deposit is visible but not final yet. */
+  markFundingSeen(at: UnixSeconds, funding?: Reference): Swap {
+    return this.move(Side.From, 'locking', at, noted(FactKind.Funding, funding))
+  }
+
+  markFunded(at: UnixSeconds, funding?: Reference, expiresAt: UnixSeconds | null = null): Swap {
+    return this.move(Side.From, 'locked', at, noted(FactKind.Funding, funding), expiresAt)
+  }
+
+  /** Call this before sending on the rail, so a crash in between still leaves the payout on record. */
+  startFill(at: UnixSeconds, funding?: Reference): Swap {
+    return this.move(Side.To, 'locking', at, noted(FactKind.Funding, funding))
+  }
+
   /** A Lightning payment can fail for good; a signed transaction can still land. */
   get canAbortFill(): boolean {
     const { to } = this
     return to.state === 'locking' && (to.contract === ContractKind.Lightning || to.fact(FactKind.Funding) === null)
   }
 
-  accepts(command: Command): boolean {
-    return this.refusal(command) === null
+  abortFill(at: UnixSeconds): Swap {
+    if (this.to.state !== 'locking') throw this.illegal(`to leg is ${this.to.state}, not locking`)
+    if (!this.canAbortFill) throw this.againstRule('to leg has a transaction that may still land')
+    return this.move(Side.To, 'pending', at)
   }
 
-  apply(command: Command, at: UnixSeconds): Applied {
-    const refusal = this.refusal(command)
-    if (refusal !== null) throw new refusal.Kind(`swap ${this.id}: ${command.do}: ${refusal.why}`)
-    const next = this.after(command, at)
-    if (next === this.props) return { swap: this, transition: null }
-    const swap = new Swap(next, this.version)
-    const reason = 'reason' in command ? command.reason : null
-    return {
-      swap,
-      transition: { swapId: this.id, at, from: this.state, to: swap.state, command: command.do, reason },
-    }
+  markToLocked(at: UnixSeconds, funding?: Reference, expiresAt: UnixSeconds | null = null): Swap {
+    return this.move(Side.To, 'locked', at, noted(FactKind.Funding, funding), expiresAt)
   }
 
-  private after(command: Command, at: UnixSeconds): SwapProps {
-    const { props } = this
-    switch (command.do) {
-      case 'record_fact': {
-        const leg = props[command.side]
-        return leg.knows(command.facts) ? props : { ...props, [command.side]: leg.record(command.facts) }
-      }
-      case 'abort_fill':
-        return { ...props, to: props.to.moveTo('pending', at) }
-      case 'mark_offer_filled': {
-        const claim = noted(FactKind.Claim, command.reference)
-        return { ...props, from: props.from.moveTo('claimed', at, claim), to: props.to.moveTo('claimed', at, claim) }
-      }
-      case 'refuse':
-      case 'mark_lost':
-      case 'stick':
-        if (props.outcome === FAILURES[command.do]) return props
-        return { ...props, outcome: FAILURES[command.do], outcomeReason: command.reason }
-      case 'rearm':
-        return { ...props, outcome: null, outcomeReason: null }
-      case 'mark_filled': {
-        const to = props.to.moveTo('claimed', at, noted(FactKind.Claim, command.reference))
-        return { ...props, to, preimage: command.preimage }
-      }
-      default: {
-        const { side, state, fact } = LEG_COMMANDS[command.do]
-        const expiresAt = 'expiresAt' in command ? (command.expiresAt ?? null) : null
-        const leg = props[side].moveTo(state, at, noted(fact, command.reference), expiresAt)
-        return { ...props, [side]: leg }
-      }
-    }
+  markFilled(at: UnixSeconds, preimage: Preimage, claim?: Reference): Swap {
+    const claimed = this.move(Side.To, 'claimed', at, noted(FactKind.Claim, claim))
+    if (this.hashlock === null) throw this.againstRule('an offer has no preimage')
+    if (!Preimage.opens(preimage, this.hashlock)) throw this.againstRule('the preimage does not open the hashlock')
+    return claimed.with({ preimage })
   }
 
-  private refusal(command: Command): Refusal | null {
-    switch (command.do) {
-      case 'record_fact':
-        return null
-      case 'abort_fill':
-        return this.abortRefusal()
-      case 'mark_offer_filled':
-        return this.offerFillRefusal()
-      case 'refuse':
-      case 'mark_lost':
-      case 'stick':
-        return this.failureRefusal(FAILURES[command.do])
-      case 'rearm':
-        return this.rearmRefusal()
-      default:
-        return this.moveRefusal(command.do, command.do === 'mark_filled' ? command.preimage : null)
-    }
+  startSettle(at: UnixSeconds, claim?: Reference): Swap {
+    return this.move(Side.From, 'claiming', at, noted(FactKind.Claim, claim))
   }
 
-  private moveRefusal(name: LegCommand, preimage: Preimage | null): Refusal | null {
-    const { side, state } = LEG_COMMANDS[name]
+  markSettled(at: UnixSeconds, claim?: Reference): Swap {
+    return this.move(Side.From, 'claimed', at, noted(FactKind.Claim, claim))
+  }
+
+  startRefund(at: UnixSeconds, refund?: Reference): Swap {
+    return this.move(Side.To, 'refunding', at, noted(FactKind.Refund, refund))
+  }
+
+  markRefunded(at: UnixSeconds, refund?: Reference): Swap {
+    return this.move(Side.To, 'refunded', at, noted(FactKind.Refund, refund))
+  }
+
+  startClientRefund(at: UnixSeconds, refund?: Reference): Swap {
+    return this.move(Side.From, 'refunding', at, noted(FactKind.Refund, refund))
+  }
+
+  markClientRefunded(at: UnixSeconds, refund?: Reference): Swap {
+    return this.move(Side.From, 'refunded', at, noted(FactKind.Refund, refund))
+  }
+
+  /** The one transaction of an offer takes the client's deposit and pays them, so both legs end at once. */
+  markOfferFilled(at: UnixSeconds, fill?: Reference): Swap {
+    if (!this.isOffer) throw this.againstRule('only an offer is filled in one transaction')
+    if (this.outcome !== null || this.legsState !== 'filling') throw this.illegal(`cannot fill while ${this.state}`)
+    const claim = noted(FactKind.Claim, fill)
+    return this.with({ from: this.from.moveTo('claimed', at, claim), to: this.to.moveTo('claimed', at, claim) })
+  }
+
+  /** A fact learned later, or a replacement for one. The leg stays where it is. */
+  recordFact(side: Side, facts: LegFacts): Swap {
     const leg = this[side]
-    if (!leg.canMoveTo(state)) return illegal(`${side} leg cannot go ${leg.state} -> ${state}`)
-    if (preimage !== null) {
-      if (this.hashlock === null) return againstRule('an offer has no preimage')
-      if (!Preimage.opens(preimage, this.hashlock)) return againstRule('the preimage does not open the hashlock')
-    }
+    return leg.knows(facts) ? this : this.with({ [side]: leg.record(facts) })
+  }
+
+  /** Nothing of ours went out. Asked of the leg: a stuck swap can hold legs that name no swap state. */
+  refuse(reason: string): Swap {
+    const refused = this.fail(SwapOutcome.Refused, reason)
+    const nothingOut = this.to.state === 'pending' || this.to.state === 'refunded'
+    if (refused !== this && !nothingOut) throw this.againstRule('our payout may be out, so it cannot be refused')
+    return refused
+  }
+
+  markLost(reason: string): Swap {
+    return this.fail(SwapOutcome.Lost, reason)
+  }
+
+  stick(reason: string): Swap {
+    return this.fail(SwapOutcome.Stuck, reason)
+  }
+
+  get canRearm(): boolean {
+    return this.rearmBlocked() === null
+  }
+
+  /** A stuck swap goes back to being driven: it can be collected, or nothing is out any more. */
+  rearm(): Swap {
+    const blocked = this.rearmBlocked()
+    if (blocked !== null) throw blocked
+    return this.with({ outcome: null, outcomeReason: null })
+  }
+
+  // `refused` and `lost` are final. A stuck swap may be judged again. The same outcome twice changes nothing.
+  private fail(outcome: SwapOutcome, reason: string): Swap {
+    const current = this.outcome
+    if (current === outcome) return this
+    if (current !== null && current !== SwapOutcome.Stuck) throw this.illegal(`already ${current}`)
+    const legs = this.legsState
+    if (current === null && legs !== null && SwapState.isTerminal(legs)) throw this.illegal(`already ${legs}`)
+    return this.with({ outcome, outcomeReason: reason })
+  }
+
+  private rearmBlocked(): DomainError | null {
+    if (this.outcome !== SwapOutcome.Stuck)
+      return this.illegal(`only a stuck swap is rearmed, this one is ${this.state}`)
+    const resolved = this.preimage !== null || this.to.state === 'refunded'
+    if (!resolved) return this.againstRule('no preimage is known and our payout is not back')
+    return this.legsState === null ? this.againstRule(`legs ${this.from.state}/${this.to.state} make no sense`) : null
+  }
+
+  private move(
+    side: Side,
+    state: LegState,
+    at: UnixSeconds,
+    facts: LegFacts = {},
+    expiresAt: UnixSeconds | null = null,
+  ): Swap {
+    const blocked = this.blocked(side, state)
+    if (blocked !== null) throw blocked
+    return this.with({ [side]: this[side].moveTo(state, at, facts, expiresAt) })
+  }
+
+  private blocked(side: Side, state: LegState): DomainError | null {
+    const leg = this[side]
+    if (!leg.canMoveTo(state)) return this.illegal(`${side} leg cannot go ${leg.state} -> ${state}`)
     const collects = side === Side.From && (state === 'claiming' || state === 'claimed')
     if (collects && !this.isOffer && this.preimage === null) {
-      return againstRule('the from leg cannot be collected before the preimage is known')
+      return this.againstRule('the from leg cannot be collected before the preimage is known')
     }
-    return side === Side.From ? this.incoherent(state, this.to.state) : this.incoherent(this.from.state, state)
-  }
-
-  // A failed swap still records what the rails do; only a live one must keep its legs coherent.
-  private incoherent(from: LegState, to: LegState): Refusal | null {
+    // A failed swap still records what the rails do; only a live one must keep its legs coherent.
+    const [from, to] = side === Side.From ? [state, this.to.state] : [this.from.state, state]
     const makesSense = this.outcome !== null || SwapState.derive(from, to) !== null
-    return makesSense ? null : againstRule(`legs ${from}/${to} make no sense; fail the swap`)
+    return makesSense ? null : this.againstRule(`legs ${from}/${to} make no sense; fail the swap`)
   }
 
-  private abortRefusal(): Refusal | null {
-    if (this.to.state !== 'locking') return illegal(`to leg is ${this.to.state}, not locking`)
-    if (!this.canAbortFill) return againstRule('to leg has a transaction that may still land')
-    return this.incoherent(this.from.state, 'pending')
+  private with(changes: Partial<SwapProps>): Swap {
+    return new Swap({ ...this.props, ...changes }, this.version)
   }
 
-  private offerFillRefusal(): Refusal | null {
-    if (!this.isOffer) return againstRule('only an offer is filled in one transaction')
-    return this.outcome === null && this.legsState === 'filling' ? null : illegal(`cannot fill while ${this.state}`)
+  private illegal(why: string): DomainError {
+    return new IllegalTransition(`swap ${this.id}: ${why}`)
   }
 
-  // `refused` means nothing of ours went out. A stuck swap may be judged again; `refused` and `lost` are final.
-  private failureRefusal(outcome: SwapOutcome): Refusal | null {
-    const current = this.outcome
-    if (current === outcome) return null
-    if (current !== null && current !== SwapOutcome.Stuck) return illegal(`already ${current}`)
-    const legs = this.legsState
-    if (current === null && legs !== null && SwapState.isTerminal(legs)) return illegal(`already ${legs}`)
-    // Asked of the leg, not of the swap state: a stuck swap can hold legs that name no state.
-    const nothingOut = this.to.state === 'pending' || this.to.state === 'refunded'
-    if (outcome === SwapOutcome.Refused && !nothingOut) {
-      return againstRule('our payout may be out, so it cannot be refused')
-    }
-    return null
-  }
-
-  private rearmRefusal(): Refusal | null {
-    if (this.outcome !== SwapOutcome.Stuck) return illegal(`only a stuck swap is rearmed, this one is ${this.state}`)
-    const resolved = this.preimage !== null || this.to.state === 'refunded'
-    if (!resolved) return againstRule('no preimage is known and our payout is not back')
-    return this.legsState === null ? againstRule(`legs ${this.from.state}/${this.to.state} make no sense`) : null
+  private againstRule(why: string): DomainError {
+    return new RuleViolated(`swap ${this.id}: ${why}`)
   }
 
   private get legsState(): DerivedSwapState | null {
