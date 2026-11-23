@@ -37,18 +37,22 @@ export const onchainFloatSampler = (input: {
   const now = input.now ?? (() => Date.now())
   let held: number | null = null
   let heldAt = 0
-  let inFlight = false
+  let generation = 0
+  let inFlight: number | null = null
   let announced = false
   let sharedAnnounced = false
 
   const start = (): void => {
     // One at a time, or a burst of quotes past the refresh age each start their
     // own fetch — the amplification a synchronous read exists to prevent.
-    if (inFlight) return
-    inFlight = true
+    if (inFlight === generation) return
+    const started = generation
+    inFlight = started
     void input
       .getBalance()
       .then((balance) => {
+        // Begun before an invalidate: it may predate the withdrawal it would undo.
+        if (started !== generation) return
         held = balance.confirmedSats
         heldAt = now()
         announced = false
@@ -62,9 +66,12 @@ export const onchainFloatSampler = (input: {
         // known balance is better evidence than none.
       })
       .finally(() => {
-        inFlight = false
+        if (inFlight === started) inFlight = null
       })
   }
+
+  // At construction, not first read: a lazy first fetch refused the first quote after every boot.
+  start()
 
   return {
     read: () => {
@@ -78,8 +85,10 @@ export const onchainFloatSampler = (input: {
       return { sats: held, ageMs: age }
     },
     invalidate: () => {
+      generation += 1
       held = null
       announced = false
+      start()
     },
   }
 }
