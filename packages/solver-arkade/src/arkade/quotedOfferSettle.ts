@@ -13,9 +13,13 @@
  * needs: a human. Its deposit's own liveness is the exception — a lost race is
  * no disagreement — so that one is typed. @see OfferNotSubmittedError
  */
+import { selectCoinsWithAsset, selectVirtualCoins, type ExtendedVirtualCoin } from '@arkade-os/sdk'
+import { RFQ_ASSET_SWAP_DIRECTED, RFQ_ASSET_SWAP_DIRECTED_NONCE } from '@arkade-os/solver-core/core/rfqContract.js'
 import type { ArkadeContext } from './wallet.js'
-import { fulfillOffer, OfferNotSubmittedError, type FulfillOptions } from './offerFulfill.js'
+import { fulfillOffers, type BatchOfferFill, type BatchOfferSubmitOptions } from './batchOfferFulfill.js'
+import { assetsOn, fulfillOffer, OfferNotSubmittedError, type FulfillOptions } from './offerFulfill.js'
 import { heldOf } from './offerFill.js'
+import { outpointKey } from './lockupFunding.js'
 import { liveOfferOutpoints, type OfferOutpoint } from './offerOutpoints.js'
 import { offerScriptFrom, type OfferDerivation, type QuotedOfferTerms } from './offerTerms.js'
 
@@ -58,14 +62,13 @@ const termsOf = (intent: QuotedOfferIntent): QuotedOfferTerms => ({
   rfqId: intent.rfqId,
 })
 
-export const quotedOfferSettleFor = (
+const prepareQuotedOfferFor = (
   deps: QuotedOfferSettleDeps,
-): ((intent: QuotedOfferIntent, options?: FulfillOptions) => Promise<string>) => {
+): ((intent: QuotedOfferIntent) => Promise<BatchOfferFill>) => {
   const outpointsAt = deps.outpointsAt ?? ((pkScript: string) => liveOfferOutpoints(deps.ctx, pkScript))
-  const fulfill = deps.fulfill ?? fulfillOffer
   const derive = offerScriptFrom(deps.derivation)
 
-  return async (intent, options) => {
+  return async (intent) => {
     if (intent.depositTxid === null || intent.depositVout === null) {
       throw new Error(`the negotiation at ${intent.offerPkScript} records no deposit outpoint to spend`)
     }
@@ -100,24 +103,97 @@ export const quotedOfferSettleFor = (
       )
     }
 
-    return fulfill(
-      deps.ctx,
-      deps.emulatorUrl,
-      // The offer the derived script was compiled from, taker included.
-      derived.offer,
-      {
+    return {
+      offer: derived.offer,
+      deposit: {
         txid: deposit.txid,
         vout: deposit.vout,
-        // Narrowed because `OfferDepositOutpoint.value` is `number`. Safe while
-        // sats are: 21M BTC is 2.1e15, well inside 2^53. Guarded rather than
-        // trusted, because the solver COMPILES this packet from terms it named
-        // itself, and a truncated value describes an input that does not exist.
         value: assertSafeSats(deposit.sats),
-        // What vin 0 actually carries, not what was quoted: the packet declares
-        // the input, and declaring an amount the input does not hold describes
-        // an input that does not exist.
         assetAmount: intent.fromAssetId === null ? undefined : held,
       },
+    }
+  }
+}
+
+export const quotedOfferSettleFor = (
+  deps: QuotedOfferSettleDeps,
+): ((intent: QuotedOfferIntent, options?: FulfillOptions) => Promise<string>) => {
+  const prepare = prepareQuotedOfferFor(deps)
+  const fulfill = deps.fulfill ?? fulfillOffer
+  return async (intent, options) => {
+    const { offer, deposit } = await prepare(intent)
+    return fulfill(deps.ctx, deps.emulatorUrl, offer, deposit, options)
+  }
+}
+
+/** Settle funded RFQs after the caller checks action-time eligibility and approval for each row. */
+export const quotedOffersSettleFor = (
+  deps: Omit<QuotedOfferSettleDeps, 'fulfill'>,
+): ((intents: readonly QuotedOfferIntent[], options?: BatchOfferSubmitOptions) => Promise<string>) => {
+  const prepare = prepareQuotedOfferFor(deps)
+  const { ctx, emulatorUrl } = deps
+  return async (intents, options) => {
+    if (intents.length < 2) throw new OfferNotSubmittedError('a grouped fill needs at least two offers')
+    if (
+      intents.some(
+        ({ contractVersion }) =>
+          contractVersion !== RFQ_ASSET_SWAP_DIRECTED && contractVersion !== RFQ_ASSET_SWAP_DIRECTED_NONCE,
+      )
+    ) {
+      throw new OfferNotSubmittedError('a grouped fill requires directed offer covenants')
+    }
+
+    const fills = await Promise.all(intents.map(prepare))
+    const spendable = (await ctx.wallet.getSpendableVtxos()) as ExtendedVirtualCoin[]
+    const reserved = ctx.reservations.reserved()
+    const available = new Map(
+      spendable
+        .filter((coin) => !reserved.has(outpointKey(coin.txid, coin.vout)))
+        .map((coin) => [outpointKey(coin.txid, coin.vout), { ...coin, assets: assetsOn(coin) }]),
+    )
+    const wanted = new Map<string, bigint>()
+    let makerSats = 0n
+    let depositSats = 0n
+    for (const { offer, deposit } of fills) {
+      const assetId = offer.wantAsset?.toString()
+      if (assetId !== undefined) wanted.set(assetId, (wanted.get(assetId) ?? 0n) + offer.wantAmount)
+      makerSats += assetId === undefined ? offer.wantAmount : ctx.dustSats
+      depositSats += BigInt(deposit.value)
+      available.delete(outpointKey(deposit.txid, deposit.vout))
+    }
+
+    const selected: ExtendedVirtualCoin[] = []
+    const select = (coins: ExtendedVirtualCoin[]) => {
+      selected.push(...coins)
+      for (const coin of coins) available.delete(outpointKey(coin.txid, coin.vout))
+    }
+    try {
+      for (const [assetId, amount] of wanted) {
+        const held = selected.reduce(
+          (sum, coin) => sum + (coin.assets?.find((a) => a.assetId === assetId)?.amount ?? 0n),
+          0n,
+        )
+        if (held < amount) select(selectCoinsWithAsset([...available.values()], assetId, amount - held).selected)
+      }
+      const minOutputSats = ctx.dustSats > ctx.vtxoMinSats ? ctx.dustSats : ctx.vtxoMinSats
+      const changeTopUp = depositSats < minOutputSats ? minOutputSats - depositSats : 0n
+      const neededSats = makerSats + changeTopUp - selected.reduce((sum, coin) => sum + BigInt(coin.value), 0n)
+      if (neededSats > 0n) select(selectVirtualCoins([...available.values()], assertSafeSats(neededSats)).inputs)
+    } catch (error) {
+      throw new OfferNotSubmittedError('insufficient spendable wallet funding for the grouped fill', { cause: error })
+    }
+    return fulfillOffers(
+      ctx,
+      emulatorUrl,
+      fills,
+      selected.map((coin) => ({
+        txid: coin.txid,
+        vout: coin.vout,
+        value: coin.value,
+        tapLeafScript: coin.forfeitTapLeafScript,
+        tapTree: coin.tapTree,
+        assets: assetsOn(coin),
+      })),
       options,
     )
   }
