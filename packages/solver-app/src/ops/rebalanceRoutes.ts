@@ -369,8 +369,10 @@ export const createArkadeRebalanceSource = async (
             !Number.isSafeInteger(request.quote.refund_locktime)
           )
             throw new Error('external source quote expired or lacks recovery deadline')
-          if (request.quote.refund_locktime! - now() > MAX_PEER_REFUND_SECONDS)
-            throw new Error('external source quote sets its recovery deadline more than 30 days out')
+          // Unix seconds within 30 days; a block height reads as a deadline already past.
+          const horizon = request.quote.refund_locktime! - now()
+          if (horizon <= 0 || horizon > MAX_PEER_REFUND_SECONDS)
+            throw new Error('external source quote sets its recovery deadline outside the next 30 days')
           const time = now()
           const record = createRfqSwapRecord(
             {
