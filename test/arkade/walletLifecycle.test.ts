@@ -22,9 +22,8 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-const open = async (sessionDuration = 10n) => {
+const open = async (sessionDuration = 10n, dispose = vi.fn(async () => {})) => {
   const serverKey = new Uint8Array(32).fill(1)
-  const dispose = vi.fn(async () => {})
   let repository!: WalletRepository
   let journal!: DelayedReleaseBatchRegistrations
   vi.spyOn(Wallet, 'create').mockImplementation(async (config) => {
@@ -87,6 +86,17 @@ describe('Arkade context shutdown', () => {
     expect(context.close()).toBe(closing)
     await expect(context.close()).rejects.toBe(failure)
     expect(dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('closes what a refused start opened, keeping SQLite open if the wallet will not dispose', async () => {
+    const disposed = vi.fn(async () => {})
+    await expect(open(0n, disposed)).rejects.toThrow('sessionDuration=0')
+    expect(disposed).toHaveBeenCalledOnce()
+    expect(databases.at(-1)!.open).toBe(false)
+    const stuck = vi.fn(async () => {}).mockRejectedValue(new Error('wallet cleanup failed'))
+    await expect(open(0n, stuck)).rejects.toThrow('sessionDuration=0')
+    expect(stuck).toHaveBeenCalledOnce()
+    expect(databases.at(-1)!.open).toBe(true)
   })
 })
 

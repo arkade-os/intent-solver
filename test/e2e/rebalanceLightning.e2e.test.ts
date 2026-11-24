@@ -153,8 +153,11 @@ describe('e2e Arkade surplus rebalance to own Lightning channels through another
     await peerLn?.close()
     await ln?.close()
     await onchain?.close?.()
-    await peerArkade?.close()
-    await arkade?.close()
+    try {
+      await peerArkade?.close()
+    } finally {
+      await arkade?.close()
+    }
   })
 
   it(
