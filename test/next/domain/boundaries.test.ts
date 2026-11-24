@@ -38,10 +38,13 @@ describe('domain boundaries', () => {
     expect(sources().filter((file) => /new Error\(/.test(read(file)))).toEqual([])
   })
 
-  it('depends on no package', () => {
+  it('depends on no package beyond the hash primitives', () => {
     const packages = sources().flatMap((file) =>
       [...read(file).matchAll(PACKAGE)].map(([, specifier]) => `${file} imports ${specifier}`),
     )
-    expect(packages).toEqual([])
+    expect(packages.sort()).toEqual([
+      'swap/hashlock.ts imports @noble/hashes/sha2.js',
+      'swap/hashlock.ts imports @scure/base',
+    ])
   })
 })
