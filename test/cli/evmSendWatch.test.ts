@@ -4,6 +4,10 @@ import { runInNewContext } from 'node:vm'
 import ts from 'typescript'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { withEvmSendSweep } from '@arkade-os/solver-app/ops/evmSendSweep.js'
+import { createDirectFillRecovery } from '@arkade-os/solver-app/ops/directFillRecovery.js'
+import { DirectFillAttempts } from '@arkade-os/solver-arkade/arkade/directFillAttempts.js'
+import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
+import { sqliteExecutor } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { startCadence } from '@arkade-os/solver-app/ops/cadence.js'
 import { withBalanceCheckpoints } from '@arkade-os/solver-app/ops/balanceCheckpoints.js'
 
@@ -267,6 +271,92 @@ describe('the hot loop during a slow refund sweep or lifecycle pass', () => {
 })
 
 describe('disabling the EVM send corridor', () => {
+  it('logs a routine journal-list failure, keeps holds, and retries without stopping other watchers', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_800_000_000_000)
+    const db = sqliteExecutor(':memory:')
+    const pins = createReservationLedger()
+    const script = `5120${'11'.repeat(32)}`
+    const attempts = await DirectFillAttempts.open(db, pins, 'wallet', script)
+    await attempts.prepare({
+      parent: { kind: 'offer', id: 'active' },
+      deposit: { txid: '22'.repeat(32), vout: 0 },
+      funding: [{ txid: '33'.repeat(32), vout: 1, value: 5000, script, assets: [] }],
+      offerPkScript: script,
+      proceedsScript: script,
+    })
+    const list = vi.spyOn(attempts, 'list').mockRejectedValueOnce(new Error('SQLite temporarily unavailable'))
+    const signals = new EventEmitter()
+    const log = vi.fn()
+    const watcherStart = vi.fn()
+    const tickAll = vi.fn(async () => 0)
+    const services = {
+      config: { corridorEnabled: {}, contractRetentionMs: 0, poolAutoMint: false },
+      policy: { evmCorridors: [] },
+      arkade: { wallet: { getContractManager: async () => ({}) } },
+      readers: [],
+      corridors: [{ descriptor: { pair: 'other' }, tickAll, findRecoverable: async () => [] }],
+      assetRfqMarkets: [],
+      assetRfqService: { tickAll: async () => [] },
+      directFillRecovery: createDirectFillRecovery({ attempts } as never),
+    }
+    const watching = watchLoopIn(signals, {
+      Error,
+      log,
+      LockupWatcher: class {
+        start = watcherStart
+        sync() {}
+        async stop() {}
+      },
+    })(services)
+    const outcome = watching.catch((error: unknown) => error)
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      expect(log).toHaveBeenCalledWith('direct fill recovery failed:', 'SQLite temporarily unavailable')
+      expect(watcherStart).toHaveBeenCalledOnce()
+      expect(tickAll).toHaveBeenCalledOnce()
+      expect(pins.reserved().size).toBe(1)
+      await vi.advanceTimersByTimeAsync(6000)
+      expect(list.mock.calls.length).toBeGreaterThan(1)
+      expect(tickAll.mock.calls.length).toBeGreaterThan(1)
+      expect(pins.reserved().size).toBe(1)
+    } finally {
+      signals.emit('SIGTERM')
+      await vi.advanceTimersByTimeAsync(250)
+      await outcome
+      db.close()
+    }
+  })
+
+  it('recovers direct fills at startup and on full sweeps with all asset markets disabled', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_800_000_000_000)
+    const signals = new EventEmitter()
+    const sweep = vi.fn(async () => {})
+    const services = {
+      config: { corridorEnabled: {}, contractRetentionMs: 0, poolAutoMint: false, offerMarkets: [] },
+      policy: { evmCorridors: [], offerMarkets: [] },
+      arkade: { wallet: { getContractManager: async () => ({}) } },
+      readers: [],
+      corridors: [],
+      assetRfqMarkets: [],
+      assetOffers: null,
+      assetRfqService: { tickAll: async () => [] },
+      directFillRecovery: { sweep },
+    }
+    const watching = watchLoopIn(signals)(services)
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      expect(sweep).toHaveBeenCalledOnce()
+      await vi.advanceTimersByTimeAsync(6000)
+      expect(sweep.mock.calls.length).toBeGreaterThan(1)
+    } finally {
+      signals.emit('SIGTERM')
+      await vi.advanceTimersByTimeAsync(250)
+      await watching
+    }
+  })
+
   it('stops the corridor quoting without stopping the sweep that watches what it already locked', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(1_800_000_000_000)

@@ -552,7 +552,9 @@ describe('refusals an operator can read', () => {
   it('serves offers only when OFFER_MARKETS names a market', () => {
     // The second silence, driven for real in test/e2e/assetOffer.e2e.test.ts.
     expect(servicesSource).toMatch(/servesOffers\s*=\s*policy\.offerMarkets\.length > 0/)
-    expect(servicesSource).toMatch(/servesOffers\s*\?\s*await OfferFillStore\.open/)
+    expect(servicesSource).toMatch(/servesOffers \|\| recoverOffers \? await OfferFillStore\.open/)
+    expect(servicesSource).toMatch(/const servedOfferStore = servesOffers \? offerStore : null/)
+    expect(servicesSource).toMatch(/const assetOffers = servedOfferStore\s*\?\s*new AssetOfferService/)
     expect(servicesSource).toContain('replaceMarkets:')
   })
 })

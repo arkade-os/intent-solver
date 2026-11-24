@@ -144,8 +144,10 @@ import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInvento
 import { offerExitDelay, offerScriptFrom, xOnlyPubkey } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
 import { largestOfferOutpoint, liveOfferOutpoints } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
 import { quotedOfferSettleFor } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
+import { directFillRecoveryFor } from './directFillRecovery.js'
 
 export interface Services {
+  directFillRecovery?: Awaited<ReturnType<typeof directFillRecoveryFor>>
   /**
    * The ENVIRONMENT's configuration, exactly as `loadConfig()` read it.
    *
@@ -855,7 +857,9 @@ export const createServices = async (
   // either reaches `assetOffers?.replaceMarkets` on a NULL service and no-ops.
   const servesOffers = policy.offerMarkets.length > 0 || marketRows.some((row) => row.enabled && row.servesOffer)
   const liveOfferMarkets = offerMarketsFrom(assetMarkets.pricing)
-  const offerStore = servesOffers ? await OfferFillStore.open(swapFile) : null
+  // Also opened to resolve a journalled offer fill when offers are no longer served.
+  const recoverOffers = (await arkade.directFills.list()).some((attempt) => attempt.parent.kind === 'offer')
+  const offerStore = servesOffers || recoverOffers ? await OfferFillStore.open(swapFile) : null
   const leg = (assetId: string | null, amount: bigint) =>
     `${amount} ${assetId === null ? 'sats' : (assetSymbols.get(assetId) ?? assetId.slice(0, 8))}`
   // NOT a corridor, so no descriptor: an offer fill has no HTLC, deadline or
@@ -878,9 +882,10 @@ export const createServices = async (
   }
   const offerRefusals = createOfferRefusalTail()
   const rfqRefusals = createRfqRefusalTail()
-  const assetOffers = offerStore
+  const servedOfferStore = servesOffers ? offerStore : null
+  const assetOffers = servedOfferStore
     ? new AssetOfferService({
-        store: offerStore,
+        store: servedOfferStore,
         markets: liveOfferMarkets,
         // The console's market rows, in the shape this service consumes. Every
         // served market is in here by construction — see the serve list above.
@@ -987,6 +992,12 @@ export const createServices = async (
     onError: (id, error) => log(`asset rfq ${id} failed:`, error instanceof Error ? error.message : String(error)),
     onDeferred: (id, error) => log(`asset rfq ${id} deferred:`, error instanceof Error ? error.message : String(error)),
   })
+  const directFillRecovery = await directFillRecoveryFor(
+    arkade,
+    (kind) => (kind === 'offer' ? offerStore : assetRfqStore),
+    (key, error) => log(`direct fill ${key} recovery failed:`, messageOf(error)),
+  )
+  await directFillRecovery.sweep()
 
   // ONE reading, whole house: a narrower one lends out headroom another corridor
   // holds. EVM and asset read direct — their readers narrow per token and pair.
@@ -1630,6 +1641,7 @@ export const createServices = async (
     config,
     policy,
     bootPolicy: policy,
+    directFillRecovery,
     bootOverrides,
     assetMarkets: assetMarkets.pricing,
     store,

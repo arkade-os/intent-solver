@@ -75,4 +75,8 @@ export const loseRejectedSubmit = `UPDATE offer_fill SET state = 'lost', fill_ph
 export const markSubmitting = `UPDATE offer_fill SET fill_phase = 'submitting', updated_at = ?
        WHERE id = ? AND state = 'filling' AND fill_phase = 'selecting'`
 
+export const resolveDirectFill = `UPDATE offer_fill SET state = ?, updated_at = ?, fill_txid = ?, failure_reason = ?
+       WHERE id = ? AND state = ? AND offer_txid = ? AND offer_vout = ? AND offer_pk_script = ?
+       AND fill_txid IS ? AND failure_reason IS ?`
+
 export const recordEvent = `INSERT INTO offer_fill_event (fill_id, at, from_state, to_state, detail) VALUES (?, ?, ?, ?, ?)`

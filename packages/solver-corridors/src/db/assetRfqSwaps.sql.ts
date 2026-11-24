@@ -123,3 +123,7 @@ export const phaseIsSubmitting = `fill_phase = 'submitting'`
 
 export const markSubmitting = `UPDATE asset_rfq_swap SET fill_phase = 'submitting', updated_at = ?
        WHERE id = ? AND state = 'filling' AND fill_phase = 'selecting'`
+
+export const resolveDirectFill = `UPDATE asset_rfq_swap SET state = ?, updated_at = ?, fill_txid = ?, failure_reason = ?
+       WHERE id = ? AND state = ? AND deposit_txid = ? AND deposit_vout = ? AND offer_pk_script = ?
+       AND fill_txid IS ? AND failure_reason IS ?`
