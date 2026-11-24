@@ -1361,6 +1361,19 @@ describe('ReceiveSwapService.tick — claim detection and settlement', () => {
     await expect(ln.getHoldState(paymentHash)).resolves.toMatchObject({ status: 'settled' })
   })
 
+  it('finds the claim of its recorded output when the script read leaves that output out', async () => {
+    const funded = await armAndFund()
+    const row0 = await store.get(funded.id)
+    arkade.state.outputs = [{ txid: 'stray-payment', vout: 0, value: 700 }]
+    arkade.state.claimOn = { txid: row0.arkadeLockupTxid!, vout: row0.arkadeLockupVout! }
+    arkade.state.claimPreimage = P
+
+    const row = await service.tick(funded.id)
+
+    expect(row.state).toBe('settled')
+    expect(row.preimage).toBe(hex.encode(P))
+  })
+
   describe('a lockup the client unrolled onto Bitcoin', () => {
     const unroll = (funded: { id: string }, witness?: Uint8Array[]) => {
       arkade.state.unrolledOutputs = arkade.state.outputs

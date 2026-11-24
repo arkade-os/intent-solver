@@ -689,12 +689,15 @@ export class ReceiveSwapService {
           throw new Error(`swap ${row.id}: no funded outpoint recorded to look for a claim of`)
         }
         // ALL historical outpoints: a row adopted out of a crashed funding may have more than one, and
-        // the preimage only has to appear in one of their spends. An empty read falls back to the
-        // recorded outpoint, so indexer lag never narrows the search.
+        // the preimage only has to appear in one of their spends. The recorded outpoint is always
+        // searched, so indexer lag never narrows the search.
         const history = await arkade.findLockupOutpoints(row.pkScript)
         reads.history = history
         const recorded = { txid: row.arkadeLockupTxid, vout: row.arkadeLockupVout }
-        const preimage = await this.preimages.find(row, history.length > 0 ? history : [recorded])
+        const searched = history.some((o) => o.txid === recorded.txid && o.vout === recorded.vout)
+          ? history
+          : [...history, recorded]
+        const preimage = await this.preimages.find(row, searched)
         return { history, preimage: preimage ? hex.encode(preimage) : null }
       },
       // A throw keeps the row refunding, so the sweep retries a finalize arkd refused.
