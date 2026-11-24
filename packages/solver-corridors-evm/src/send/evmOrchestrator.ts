@@ -22,6 +22,7 @@ import type { EvmSendQuoteRecord, EvmSendSwapRow, EvmSendSwapStore } from '../db
 import { sendLockFromRow } from '../evm/lockFromRow.js'
 import {
   EvmClaimVerificationError,
+  asTimelockHeight,
   type EvmCall,
   type EvmHtlcBackend,
   type EvmTransactionOutcome,
@@ -322,6 +323,21 @@ export class EvmSendSwapService {
    * was true of neither.
    */
   private async observe(row: EvmSendSwapRow): Promise<EvmSendObservation> {
+    // RULE 4 is decided by the row alone, so an EVM read that fails must not withhold the claim.
+    if (row.preimage !== null) {
+      return {
+        arkadeLockupFunded: false,
+        evmLockPresent: false,
+        evmLockReverted: false,
+        evmRefundOutcome: 'pending',
+        evmRefundLanded: false,
+        evmLockConfirmations: 0,
+        evmLockAgeSeconds: 0,
+        preimage: row.preimage,
+        nowSeconds: this.now(),
+        evmTimelockHeight: asTimelockHeight(0),
+      }
+    }
     const lock = this.deps.lockFor(row)
     const [funded, present, height, clock, lockReverted, refundOutcome, refundLanded] = await Promise.all([
       this.deps.arkadeLockupFunded(row),
