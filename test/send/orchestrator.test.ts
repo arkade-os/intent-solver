@@ -3195,6 +3195,18 @@ describe('tick: failure and recovery', () => {
       expect(done.failureReason).toContain('u1:0 spent on L1 by an unrecognized transaction; destination needs review')
       expect(done.failureReason).toContain('unilateralClaim')
     })
+
+    it('advances a recorded claim when the outpoint read fails, then surfaces the error', async () => {
+      const row = await claiming()
+      expect((await service.tick(row.id)).state).toBe('claiming')
+      l1.calls.length = 0
+      arkade.findLockupOutpoints = async () => {
+        throw new Error('indexer unavailable')
+      }
+
+      await expect(service.tick(row.id)).rejects.toThrow('indexer unavailable')
+      expect(l1.calls.map((c) => c.lockup)).toEqual(['u1:0'])
+    })
   })
 })
 
