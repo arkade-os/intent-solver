@@ -896,7 +896,8 @@ export class OnchainSendSwapService {
   }
 
   private async lockupHeld(row: OnchainSendSwapRow): Promise<number> {
-    return (await this.deps.arkade.findLockups(row.pkScript)).reduce((sum, o) => sum + o.value, 0)
+    // Sats outputs only, as at adoption: value on an asset vtxo a claim cannot spend is not cover.
+    return satsOutputs(await this.deps.arkade.findLockups(row.pkScript)).reduce((sum, o) => sum + o.value, 0)
   }
 
   /** Read again right before money moves: an approval wait or a failing `fund()` is time the client can spend unrolling it. */

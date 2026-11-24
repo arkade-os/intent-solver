@@ -3304,6 +3304,23 @@ describe('OnchainSendSwapService', () => {
       expect(await deps.onchain.findOutputs({ address: row.onchainAddress })).toHaveLength(0)
     })
 
+    it('refuses when what is left at the lockup is an asset vtxo a claim cannot spend', async () => {
+      let proceed = false
+      const svc = gated(async () => (proceed ? { proceed: true } : { proceed: false, reason: APPROVAL_REFUSAL }))
+      const swap = await fundedRow(svc)
+      expect((await svc.tick(swap.id)).state).toBe('funded')
+
+      deps.outputs.set(swap.pkScript, [
+        { txid: 'lockup-tx', vout: 1, value: 20_000 },
+        { txid: 'asset-tx', vout: 0, value: 30_000, assets: [{ assetId: 'a'.repeat(64), amount: 1n }] },
+      ])
+      proceed = true
+      const row = await svc.tick(swap.id)
+      expect(row.state).toBe('refused')
+      expect(row.failureReason).toContain('lockup holds 20000 of 50000 sats')
+      expect(await deps.onchain.findOutputs({ address: row.onchainAddress })).toHaveLength(0)
+    })
+
     it('broadcasts once the gate proceeds', async () => {
       const svc = gated(async () => ({ proceed: true }))
       const swap = await fundedRow(svc)
