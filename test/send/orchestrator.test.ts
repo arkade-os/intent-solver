@@ -1774,6 +1774,30 @@ describe('tick: refusals before money moves', () => {
       expect(done.failureReason).toContain('does not match adopted')
     })
 
+    it('keeps a pending L1 claim advancing while a batch awaits evidence at the refund deadline', async () => {
+      const batch = batchClaimFake()
+      const row = await claimingAdopted([second, third])
+      arkade.sweptLockups = [second]
+      arkade.findLockupOutpoints = async () => [
+        { ...second, spent: false, unrolled: false },
+        { ...third, spent: false, unrolled: true },
+      ]
+      const unrolledCalls: string[] = []
+      arkade.claimUnrolled = async (_row, output, record, save) => {
+        unrolledCalls.push(output.txid)
+        const claim = record ?? { txid: 'l1-claim', tx: null, feeRate: 10, broadcastAt: clock, cpfpTxid: null }
+        if (!record) await save(claim)
+        return { kind: 'pending', record: claim }
+      }
+      batch.setPending(true)
+      expect((await service.tick(row.id)).state).toBe('claiming')
+
+      clock = row.refundLocktime + 1
+      await expect(service.tick(row.id)).rejects.toThrow('awaits exact payout evidence')
+      expect((await store.get(row.id)).state).toBe('claiming')
+      expect(unrolledCalls).toEqual([third.txid, third.txid])
+    })
+
     it('never marks a journaled batch claimed from an empty indexer view', async () => {
       const batch = batchClaimFake()
       const row = await claimingAdopted([first])

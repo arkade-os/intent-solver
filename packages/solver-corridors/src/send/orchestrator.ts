@@ -1972,7 +1972,11 @@ export class SendSwapService {
     if (pendingBatches.length > 0) {
       if (txid !== null) await store.patch(row.id, { claim_ark_txid: txid })
       // Deadline first: past it a retry cannot beat the client's refund, so the row must name its recourse.
-      if (await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip)) {
+      // An L1 claim still out keeps the row claiming, as above.
+      if (
+        (unrolled === null || unrolled.settled) &&
+        (await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip))
+      ) {
         const detail =
           batchError === undefined ? '' : `: ${batchError instanceof Error ? batchError.message : String(batchError)}`
         const recourse = unilateralExitRecourse(row, { solverPubkey: arkade.providerPubkey })
