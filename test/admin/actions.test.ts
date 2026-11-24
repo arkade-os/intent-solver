@@ -700,6 +700,89 @@ describe('park-swap', () => {
   })
 })
 
+describe('resolve-stuck', () => {
+  const LN_SEND = 'arkade:BTC->lightning:BTC'
+  const lockup = {
+    id: 'swap-1',
+    receiverPubkey: 'aa',
+    serverPubkey: 'bb',
+    paymentHash: 'cc',
+    pkScript: '5120ab',
+    refundLocktime: 1,
+    claimDelay: 1,
+    refundWithoutReceiverDelay: 1,
+    refundDelay: 1,
+    emulatorPubkey: null,
+    refundPkScript: null,
+    clientRefundPubkey: null,
+    receiverPkScript: null,
+    nonInteractiveParameters: true,
+  }
+  const resolve = async ({
+    state = 'stuck',
+    spendable = [] as number[],
+    swept = [] as number[],
+    corridor = LN_SEND,
+  } = {}) => {
+    const resolveStuck = vi.fn().mockResolvedValue(undefined)
+    const getVtxos = vi.fn(async (query: { spendableOnly?: boolean }) => ({
+      vtxos: (query.spendableOnly ? spendable : swept).map((value, vout) => ({ txid: 'tx', vout, value })),
+    }))
+    const services = fakeServices({
+      adminStore: { ...adminStore(), resolveStuck },
+      arkade: { wallet: { indexerProvider: { getVtxos } } },
+      readers: corridorSet({
+        [corridor]: {
+          detail: async () => ({ swap: { state } }),
+          lockupFor: async () => ({ lockup, preimage: null }),
+        },
+      }),
+    })
+    const body = { id: 'swap-1', corridor, reason: 'client refunded, payment failed', confirm: 'swap-1' }
+    const response = await post('resolve-stuck', body, services)
+    return { response, resolveStuck, getVtxos }
+  }
+
+  it('is armed, and says it moves no money', () => {
+    expect(ACTIONS['resolve-stuck']?.tier).toBe('armed')
+    expect(ACTIONS['resolve-stuck']?.warning).toMatch(/moves no money/i)
+  })
+
+  it('records the note once nothing is left at the lockup', async () => {
+    const { response, resolveStuck, getVtxos } = await resolve()
+
+    expect(response.status).toBe(200)
+    expect(getVtxos).toHaveBeenCalledWith(expect.objectContaining({ scripts: ['5120ab'], spendableOnly: true }))
+    expect(resolveStuck).toHaveBeenCalledWith(LN_SEND, 'swap-1', 'client refunded, payment failed')
+  })
+
+  it.each([
+    ['spendable', { spendable: [553] }],
+    ['swept', { swept: [553] }],
+  ])('refuses while sats are still at the lockup (%s)', async (_, outputs) => {
+    const { response, resolveStuck } = await resolve(outputs)
+
+    expect(response.status).toBe(500)
+    expect(await response.json()).toMatchObject({ message: expect.stringMatching(/553 sats at its lockup/) })
+    expect(resolveStuck).not.toHaveBeenCalled()
+  })
+
+  it('refuses a row that is not stuck', async () => {
+    const { response, resolveStuck } = await resolve({ state: 'paid' })
+
+    expect(response.status).toBe(500)
+    expect(resolveStuck).not.toHaveBeenCalled()
+  })
+
+  it('refuses the onchain send, which can still hold an L1 HTLC', async () => {
+    const { response, resolveStuck } = await resolve({ corridor: 'arkade:BTC->onchain:BTC' })
+
+    expect(response.status).toBe(500)
+    expect(await response.json()).toMatchObject({ message: expect.stringMatching(/Lightning corridors/) })
+    expect(resolveStuck).not.toHaveBeenCalled()
+  })
+})
+
 /**
  * A payment id is only meaningful to the backend that minted it, pointed at the
  * wallet it was minted from. Switching providers — or the same provider onto a

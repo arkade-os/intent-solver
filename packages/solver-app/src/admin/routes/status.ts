@@ -93,9 +93,20 @@ const stuckSwaps = async (deps: AdminDeps): Promise<{ rows: AdminSwap[]; total: 
     services.receiveStore.countByStates(['stuck']),
     services.onchainStore.countByStates(['stuck']),
   ])
+  const resolutions = await services.adminStore.listStuckResolutions()
+  const resolved = new Set(resolutions.map(({ corridor, swapId }) => `${corridor} ${swapId}`))
+  // ponytail: one row read per resolution per load; an id-only stuck query if these reach the hundreds.
+  const stillStuck = await Promise.all(
+    resolutions.map(
+      async ({ corridor, swapId }) =>
+        (await deps.services.readers.get(corridor)?.detail(swapId))?.swap.state === 'stuck',
+    ),
+  )
   return {
-    rows: [...send.map(projectSend), ...receive.map(projectReceive), ...onchainSend.map(projectOnchainSend)],
-    total: counts.reduce((sum, n) => sum + n, 0),
+    rows: [...send.map(projectSend), ...receive.map(projectReceive), ...onchainSend.map(projectOnchainSend)].filter(
+      (row) => !resolved.has(`${row.corridor} ${row.id}`),
+    ),
+    total: counts.reduce((sum, n) => sum + n, 0) - stillStuck.filter(Boolean).length,
   }
 }
 

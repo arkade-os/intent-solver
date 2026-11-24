@@ -22,7 +22,7 @@
 
 import type { Hono } from 'hono'
 import { randomUUID } from 'node:crypto'
-import { refundNow, onchainRefundNow, reclaimL1Htlc, receiveRefundNow } from '../../ops/refunds.js'
+import { refundNow, onchainRefundNow, reclaimL1Htlc, receiveRefundNow, satsLeftAtLockup } from '../../ops/refunds.js'
 import { hex } from '@scure/base'
 import { claimNow, onchainClaimNow } from '../../ops/claims.js'
 import { planExitForSwap } from '../../ops/unilateralExit.js'
@@ -39,6 +39,8 @@ import type { AdminDeps } from '../server.js'
 import { clampLimit } from '@arkade-os/solver-core/core/page.js'
 import { json, log, messageOf } from '@arkade-os/solver-core/util/poll.js'
 import { CORRIDORS, isCorridor, type Corridor } from '@arkade-os/solver-core/core/corridorPolicy.js'
+
+const RESOLVABLE_CORRIDORS = new Set(['arkade:BTC->lightning:BTC', 'lightning:BTC->arkade:BTC'])
 
 export type ActionTier = 'safe' | 'armed'
 
@@ -423,6 +425,32 @@ export const ACTIONS: Record<string, ActionDefinition> = {
       const served = services.corridors.get(corridor)
       if (!served) throw new Error(`the ${corridor} corridor is not enabled on this deployment`)
       return served.park(id, reason)
+    },
+  },
+
+  'resolve-stuck': {
+    tier: 'armed',
+    confirmKind: 'swap-id',
+    expectedConfirm: bodyId,
+    target: bodyId,
+    warning:
+      'Records your note and takes this swap off the stuck count. It moves no money and the row stays stuck. ' +
+      'Refused while anything is still at the lockup: claim or refund that first.',
+    run: async (services, body) => {
+      const id = requireId(body)
+      const note = requireReason(body)
+      const corridor = requireCorridorName(body)
+      // An onchain send can still hold the solver's own L1 HTLC, which an empty Arkade lockup does not show.
+      if (!RESOLVABLE_CORRIDORS.has(corridor))
+        throw new Error(`resolve-stuck is for the Lightning corridors, not ${corridor}`)
+      const detail = await services.readers.get(corridor)?.detail(id)
+      if (!detail) throw new Error(`no ${corridor} swap ${id}`)
+      if (detail.swap.state !== 'stuck')
+        throw new Error(`swap ${id} is ${detail.swap.state}; only a stuck row is resolved`)
+      const left = await satsLeftAtLockup(services, corridor, id)
+      if (left > 0) throw new Error(`swap ${id} still has ${left} sats at its lockup: claim or refund before resolving`)
+      await services.adminStore.resolveStuck(corridor, id, note)
+      return { resolved: id, corridor }
     },
   },
 

@@ -990,6 +990,16 @@ overview, newest first, each linking to its detail.
 
    It does NOT refund or claim. Decide that separately, with `read-payment`.
 
+5. **Once nothing is left at the lockup, `resolve-stuck`.** A stuck row whose
+   lockup was already spent (by the client's refund, your claim, or the
+   client's claim of a receive payout) has nothing left to claim or refund, so
+   it would sit in the count forever. `resolve-stuck` records your account of
+   it, in the confirmation's reason field, and takes it off the count. It moves
+   no money and the row stays `stuck` as the incident record. It refuses while
+   anything, spendable or swept, is still at the lockup script, and it covers
+   the two Lightning corridors only: an onchain send can still hold your L1
+   HTLC, which an empty Arkade lockup does not show.
+
 ### The other corridors
 
 The procedure above is `arkade:BTC->lightning:BTC`, and `read-payment` is that
