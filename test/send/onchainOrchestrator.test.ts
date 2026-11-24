@@ -2173,6 +2173,35 @@ describe('OnchainSendSwapService', () => {
     expect(after.refundOutcome).toBeNull()
   })
 
+  it('refundNow() refuses while the preimage is on the row, even when the spend read comes back empty', async () => {
+    const outcome = await service.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    deps.outputs.set(outcome.swap.pkScript, [{ txid: 'lockup-tx', vout: 0, value: 50_000 }])
+    const funded = await service.tick(outcome.swap.id)
+    deps.onchain.spendClaim(funded.fundingTxid!, 0, [
+      new Uint8Array([0xaa]),
+      P,
+      new Uint8Array([0xbb]),
+      new Uint8Array([0xcc]),
+    ])
+    vi.spyOn(deps.arkade, 'claim').mockRejectedValue(new Error('arkd unreachable'))
+    await expect(service.tick(funded.id)).rejects.toThrow('arkd unreachable')
+    expect((await deps.store.get(funded.id)).preimage).toBe(hex.encode(P))
+
+    // The spend read falls behind the claim the row already recorded.
+    vi.spyOn(deps.onchain, 'findSpendWitness').mockResolvedValue(null)
+    await expect(service.refundNow(funded.id)).rejects.toThrow(hex.encode(P))
+    const after = await deps.store.get(funded.id)
+    expect(after.refundArkTxid).toBeNull()
+    expect(after.refundOutcome).toBeNull()
+  })
+
   it('refundNow() records an already-emptied lockup as external rather than inventing a txid', async () => {
     const row = await driveToStuck()
     // The client took it themselves, via the covenant's client-only

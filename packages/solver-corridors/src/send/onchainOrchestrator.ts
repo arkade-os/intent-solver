@@ -658,10 +658,12 @@ export class OnchainSendSwapService {
    */
   async refundNow(id: string): Promise<string | null> {
     const row = await this.deps.store.get(id)
-    const preimage = await this.clientClaimPreimage(row)
+    // A claim already on the row is not undone by a spend read that has fallen behind.
+    const found = row.preimage === null ? await this.clientClaimPreimage(row) : null
+    const preimage = row.preimage ?? (found && hex.encode(found))
     if (preimage) {
       throw new Error(
-        `swap ${id}: the client already claimed the onchain HTLC, preimage ${hex.encode(preimage)} — ` +
+        `swap ${id}: the client already claimed the onchain HTLC, preimage ${preimage} — ` +
           'refunding the arkade lockup would pay them twice; claim the lockup with that preimage instead',
       )
     }
