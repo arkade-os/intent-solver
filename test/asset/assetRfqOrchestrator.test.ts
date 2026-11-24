@@ -528,6 +528,25 @@ describe('tick — driving a negotiation', () => {
     expect(await store.get('swap-1')).toMatchObject({ state: 'filled', fillPhase: 'submitting' })
   })
 
+  it('refuses the latch when the quote lapsed between the fill decision and the submission', async () => {
+    let at: (seconds: number) => void = () => {}
+    const built = await harness({
+      depositAt: async () => deposit(),
+      settle: async (_row, options) => {
+        at(1_100)
+        if (!(await options?.markSubmitting?.())) throw new OfferNotSubmittedError('quote lapsed before submission')
+        return 'fa'.repeat(32)
+      },
+    })
+    at = built.tick
+
+    await built.service.quote(request())
+    await built.service.tick('swap-1')
+    await built.service.tick('swap-1')
+
+    expect(await built.store.get('swap-1')).toMatchObject({ state: 'funded', fillPhase: null })
+  })
+
   it('walks a row a restart left mid-selection back to funded', async () => {
     const { service, store, settled } = await harness({ depositAt: async () => deposit() })
     await service.quote(request())

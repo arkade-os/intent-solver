@@ -486,7 +486,8 @@ export class AssetRfqSwapService {
     if (!(await this.deps.store.transition(row.id, 'funded', 'filling', { ...seen, fill_phase: 'selecting' }))) return
     try {
       const txid = await this.deps.settle(await this.deps.store.get(row.id), {
-        markSubmitting: () => this.deps.store.markSubmitting(row.id),
+        // The deadline again at the latch: approval and the settle's own reads come after the decision.
+        markSubmitting: async () => this.now() <= row.validUntil && (await this.deps.store.markSubmitting(row.id)),
       })
       const filled = await this.deps.store.transition(row.id, 'filling', 'filled', { fill_txid: txid })
       // AFTER the transition, never before. A feed read between `settle` and
