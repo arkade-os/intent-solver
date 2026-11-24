@@ -983,7 +983,12 @@ export class OnchainSendSwapService {
     if ((await onchain.transactionOutcome(txid)) === 'unknown') {
       const refusal = recheck ? (this.fundingRefusal(row) ?? (await this.lockupShortfall(row))) : null
       if (refusal) {
-        await store.fail(row.id, 'funding_onchain', `${refusal}; recorded funding ${txid} was never seen on chain`)
+        // An earlier broadcast may still land: its outpoint is what reclaims that leg.
+        await store.transition(row.id, 'funding_onchain', 'stuck', {
+          funding_txid: txid,
+          funding_vout: vout,
+          failure_reason: `${refusal}; recorded funding ${txid} was never seen on chain`,
+        })
         return false
       }
       await onchain.broadcastRaw(tx)

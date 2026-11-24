@@ -1279,6 +1279,23 @@ describe('OnchainSendSwapService', () => {
       expect(await deps.onchain.findOutputs({ address: row.onchainAddress })).toHaveLength(0)
     })
 
+    it('keeps the funding outpoint on a recorded funding it parks, so that leg can still be reclaimed', async () => {
+      const { row, signForReal } = await stalled()
+      deps.onchain.signFunding = signForReal
+      vi.spyOn(deps.onchain, 'broadcastRaw').mockRejectedValueOnce(new Error('ECONNRESET'))
+      await expect(service.tick(row.id)).rejects.toThrow('ECONNRESET')
+
+      now = row.htlcLocktime - claimWindow(row)
+      const parked = await service.tick(row.id)
+      expect(parked.state).toBe('stuck')
+      const recorded = Transaction.fromRaw(hex.decode(parked.fundingTx!), {
+        allowUnknownInputs: true,
+        allowUnknownOutputs: true,
+      })
+      expect(parked.fundingTxid).toBe(recorded.id)
+      expect(parked.fundingVout).toBe(0)
+    })
+
     /**
      * The deadline runs AFTER the recovery read. Parking a funding that really
      * went out would lose the outpoint `reclaimOnchainHtlc` needs.
