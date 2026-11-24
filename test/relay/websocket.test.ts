@@ -94,8 +94,16 @@ describe('webSocketRelayConnection', () => {
     let decoded = 0
     let active = 0
     let peak = 0
+    let frames = 0
+    class CountingWebSocket extends WebSocket {
+      constructor(url: string | URL) {
+        super(url)
+        this.addEventListener('message', () => frames++)
+      }
+    }
     const connection = track(
       webSocketRelayConnection(`ws://127.0.0.1:${port}`, {
+        WebSocketCtor: CountingWebSocket,
         maxConcurrentHandlers: 2,
         maxQueuedEvents: 2,
         codec: {
@@ -121,7 +129,8 @@ describe('webSocketRelayConnection', () => {
       }
     }
     for (let i = 0; i < 8; i++) send(String(i))
-    await until(() => decoded === 8)
+    await until(() => frames === 8)
+    expect(decoded).toBe(4)
     expect(started).toEqual(['0', '1'])
     releases[0]!()
     await until(() => started.length === 3)
