@@ -1037,7 +1037,12 @@ export const recordBalanceCheckpoint = async (services: CheckpointServices): Pro
   const room = Math.max(0, UNRECOVERED_LIMIT - protectedBtc.length)
   const capped = room
     ? stillOpen
-        .filter((row) => !protectedBtc.includes(row) && startedAt - (row.at ?? startedAt) < FOLLOW_SECONDS)
+        .filter(
+          (row) =>
+            !protectedBtc.includes(row) &&
+            // A decrease from the previous checkpoint has not been alerted yet, however old it is.
+            (row.checkpointId === previous?.id || startedAt - (row.at ?? startedAt) < FOLLOW_SECONDS),
+        )
         .slice(-room)
     : []
   return services.adminStore.recordBalanceCheckpoint({

@@ -1861,6 +1861,16 @@ describe('balance checkpoints', () => {
     expect(formatCheckpointRecovery(await f.sample(), 'regtest')).toBeNull()
   })
 
+  it('still alerts a decrease whose next complete checkpoint comes a day later', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const f = await fixture()
+    await f.sample()
+    f.arkade.total -= 10
+    await f.sample()
+    vi.setSystemTime(Date.now() + 24 * 60 * 60 * 1000)
+    expect(formatCheckpointWarning(await f.sample(), 'regtest')).not.toBeNull()
+  })
+
   it('stops following the oldest of more than 20 unrecovered decreases', async () => {
     const f = await fixture()
     await f.sample()

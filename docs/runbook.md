@@ -174,7 +174,10 @@ Checkpoints track Arkade's total BTC and asset balances, Lightning outbound
 liquidity, and confirmed plus unconfirmed onchain BTC. Inbound Lightning
 capacity is excluded; a shared Lightning/onchain pool is counted once. Asset
 quantities stay in their own atomic units. EVM wallets and custom fund sources
-are not covered.
+are not covered. A lockup a client funded counts as the client's until the
+solver has paid out against it (a Lightning send in `paid`, an onchain send in
+`awaiting_claim`), so a refund is no loss and a slow preimage or onchain claim
+is no drop.
 
 A decrease since the last complete checkpoint emits `POSSIBLE LOSS` with the
 before, after, and decrease amounts. For journaled rebalances, checkpoints
@@ -262,7 +265,9 @@ Each decrease is then followed against its own before amount. The first later
 complete checkpoint where that asset is back at or above it emits `RECOVERED`,
 naming the checkpoint that reported the drop. Followed decreases are carried in
 the checkpoint record, so restarts and incomplete reads do not lose them; only
-the 20 most recent unrecovered ones are kept. `RECOVERED` means the balance is
+the 20 most recent unrecovered ones are kept, each for a day after it was seen.
+A drop still open after a day only comes back once profit refills it, so it
+gets no `RECOVERED`. `RECOVERED` means the balance is
 back, not that the cause was reconciled. A drop that offsets a gain from the
 previous minute, such as the second leg of one swap, gets its follow-up only
 once the balance passes the amount before that drop.
