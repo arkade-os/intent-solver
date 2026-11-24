@@ -501,6 +501,7 @@ describe('asset markets on the card', () => {
       [{ quoteDecimals: 24 }, /in 0\.\.18/],
       [{ pricePath: '' }, /price_path/],
       [{ feedUrl: '' }, /price_feed/],
+      [{ feedUrl: 'https://feed.example/price?apikey=s3cret' }, /credential/],
       [{ feeBps: 10_001 }, /fee_bps/],
       [{ sellBase: { min: 0n, max: 0n }, buyBase: { min: 0n, max: 0n } }, /neither side/],
       [{ sellBase: { min: 0n, max: 5n } }, /min/],
