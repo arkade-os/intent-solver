@@ -74,7 +74,6 @@ import {
   planPayment,
   planPolledPayment,
   planSend,
-  SEND_COUPLED_REFUSED,
   submittedWithinGrace,
   type FailedPaymentRecourse,
   type SendReads,
@@ -1070,7 +1069,7 @@ export class SendSwapService {
     }
     if (next.do === 'collect') return this.claimWithPreimage(row.id, row.paymentHash, next.preimage, 'funded')
     if (next.do === 'refuse_coupled') {
-      const won = await store.transition(row.id, 'funded', 'refused', { failure_reason: SEND_COUPLED_REFUSED })
+      const won = await store.transition(row.id, 'funded', 'refused', { failure_reason: next.reason })
       if (won) await this.refundAfterTerminalFailure(row)
       return false
     }
