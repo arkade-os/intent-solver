@@ -10,6 +10,7 @@ export const FULL_DOCUMENT = {
       emulatorUrl: 'http://localhost:7073',
       esploraUrl: 'http://localhost:3000/api',
       unilateralExitDelay: 260096,
+      taxiUrl: 'http://localhost:8080',
       poolAutoMint: false,
       contractRetentionDays: 30,
     },

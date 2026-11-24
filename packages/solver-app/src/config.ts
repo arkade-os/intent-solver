@@ -31,7 +31,7 @@ import { parseAssetMarkets, type AssetMarket } from './ops/assetOffers.js'
 import { parseAssetRfqTokens, type AssetRfqToken } from './ops/assetRfqMarkets.js'
 import type { ArkadeWalletConfig } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import type { AdPublishMode } from '@arkade-os/solver-transport/relay/adPublisher.js'
-import { parseSentryDsn, type SentryOptions } from './ops/sentry.js'
+import { isLoopback, parseSentryDsn, type SentryOptions } from './ops/sentry.js'
 import { loadEvmChainConfig, type EvmChainConfig } from '@arkade-os/solver-rails-evm/evm/config.js'
 import { OFFER_CONTRACT_VERSIONS, type OfferContractVersion } from '@arkade-os/solver-core/core/offerContract.js'
 import { RFQ_CONTRACT_VERSION_ID, type RfqContractVersion } from '@arkade-os/solver-core/core/rfqContract.js'
@@ -427,6 +427,8 @@ export interface Config {
   sendHintScidDenylist: ReadonlySet<string>
   /** Emulator service co-signing covenant refunds. */
   emulatorUrl: string
+  /** Taxi operator base URL, the receive-carrier rail; off unless set. Quote identities never come from here. */
+  taxiUrl?: string
   /**
    * Which BTC rail this deployment moves money on — the Lightning AND the
    * onchain leg, since both come out of one wallet (@see ops/rails.ts).
@@ -945,6 +947,22 @@ const sendHintScidDenylistFromEnv = (env: Knobs): ReadonlySet<string> => {
 
 const MAX_SOLVER_NAME_CHARS = 64
 
+const operatorUrlFromEnv = (env: Knobs, name: string, isMainnet: boolean): string | undefined => {
+  const raw = env[name]?.trim()
+  if (!raw) return undefined
+  let url: URL
+  try {
+    url = new URL(raw)
+  } catch {
+    throw new Error(`${name} must be an absolute URL, got "${raw}"`)
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`${name} must be http or https, got "${url.protocol}"`)
+  }
+  if (url.protocol === 'https:' || isLoopback(url.hostname) || !isMainnet) return raw
+  throw new Error(`${name} must use https on mainnet, got "${url.protocol}//${url.host}"`)
+}
+
 const solverNameFromEnv = (env: Knobs): string | null => {
   const name = env.SOLVER_NAME?.trim()
   if (!name) return null
@@ -1150,6 +1168,8 @@ export const configFromKnobs = (env: Knobs): Config => {
     // deployment's money path at whichever service this repository happened to
     // name — a choice that belongs to whoever runs the solver.
     emulatorUrl: required(env, 'EMULATOR_URL'),
+    // Plaintext to a remote host on mainnet is a quote anyone on the path can rewrite.
+    taxiUrl: operatorUrlFromEnv(env, 'TAXI_URL', profile.isMainnet),
     arkade: {
       mnemonic: required(env, 'WALLET_MNEMONIC'),
       operatorUrl: required(env, 'ARKADE_OPERATOR_URL'),

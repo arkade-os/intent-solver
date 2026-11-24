@@ -26,7 +26,7 @@ export interface SentryOptions {
 }
 
 /** Every octet, not a `127.` prefix: that would read 127.evil.com as loopback. */
-const isLoopback = (hostname: string): boolean => {
+export const isLoopback = (hostname: string): boolean => {
   const host = hostname.replace(/^\[|\]$/g, '')
   return host === 'localhost' || host === '::1' || /^127(\.\d{1,3}){3}$/.test(host)
 }

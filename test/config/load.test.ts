@@ -74,6 +74,14 @@ describe('loadConfig — amount bounds', () => {
 })
 
 describe('loadConfig — where the document comes from', () => {
+  it('loads the Taxi adapter from the Arkade rail document', () => {
+    const doc = {
+      ...minimalDoc,
+      rails: { ...minimalDoc.rails, arkade: { ...minimalDoc.rails.arkade, taxiUrl: 'http://localhost:8080' } },
+    }
+    expect(loadConfig({ env: inline(doc) }).taxiUrl).toBe('http://localhost:8080')
+  })
+
   it('refuses both sources', () => {
     expect(() => loadConfig({ env: { SOLVER_CONFIG: '/x.json', SOLVER_CONFIG_JSON: '{}' } })).toThrow(
       'set only one of SOLVER_CONFIG or SOLVER_CONFIG_JSON',
