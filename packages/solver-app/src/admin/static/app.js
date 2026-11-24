@@ -5725,7 +5725,7 @@ const viewFromHash = () => {
   if (view === 'markets' || view === 'settings') return 'pricing'
   if (view === 'backends' || view === 'diagnostics' || view === 'discovery') return 'health'
   if (ACTIVITY_SECTIONS.includes(view)) return 'activity'
-  return BODIES[view] ? view : 'overview'
+  return Object.hasOwn(BODIES, view) ? view : 'overview'
 }
 
 const go = (view) => {
