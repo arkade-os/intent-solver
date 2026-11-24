@@ -3100,6 +3100,20 @@ describe('tick: failure and recovery', () => {
       expect(arkade.claimCalls).toHaveLength(1)
     })
 
+    it('keeps a pending L1 claim advancing when the Arkade claim fails past the refund deadline', async () => {
+      const row = await claiming()
+      arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT / 2 }]
+      outpoints = [{ txid: 'f1', vout: 0, unrolled: false }, ...outpoints]
+      clock = row.refundLocktime + 1
+      arkade.claim = async () => {
+        throw new Error('arkd down')
+      }
+
+      await expect(service.tick(row.id)).rejects.toThrow('arkd down')
+      expect((await store.get(row.id)).state).toBe('claiming')
+      expect(l1.calls.map((c) => c.lockup)).toEqual(['u1:0'])
+    })
+
     it('stays claiming while an adopted output is hidden by a lagging read, then claims it', async () => {
       const { swap } = await quoted()
       const adopted = [
