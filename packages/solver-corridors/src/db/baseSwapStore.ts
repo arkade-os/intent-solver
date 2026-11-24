@@ -175,17 +175,21 @@ export abstract class BaseSwapStore<Row, State extends string> {
     return Number(row?.total ?? 0)
   }
 
-  async countByStates(states: readonly State[]): Promise<number> {
+  async countByStates(states: readonly State[], excludeIds: readonly string[] = []): Promise<number> {
     if (states.length === 0) return 0
-    const row = await this.driver.get<{ total: number }>(sql.countByStates(this.shape.table, states), [...states])
+    const row = await this.driver.get<{ total: number }>(sql.countByStates(this.shape.table, states, excludeIds), [
+      ...states,
+      ...excludeIds,
+    ])
     return Number(row?.total ?? 0)
   }
 
   async findByStates(states: readonly State[], options: FindByStatesOptions = {}): Promise<Row[]> {
     if (states.length === 0) return []
+    const excludeIds = options.excludeIds ?? []
     const rows = await this.driver.all<RawRow>(
-      sql.byStates(this.shape.table, states, options.newestFirst === true, options.limit),
-      [...states],
+      sql.byStates(this.shape.table, states, options.newestFirst === true, options.limit, excludeIds),
+      [...states, ...excludeIds],
     )
     return rows.map((raw) => this.shape.toRow(raw))
   }

@@ -26,21 +26,25 @@ export const liveByPaymentHash = (table: string): string =>
 export const committedSats = (table: string, states: readonly string[]): string =>
   `SELECT COALESCE(SUM(amount_sats), 0) AS total FROM ${table} WHERE state IN (${placeholdersFor(states)})`
 
-export const countByStates = (table: string, states: readonly string[]): string =>
-  `SELECT COUNT(*) AS total FROM ${table} WHERE state IN (${placeholdersFor(states)})`
+const notIn = (excludeIds: readonly string[]): string =>
+  excludeIds.length === 0 ? '' : ` AND id NOT IN (${placeholdersFor(excludeIds)})`
+
+export const countByStates = (table: string, states: readonly string[], excludeIds: readonly string[] = []): string =>
+  `SELECT COUNT(*) AS total FROM ${table} WHERE state IN (${placeholdersFor(states)})${notIn(excludeIds)}`
 
 export const byStates = (
   table: string,
   states: readonly string[],
   newestFirst: boolean,
   limit: number | undefined,
+  excludeIds: readonly string[] = [],
 ): string => {
   // Oldest-first and unbounded by default: that is what the sweep wants, and
   // the sweep is the caller that matters. The options exist for the console,
   // which reads a TERMINAL set that only ever grows.
   const order = newestFirst ? 'updated_at DESC' : 'created_at'
   const cap = limit === undefined ? '' : ` LIMIT ${Math.max(0, Math.trunc(limit))}`
-  return `SELECT * FROM ${table} WHERE state IN (${placeholdersFor(states)}) ORDER BY ${order}${cap}`
+  return `SELECT * FROM ${table} WHERE state IN (${placeholdersFor(states)})${notIn(excludeIds)} ORDER BY ${order}${cap}`
 }
 
 export const pageRecoverable = (

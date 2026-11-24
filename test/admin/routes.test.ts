@@ -123,9 +123,12 @@ describe('GET /api/overview — stuck swaps', () => {
     })
     const rows = [stuck('swap-1'), stuck('swap-2')]
     const send = store({
-      findByStates: vi.fn(async (states: string[]) => (states.includes('stuck') ? rows : [])),
-      countByStates: vi.fn(async (states: string[]) => (states.includes('stuck') ? rows.length : 0)),
-      get: vi.fn(async (id: string) => rows.find((row) => row.id === id)),
+      findByStates: vi.fn(async (states: string[], options?: { excludeIds?: string[] }) =>
+        states.includes('stuck') ? rows.filter((row) => !options?.excludeIds?.includes(row.id)) : [],
+      ),
+      countByStates: vi.fn(async (states: string[], excludeIds: string[] = []) =>
+        states.includes('stuck') ? rows.filter((row) => !excludeIds.includes(row.id)).length : 0,
+      ),
     })
     const response = await get('/api/overview?balances=false', {
       store: send,
