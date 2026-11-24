@@ -42,6 +42,7 @@ import type { Services } from './services.js'
 import * as sql from './rebalanceRoutes.sql.js'
 
 const now = (): number => Math.floor(Date.now() / 1000)
+const MAX_PEER_REFUND_SECONDS = 30 * 24 * 60 * 60
 const validTxid = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{64}$/i.test(value)
 const sum = (coins: readonly { value: number }[]): number => coins.reduce((total, coin) => total + coin.value, 0)
 // Rows written before swap 0.1.0 carry fundingArkTxid/refundArkTxid/lockupSpendArkTxids.
@@ -368,6 +369,8 @@ export const createArkadeRebalanceSource = async (
             !Number.isSafeInteger(request.quote.refund_locktime)
           )
             throw new Error('external source quote expired or lacks recovery deadline')
+          if (request.quote.refund_locktime! - now() > MAX_PEER_REFUND_SECONDS)
+            throw new Error('external source quote sets its recovery deadline more than 30 days out')
           const time = now()
           const record = createRfqSwapRecord(
             {

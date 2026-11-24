@@ -532,6 +532,18 @@ describe('Arkade rebalance source routes', () => {
     expect(services.arkade.wallet.send).not.toHaveBeenCalled()
   })
 
+  it('refuses a quote whose recovery deadline is more than 30 days out', async () => {
+    const receiving = lightningDeposit()
+    mockRequest(receiving)
+    const request = await mocks.request()
+    mocks.request.mockResolvedValue({
+      ...request,
+      quote: { ...request.quote, refund_locktime: timestamp() + 31 * 24 * 60 * 60 },
+    })
+    await expect(source.quote(receiving, policy)).rejects.toThrow(/30 days/)
+    expect(await driver.all('SELECT * FROM rebalance_rfq')).toEqual([])
+  })
+
   it('persists public RFQ recovery before funding and restores only funded records', async () => {
     const receiving = lightningDeposit()
     mockRequest(receiving)
