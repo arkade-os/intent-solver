@@ -50,8 +50,8 @@ describe('e2e pool consolidation', () => {
     arkade = await openArkade()
   }, SETUP_TIMEOUT_MS)
 
-  afterAll(() => {
-    arkade?.close()
+  afterAll(async () => {
+    await arkade?.close()
   })
 
   it(

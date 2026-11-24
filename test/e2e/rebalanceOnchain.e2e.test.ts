@@ -95,8 +95,8 @@ describe('e2e Arkade surplus rebalance to own onchain wallet', () => {
     await driver?.close()
     await ln?.close()
     await onchain?.close?.()
-    arkade?.close()
-    donor?.close()
+    await arkade?.close()
+    await donor?.close()
   })
 
   it(

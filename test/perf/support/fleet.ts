@@ -82,7 +82,7 @@ export interface FleetWallet {
 
 export interface Fleet {
   wallets: readonly FleetWallet[]
-  close(): void
+  close(): Promise<void>
 }
 
 /**
@@ -120,8 +120,8 @@ export const openFleet = async (arkade: E2eArkade, size: number): Promise<Fleet>
   )
   return {
     wallets,
-    close: () => {
-      for (const wallet of wallets) wallet.ctx.close()
+    close: async () => {
+      for (const wallet of wallets) await wallet.ctx.close()
     },
   }
 }

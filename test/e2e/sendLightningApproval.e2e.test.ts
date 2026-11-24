@@ -145,7 +145,7 @@ describe('e2e arkade:BTC->lightning:BTC approval gate', () => {
   afterAll(async () => {
     await store?.close()
     await ln?.close()
-    arkade?.close()
+    await arkade?.close()
   })
 
   it(

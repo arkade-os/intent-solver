@@ -159,7 +159,7 @@ describe('e2e lightning:BTC->arkade:BTC (receive)', () => {
     // One raw gRPC client per LND subservice; leaving them open crashes the
     // fork on exit on Windows. See `SendBackend.close` in `src/ln/port.ts`.
     await ln?.close()
-    arkade?.close()
+    await arkade?.close()
   })
 
   /**
