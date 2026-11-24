@@ -238,6 +238,18 @@ describe('planReceive: armed', () => {
       expect((await run(row('armed'), { ...coupledTo(SEND), coupledLockupFunded: false })).next).toEqual(WAIT)
     })
 
+    it('refuses when the invoice expires during the lockup read', async () => {
+      const subject = row('armed')
+      const world: World = {
+        ...coupledTo(SEND),
+        get coupledLockupFunded() {
+          world.now = subject.invoiceExpiresAt
+          return true
+        },
+      }
+      expect((await run(subject, world)).next).toEqual(fail('refused to fund: invoice_expired'))
+    })
+
     it('refuses a send that is not funded without reading its deadline', async () => {
       const { reads, next } = await run(row('armed'), coupledTo({ ...SEND, state: 'claiming' }))
       expect(reads).toEqual(['earlierFunding', 'hold', 'coupledSend'])

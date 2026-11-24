@@ -223,6 +223,8 @@ const fundAgainstCoupledSend = async (
   if (send.amountSats < row.payoutSats) return fail(sendTooSmall(send, row))
   if (reads.now() >= row.invoiceExpiresAt) return fail('refused to fund: invoice_expired')
   if (!(await reads.coupledLockupFunded(send))) return WAIT
+  // Asked again: the read above is time the invoice can expire in.
+  if (reads.now() >= row.invoiceExpiresAt) return fail('refused to fund: invoice_expired')
   return { do: 'fund', coupled: true }
 }
 
