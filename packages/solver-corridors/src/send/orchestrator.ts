@@ -1957,7 +1957,11 @@ export class SendSwapService {
         }
       }
     } catch (error) {
-      if (await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip)) {
+      // An L1 claim still out keeps the row claiming, as in `claimClientLockup`.
+      if (
+        (unrolled === null || unrolled.settled) &&
+        (await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip))
+      ) {
         const detail = error instanceof Error ? error.message : String(error)
         const recourse = unilateralExitRecourse(row, { solverPubkey: arkade.providerPubkey })
         await store.fail(row.id, 'claiming', `claim failing past the refund deadline: ${detail} — ${recourse}`)

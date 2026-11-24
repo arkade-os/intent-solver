@@ -1466,6 +1466,31 @@ describe('tick: refusals before money moves', () => {
       expect(done.claimArkTxid).toBe('claim-txid')
     })
 
+    it('keeps a pending L1 claim advancing when the Arkade claim fails past the refund deadline', async () => {
+      batchClaimFake()
+      const row = await claimingAdopted([second, third])
+      arkade.lockups = [third]
+      arkade.findLockupOutpoints = async () => [
+        { ...second, spent: false, unrolled: true },
+        { ...third, spent: false, unrolled: false },
+      ]
+      const unrolledCalls: string[] = []
+      arkade.claimUnrolled = async (_row, output, record, save) => {
+        unrolledCalls.push(output.txid)
+        const claim = record ?? { txid: 'l1-claim', tx: null, feeRate: 10, broadcastAt: clock, cpfpTxid: null }
+        if (!record) await save(claim)
+        return { kind: 'pending', record: claim }
+      }
+      clock = row.refundLocktime + 1
+      arkade.claim = async () => {
+        throw new Error('arkd down')
+      }
+
+      await expect(service.tick(row.id)).rejects.toThrow('arkd down')
+      expect((await store.get(row.id)).state).toBe('claiming')
+      expect(unrolledCalls).toEqual([second.txid])
+    })
+
     it('claims only adopted spendable outputs when no batch is needed', async () => {
       batchClaimFake()
       const row = await claimingAdopted([first])
