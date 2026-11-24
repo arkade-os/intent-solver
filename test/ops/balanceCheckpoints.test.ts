@@ -1861,6 +1861,18 @@ describe('balance checkpoints', () => {
     expect(formatCheckpointRecovery(await f.sample(), 'regtest')).toBeNull()
   })
 
+  it('sends no RECOVERED for a drop that comes back only after a day', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const f = await fixture()
+    await f.sample()
+    f.arkade.total -= 10
+    await f.sample()
+    await f.sample()
+    vi.setSystemTime(Date.now() + 24 * 60 * 60 * 1000)
+    f.arkade.total += 10
+    expect(formatCheckpointRecovery(await f.sample(), 'regtest')).toBeNull()
+  })
+
   it('still alerts a decrease whose next complete checkpoint comes a day later', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     const f = await fixture()
@@ -1939,6 +1951,20 @@ describe('balance checkpoints', () => {
     release(f.lightning)
     await vi.advanceTimersByTimeAsync(0)
     expect((await f.sample()).totalSats).toBe('6400')
+    expect(f.services.ln!.getBalance).toHaveBeenCalledTimes(2)
+  })
+
+  it('reads the rails afresh while a lockup is paid out, never reusing a read begun before it', async () => {
+    vi.useFakeTimers()
+    const f = await fixture()
+    vi.mocked(f.services.ln!.getBalance).mockImplementationOnce(() => new Promise(() => {}))
+    const first = f.sample()
+    await vi.advanceTimersByTimeAsync(10_000)
+    await first
+    f.paidOut.push(lockup(USER, SOLVER, 300).contract.script)
+    const second = f.sample()
+    await vi.advanceTimersByTimeAsync(10_000)
+    await second
     expect(f.services.ln!.getBalance).toHaveBeenCalledTimes(2)
   })
 

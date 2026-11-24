@@ -822,16 +822,23 @@ export const recordBalanceCheckpoint = async (services: CheckpointServices): Pro
       )
       return { balance, clientLockups: lockups.filter(({ contract }) => theirs.has(contract.script)), history }
     }),
-    services.ln ? read('lightning', async () => sats((await services.ln!.getBalance()).availableSats)) : null,
+    // A joined rail read may predate a payout whose lockup is counted, so none is joined while one is.
+    services.ln
+      ? read('lightning', async () => sats((await services.ln!.getBalance()).availableSats), paidOutBefore.length > 0)
+      : null,
     services.onchain
-      ? read('onchain', async () => {
-          const balance = await services.onchain!.getBalance()
-          return {
-            confirmedSats: sats(balance.confirmedSats),
-            unconfirmedSats: sats(balance.unconfirmedSats),
-            sharedWithLightning: balance.sharedWithLightning === true,
-          }
-        })
+      ? read(
+          'onchain',
+          async () => {
+            const balance = await services.onchain!.getBalance()
+            return {
+              confirmedSats: sats(balance.confirmedSats),
+              unconfirmedSats: sats(balance.unconfirmedSats),
+              sharedWithLightning: balance.sharedWithLightning === true,
+            }
+          },
+          paidOutBefore.length > 0,
+        )
       : null,
   ])
   // Paid out before the rail read, so its debit shows; still paid out after, so no claim output shows beside it.
@@ -1032,19 +1039,13 @@ export const recordBalanceCheckpoint = async (services: CheckpointServices): Pro
     ...(rebalance?.attributionDeferred?.heldBtcDecreaseIds ?? rebalance?.delayedBtcWarningIds ?? []),
     ...(operatorWithdrawals?.deferred?.heldBtcDecreaseIds ?? operatorWithdrawals?.delayedBtcWarningIds ?? []),
   ])
+  // A decrease from the previous checkpoint has not been alerted yet, however old it is.
+  const followable = (row: FollowedDecrease) =>
+    row.checkpointId === previous?.id || startedAt - (row.at ?? startedAt) < FOLLOW_SECONDS
   const stillOpen = followed.filter((row) => !isBack(row))
   const protectedBtc = stillOpen.filter((row) => row.asset === 'BTC' && heldBtcIds.has(row.checkpointId))
   const room = Math.max(0, UNRECOVERED_LIMIT - protectedBtc.length)
-  const capped = room
-    ? stillOpen
-        .filter(
-          (row) =>
-            !protectedBtc.includes(row) &&
-            // A decrease from the previous checkpoint has not been alerted yet, however old it is.
-            (row.checkpointId === previous?.id || startedAt - (row.at ?? startedAt) < FOLLOW_SECONDS),
-        )
-        .slice(-room)
-    : []
+  const capped = room ? stillOpen.filter((row) => !protectedBtc.includes(row) && followable(row)).slice(-room) : []
   return services.adminStore.recordBalanceCheckpoint({
     scope,
     startedAt,
@@ -1059,7 +1060,7 @@ export const recordBalanceCheckpoint = async (services: CheckpointServices): Pro
     previousId: previous?.id ?? null,
     decreases,
     recovered: followed
-      .filter((d) => isBack(d) && !(d.asset === 'BTC' && delayed.has(d.checkpointId)))
+      .filter((d) => isBack(d) && followable(d) && !(d.asset === 'BTC' && delayed.has(d.checkpointId)))
       .map((d) => ({ ...d, after: String(level(d.asset)) })),
     unrecovered: [...protectedBtc, ...capped],
   })
