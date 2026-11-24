@@ -228,10 +228,14 @@ describe('planReceive: armed', () => {
     })
 
     it('funds once the send is funded, covers the payout and can still be refunded alone in time', async () => {
-      expect(await run(row('armed'), coupledTo(SEND))).toEqual({
-        reads: ['earlierFunding', 'hold', 'coupledSend', 'coupledRefundDeadline'],
+      expect(await run(row('armed'), { ...coupledTo(SEND), coupledLockupFunded: true })).toEqual({
+        reads: ['earlierFunding', 'hold', 'coupledSend', 'coupledRefundDeadline', 'coupledLockupFunded'],
         next: { do: 'fund', coupled: true },
       })
+    })
+
+    it('waits when the coupled send lockup no longer holds the payout at funding time', async () => {
+      expect((await run(row('armed'), { ...coupledTo(SEND), coupledLockupFunded: false })).next).toEqual(WAIT)
     })
 
     it('refuses a send that is not funded without reading its deadline', async () => {
