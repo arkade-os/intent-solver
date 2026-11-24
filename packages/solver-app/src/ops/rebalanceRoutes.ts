@@ -39,6 +39,7 @@ import { ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import { arkadeFundingOwed } from './pool.js'
 import type { RebalanceSource } from './rebalance.js'
 import type { Services } from './services.js'
+import * as sql from './rebalanceRoutes.sql.js'
 
 const now = (): number => Math.floor(Date.now() / 1000)
 const validTxid = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{64}$/i.test(value)
@@ -59,23 +60,22 @@ class RebalanceRfqRepository implements RfqSwapRecordStore {
   constructor(private readonly driver: SqlDriver) {}
 
   async init(): Promise<void> {
-    await this.driver.exec(
-      'CREATE TABLE IF NOT EXISTS rebalance_rfq (rfq_id TEXT PRIMARY KEY, record_json TEXT NOT NULL, fund_amount INTEGER NOT NULL, valid_until INTEGER NOT NULL)',
-    )
+    await this.driver.exec(sql.SCHEMA)
   }
 
   async create(value: StoredRfq): Promise<void> {
-    await this.driver.run(
-      'INSERT INTO rebalance_rfq (rfq_id, record_json, fund_amount, valid_until) VALUES (?, ?, ?, ?)',
-      [value.record.rfqId, JSON.stringify(value.record), value.fundAmount, value.validUntil],
-    )
+    await this.driver.run(sql.insertRfq, [
+      value.record.rfqId,
+      JSON.stringify(value.record),
+      value.fundAmount,
+      value.validUntil,
+    ])
   }
 
   async stored(id: string): Promise<StoredRfq | undefined> {
-    const row = await this.driver.get<{ record_json: string; fund_amount: number; valid_until: number }>(
-      'SELECT record_json, fund_amount, valid_until FROM rebalance_rfq WHERE rfq_id = ?',
-      [id],
-    )
+    const row = await this.driver.get<{ record_json: string; fund_amount: number; valid_until: number }>(sql.rfqById, [
+      id,
+    ])
     return (
       row && {
         record: parseRecord(row.record_json),
@@ -86,10 +86,7 @@ class RebalanceRfqRepository implements RfqSwapRecordStore {
   }
 
   async saveRfqSwap(record: RfqSwapRecord): Promise<void> {
-    const result = await this.driver.run('UPDATE rebalance_rfq SET record_json = ? WHERE rfq_id = ?', [
-      JSON.stringify(record),
-      record.rfqId,
-    ])
+    const result = await this.driver.run(sql.saveRecord, [JSON.stringify(record), record.rfqId])
     if (result.changes !== 1) throw new Error('rebalance recovery origin is missing')
   }
 
@@ -97,9 +94,7 @@ class RebalanceRfqRepository implements RfqSwapRecordStore {
     return (await this.stored(id))?.record
   }
   async getAllRfqSwaps(): Promise<RfqSwapRecord[]> {
-    return (await this.driver.all<{ record_json: string }>('SELECT record_json FROM rebalance_rfq')).map((row) =>
-      parseRecord(row.record_json),
-    )
+    return (await this.driver.all<{ record_json: string }>(sql.allRecords)).map((row) => parseRecord(row.record_json))
   }
   async getRfqSwapsPage(
     filter: RfqSwapPageFilter,
@@ -118,7 +113,7 @@ class RebalanceRfqRepository implements RfqSwapRecordStore {
     return pageResult(remaining, page.limit, (record) => ({ updatedAt: record.updatedAt, rfqId: record.rfqId }))
   }
   async removeRfqSwap(id: string): Promise<void> {
-    await this.driver.run('DELETE FROM rebalance_rfq WHERE rfq_id = ?', [id])
+    await this.driver.run(sql.deleteRfq, [id])
   }
 }
 

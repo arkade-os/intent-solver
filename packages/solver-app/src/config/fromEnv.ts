@@ -18,6 +18,7 @@ import { redactMnemonics, SECRET_KEY } from '../ops/sentry.js'
 import { DECIMAL, documentSchema, jsonPath, type SolverDocument } from './document.js'
 import { BTC_FAMILY, CORRIDOR_FIELDS, corridorKnob, EVM_FIELDS, legacyEnvName, PATHS, SECRET_KNOBS } from './knobs.js'
 import { legacyEnvNames, loadConfig, type LoadOptions } from './load.js'
+import * as sql from './fromEnv.sql.js'
 
 /** The two legs of a stored market row; null is BTC. */
 export interface MarketPair {
@@ -174,7 +175,7 @@ const storedPairs = async (path: string): Promise<MarketPair[]> => {
   if (!existsSync(path)) return []
   const driver = betterSqliteDriver(path)
   try {
-    return await driver.all<MarketPair>('SELECT base, quote FROM admin_market')
+    return await driver.all<MarketPair>(sql.marketPairs)
   } catch (error) {
     if (/no such table/.test(messageOf(error))) return []
     throw error

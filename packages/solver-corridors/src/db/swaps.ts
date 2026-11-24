@@ -19,6 +19,7 @@
 
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
 import { BaseSwapStore, addColumns, numberOrNull, text, type RawRow, type StoreShape } from './baseSwapStore.js'
+import * as sql from './swaps.sql.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 import { LnSendMachine, type LnSendSwapState } from '../machines/lnSend.js'
@@ -217,90 +218,6 @@ export interface SendSwapRow {
   rfqId: string | null
 }
 
-// The unique index on payment_hash is PARTIAL on purpose: one LIVE swap per
-// hash, but a 'refused' swap never moved money and never learned a preimage, so
-// its still-valid invoice may be quoted again. Every other state blocks the
-// hash — including terminal 'claimed'/'stuck', whose preimage the provider may
-// KNOW: re-quoting one would invite a lockup the provider could take without
-// paying again. (No SQL comments in this string: the D1 driver's exec flattens
-// newlines, which would turn a `--` comment into a statement-eater.)
-const SEND_SWAP_COLUMNS = `
-  id                            TEXT PRIMARY KEY,
-  state                         TEXT NOT NULL,
-  created_at                    INTEGER NOT NULL,
-  updated_at                    INTEGER NOT NULL,
-  invoice                       TEXT NOT NULL,
-  payment_hash                  TEXT NOT NULL,
-  amount_sats                   INTEGER NOT NULL,
-  invoice_expires_at            INTEGER NOT NULL,
-  quoted_refund_deadline        INTEGER,
-  refund_locktime               INTEGER NOT NULL,
-  sender_pubkey                 TEXT NOT NULL,
-  receiver_pubkey               TEXT NOT NULL,
-  server_pubkey                 TEXT NOT NULL,
-  claim_delay                   INTEGER NOT NULL,
-  refund_delay                  INTEGER NOT NULL,
-  refund_without_receiver_delay INTEGER NOT NULL,
-  pk_script                     TEXT NOT NULL,
-  lockup_address                TEXT NOT NULL,
-  refund_pk_script              TEXT,
-  emulator_pubkey               TEXT,
-  client_refund_pubkey          TEXT,
-  receiver_pk_script            TEXT,
-  non_interactive_parameters TEXT,
-  refund_ark_txid               TEXT,
-  refund_outcome                TEXT,
-  refund_attempt                TEXT,
-  payment_backend               TEXT,
-  payment_wallet                TEXT,
-  quoted_routing_fee_sats       INTEGER,
-  fee_handle                    TEXT,
-  lockup_txid                   TEXT,
-  lockup_vout                   INTEGER,
-  lockup_value                  INTEGER,
-  idempotency_key               TEXT,
-  pay_attempted_at              INTEGER,
-  payment_id                    TEXT,
-  preimage                      TEXT,
-  claim_ark_txid                TEXT,
-  claim_batch                   TEXT,
-  failure_reason                TEXT,
-  rfq_id                        TEXT,
-  payment_evidence              TEXT,
-  payment_failure_reason        TEXT,
-  routing_fee_paid_sats         INTEGER,
-  unrolled_claim                TEXT,
-  lockup_outpoints              TEXT
-`
-
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS send_swap (${SEND_SWAP_COLUMNS});
-CREATE INDEX IF NOT EXISTS idx_send_swap_state ON send_swap(state);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_send_swap_live_hash
-  ON send_swap(payment_hash) WHERE state != 'refused';
--- Both partial: the columns are nullable and NULL is never what we look up, so
--- each index carries only the rows a lookup can match. rfq_id is the hot one --
--- findByRfqId runs on EVERY inbound rfq_request and rfq_status_request
--- (src/ingress/rfq.ts), so without it each request scanned the whole table.
--- lockup_txid is the cold one, but it is the only identifier an operator
--- actually has: the swap id is ours and appears in no UI, and a finished swap
--- is terminal so the list command will not show it either.
-CREATE INDEX IF NOT EXISTS idx_send_swap_rfq_id
-  ON send_swap(rfq_id) WHERE rfq_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_send_swap_lockup_txid
-  ON send_swap(lockup_txid) WHERE lockup_txid IS NOT NULL;
-
-CREATE TABLE IF NOT EXISTS send_swap_event (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  swap_id    TEXT NOT NULL REFERENCES send_swap(id),
-  at         INTEGER NOT NULL,
-  from_state TEXT,
-  to_state   TEXT NOT NULL,
-  detail     TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_send_swap_event_swap ON send_swap_event(swap_id);
-`
-
 type Raw = Record<string, string | number | null>
 
 const toRow = (raw: Raw): SendSwapRow => ({
@@ -386,35 +303,14 @@ export interface QuoteRecord {
   rfqId?: string
 }
 
-/**
- * Columns an operator search matches against, for this corridor.
- *
- * Identifiers only — every one is something a user can hand you: the swap
- * id, the payment hash, the invoice, an address, a txid, the rfq id. Amounts
- * and timestamps are deliberately absent; they are filters, not identifiers,
- * and a substring match on a number matches far too much to be a search.
- *
- * Interpolated into SQL, so it lives here beside the schema rather than
- * anywhere a request can reach.
- */
-export const SEND_SEARCH_COLUMNS: readonly string[] = [
-  'id',
-  'payment_hash',
-  'invoice',
-  'lockup_address',
-  'lockup_txid',
-  'claim_ark_txid',
-  'refund_ark_txid',
-  'unrolled_claim',
-  'rfq_id',
-]
+export { SEND_SEARCH_COLUMNS } from './swaps.sql.js'
 
 const SHAPE: StoreShape<SendSwapRow, SendSwapState> = {
   table: 'send_swap',
   eventTable: 'send_swap_event',
   noun: 'swap',
   lifecycleLabel: 'swap lifecycle',
-  searchColumns: SEND_SEARCH_COLUMNS,
+  searchColumns: sql.SEND_SEARCH_COLUMNS,
   legalEdges: LnSendMachine.edges,
   transitionColumns: TRANSITION_COLUMNS,
   patchColumns: PATCH_COLUMNS,
@@ -427,11 +323,7 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
   protected readonly shape = SHAPE
 
   async compareAndSwapClaimBatch(id: string, expected: string | null, next: string | null): Promise<boolean> {
-    const result = await this.driver.run(
-      `UPDATE send_swap SET claim_batch = ?, updated_at = ?
-       WHERE id = ? AND state = 'claiming' AND claim_batch IS ?`,
-      [next, this.now(), id, expected],
-    )
+    const result = await this.driver.run(sql.setClaimBatch, [next, this.now(), id, expected])
     return result.changes === 1
   }
 
@@ -444,7 +336,7 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
    */
   static async open(driver: SqlDriver | string, now: () => number = nowSeconds): Promise<SwapStore> {
     const store = new SwapStore(typeof driver === 'string' ? betterSqliteDriver(driver) : driver, now)
-    await store.driver.exec(SCHEMA)
+    await store.driver.exec(sql.SCHEMA)
     await store.migrate()
     return store
   }
@@ -452,38 +344,12 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
   /**
    * Additive migration for databases created before a column existed.
    * `CREATE TABLE IF NOT EXISTS` never alters an existing table, so columns
-   * added to the schema must also be added here. The column check goes through
+   * added to the schema must also be added to `ADDED_COLUMNS`. The column check goes through
    * the driver's prepared `all` because that form works on both runtimes —
    * D1 serves `PRAGMA table_info` via prepare().all() like any query.
    */
   private async migrate(): Promise<void> {
-    await addColumns(this.driver, 'send_swap', [
-      ['refund_attempt', 'TEXT'],
-      ['payment_backend', 'TEXT'],
-      ['payment_wallet', 'TEXT'],
-      ['refund_pk_script', 'TEXT'],
-      ['emulator_pubkey', 'TEXT'],
-      ['refund_ark_txid', 'TEXT'],
-      ['refund_outcome', 'TEXT'],
-      ['rfq_id', 'TEXT'],
-      ['client_refund_pubkey', 'TEXT'],
-      ['receiver_pk_script', 'TEXT'],
-      ['payment_evidence', 'TEXT'],
-      ['payment_failure_reason', 'TEXT'],
-      ['non_interactive_parameters', 'TEXT'],
-      ['quoted_routing_fee_sats', 'INTEGER'],
-      // Nothing reads or writes it; kept because dropping a column is a table rebuild.
-      ['fee_handle', 'TEXT'],
-      // INTEGER, matching the schema above rather than defaulting to TEXT: a
-      // migrated database would otherwise give this column TEXT affinity and
-      // store sats as strings, which reads back correctly through `Number()`
-      // and sorts and sums wrongly the day anything asks SQLite to do either.
-      ['routing_fee_paid_sats', 'INTEGER'],
-      ['quoted_refund_deadline', 'INTEGER'],
-      ['unrolled_claim', 'TEXT'],
-      ['claim_batch', 'TEXT'],
-      ['lockup_outpoints', 'TEXT'],
-    ])
+    await addColumns(this.driver, 'send_swap', sql.ADDED_COLUMNS)
 
     // Databases created when payment_hash carried a column-level UNIQUE burn a
     // hash forever once any swap — even a refused one that never moved money —
@@ -492,9 +358,7 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
     // also creates an autoindex, so only an autoindex whose indexed column is
     // payment_hash marks the legacy constraint.
     if (await this.hasLegacyHashConstraint()) {
-      const names = (await this.driver.all<{ name: string }>(`PRAGMA table_info(send_swap)`))
-        .map((c) => c.name)
-        .join(', ')
+      const names = (await this.driver.all<{ name: string }>(sql.tableInfo)).map((c) => c.name).join(', ')
       // The SQLite-recommended table rebuild (sqlite.org/lang_altertable.html):
       // build the replacement, copy, drop the original, rename into place. The
       // drop is what removes the column-level UNIQUE the whole rebuild exists to
@@ -515,30 +379,24 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
       await this.setForeignKeys(false)
       try {
         await this.driver.transaction(async () => {
-          await this.driver.exec(`DROP TABLE IF EXISTS send_swap_next`)
-          await this.driver.exec(`CREATE TABLE send_swap_next (${SEND_SWAP_COLUMNS})`)
-          await this.driver.exec(`INSERT INTO send_swap_next (${names}) SELECT ${names} FROM send_swap`)
-          await this.driver.exec(`DROP TABLE send_swap`)
-          await this.driver.exec(`ALTER TABLE send_swap_next RENAME TO send_swap`)
+          await this.driver.exec(sql.dropNext)
+          await this.driver.exec(sql.createNext)
+          await this.driver.exec(sql.copyIntoNext(names))
+          await this.driver.exec(sql.dropTable)
+          await this.driver.exec(sql.renameNext)
         })
       } finally {
         await this.setForeignKeys(true)
       }
       // Recreate the indexes the dropped table took with it.
-      await this.driver.exec(SCHEMA)
+      await this.driver.exec(sql.SCHEMA)
     }
 
     // Backfill the outcome discriminator from the retired 'external' sentinel,
     // which used to be smuggled through the txid column (and leaked to clients
     // as if it were a txid).
-    await this.driver.run(
-      `UPDATE send_swap SET refund_outcome = 'external', refund_ark_txid = NULL
-       WHERE refund_ark_txid = 'external' AND refund_outcome IS NULL`,
-    )
-    await this.driver.run(
-      `UPDATE send_swap SET refund_outcome = 'pushed'
-       WHERE refund_ark_txid IS NOT NULL AND refund_outcome IS NULL`,
-    )
+    await this.driver.run(sql.backfillExternalRefund)
+    await this.driver.run(sql.backfillPushedRefund)
   }
 
   /**
@@ -549,7 +407,7 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
    */
   private async setForeignKeys(on: boolean): Promise<void> {
     try {
-      await this.driver.exec(`PRAGMA foreign_keys = ${on ? 'ON' : 'OFF'}`)
+      await this.driver.exec(sql.foreignKeys(on))
     } catch {
       // Driver manages foreign keys itself; nothing to do.
     }
@@ -557,11 +415,11 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
 
   /** True when payment_hash still carries the legacy column-level UNIQUE. */
   private async hasLegacyHashConstraint(): Promise<boolean> {
-    const indexes = await this.driver.all<{ name: string }>(`PRAGMA index_list(send_swap)`)
+    const indexes = await this.driver.all<{ name: string }>(sql.indexList)
     for (const index of indexes) {
       const name = String(index.name)
       if (!name.startsWith('sqlite_autoindex_send_swap')) continue
-      const cols = await this.driver.all<{ name: string }>(`PRAGMA index_info(${name})`)
+      const cols = await this.driver.all<{ name: string }>(sql.indexInfo(name))
       if (cols.some((c) => c.name === 'payment_hash')) return true
     }
     return false
@@ -581,51 +439,38 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
 
   private async insertQuoteRows(quote: QuoteRecord): Promise<SendSwapRow> {
     const at = this.now()
-    const inserted = await this.driver.run(
-      `INSERT INTO send_swap (
-        id, state, created_at, updated_at, invoice, payment_hash, amount_sats, invoice_expires_at,
-        quoted_refund_deadline, refund_locktime, sender_pubkey, receiver_pubkey, server_pubkey,
-        claim_delay, refund_delay, refund_without_receiver_delay, pk_script, lockup_address,
-        refund_pk_script, emulator_pubkey, client_refund_pubkey, receiver_pk_script,
-        non_interactive_parameters, quoted_routing_fee_sats, rfq_id
-      ) SELECT ?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-      WHERE NOT EXISTS (
-        SELECT 1 FROM send_swap WHERE payment_hash = ?
-        AND (state != 'refused' OR (COALESCE(lockup_value, 0) > 0 AND refund_outcome IS NULL))
-      )`,
-      [
-        quote.id,
-        at,
-        at,
-        quote.invoice,
-        quote.paymentHash,
-        quote.amountSats,
-        quote.invoiceExpiresAt,
-        quote.quotedRefundDeadline,
-        quote.refundLocktime,
-        quote.senderPubkey,
-        quote.receiverPubkey,
-        quote.serverPubkey,
-        quote.claimDelay,
-        quote.refundDelay,
-        quote.refundWithoutReceiverDelay,
-        quote.pkScript,
-        quote.lockupAddress,
-        quote.refundPkScript ?? null,
-        quote.emulatorPubkey ?? null,
-        quote.clientRefundPubkey ?? null,
-        quote.receiverPkScript ?? null,
-        // `false` collapses to NULL — the same value a row quoted before the leaf shipped
-        // carries — and so does not round-trip back as `false`. Deliberate: the only reader
-        // that matters (`covenantScriptFromRow`) treats NULL and `false` identically and
-        // rebuilds the eight-leaf shape for both, so this is not a distinction the row needs
-        // to carry. Only `true` changes what gets derived.
-        quote.nonInteractiveParameters ? '1' : null,
-        quote.quotedRoutingFeeSats ?? null,
-        quote.rfqId ?? null,
-        quote.paymentHash,
-      ],
-    )
+    const inserted = await this.driver.run(sql.insertQuote, [
+      quote.id,
+      at,
+      at,
+      quote.invoice,
+      quote.paymentHash,
+      quote.amountSats,
+      quote.invoiceExpiresAt,
+      quote.quotedRefundDeadline,
+      quote.refundLocktime,
+      quote.senderPubkey,
+      quote.receiverPubkey,
+      quote.serverPubkey,
+      quote.claimDelay,
+      quote.refundDelay,
+      quote.refundWithoutReceiverDelay,
+      quote.pkScript,
+      quote.lockupAddress,
+      quote.refundPkScript ?? null,
+      quote.emulatorPubkey ?? null,
+      quote.clientRefundPubkey ?? null,
+      quote.receiverPkScript ?? null,
+      // `false` collapses to NULL — the same value a row quoted before the leaf shipped
+      // carries — and so does not round-trip back as `false`. Deliberate: the only reader
+      // that matters (`covenantScriptFromRow`) treats NULL and `false` identically and
+      // rebuilds the eight-leaf shape for both, so this is not a distinction the row needs
+      // to carry. Only `true` changes what gets derived.
+      quote.nonInteractiveParameters ? '1' : null,
+      quote.quotedRoutingFeeSats ?? null,
+      quote.rfqId ?? null,
+      quote.paymentHash,
+    ])
     // `WHERE NOT EXISTS`, not an index: a lost race is zero changes, never a driver error.
     if (inserted.changes !== 1) throw new UniqueConstraintError('UNIQUE constraint failed: send_swap.payment_hash')
     await this.recordEvent(quote.id, null, 'quoted', null)
@@ -641,20 +486,13 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
    * terminal, so absent from `list` — is unreachable from the outside.
    */
   async findByLockupTxid(txid: string): Promise<SendSwapRow | null> {
-    const raw = await this.driver.get<Raw>(
-      'SELECT * FROM send_swap WHERE lockup_txid = ? ORDER BY created_at DESC LIMIT 1',
-      [txid],
-    )
+    const raw = await this.driver.get<Raw>(sql.byLockupTxid, [txid])
     return raw ? toRow(raw) : null
   }
 
   /** The row that still blocks this hash, including a funded refusal awaiting proof of refund. */
   override async findLiveByPaymentHash(paymentHash: string): Promise<SendSwapRow | null> {
-    const raw = await this.driver.get<Raw>(
-      `SELECT * FROM send_swap WHERE payment_hash = ?
-       AND (state != 'refused' OR (COALESCE(lockup_value, 0) > 0 AND refund_outcome IS NULL)) LIMIT 1`,
-      [paymentHash],
-    )
+    const raw = await this.driver.get<Raw>(sql.liveByPaymentHash, [paymentHash])
     return raw ? toRow(raw) : null
   }
 
@@ -666,15 +504,7 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
    * timelock; without it the `refund` leaf is gated on `refundLocktime`.
    */
   async findRefundable(now: number): Promise<SendSwapRow[]> {
-    const rows = await this.driver.all<Raw>(
-      `SELECT * FROM send_swap
-       WHERE state = 'refused'
-         AND refund_outcome IS NULL
-         AND refund_pk_script IS NOT NULL
-         AND (client_refund_pubkey IS NOT NULL OR refund_locktime <= ?)
-       ORDER BY created_at`,
-      [now],
-    )
+    const rows = await this.driver.all<Raw>(sql.refundable, [now])
     return rows.map(toRow)
   }
 
@@ -688,20 +518,17 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
    * which came last.
    */
   async findMostRecent(): Promise<SendSwapRow | null> {
-    const raw = await this.driver.get<Raw>('SELECT * FROM send_swap ORDER BY created_at DESC, rowid DESC LIMIT 1')
+    const raw = await this.driver.get<Raw>(sql.mostRecent)
     return raw ? toRow(raw) : null
   }
 
   async noteFundings(id: string, outputs: readonly { txid: string; vout: number; value: number }[]): Promise<void> {
     if (outputs.length === 0) return
-    const [row] = await this.driver.all<Raw>('SELECT state FROM send_swap WHERE id = ?', [id])
+    const [row] = await this.driver.all<Raw>(sql.stateById, [id])
     if (!row) return
     const state = String(row.state) as SendSwapState
 
-    const seen = await this.driver.all<Raw>(
-      "SELECT detail FROM send_swap_event WHERE swap_id = ? AND detail LIKE 'funding %'",
-      [id],
-    )
+    const seen = await this.driver.all<Raw>(sql.fundingNotes, [id])
     const already = new Set(seen.map((e) => String(e.detail)))
 
     for (const output of outputs) {
@@ -730,7 +557,7 @@ export class SwapStore extends BaseSwapStore<SendSwapRow, SendSwapState> {
    */
   override async patch(id: string, fields: Record<string, unknown>): Promise<void> {
     const notable = fields.refund_outcome !== undefined
-    const [before] = notable ? await this.driver.all<Raw>('SELECT * FROM send_swap WHERE id = ?', [id]) : [null]
+    const [before] = notable ? await this.driver.all<Raw>(sql.byId, [id]) : [null]
 
     await super.patch(id, fields)
 
