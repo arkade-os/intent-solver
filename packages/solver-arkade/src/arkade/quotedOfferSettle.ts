@@ -36,6 +36,7 @@ export interface QuotedOfferIntent {
   makerPublicKey: string
   depositTxid: string | null
   depositVout: number | null
+  carrierTerms?: { mode: 'purchase' | 'recycle' | 'recycle_receiver' } | null
   /** The negotiated contract version; null is the baseline, asset-swap-v2. */
   contractVersion: string | null
 }
@@ -66,6 +67,9 @@ export const quotedOfferSettleFor = (
   const derive = offerScriptFrom(deps.derivation)
 
   return async (intent, options) => {
+    if (intent.carrierTerms?.mode === 'recycle' || intent.carrierTerms?.mode === 'recycle_receiver') {
+      throw new Error(`${intent.carrierTerms.mode} settlement requires the dedicated receive-carrier adapter`)
+    }
     if (intent.depositTxid === null || intent.depositVout === null) {
       throw new Error(`the negotiation at ${intent.offerPkScript} records no deposit outpoint to spend`)
     }

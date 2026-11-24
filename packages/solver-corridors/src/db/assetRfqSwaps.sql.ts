@@ -30,6 +30,8 @@ const COLUMNS = `
   quote_gives_base       INTEGER,
   fill_price_mantissa    TEXT,
   fill_price_scale       INTEGER,
+  carrier_terms          TEXT,
+  carrier_attempt        TEXT,
   fill_phase             TEXT,
   contract_version       TEXT
 `
@@ -76,6 +78,8 @@ export const ADDED_COLUMNS: readonly (readonly [column: string, type: string])[]
   ['to_spread', 'TEXT'],
   ['fill_price_mantissa', 'TEXT'],
   ['fill_price_scale', 'INTEGER'],
+  ['carrier_terms', 'TEXT'],
+  ['carrier_attempt', 'TEXT'],
   ['fill_phase', 'TEXT'],
   ['contract_version', 'TEXT'],
 ]
@@ -93,8 +97,8 @@ export const insertQuote = `INSERT INTO asset_rfq_swap (
          from_decimals, from_flat_fee, to_asset_id, to_amount, to_decimals, to_spread,
          maker_pk_script, maker_public_key, offer_pk_script,
          offer_address, solver_pubkey, valid_until, deposit_txid, deposit_vout, fill_txid, failure_reason,
-         quote_implied_mantissa, quote_implied_scale, quote_gives_base, contract_version
-       ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?)`
+         quote_implied_mantissa, quote_implied_scale, quote_gives_base, carrier_terms, contract_version
+       ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?)`
 
 export const byId = `SELECT * FROM asset_rfq_swap WHERE id = ?`
 
@@ -126,4 +130,20 @@ export const markSubmitting = `UPDATE asset_rfq_swap SET fill_phase = 'submittin
 
 export const resolveDirectFill = `UPDATE asset_rfq_swap SET state = ?, updated_at = ?, fill_txid = ?, failure_reason = ?
        WHERE id = ? AND state = ? AND deposit_txid = ? AND deposit_vout = ? AND offer_pk_script = ?
-       AND fill_txid IS ? AND failure_reason IS ?`
+       AND fill_txid IS ? AND failure_reason IS ? AND carrier_attempt IS NULL`
+
+export const carrierAttemptById = `SELECT carrier_attempt FROM asset_rfq_swap WHERE id = ?`
+
+export const prepareCarrierAttempt = `UPDATE asset_rfq_swap SET carrier_attempt = ?
+       WHERE id = ? AND state = 'filling' AND carrier_attempt IS NULL`
+
+export const casCarrierAttempt = `UPDATE asset_rfq_swap SET carrier_attempt = ?
+       WHERE id = ? AND state = 'filling' AND carrier_attempt = ?`
+
+export const refuseCarrierAttempt = `UPDATE asset_rfq_swap SET carrier_attempt = ?, state = 'refused', failure_reason = ?, updated_at = ?
+       WHERE id = ? AND state = 'filling' AND carrier_attempt = ?`
+
+export const refuseUnattemptedCarrierFill = `UPDATE asset_rfq_swap SET state = 'refused', failure_reason = ?, updated_at = ?
+       WHERE id = ? AND state = 'filling' AND carrier_attempt IS NULL`
+
+export const unresolvedCarrierAttempts = `SELECT * FROM asset_rfq_swap WHERE carrier_attempt IS NOT NULL ORDER BY created_at ASC, id ASC`

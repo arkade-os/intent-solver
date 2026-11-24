@@ -148,6 +148,49 @@ for (const kind of ['public', 'rfq'] as const) {
           await reopened.close()
         }
       }))
+    if (kind === 'rfq') {
+      for (const mode of ['recycle', 'recycle_receiver'] as const) {
+        it(`excludes ${mode} carrier rows`, () =>
+          fixture(async (store, driver) => {
+            const terms =
+              mode === 'recycle'
+                ? {
+                    mode,
+                    quote_id: 'q',
+                    physical_sats: '330',
+                    loan_sats: '329',
+                    receipt_sats: '1',
+                    service_fare_sats: '0',
+                    priced_sats: '1',
+                    expires_at: 5000,
+                  }
+                : {
+                    mode,
+                    quote_id: 'q',
+                    physical_sats: '330',
+                    loan_sats: '330',
+                    receipt_sats: '0',
+                    service_fare_sats: '0',
+                    priced_sats: '0',
+                    expires_at: 5000,
+                    taxi_url: 'http://localhost:3000',
+                    taxi_key: '11'.repeat(32),
+                  }
+            await driver.run('UPDATE asset_rfq_swap SET carrier_terms = ? WHERE id = ?', [
+              JSON.stringify(terms),
+              proof.id,
+            ])
+            expect(await store.recoverDirectFill(proof, original)).toBe(false)
+            expect(await store.cancelDirectFill(proof, conflict)).toBe(false)
+          }))
+      }
+      it('excludes any existing carrier journal', () =>
+        fixture(async (store, driver) => {
+          await driver.run('UPDATE asset_rfq_swap SET carrier_attempt = ? WHERE id = ?', ['{}', proof.id])
+          expect(await store.recoverDirectFill(proof, original)).toBe(false)
+          expect(await store.cancelDirectFill(proof, conflict)).toBe(false)
+        }))
+    }
     it('does not overwrite a known different fill', () =>
       fixture(async (store, driver) => {
         await driver.run(
