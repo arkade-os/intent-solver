@@ -959,6 +959,9 @@ export class OnchainSendSwapService {
       await store.releaseFundLease(row.id)
       throw error
     }
+    // Signing is time the window can close in. A re-drive's lease holder finishes what it started.
+    const late = fresh ? this.fundingRefusal(row) : null
+    if (late) return this.refuseFunding(row, fresh, late)
     if (!(await store.recordFundingTx(row.id, signed.tx))) return false
     return this.publishFunding(row, signed.tx, false)
   }

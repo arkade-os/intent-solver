@@ -925,6 +925,29 @@ describe('OnchainSendSwapService', () => {
     expect((await deps.store.get(outcome.swap.id)).state).toBe('awaiting_claim')
   })
 
+  it('does not broadcast a fresh funding once the claim window closes while it is being signed', async () => {
+    const outcome = await service.quote({
+      paymentHash,
+      amountSats: 50_000,
+      payoutPubkey,
+      refundAddress: REFUND_ADDRESS,
+      clientRefundPubkey,
+    })
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    deps.outputs.set(outcome.swap.pkScript, [{ txid: 'lockup-tx', vout: 0, value: 50_000 }])
+    const signForReal = deps.onchain.signFunding.bind(deps.onchain)
+    deps.onchain.signFunding = async (params) => {
+      now =
+        outcome.swap.htlcLocktime -
+        (outcome.swap.minConfirmations * ONCHAIN_SECONDS_PER_BLOCK + ONCHAIN_CLAIM_MARGIN_SECONDS)
+      return signForReal(params)
+    }
+
+    const row = await service.tick(outcome.swap.id)
+    expect(row.state).toBe('refused')
+    expect(await deps.onchain.findOutputs({ address: row.onchainAddress })).toHaveLength(0)
+  })
+
   describe('refusing before anything is broadcast', () => {
     const lockedQuote = async (svc: OnchainSendSwapService = service) => {
       const outcome = await svc.quote({
