@@ -152,6 +152,26 @@ describe('quote', () => {
     expect(outcome.swap.validUntil).toBe(1_030)
   })
 
+  it('sizes valid_until from the price it struck, not from after a slow inventory read', async () => {
+    let at: (seconds: number) => void = () => {}
+    const built = await harness({
+      fetchPrice: async () => {
+        at(1_010)
+        return { mantissa: 100_000n, scale: 0 }
+      },
+      balance: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        at(1_100)
+        return new Map([[ASSET_A, 10n ** 18n]])
+      },
+    })
+    at = built.tick
+
+    const outcome = await built.service.quote(request())
+    if (!outcome.accepted) throw new Error('expected a quote')
+    expect(outcome.swap.validUntil).toBe(1_040)
+  })
+
   it('records the input flat fee and output spread in their native units', async () => {
     const { service } = await harness({
       markets: [{ ...MARKET, sellBaseFeeFlat: 300n }],

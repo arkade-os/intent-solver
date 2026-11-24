@@ -294,6 +294,7 @@ export class AssetRfqSwapService {
       this.deps.onError?.('price', error)
       return { accepted: false, reason: 'price_unavailable', detail: 'the market feed could not be read' }
     }
+    const pricedAt = this.now()
 
     const resolved = decomposeAssetQuote({
       pair,
@@ -350,7 +351,7 @@ export class AssetRfqSwapService {
         offerPkScript: offer.pkScript,
         offerAddress: offer.address,
         solverPubkey: this.deps.solverPubkey,
-        validUntil: this.now() + this.deps.quoteValiditySeconds,
+        validUntil: pricedAt + this.deps.quoteValiditySeconds,
         // The price this quote FIXED — not the feed it was derived from.
         // Against a feed read at fill time it measures how far the market moved
         // while the quote was outstanding; against its own feed it would measure
