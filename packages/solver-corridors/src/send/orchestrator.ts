@@ -1144,10 +1144,6 @@ export class SendSwapService {
       await this.deps.store.fail(row.id, 'paying', `refused to re-submit: ${other} — reconcile before retry`)
       return false
     }
-    // Thrown, not parked, for the reason `believeFailureOnlyFromPayingNode` gives.
-    if (unconfirmed) {
-      throw new Error(`swap ${row.id}: not re-submitting: cannot read which Lightning node is answering`)
-    }
     // No payment id on disk: the payInvoice call may or may not have gone out.
     //
     // Re-submitting is NOT safe by construction, which is what this once
@@ -1164,6 +1160,11 @@ export class SendSwapService {
     // classes and the method reads its own instance state.
     const { ln } = this.deps
     const committed = await ln.getSendHtlcState?.(row.paymentHash)
+    // A settled answer proves itself with its preimage; anything else needs to know which node answered.
+    // Thrown, not parked, for the reason `believeFailureOnlyFromPayingNode` gives.
+    if (unconfirmed && committed?.status !== 'settled') {
+      throw new Error(`swap ${row.id}: not re-submitting: cannot read which Lightning node is answering`)
+    }
     if (committed) return this.recoverCommitted(row, committed)
     // A probe that reaches the backend before the submission it follows is
     // recorded answers null either way, so inside the grace it is not yet the

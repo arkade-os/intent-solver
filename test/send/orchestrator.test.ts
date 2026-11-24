@@ -4094,6 +4094,24 @@ describe('a payment whose commitment outlived its id', () => {
     expect(ln.payCalls).toHaveLength(submitted)
   })
 
+  it.each([
+    ['settled', { status: 'settled', preimage: FORGED_PREIMAGE }],
+    ['returned', { status: 'returned' }],
+  ] as const)('acts on a %s commitment only as far as an unreadable node allows', async (_, htlc) => {
+    Object.defineProperty(ln, 'walletFingerprint', { value: async () => 'wallet-a', configurable: true })
+    const wedged = await wedgedInPaying()
+    Object.defineProperty(ln, 'walletFingerprint', {
+      value: async () => {
+        throw new Error('node unreachable')
+      },
+    })
+    ln.sendHtlc = htlc
+
+    if (htlc.status === 'settled') expect((await service.tick(wedged.id)).state).toBe('claimed')
+    else await expect(service.tick(wedged.id)).rejects.toThrow(/cannot read which Lightning node/)
+    expect(arkade.refundCalls).toHaveLength(0)
+  })
+
   it('refunds when the backend says the commitment was returned', async () => {
     const wedged = await wedgedInPaying()
     ln.sendHtlc = { status: 'returned' }
