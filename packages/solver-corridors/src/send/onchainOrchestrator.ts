@@ -1092,7 +1092,10 @@ export class OnchainSendSwapService {
     const broadcastAt = row.onchainRefundBroadcastAt ?? row.updatedAt
     if (!bumpDue(broadcastAt, this.now())) return null
     const estimate = await this.deps.onchain.estimateFeeRate()
-    const previousFeeRate = row.onchainRefundFeeRate ?? estimate
+    // A version the backend never saw sets no fee to outbid: its broadcast threw after the pre-commit.
+    const latest = row.onchainRefundTxid
+    const unseen = latest !== null && (await this.deps.onchain.transactionOutcome(latest)) === 'unknown'
+    const previousFeeRate = unseen ? null : (row.onchainRefundFeeRate ?? estimate)
     const attempt = await this.pushOnchainHtlcRefund(row, fundingTxid, fundingVout, { estimate, previousFeeRate })
     return attempt.broadcast ? attempt.txid : null
   }

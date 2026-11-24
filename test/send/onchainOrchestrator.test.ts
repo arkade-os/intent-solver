@@ -2382,6 +2382,22 @@ describe('OnchainSendSwapService', () => {
     expect(bumped.onchainRefundBroadcastAt).toBe(now)
   })
 
+  it('resends a replacement whose broadcast never reached the backend', async () => {
+    const first = await driveToBroadcastRefund(MAINNET_EXIT_DELAY)
+    now += FEE_BUMP_INTERVAL_SECONDS
+    deps.onchain.setFeeRate(8)
+    vi.spyOn(deps.onchain, 'broadcastRaw').mockRejectedValueOnce(new Error('ECONNRESET'))
+    await expect(service.tick(first.id)).rejects.toThrow('ECONNRESET')
+    const candidate = await deps.store.get(first.id)
+    expect(candidate.onchainRefundFeeRate).toBe(8)
+    expect(await deps.onchain.transactionOutcome(candidate.onchainRefundTxid!)).toBe('unknown')
+
+    const broadcasts = captureBroadcasts()
+    now += FEE_BUMP_INTERVAL_SECONDS
+    await service.tick(first.id)
+    expect(broadcasts).toHaveLength(1)
+  })
+
   it('refunds on an OLDER version when that is the one a miner took', async () => {
     const first = await driveToBroadcastRefund()
     now += FEE_BUMP_INTERVAL_SECONDS
