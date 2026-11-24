@@ -1139,10 +1139,14 @@ export class SendSwapService {
     // human — the same identity guard the coupled refund and `paymentVerdict`
     // apply, here on a row that has no id yet. `stuck`, not `refused`: a payment
     // may exist on the other node, so a refund is not safe.
-    const { other } = await this.payingNode(row)
+    const { other, unconfirmed } = await this.payingNode(row)
     if (other !== null) {
       await this.deps.store.fail(row.id, 'paying', `refused to re-submit: ${other} — reconcile before retry`)
       return false
+    }
+    // Thrown, not parked, for the reason `believeFailureOnlyFromPayingNode` gives.
+    if (unconfirmed) {
+      throw new Error(`swap ${row.id}: not re-submitting: cannot read which Lightning node is answering`)
     }
     // No payment id on disk: the payInvoice call may or may not have gone out.
     //

@@ -2521,6 +2521,28 @@ describe('tick: failure and recovery', () => {
     expect(row.failureReason).toContain('reconcile before retry')
   })
 
+  it('does not re-submit a mid-payment row while the live Lightning node cannot be identified', async () => {
+    const { swap } = await quoted()
+    Object.defineProperty(ln, 'walletFingerprint', {
+      value: async () => {
+        throw new Error('node unreachable')
+      },
+      configurable: true,
+    })
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
+    await store.transition(swap.id, 'quoted', 'funded', { lockup_value: AMOUNT })
+    await store.transition(swap.id, 'funded', 'paying', {
+      pay_attempted_at: clock - NO_RECORD_GRACE_SECONDS,
+      idempotency_key: `swap-${PAYMENT_HASH}`,
+      payment_wallet: 'wallet-a',
+    })
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
+
+    await expect(service.tick(swap.id)).rejects.toThrow()
+    expect(ln.payCalls).toHaveLength(0)
+    expect((await store.get(swap.id)).state).toBe('paying')
+  })
+
   describe('a row with a payment id, polled as failed', () => {
     const polledAsFailed = async (
       state: 'paying' | 'paid',
