@@ -13,6 +13,7 @@ import {
   ArkAddress,
   buildOffchainTx,
   claimWithPreimageIdentity,
+  collectBatchRegistrations,
   ConditionWitness,
   createAssetPacket,
   EmulatorPacket,
@@ -28,6 +29,7 @@ import {
   signAndSubmitOffchainTx,
   Transaction,
   Wallet,
+  type Outpoint,
   type Recipient,
   type TapLeafScript,
   type VirtualCoin,
@@ -76,6 +78,27 @@ export const sqliteExecutor = (path: string): SQLExecutor & { close(): void } =>
     // Without this the WAL is never checkpointed. process.exit() skips it, and
     // the sidecar grows to many times the size of the database it fronts.
     close: () => db.close(),
+  }
+}
+
+/** The session that may have popped an intent, then one whole session after it. */
+const RELEASE_AFTER_SESSIONS = 2
+
+/**
+ * The SDK journal, except a registration that ends without a commitment keeps its inputs locked
+ * for `releaseDelayMs`. The SDK frees them on a delete ACK or "no matching intents", and neither
+ * proves arkd will not batch the intent: it matches before it deletes, and a popped intent matches nothing.
+ */
+export class DelayedReleaseBatchRegistrations extends SQLiteBatchRegistrationRepository {
+  releaseDelayMs = Number.POSITIVE_INFINITY
+
+  override async getLockedVtxoOutpoints(): Promise<Outpoint[]> {
+    const [live, ended] = await Promise.all([
+      super.getLockedVtxoOutpoints(),
+      collectBatchRegistrations(this, { states: ['cancelled', 'batch_failed'] }),
+    ])
+    const now = Date.now()
+    return [...live, ...ended.filter((r) => now - r.updatedAt < this.releaseDelayMs).flatMap((r) => r.proofInputs)]
   }
 }
 
@@ -256,6 +279,7 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
   const identity = MnemonicIdentity.fromMnemonic(config.mnemonic, { isMainnet: config.isMainnet })
   const executor = sqliteExecutor(config.databasePath)
   const latencyDiagnostics = latencyDiagnosticsEnabled()
+  const intentRepository = new DelayedReleaseBatchRegistrations(executor)
 
   const wallet = await Wallet.create({
     identity,
@@ -269,7 +293,7 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
     storage: {
       walletRepository: new SQLiteWalletRepository(executor),
       contractRepository: new SQLiteContractRepository(executor),
-      intentRepository: new SQLiteBatchRegistrationRepository(executor),
+      intentRepository,
     },
     // Passing undefined is safe and is NOT the same as passing a hole: the SDK takes
     // `config.onchainProvider || new EsploraProvider(default)` (SDK
@@ -328,6 +352,14 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
   if (vtxoMinSats < 0n || vtxoMinSats > BigInt(Number.MAX_SAFE_INTEGER)) {
     throw new Error(`Arkade server at ${config.operatorUrl} reports invalid vtxoMinAmount=${info.vtxoMinAmount}`)
   }
+  const sessionSeconds = Number(info.sessionDuration)
+  if (!Number.isSafeInteger(sessionSeconds) || sessionSeconds <= 0) {
+    throw new Error(
+      `Arkade server at ${config.operatorUrl} reports sessionDuration=${info.sessionDuration}, ` +
+        'which gives an abandoned intent no time to leave a batch',
+    )
+  }
+  intentRepository.releaseDelayMs = RELEASE_AFTER_SESSIONS * sessionSeconds * 1000
 
   const advertisedExitDelay = Number(info.unilateralExitDelay)
   const { unit: advertisedUnit, notices } = resolveTimelockUnit({

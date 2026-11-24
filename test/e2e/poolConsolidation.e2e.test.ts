@@ -7,6 +7,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { isVtxoSpent, type VirtualCoin } from '@arkade-os/sdk'
 import { createCorridorReaderSet } from '@arkade-os/solver-core/core/corridor.js'
 import { mintPool, poolPlan } from '@arkade-os/solver-app/ops/pool.js'
 import type { Services } from '@arkade-os/solver-app/ops/services.js'
@@ -35,10 +36,10 @@ const services = (): Services =>
 
 const outpoint = (vtxo: { txid: string; vout: number }) => `${vtxo.txid}:${vtxo.vout}`
 
-const waitFor = async (ready: (coins: { txid: string; vout: number; value: number }[]) => boolean) => {
+const waitFor = async (ready: (coins: VirtualCoin[]) => boolean | Promise<boolean>) => {
   for (let attempt = 0; attempt < 90; attempt += 1) {
     const coins = await arkade.ctx.wallet.getSpendableVtxos()
-    if (ready(coins)) return coins
+    if (await ready(coins)) return coins
     await new Promise((resolve) => setTimeout(resolve, 1_000))
   }
   throw new Error('the float never reached the expected shape')
@@ -62,13 +63,23 @@ describe('e2e pool consolidation', () => {
       const piece = { address: own, amount: COIN_SATS }
       for (let sent = 0; sent < COINS; sent += PER_SEND) {
         const txid = await arkade.ctx.wallet.send(piece, ...Array.from({ length: PER_SEND - 1 }, () => piece))
-        const outpoints = Array.from({ length: PER_SEND }, (_, vout) => ({ txid, vout }))
-        await expect
-          .poll(async () => (await arkade.ctx.wallet.indexerProvider.getVtxos({ outpoints })).vtxos.length, {
-            message: `seed transaction ${txid} is visible to arkd`,
-            timeout: 10_000,
+        const outputs = Array.from({ length: PER_SEND + 1 }, (_, vout) => ({ txid, vout }))
+        await waitFor(async (coins) => {
+          const { vtxos } = await arkade.ctx.wallet.indexerProvider.getVtxos({ outpoints: outputs })
+          return outputs.every((expected) => {
+            const local = coins.find((coin) => outpoint(coin) === outpoint(expected))
+            const projected = vtxos.find((coin) => outpoint(coin) === outpoint(expected))
+            if (!local || !projected) return false
+            return (
+              local.value === projected.value &&
+              (expected.vout === PER_SEND ? local.value > 0 : local.value === COIN_SATS) &&
+              !isVtxoSpent(local) &&
+              local.isSwept !== true &&
+              !isVtxoSpent(projected) &&
+              projected.isSwept !== true
+            )
           })
-          .toBe(PER_SEND)
+        })
       }
       const small = (coins: { value: number }[]) => coins.filter((coin) => coin.value === COIN_SATS).length
       const before = await waitFor((coins) => small(coins) >= COINS)

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ArkAddress, Wallet } from '@arkade-os/sdk'
 import type { WalletRepository } from '@arkade-os/sdk'
 import type { Database } from 'better-sqlite3'
-import { createArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { createArkadeContext, type DelayedReleaseBatchRegistrations } from '@arkade-os/solver-arkade/arkade/wallet.js'
 
 const databases = vi.hoisted(() => [] as Database[])
 
@@ -22,16 +22,18 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-const open = async () => {
+const open = async (sessionDuration = 10n) => {
   const serverKey = new Uint8Array(32).fill(1)
   const dispose = vi.fn(async () => {})
   let repository!: WalletRepository
+  let journal!: DelayedReleaseBatchRegistrations
   vi.spyOn(Wallet, 'create').mockImplementation(async (config) => {
     repository = config.storage!.walletRepository!
+    journal = config.storage!.intentRepository as DelayedReleaseBatchRegistrations
     await repository.getWalletState()
     return {
       arkProvider: {
-        getInfo: async () => ({ network: 'regtest', dust: 330, unilateralExitDelay: 86400 }),
+        getInfo: async () => ({ network: 'regtest', dust: 330, unilateralExitDelay: 86400, sessionDuration }),
       },
       arkServerPublicKey: serverKey,
       getAddress: async () => new ArkAddress(serverKey, serverKey, 'tark').encode(),
@@ -46,7 +48,7 @@ const open = async () => {
     arkadeHrp: 'tark',
     expectedArkdNetwork: 'regtest',
   })
-  return { context, dispose, repository, database: databases.at(-1)! }
+  return { context, dispose, repository, journal, database: databases.at(-1)! }
 }
 
 describe('Arkade context shutdown', () => {
@@ -85,5 +87,12 @@ describe('Arkade context shutdown', () => {
     expect(context.close()).toBe(closing)
     await expect(context.close()).rejects.toBe(failure)
     expect(dispose).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('intent journal release delay', () => {
+  it('is two of the server’s sessions, and a server advertising none is refused', async () => {
+    expect((await open(30n)).journal.releaseDelayMs).toBe(60_000)
+    await expect(open(0n)).rejects.toThrow('sessionDuration=0')
   })
 })

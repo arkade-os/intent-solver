@@ -34,6 +34,7 @@ import {
   classifyAgainstSignerSet,
   isSubdust,
   signerSetFromInfo,
+  type SettleParams,
   type TimeHeight,
 } from '@arkade-os/sdk'
 import { log, nowSeconds } from '@arkade-os/solver-core/util/poll.js'
@@ -57,7 +58,26 @@ import { poolTarget } from '@arkade-os/solver-arkade/arkade/vtxoPool.js'
 import { pinInputs, poolPlan, resplitFloat } from './pool.js'
 import { summariseSignerMigration } from '@arkade-os/solver-arkade/arkade/signerMigration.js'
 import { planBoardingSettle } from '@arkade-os/solver-arkade/arkade/boardingSettle.js'
+import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import type { Services } from './services.js'
+
+export const settleReservedRenewal = async (arkade: ArkadeContext, params: SettleParams): Promise<string> => {
+  const repository = arkade.wallet.intentRepository
+  if (!repository) throw new Error('renewal requires a durable batch registration repository')
+  const locked = new Set((await repository.getLockedVtxoOutpoints()).map((coin) => `${coin.txid}:${coin.vout}`))
+  const reserved = arkade.reservations.reserved()
+  if (
+    params.inputs.some((coin) => reserved.has(`${coin.txid}:${coin.vout}`) || locked.has(`${coin.txid}:${coin.vout}`))
+  ) {
+    throw new Error('renewal input is reserved by another operation')
+  }
+  const release = arkade.reservations.reserve(params.inputs)
+  try {
+    return await arkade.wallet.settle(params)
+  } finally {
+    release()
+  }
+}
 
 /**
  * Every registered lockup's refund deadline, for the recovery guard.
@@ -283,8 +303,10 @@ const floatLifecycle = async (services: Services): Promise<VtxoLifecycleReport> 
     // Pinning the active signer's coins too would hold every funding off for the call.
     let release: ReleaseReservation | null = null
     try {
+      const manager = await wallet.getContractManager()
+      await manager.reconcilePendingBatchRegistrations?.()
       const [contracts, info] = await Promise.all([
-        (await wallet.getContractManager()).getContractsWithVtxos({ type: ['default', 'delegate'] }),
+        manager.getContractsWithVtxos({ type: ['default', 'delegate'] }),
         wallet.arkProvider.getInfo(),
       ])
       const signers = signerSetFromInfo(info)
@@ -340,8 +362,8 @@ const floatLifecycle = async (services: Services): Promise<VtxoLifecycleReport> 
           return { intentFee: info.fees.intentFee, vtxoMaxAmount: info.vtxoMaxAmount, dust: info.dust }
         },
         expiringVtxos: async () => {
-          const reserved = services.arkade.reservations.reserved()
           const expiring = await vtxoManager.getExpiringVtxos(RENEWAL_THRESHOLD_MS)
+          const reserved = services.arkade.reservations.reserved()
           return expiring.filter((vtxo) => !reserved.has(`${vtxo.txid}:${vtxo.vout}`))
         },
         destination: () => wallet.getAddress(),
@@ -349,15 +371,8 @@ const floatLifecycle = async (services: Services): Promise<VtxoLifecycleReport> 
         // reads the ledger two network calls before selection is final, and a funding
         // can pin a coin in between. The renewal yields: a failed funding is a dead
         // swap, a deferred renewal one coin closer to expiry.
-        settle: async (inputs, outputs) => {
-          const release = pinInputs(services, inputs)
-          if (release === null) throw new Error('inputs pinned by a funding since selection')
-          try {
-            return await wallet.settle({ inputs: [...inputs], outputs: [...outputs] })
-          } finally {
-            release()
-          }
-        },
+        settle: (inputs, outputs) =>
+          settleReservedRenewal(services.arkade, { inputs: [...inputs], outputs: [...outputs] }),
         // The shape a renewal should carve its proceeds into, so the float
         // comes back able to fund several swaps at once rather than one.
         // Same target `pool`/`mintPool` work from, so the two cannot drift.
