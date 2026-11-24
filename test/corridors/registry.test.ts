@@ -80,6 +80,14 @@ describe('the corridor registry', () => {
     for (const reader of readers) expect(typeof reader.lockupFor).toBe('function')
   })
 
+  it('reports a send lockup as paid out only after the rail paid and before the claim starts', async () => {
+    const asked: unknown[] = []
+    const store = { findByStates: async (states: unknown) => (asked.push(states), [{ pkScript: '5120ab' }]) } as never
+    expect(await lightningSendReader(store).paidOutLockups?.()).toEqual(['5120ab'])
+    expect(await onchainSendReader(store).paidOutLockups?.()).toEqual(['5120ab'])
+    expect(asked).toEqual([['paid'], ['awaiting_claim']])
+  })
+
   it('never lists a delivered state as live', () => {
     for (const descriptor of ALL_DESCRIPTORS) {
       const overlap = descriptor.states.delivered.filter((state) => descriptor.states.live.includes(state))
