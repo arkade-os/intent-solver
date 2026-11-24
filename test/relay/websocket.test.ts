@@ -101,17 +101,20 @@ describe('webSocketRelayConnection', () => {
         this.addEventListener('message', () => frames++)
       }
     }
+    const notices: RelayNotice[] = []
     const connection = track(
       webSocketRelayConnection(`ws://127.0.0.1:${port}`, {
         WebSocketCtor: CountingWebSocket,
         maxConcurrentHandlers: 2,
         maxQueuedEvents: 2,
+        onNotice: (notice) => void notices.push(notice),
         codec: {
           ...devCodec,
           decodeEvent: (raw) => {
             decoded++
             return devCodec.decodeEvent(raw)
           },
+          decodeNotice: (raw) => (raw === 'closed' ? { kind: 'subscription-closed', ref: 's1' } : null),
         },
       }),
       server,
@@ -129,8 +132,10 @@ describe('webSocketRelayConnection', () => {
       }
     }
     for (let i = 0; i < 8; i++) send(String(i))
-    await until(() => frames === 8)
+    for (const socket of server.clients) socket.send('closed')
+    await until(() => frames === 9)
     expect(decoded).toBe(4)
+    expect(notices).toEqual([{ kind: 'subscription-closed', ref: 's1' }])
     expect(started).toEqual(['0', '1'])
     releases[0]!()
     await until(() => started.length === 3)

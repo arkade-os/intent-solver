@@ -442,9 +442,9 @@ export const webSocketRelayConnection = (url: string, options: WebSocketRelayOpt
     })
     ws.addEventListener('message', (ev: MessageEvent) => {
       if (socket !== ws) return
-      // A full backlog would drop the event anyway; skip decoding it.
-      if (activeHandlers >= maxConcurrentHandlers && queuedHandlers.length >= maxQueuedEvents) return
       const raw = typeof ev.data === 'string' ? ev.data : String(ev.data)
+      // A full backlog would drop the event anyway: skip decoding it, but still hear the relay's notices.
+      if (activeHandlers >= maxConcurrentHandlers && queuedHandlers.length >= maxQueuedEvents) return reportNotice(raw)
       const event = codec.decodeEvent(raw)
       if (!event) {
         // Not an event for us — but it may still be the relay telling us our
