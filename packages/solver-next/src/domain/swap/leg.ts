@@ -36,13 +36,13 @@ export const LEG_MOVES = {
 
 export type LegState = keyof typeof LEG_MOVES
 
-export const ReferenceKind = {
+export const FactKind = {
   Funding: 'funding',
   Claim: 'claim',
   Refund: 'refund',
 } as const
 
-export type ReferenceKind = ValueOf<typeof ReferenceKind>
+export type FactKind = ValueOf<typeof FactKind>
 
 export type Reference = Brand<string, 'Reference'>
 export const Reference = { of: (value: string): Reference => nonEmpty('reference', value) }
@@ -50,9 +50,9 @@ export const Reference = { of: (value: string): Reference => nonEmpty('reference
 export type ContractVersion = Brand<string, 'ContractVersion'>
 export const ContractVersion = { of: (value: string): ContractVersion => nonEmpty('contract version', value) }
 
-export type ReferenceHistory = Readonly<Record<ReferenceKind, readonly Reference[]>>
+export type FactHistory = Readonly<Record<FactKind, readonly Reference[]>>
 
-export type LegReferences = Partial<Record<ReferenceKind, Reference>>
+export type LegFacts = Partial<Record<FactKind, Reference>>
 
 export interface LegTerms {
   readonly rail: Rail
@@ -68,11 +68,11 @@ const STATES_NEVER_ENTERED: Partial<Record<ContractKind, Partial<Record<Side, re
   payment: { to: ['locked', 'refunding', 'refunded'] },
 }
 
-const NO_REFERENCES: ReferenceHistory = { funding: [], claim: [], refund: [] }
+const NO_FACTS: FactHistory = { funding: [], claim: [], refund: [] }
 
-const withReferences = (history: ReferenceHistory, added: LegReferences): ReferenceHistory => {
+const withFacts = (history: FactHistory, added: LegFacts): FactHistory => {
   const next = { ...history }
-  for (const kind of Object.keys(added) as ReferenceKind[]) {
+  for (const kind of Object.keys(added) as FactKind[]) {
     const reference = added[kind]
     if (reference !== undefined && history[kind].at(-1) !== reference) next[kind] = [...history[kind], reference]
   }
@@ -84,25 +84,25 @@ export class Leg {
     readonly side: Side,
     readonly terms: LegTerms,
     readonly state: LegState,
-    readonly references: ReferenceHistory,
+    readonly facts: FactHistory,
     readonly since: UnixSeconds,
     readonly expiresAt: UnixSeconds | null,
   ) {}
 
   static open(side: Side, terms: LegTerms, at: UnixSeconds): Leg {
     if (terms.amount.isZero) throw new InvalidValue(`${side} leg amount must be positive`)
-    return new Leg(side, terms, 'pending', NO_REFERENCES, at, null)
+    return new Leg(side, terms, 'pending', NO_FACTS, at, null)
   }
 
   static restore(
     side: Side,
     terms: LegTerms,
     state: LegState,
-    references: ReferenceHistory,
+    facts: FactHistory,
     since: UnixSeconds,
     expiresAt: UnixSeconds | null = null,
   ): Leg {
-    return new Leg(side, terms, state, references, since, expiresAt)
+    return new Leg(side, terms, state, facts, since, expiresAt)
   }
 
   get rail(): Rail {
@@ -115,8 +115,8 @@ export class Leg {
     return this.terms.contract
   }
 
-  reference(kind: ReferenceKind): Reference | null {
-    return this.references[kind].at(-1) ?? null
+  fact(kind: FactKind): Reference | null {
+    return this.facts[kind].at(-1) ?? null
   }
 
   static canTransition(leg: { side: Side; contract: ContractKind }, from: LegState, to: LegState): boolean {
@@ -124,24 +124,23 @@ export class Leg {
     return moves.includes(to) && !STATES_NEVER_ENTERED[leg.contract]?.[leg.side]?.includes(to)
   }
 
+  knows(facts: LegFacts): boolean {
+    return (Object.keys(facts) as FactKind[]).every(
+      (kind) => facts[kind] === undefined || facts[kind] === this.fact(kind),
+    )
+  }
+
   canMoveTo(state: LegState): boolean {
     return Leg.canTransition(this, this.state, state)
   }
 
-  moveTo(state: LegState, at: UnixSeconds, references: LegReferences = {}, expiresAt: UnixSeconds | null = null): Leg {
+  moveTo(state: LegState, at: UnixSeconds, facts: LegFacts = {}, expiresAt: UnixSeconds | null = null): Leg {
     if (!this.canMoveTo(state)) throw new IllegalTransition(`${this.side} leg cannot go ${this.state} -> ${state}`)
     const expires = expiresAt ?? this.expiresAt
-    return new Leg(this.side, this.terms, state, withReferences(this.references, references), at, expires)
+    return new Leg(this.side, this.terms, state, withFacts(this.facts, facts), at, expires)
   }
 
-  record(references: LegReferences): Leg {
-    return new Leg(
-      this.side,
-      this.terms,
-      this.state,
-      withReferences(this.references, references),
-      this.since,
-      this.expiresAt,
-    )
+  record(facts: LegFacts): Leg {
+    return new Leg(this.side, this.terms, this.state, withFacts(this.facts, facts), this.since, this.expiresAt)
   }
 }
