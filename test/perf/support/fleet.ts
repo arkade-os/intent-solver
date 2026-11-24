@@ -121,7 +121,10 @@ export const openFleet = async (arkade: E2eArkade, size: number): Promise<Fleet>
   return {
     wallets,
     close: async () => {
-      for (const wallet of wallets) await wallet.ctx.close()
+      const failures = (await Promise.allSettled(wallets.map((wallet) => wallet.ctx.close()))).flatMap((result) =>
+        result.status === 'rejected' ? [result.reason] : [],
+      )
+      if (failures.length > 0) throw new AggregateError(failures, `${failures.length} fleet wallets did not close`)
     },
   }
 }

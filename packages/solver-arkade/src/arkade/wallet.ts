@@ -327,65 +327,74 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
     settlementConfig: false,
   })
 
-  // Everything else the swap needs -- the providers, the server key, the unroll
-  // script -- the wallet already built and exposes. Only the server's minimum
-  // exit delay still has to be fetched.
-  const info = await wallet.arkProvider.getInfo()
-
-  // The URL alone does not prove which chain the server is on, and every other
-  // network fact (invoice prefix, address HRP, key derivation) came from config.
-  // A mismatch means paying this network's invoices to claim vtxos on another
-  // chain — refuse to start rather than discover it with money in flight.
-  if (info.network !== config.expectedArkdNetwork) {
-    throw new Error(
-      `Arkade server at ${config.operatorUrl} reports network '${info.network}', ` +
-        `expected '${config.expectedArkdNetwork}' — check rails.arkade.operatorUrl / network`,
-    )
-  }
-
-  const dustSats = BigInt(info.dust)
-  // A quote prices against this; zero would remove the sats leg's dust floor.
-  if (dustSats <= 0n) {
-    throw new Error(`Arkade server at ${config.operatorUrl} reports dust=${info.dust}, which no asset can ride on`)
-  }
-  const vtxoMinSats = BigInt(info.vtxoMinAmount ?? 0)
-  if (vtxoMinSats < 0n || vtxoMinSats > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new Error(`Arkade server at ${config.operatorUrl} reports invalid vtxoMinAmount=${info.vtxoMinAmount}`)
-  }
-  const sessionSeconds = Number(info.sessionDuration)
-  if (!Number.isSafeInteger(sessionSeconds) || sessionSeconds <= 0) {
-    throw new Error(
-      `Arkade server at ${config.operatorUrl} reports sessionDuration=${info.sessionDuration}, ` +
-        'which gives an abandoned intent no time to leave a batch',
-    )
-  }
-  intentRepository.releaseDelayMs = RELEASE_AFTER_SESSIONS * sessionSeconds * 1000
-
-  const advertisedExitDelay = Number(info.unilateralExitDelay)
-  const { unit: advertisedUnit, notices } = resolveTimelockUnit({
-    advertisedExitDelay,
-    unilateralExitDelayOverride: config.unilateralExitDelayOverride,
-    isMainnet: config.isMainnet,
-  })
-  for (const notice of notices) log(notice)
-
   let closing: Promise<void> | undefined
-  return {
-    wallet,
-    identity,
-    operatorUrl: config.operatorUrl,
-    unilateralDelays: deriveUnilateralDelays(config.unilateralExitDelayOverride ?? advertisedExitDelay),
-    advertisedExitDelay,
-    dustSats,
-    vtxoMinSats,
-    timelockUnit: advertisedUnit,
-    hrp: config.arkadeHrp,
-    reservations: createReservationLedger(),
-    close: () =>
-      (closing ??= (async () => {
-        await wallet.dispose()
-        executor.close()
-      })()),
+  const close = () =>
+    (closing ??= (async () => {
+      await wallet.dispose()
+      executor.close()
+    })())
+
+  try {
+    // Everything else the swap needs -- the providers, the server key, the unroll
+    // script -- the wallet already built and exposes. Only the server's minimum
+    // exit delay still has to be fetched.
+    const info = await wallet.arkProvider.getInfo()
+
+    // The URL alone does not prove which chain the server is on, and every other
+    // network fact (invoice prefix, address HRP, key derivation) came from config.
+    // A mismatch means paying this network's invoices to claim vtxos on another
+    // chain — refuse to start rather than discover it with money in flight.
+    if (info.network !== config.expectedArkdNetwork) {
+      throw new Error(
+        `Arkade server at ${config.operatorUrl} reports network '${info.network}', ` +
+          `expected '${config.expectedArkdNetwork}' — check rails.arkade.operatorUrl / network`,
+      )
+    }
+
+    const dustSats = BigInt(info.dust)
+    // A quote prices against this; zero would remove the sats leg's dust floor.
+    if (dustSats <= 0n) {
+      throw new Error(`Arkade server at ${config.operatorUrl} reports dust=${info.dust}, which no asset can ride on`)
+    }
+    const vtxoMinSats = BigInt(info.vtxoMinAmount ?? 0)
+    if (vtxoMinSats < 0n || vtxoMinSats > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new Error(`Arkade server at ${config.operatorUrl} reports invalid vtxoMinAmount=${info.vtxoMinAmount}`)
+    }
+    const sessionSeconds = Number(info.sessionDuration)
+    if (!Number.isSafeInteger(sessionSeconds) || sessionSeconds <= 0) {
+      throw new Error(
+        `Arkade server at ${config.operatorUrl} reports sessionDuration=${info.sessionDuration}, ` +
+          'which gives an abandoned intent no time to leave a batch',
+      )
+    }
+    intentRepository.releaseDelayMs = RELEASE_AFTER_SESSIONS * sessionSeconds * 1000
+
+    const advertisedExitDelay = Number(info.unilateralExitDelay)
+    const { unit: advertisedUnit, notices } = resolveTimelockUnit({
+      advertisedExitDelay,
+      unilateralExitDelayOverride: config.unilateralExitDelayOverride,
+      isMainnet: config.isMainnet,
+    })
+    for (const notice of notices) log(notice)
+
+    return {
+      wallet,
+      identity,
+      operatorUrl: config.operatorUrl,
+      unilateralDelays: deriveUnilateralDelays(config.unilateralExitDelayOverride ?? advertisedExitDelay),
+      advertisedExitDelay,
+      dustSats,
+      vtxoMinSats,
+      timelockUnit: advertisedUnit,
+      hrp: config.arkadeHrp,
+      reservations: createReservationLedger(),
+      close,
+    }
+  } catch (error) {
+    await close().catch((cleanup) =>
+      log('Arkade wallet did not dispose after a failed start; SQLite stays open:', cleanup),
+    )
+    throw error
   }
 }
 
