@@ -1447,7 +1447,7 @@ export const createServices = async (
       broadcast,
       blockHeight,
       timelockHeight,
-      ...evmReceiveArkadeDeps(receiveOps),
+      ...evmReceiveArkadeDeps(receiveOps, rail?.onchain, tickErrorLogger('evm receive tick')),
       arkade: receiveOps,
       markets: marketsFor('receive'),
       fetchPrice: createPriceFeed(),
