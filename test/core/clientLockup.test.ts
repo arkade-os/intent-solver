@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { judgeClientLockup, type ClientLockupRules } from '@arkade-os/solver-core/core/clientLockup.js'
+import {
+  isLockupRefusal,
+  judgeClientLockup,
+  LOCKUP_REFUSAL,
+  type ClientLockupRules,
+} from '@arkade-os/solver-core/core/clientLockup.js'
 
 const rules = (over: Partial<ClientLockupRules> = {}): ClientLockupRules => ({
   amountSats: 1_000,
@@ -62,5 +67,25 @@ describe('judgeClientLockup', () => {
     expect(judgeClientLockup(lockup([1_001]), rules({ tooLate: true }))).toMatchObject({
       reason: 'overfunded lockup: 1001 > 1000 sats',
     })
+  })
+})
+
+describe('the refusal texts other code reads', () => {
+  it('keeps the words stored on rows already in the database', () => {
+    expect(LOCKUP_REFUSAL).toEqual({
+      overfunded: 'overfunded lockup',
+      timeout: 'lockup timeout',
+      invoiceExpired: 'invoice expired before funding completed',
+      arrivedLate: 'lockup arrived after the funding deadline',
+    })
+  })
+
+  it('recognises a refusal by how its text begins', () => {
+    const late = [LOCKUP_REFUSAL.timeout, LOCKUP_REFUSAL.arrivedLate]
+    expect(isLockupRefusal('lockup timeout with partial 10 sats', late)).toBe(true)
+    expect(isLockupRefusal('lockup arrived after the funding deadline', late)).toBe(true)
+    expect(isLockupRefusal('overfunded lockup: 2 > 1 sats', late)).toBe(false)
+    expect(isLockupRefusal('refused: lockup timeout', late)).toBe(false)
+    expect(isLockupRefusal(null, late)).toBe(false)
   })
 })

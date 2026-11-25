@@ -18,6 +18,7 @@
 import { z } from 'zod'
 import { WIRE_AMOUNT } from '@arkade-os/solver-core/core/wireAmount.js'
 import { MAX_PAIR_LENGTH } from '@arkade-os/solver-core/core/marketKey.js'
+import { isLockupRefusal, LOCKUP_REFUSAL } from '@arkade-os/solver-core/core/clientLockup.js'
 import type { OnchainSendSwapRow } from '../db/onchainSwaps.js'
 import type { RfqState } from './payloads.js'
 
@@ -92,7 +93,7 @@ export const onchainRfqQuotePayload = (
   },
 })
 
-const EXPIRY_REASONS = /^(lockup timeout)/
+const EXPIRY_REASONS = [LOCKUP_REFUSAL.timeout]
 
 export const onchainRfqStateFromRow = (row: OnchainSendSwapRow): RfqState => {
   switch (row.state) {
@@ -120,7 +121,7 @@ export const onchainRfqStateFromRow = (row: OnchainSendSwapRow): RfqState => {
       return 'stuck'
     case 'refused':
       if (row.refundOutcome !== null) return 'refunded'
-      if (row.failureReason !== null && EXPIRY_REASONS.test(row.failureReason)) return 'expired'
+      if (isLockupRefusal(row.failureReason, EXPIRY_REASONS)) return 'expired'
       return 'refused'
   }
 }

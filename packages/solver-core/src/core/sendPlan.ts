@@ -9,7 +9,7 @@
 
 import { decodeInvoice } from '../invoice/decode.js'
 import type { PaymentResult } from '../ports/lightning.js'
-import { judgeClientLockup, type ClientLockup } from './clientLockup.js'
+import { judgeClientLockup, LOCKUP_REFUSAL, type ClientLockup } from './clientLockup.js'
 import { maxRoutingFeeSats } from './limits.js'
 import {
   deadlineContainsHtlc,
@@ -120,9 +120,9 @@ const whenQuoted = async (row: SendPlanRow, reads: SendReads): Promise<SendActio
 }
 
 const lateFundingReason = (row: SendPlanRow, claimable: number, nowSeconds: number): string => {
-  if (nowSeconds >= row.invoiceExpiresAt) return 'invoice expired before funding completed'
-  if (claimable >= row.amountSats) return 'lockup arrived after the funding deadline'
-  return claimable > 0 ? `lockup timeout with partial ${claimable} sats` : 'lockup timeout'
+  if (nowSeconds >= row.invoiceExpiresAt) return LOCKUP_REFUSAL.invoiceExpired
+  if (claimable >= row.amountSats) return LOCKUP_REFUSAL.arrivedLate
+  return claimable > 0 ? `${LOCKUP_REFUSAL.timeout} with partial ${claimable} sats` : LOCKUP_REFUSAL.timeout
 }
 
 const sameInvoice = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase()
