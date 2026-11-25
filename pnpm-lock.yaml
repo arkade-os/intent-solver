@@ -5,9 +5,9 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  '@arkade-taxi/client': file:packages/solver-app/vendor/carrier/arkade-taxi-client-1.1.3-11bfa10e.tgz
-  '@arkade-taxi/covenant': file:packages/solver-app/vendor/carrier/arkade-taxi-covenant-1.1.3-11bfa10e.tgz
-  '@arkade-taxi/protocol': file:packages/solver-app/vendor/carrier/arkade-taxi-protocol-1.1.3-11bfa10e.tgz
+  '@arkade-taxi/client': file:packages/solver-app/vendor/carrier/arkade-taxi-client-1.1.4-5df105e8.tgz
+  '@arkade-taxi/covenant': file:packages/solver-app/vendor/carrier/arkade-taxi-covenant-1.1.4-5df105e8.tgz
+  '@arkade-taxi/protocol': file:packages/solver-app/vendor/carrier/arkade-taxi-protocol-1.1.4-5df105e8.tgz
 
 importers:
 
@@ -50,8 +50,8 @@ importers:
         specifier: workspace:*
         version: link:packages/solver-transport
       '@arkade-taxi/client':
-        specifier: file:packages/solver-app/vendor/carrier/arkade-taxi-client-1.1.3-11bfa10e.tgz
-        version: file:packages/solver-app/vendor/carrier/arkade-taxi-client-1.1.3-11bfa10e.tgz
+        specifier: file:packages/solver-app/vendor/carrier/arkade-taxi-client-1.1.4-5df105e8.tgz
+        version: file:packages/solver-app/vendor/carrier/arkade-taxi-client-1.1.4-5df105e8.tgz
       '@hono/node-server':
         specifier: ^2.1.0
         version: 2.1.0(hono@4.13.0)
@@ -162,8 +162,8 @@ importers:
         specifier: 0.1.16
         version: 0.1.16(typescript@5.9.3)
       '@arkade-taxi/client':
-        specifier: file:vendor/carrier/arkade-taxi-client-1.1.3-11bfa10e.tgz
-        version: file:packages/solver-app/vendor/carrier/arkade-taxi-client-1.1.3-11bfa10e.tgz
+        specifier: file:vendor/carrier/arkade-taxi-client-1.1.4-5df105e8.tgz
+        version: file:packages/solver-app/vendor/carrier/arkade-taxi-client-1.1.4-5df105e8.tgz
       '@hono/node-server':
         specifier: ^2.1.0
         version: 2.1.0(hono@4.13.0)
@@ -461,17 +461,17 @@ packages:
     resolution: {integrity: sha512-vzajHjQ5c11Tx71pDea3P+OTaXeB+jAHf7RQ0YZGq6t8FHKZ5WEzu+hWwqdyQx3nTnElvu4vYZ3asBgRdukqPg==}
     engines: {node: '>=22.13.0'}
 
-  '@arkade-taxi/client@file:packages/solver-app/vendor/carrier/arkade-taxi-client-1.1.3-11bfa10e.tgz':
-    resolution: {integrity: sha512-3Kc4P5r1i4bBbzeKKwd/TNqHkfQB5O7z15eXBLjtEjXacw2cNHfmyrm855XVdYU5nB2TKY5+CBP4iP8P39QUuQ==, tarball: file:packages/solver-app/vendor/carrier/arkade-taxi-client-1.1.3-11bfa10e.tgz}
-    version: 1.1.3
+  '@arkade-taxi/client@file:packages/solver-app/vendor/carrier/arkade-taxi-client-1.1.4-5df105e8.tgz':
+    resolution: {integrity: sha512-77ZpY/j58LT3arAYjc6nbzM1U2FBZvjllW3rB3KlmxJBIoTl4hsnfQIxCvvC3jOimemLwYVEVD/Fsg/lixc4+A==, tarball: file:packages/solver-app/vendor/carrier/arkade-taxi-client-1.1.4-5df105e8.tgz}
+    version: 1.1.4
 
-  '@arkade-taxi/covenant@file:packages/solver-app/vendor/carrier/arkade-taxi-covenant-1.1.3-11bfa10e.tgz':
-    resolution: {integrity: sha512-54hPzNWhm20jJNm0qFQzrV1pM69jrLQtwsbuStVz+ZjGSLuQ7OW9AFKjrM57kyXVGg2LCIyArzArjIxktyFzeg==, tarball: file:packages/solver-app/vendor/carrier/arkade-taxi-covenant-1.1.3-11bfa10e.tgz}
-    version: 1.1.3
+  '@arkade-taxi/covenant@file:packages/solver-app/vendor/carrier/arkade-taxi-covenant-1.1.4-5df105e8.tgz':
+    resolution: {integrity: sha512-7MFT18dqxpmxEm19RF61+OGzwrlB/wJ0pkkEfcfjSHsEvf/I5beBVIF3DLhXX/A5lsa3N8Y4be93uMN4q7lbOA==, tarball: file:packages/solver-app/vendor/carrier/arkade-taxi-covenant-1.1.4-5df105e8.tgz}
+    version: 1.1.4
 
-  '@arkade-taxi/protocol@file:packages/solver-app/vendor/carrier/arkade-taxi-protocol-1.1.3-11bfa10e.tgz':
-    resolution: {integrity: sha512-nG5KpHlD1US+xqeYJ2GGF3AO/5ZkyiRuM7/w5i6j6DDht/kCy4Ci3TtlI4cvuQgNVIRgvaGjF5KjzZXT0IRA8w==, tarball: file:packages/solver-app/vendor/carrier/arkade-taxi-protocol-1.1.3-11bfa10e.tgz}
-    version: 1.1.3
+  '@arkade-taxi/protocol@file:packages/solver-app/vendor/carrier/arkade-taxi-protocol-1.1.4-5df105e8.tgz':
+    resolution: {integrity: sha512-sHLPc/WL0Q9TyUthW2lZDkVOLiq3JntcrwRn5rUV7cPeBtXGwuwTCEPpDgAzEC4qzFyafk5IrQ2xsVxiXAfGCw==, tarball: file:packages/solver-app/vendor/carrier/arkade-taxi-protocol-1.1.4-5df105e8.tgz}
+    version: 1.1.4
 
   '@bitcoinerlab/descriptors-core@3.1.7':
     resolution: {integrity: sha512-7VccUDvKcHK7RF07Vo19Obax9jO3wlPWIXtvXy61GBqXptKv156O9Z4+sm2py1CuxPRpTXHlvH70G4KVVDoKlw==}
@@ -1785,11 +1785,11 @@ snapshots:
       - typescript
       - utf-8-validate
 
-  '@arkade-taxi/client@file:packages/solver-app/vendor/carrier/arkade-taxi-client-1.1.3-11bfa10e.tgz':
+  '@arkade-taxi/client@file:packages/solver-app/vendor/carrier/arkade-taxi-client-1.1.4-5df105e8.tgz':
     dependencies:
       '@arkade-os/sdk': 0.5.14
-      '@arkade-taxi/covenant': file:packages/solver-app/vendor/carrier/arkade-taxi-covenant-1.1.3-11bfa10e.tgz
-      '@arkade-taxi/protocol': file:packages/solver-app/vendor/carrier/arkade-taxi-protocol-1.1.3-11bfa10e.tgz
+      '@arkade-taxi/covenant': file:packages/solver-app/vendor/carrier/arkade-taxi-covenant-1.1.4-5df105e8.tgz
+      '@arkade-taxi/protocol': file:packages/solver-app/vendor/carrier/arkade-taxi-protocol-1.1.4-5df105e8.tgz
       '@noble/hashes': 2.4.0
       '@scure/base': 2.4.0
       '@scure/btc-signer': 2.4.1
@@ -1807,7 +1807,7 @@ snapshots:
       - expo-task-manager
       - utf-8-validate
 
-  '@arkade-taxi/covenant@file:packages/solver-app/vendor/carrier/arkade-taxi-covenant-1.1.3-11bfa10e.tgz':
+  '@arkade-taxi/covenant@file:packages/solver-app/vendor/carrier/arkade-taxi-covenant-1.1.4-5df105e8.tgz':
     dependencies:
       '@arkade-os/sdk': 0.5.14
       '@noble/hashes': 2.4.0
@@ -1826,7 +1826,7 @@ snapshots:
       - expo-task-manager
       - utf-8-validate
 
-  '@arkade-taxi/protocol@file:packages/solver-app/vendor/carrier/arkade-taxi-protocol-1.1.3-11bfa10e.tgz': {}
+  '@arkade-taxi/protocol@file:packages/solver-app/vendor/carrier/arkade-taxi-protocol-1.1.4-5df105e8.tgz': {}
 
   '@bitcoinerlab/descriptors-core@3.1.7(@noble/curves@2.4.0)(@noble/hashes@2.4.0)(@scure/base@2.4.0)(@scure/bip32@2.2.0)(@scure/btc-signer@2.4.1)':
     dependencies:

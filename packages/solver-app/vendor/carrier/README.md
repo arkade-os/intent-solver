@@ -8,11 +8,11 @@ workspace pins, so one SDK copy is linked. SDK 0.5.14 and swap 0.1.16 carry ts-s
 
 | Archive                                   | Source                                                           | sha256                                                             | sha512 (lockfile `integrity`)                                                                     |
 | ----------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
-| `arkade-taxi-client-1.1.3-11bfa10e.tgz`   | ArkLabsHQ/arkade-taxi `11bfa10eb165f60a493055016d4e226f028378df` | `4d4a39ab4f79430a98d25f2e0ee3bc05b0e9188ca8d307c3d084efa0800cae5f` | `sha512-3Kc4P5r1i4bBbzeKKwd/TNqHkfQB5O7z15eXBLjtEjXacw2cNHfmyrm855XVdYU5nB2TKY5+CBP4iP8P39QUuQ==` |
-| `arkade-taxi-covenant-1.1.3-11bfa10e.tgz` | ArkLabsHQ/arkade-taxi `11bfa10eb165f60a493055016d4e226f028378df` | `4d2c8b8e1402a03749da1a158c9d0340c8ced3c616f28c4fb481af0ddf63b95e` | `sha512-54hPzNWhm20jJNm0qFQzrV1pM69jrLQtwsbuStVz+ZjGSLuQ7OW9AFKjrM57kyXVGg2LCIyArzArjIxktyFzeg==` |
-| `arkade-taxi-protocol-1.1.3-11bfa10e.tgz` | ArkLabsHQ/arkade-taxi `11bfa10eb165f60a493055016d4e226f028378df` | `320f1c525f647dea8ed4a596e93e1b4f52d6cc5905e1dfcedb8da3a59075efba` | `sha512-nG5KpHlD1US+xqeYJ2GGF3AO/5ZkyiRuM7/w5i6j6DDht/kCy4Ci3TtlI4cvuQgNVIRgvaGjF5KjzZXT0IRA8w==` |
+| `arkade-taxi-client-1.1.4-5df105e8.tgz`   | ArkLabsHQ/arkade-taxi `5df105e82f33a1c74a1d898c93356cb9a70150c7` | `0415203f0613d5e4494add128fccf15fdc746f999396d87b7ae2bfa5e6a75dfc` | `sha512-77ZpY/j58LT3arAYjc6nbzM1U2FBZvjllW3rB3KlmxJBIoTl4hsnfQIxCvvC3jOimemLwYVEVD/Fsg/lixc4+A==` |
+| `arkade-taxi-covenant-1.1.4-5df105e8.tgz` | ArkLabsHQ/arkade-taxi `5df105e82f33a1c74a1d898c93356cb9a70150c7` | `c8f8d2e1752bff621caa6d16827382f1c0040c7d041258513cd907f1dcbb475f` | `sha512-7MFT18dqxpmxEm19RF61+OGzwrlB/wJ0pkkEfcfjSHsEvf/I5beBVIF3DLhXX/A5lsa3N8Y4be93uMN4q7lbOA==` |
+| `arkade-taxi-protocol-1.1.4-5df105e8.tgz` | ArkLabsHQ/arkade-taxi `5df105e82f33a1c74a1d898c93356cb9a70150c7` | `5d04fd42d6ededac5c22720e1f1d58dd6f26c2aa77e889f2e472002c42115705` | `sha512-sHLPc/WL0Q9TyUthW2lZDkVOLiq3JntcrwRn5rUV7cPeBtXGwuwTCEPpDgAzEC4qzFyafk5IrQ2xsVxiXAfGCw==` |
 
-The Taxi commit is the merge of ArkLabsHQ/arkade-taxi#50, which cut 1.1.3; the Taxi repository has
+The Taxi commit is the merge of ArkLabsHQ/arkade-taxi#51, which cut 1.1.4; the Taxi repository has
 no tags.
 
 Check an archive:
@@ -25,10 +25,10 @@ openssl dgst -sha512 -binary <archive> | base64   # prefix sha512-, compare with
 Reproduce them from the Taxi commit:
 
 ```sh
-git checkout 11bfa10eb165f60a493055016d4e226f028378df
+git checkout 5df105e82f33a1c74a1d898c93356cb9a70150c7
 pnpm install --frozen-lockfile && pnpm -r build
 for p in client covenant protocol; do (cd packages/$p && pnpm pack --pack-destination "$OUT"); done
-# then add the -11bfa10e suffix to each file name and compare sha256 with the table
+# then add the -5df105e8 suffix to each file name and compare sha256 with the table
 ```
 
 A fresh rebuild matches all three. `pnpm pack` writes the client's two `@arkade-taxi` dependencies in
