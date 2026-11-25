@@ -1756,6 +1756,27 @@ export class SendSwapService {
     const reservedKeys = new Set<string>()
     const pendingBatches: SweptClaimJournal[] = []
     let batchError: unknown
+    const selected = new Set(adopted.map(outpointKey))
+    let unrolledClaim = row.unrolledClaim
+    if (unrolledClaim !== null) {
+      const parsed: unknown = JSON.parse(unrolledClaim)
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        throw new Error(`swap ${row.id}: invalid unrolled claim journal`)
+      }
+      unrolledClaim = JSON.stringify(Object.fromEntries(Object.entries(parsed).filter(([key]) => selected.has(key))))
+    }
+    const advanceL1 = () =>
+      advanceUnrolledClaims(
+        store,
+        { id: row.id, pkScript: row.pkScript, unrolledClaim },
+        {
+          findLockupOutpoints: async (script) =>
+            (await arkade.findLockupOutpoints!(script)).filter((output) => selected.has(outpointKey(output))),
+          claimUnrolled: arkade.claimUnrolled?.bind(arkade),
+        },
+        row,
+        row.preimage!,
+      )
     const currentSwept = seenSwept
     for (let index = 0; index < batches.length;) {
       const batch = batches[index]!
@@ -1891,15 +1912,22 @@ export class SendSwapService {
           onPrepared,
         )
       } catch (error) {
-        if (
-          !journaledThisCall &&
-          (await store.get(row.id)).claimBatch === journalRaw &&
-          (await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip))
-        ) {
-          const detail = error instanceof Error ? error.message : String(error)
-          const recourse = unilateralExitRecourse(row, { solverPubkey: arkade.providerPubkey })
-          await store.fail(row.id, 'claiming', `batch claim failing past the refund deadline: ${detail} — ${recourse}`)
-          return false
+        if (!journaledThisCall && (await store.get(row.id)).claimBatch === journalRaw) {
+          // Nothing was journaled, so this tick still advances the L1 claims the failure would hold back.
+          const unrolled = await advanceL1().catch(() => null)
+          if (
+            (unrolled === null || unrolled.settled) &&
+            (await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip))
+          ) {
+            const detail = error instanceof Error ? error.message : String(error)
+            const recourse = unilateralExitRecourse(row, { solverPubkey: arkade.providerPubkey })
+            await store.fail(
+              row.id,
+              'claiming',
+              `batch claim failing past the refund deadline: ${detail} — ${recourse}`,
+            )
+            return false
+          }
         }
         throw error
       }
@@ -1917,7 +1945,6 @@ export class SendSwapService {
       }
     }
 
-    const selected = new Set(adopted.map(outpointKey))
     const found = (await arkade.findLockups(row.pkScript)).filter(
       (output) => selected.has(outpointKey(output)) && !reservedKeys.has(outpointKey(output)),
     )
@@ -1925,25 +1952,7 @@ export class SendSwapService {
       throw new Error(`swap ${row.id}: spendable lockup value or assets changed`)
     }
     const spendable = boundedSpendInputs(found, this.now())
-    let unrolledClaim = row.unrolledClaim
-    if (unrolledClaim !== null) {
-      const parsed: unknown = JSON.parse(unrolledClaim)
-      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-        throw new Error(`swap ${row.id}: invalid unrolled claim journal`)
-      }
-      unrolledClaim = JSON.stringify(Object.fromEntries(Object.entries(parsed).filter(([key]) => selected.has(key))))
-    }
-    const unrolled = await advanceUnrolledClaims(
-      store,
-      { id: row.id, pkScript: row.pkScript, unrolledClaim },
-      {
-        findLockupOutpoints: async (script) =>
-          (await arkade.findLockupOutpoints!(script)).filter((output) => selected.has(outpointKey(output))),
-        claimUnrolled: arkade.claimUnrolled?.bind(arkade),
-      },
-      row,
-      row.preimage,
-    )
+    const unrolled = await advanceL1()
     let txid: string | null = null
     let spendableClaimed: FundedOutput[] = []
     try {
