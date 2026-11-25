@@ -17,6 +17,18 @@
     "arkdTimelocks": "seconds"
   },
   {
+    "name": "taxi",
+    "why": "Runs the solver against a funded Taxi built from ArkLabsHQ/arkade-taxi on the arkd v0.9.25 and emulator v0.0.10 stack directed Taxi fills are proven on, so the other lanes stay on theirs: a receiver-paid directed-nonce fill, its lost reply and the receiver recycle, on a zero-fee stack so the conservation predicates are exact.",
+    "profiles": "emulator,nostr,taxi",
+    "files": ["assetRfqTaxi.e2e.test.ts"],
+    "regtestRef": "185da8e2863fb461d12b898a0a692b0623476254",
+    "taxiRef": "97c9b2b6c0e9c393d7106655509d80e7488b6359",
+    "mintAsset": true,
+    "lnd": false,
+    "evmChain": false,
+    "arkdTimelocks": "seconds"
+  },
+  {
     "name": "lifecycle",
     "why": "The only group on a BLOCK-typed arkd, which is what blockTimelocks exists to cover and what the compose defaults happen to give. vtxoLifecycle rides along: it reads the wallet's own float, so it wants one with no minted asset in it and a server still charging its intent fees, since its headline assertion is the ABSENCE of INTENT_INSUFFICIENT_FEE.",
     "profiles": "emulator",
