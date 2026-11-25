@@ -486,17 +486,23 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
       )
         return false
       const reason = `direct fill cancelled by confirmed conflict ${txid}`
+      const recovered = `direct fill recovered as ${txid}`
       if (cancelled && row.state === 'refused' && row.fillTxid === null && row.failureReason === reason) return true
-      if (!cancelled && row.state === 'filled' && row.fillTxid === txid) return true
+      if (!cancelled && row.fillTxid === txid && (row.state === 'filled' || row.failureReason?.startsWith(recovered)))
+        return true
       if (row.state !== 'filling' && row.state !== 'stuck') return false
       if (row.failureReason?.startsWith('direct fill cancelled by confirmed conflict ')) return false
       if (row.fillTxid !== null && (cancelled || row.fillTxid !== txid)) return false
-      const next: AssetRfqSwapState = cancelled ? 'refused' : 'filled'
+      // A stuck row gave up its script and a later negotiation may hold it now, with a deposit of its own:
+      // record the fill, never displace that negotiation.
+      const holder =
+        cancelled || row.state !== 'stuck' ? undefined : await this.findLiveByOfferScript(row.offerPkScript)
+      const next: AssetRfqSwapState = cancelled ? 'refused' : holder ? 'stuck' : 'filled'
       const result = await this.driver.run(sql.resolveDirectFill, [
         next,
         this.now(),
         cancelled ? null : txid,
-        cancelled ? reason : null,
+        cancelled ? reason : holder ? `${recovered} after ${holder.id} took its offer script` : null,
         proof.id,
         row.state,
         proof.depositTxid,
@@ -510,7 +516,7 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
       return { from: row.state, to: next }
     })
     if (typeof moved === 'boolean') return moved
-    announceTransition(this.onTransition, proof.id, moved.from, moved.to)
+    if (moved.from !== moved.to) announceTransition(this.onTransition, proof.id, moved.from, moved.to)
     return true
   }
 
