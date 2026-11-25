@@ -21,3 +21,16 @@ Check an archive:
 sha256sum packages/solver-app/vendor/carrier/*.tgz
 openssl dgst -sha512 -binary <archive> | base64   # prefix sha512-, compare with pnpm-lock.yaml
 ```
+
+Reproduce them from the Taxi commit:
+
+```sh
+git checkout 11bfa10eb165f60a493055016d4e226f028378df
+pnpm install --frozen-lockfile && pnpm -r build
+for p in client covenant protocol; do (cd packages/$p && pnpm pack --pack-destination "$OUT"); done
+# then add the -11bfa10e suffix to each file name and compare sha256 with the table
+```
+
+A fresh rebuild matches all three. `pnpm pack` writes the client's two `@arkade-taxi` dependencies in
+either order from run to run, so repack the client until it matches; both orders name the same
+versions.
