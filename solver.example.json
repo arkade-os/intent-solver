@@ -9,6 +9,7 @@
       "emulatorUrl": "https://emulator.example.com",
       "esploraUrl": "https://mempool.arkade.sh/api",
       "unilateralExitDelay": 260096,
+      "taxiUrl": "https://taxi.example.com",
       "poolAutoMint": false,
       "contractRetentionDays": 30
     },

@@ -91,6 +91,30 @@ const settleWith = (
 })
 
 describe('quotedOfferSettleFor', () => {
+  it.each(['recycle', 'recycle_receiver'] as const)(
+    'refuses persisted %s terms before reading or spending an outpoint',
+    async (mode) => {
+      const outpointsAt = vi.fn(async () => [funded()])
+      const fulfill = vi.fn<typeof fulfillOffer>(async () => 'fill'.padEnd(64, '0'))
+      const settle = quotedOfferSettleFor({
+        ctx: {} as never,
+        emulatorUrl: 'http://emulator.test',
+        derivation,
+        outpointsAt,
+        fulfill,
+      })
+      await expect(settle({ ...intent(), carrierTerms: { mode } })).rejects.toThrow(`${mode} settlement`)
+      expect(outpointsAt).not.toHaveBeenCalled()
+      expect(fulfill).not.toHaveBeenCalled()
+    },
+  )
+
+  it('keeps persisted purchase terms on direct settlement', async () => {
+    const { settle, fulfill } = settleWith([funded()])
+    await settle({ ...intent(), carrierTerms: { mode: 'purchase' } })
+    expect(fulfill).toHaveBeenCalledOnce()
+  })
+
   it('spends the outpoint the row recorded, at the value the chain reports', async () => {
     const { settle, fulfill } = settleWith([funded({ vout: 0, sats: 999n }), funded()])
     await settle(intent())

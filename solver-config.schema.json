@@ -31,6 +31,9 @@
             "unilateralExitDelay": {
               "type": "number"
             },
+            "taxiUrl": {
+              "type": "string"
+            },
             "poolAutoMint": {
               "type": "boolean"
             },

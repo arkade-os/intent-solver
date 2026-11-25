@@ -26,8 +26,10 @@
  *              only where nothing was sent: @see revertUnsubmitted above the
  *              submission, @see revertRejectedSubmit on a refused one
  * - `filled`   the fill landed; the client is paid and the deposit is ours
- * - `refused`  declined, the quote lapsed unfunded, or the deposit was spent
- *              elsewhere before a fill arkd then refused; no exposure either way
+ * - `refused`  declined, the quote lapsed unfunded, the deposit was spent
+ *              elsewhere before a fill arkd then refused, a direct fill was beaten
+ *              by its own conflict, or a carrier fill was proven never submitted
+ *              or cancelled; no exposure either way
  * - `stuck`    `fulfill` failed or its outcome is unknown; needs a human
  *
  * THERE IS NO `refunded` STATE, and its absence is the point. § 7.2's refund is
@@ -40,6 +42,13 @@
  */
 
 import type { DirectFillParentProof } from './offerFills.js'
+import {
+  decodeCarrierAttempt,
+  decodeCarrierAttemptOrNull,
+  detachJsonObject,
+  encodeCarrierAttempt,
+  type CarrierAttempt,
+} from './carrierAttempt.js'
 import { betterSqliteDriver, type SqlDriver } from './driver.js'
 import {
   BaseSwapStore,
@@ -59,6 +68,23 @@ import { AssetRfqMachine, type AssetRfqSwapState } from '../machines/assetRfq.js
 import { clampLedgerLimit, type LedgerWindow } from '@arkade-os/solver-core/analytics/economics.js'
 
 export type { AssetRfqSwapState }
+
+/** The carrier terms a negotiation was issued under: null on legacy rows, written once at insert. */
+export interface AssetRfqCarrierTerms {
+  mode: 'purchase' | 'recycle' | 'recycle_receiver'
+  /** The Taxi quote a recycle's terms were read from. */
+  quoteId?: string
+  physicalSats: bigint
+  loanSats: bigint
+  receiptSats: bigint
+  serviceFareSats: bigint
+  /** What the price netted, which is not physicalSats. */
+  pricedSats: bigint
+  expiresAt: number
+  /** recycle_receiver only: the Taxi the payee named. */
+  taxiUrl?: string
+  taxiKey?: string
+}
 
 export const NON_TERMINAL: readonly AssetRfqSwapState[] = AssetRfqMachine.live
 export const EXPOSED: readonly AssetRfqSwapState[] = AssetRfqMachine.exposed
@@ -132,6 +158,7 @@ export interface AssetRfqSwapRow {
    */
   fillPriceMantissa: bigint | null
   fillPriceScale: number | null
+  carrierTerms: AssetRfqCarrierTerms | null
   /** The contract version negotiated for this quote; null is the baseline, asset-swap-v2. */
   contractVersion: string | null
   /** The offer's co-signer key, x-only. Null on rows quoted before it was stored: the deployment's own. */
@@ -165,9 +192,135 @@ export interface AssetRfqQuoteRecord {
    * @see AssetRfqSwapRow.quoteImpliedMantissa
    */
   quotePrice?: { impliedMantissa: bigint; scale: number; givesBase: boolean }
+  carrierTerms?: AssetRfqCarrierTerms
   /** Omitted when the request named no `contract_versions`. */
   contractVersion?: string
   emulatorPubkey?: string | null
+}
+
+export interface CarrierAttemptRecord {
+  row: AssetRfqSwapRow
+  attempt: CarrierAttempt
+}
+
+const decimal = (value: unknown, field: string): bigint => {
+  if (typeof value !== 'string' || !/^(0|[1-9][0-9]*)$/.test(value)) {
+    throw new Error(`carrier terms ${field} is not a canonical decimal string`)
+  }
+  return BigInt(value)
+}
+
+const rejectUnknown = (raw: Record<string, unknown>, mode: 'purchase' | 'recycle' | 'recycle_receiver'): void => {
+  const allowed = new Set([
+    'mode',
+    'physical_sats',
+    'loan_sats',
+    'receipt_sats',
+    'service_fare_sats',
+    'priced_sats',
+    'expires_at',
+    ...(mode === 'recycle' || mode === 'recycle_receiver' ? ['quote_id'] : []),
+    ...(mode === 'recycle_receiver' ? ['taxi_url', 'taxi_key'] : []),
+  ])
+  for (const key of Object.keys(raw)) {
+    if (!allowed.has(key)) throw new Error(`carrier terms has unknown key '${key}'`)
+  }
+}
+
+const positiveDecimal = (value: unknown, field: string): bigint => {
+  const parsed = decimal(value, field)
+  if (parsed <= 0n) throw new Error(`carrier terms ${field} must be positive`)
+  return parsed
+}
+
+export const carrierTermsToJson = (terms: AssetRfqCarrierTerms): Record<string, unknown> => ({
+  mode: terms.mode,
+  ...(terms.quoteId === undefined ? {} : { quote_id: terms.quoteId }),
+  physical_sats: terms.physicalSats.toString(),
+  loan_sats: terms.loanSats.toString(),
+  receipt_sats: terms.receiptSats.toString(),
+  service_fare_sats: terms.serviceFareSats.toString(),
+  priced_sats: terms.pricedSats.toString(),
+  expires_at: terms.expiresAt,
+  ...(terms.taxiUrl === undefined ? {} : { taxi_url: terms.taxiUrl }),
+  ...(terms.taxiKey === undefined ? {} : { taxi_key: terms.taxiKey }),
+})
+
+export const carrierTermsFromJson = (value: unknown): AssetRfqCarrierTerms => {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('carrier terms is not an object')
+  }
+  const raw = value as Record<string, unknown>
+  const mode = raw.mode
+  if (mode !== 'purchase' && mode !== 'recycle' && mode !== 'recycle_receiver') {
+    throw new Error(`carrier terms mode '${String(mode)}' is unknown`)
+  }
+  // An unknown key in a money blob is a shape this build never wrote.
+  rejectUnknown(raw, mode)
+  const quoteId = raw.quote_id
+  if (mode === 'recycle' || mode === 'recycle_receiver') {
+    if (typeof quoteId !== 'string' || quoteId.length === 0 || quoteId.length > 128) {
+      throw new Error('carrier terms quote_id must be a non-empty bounded string on a recycle')
+    }
+  } else if (quoteId !== undefined) {
+    throw new Error('carrier terms quote_id is only meaningful on a recycle')
+  }
+  const expiresAt = raw.expires_at
+  if (typeof expiresAt !== 'number' || !Number.isSafeInteger(expiresAt) || expiresAt <= 0) {
+    throw new Error('carrier terms expires_at is not a safe positive unix second')
+  }
+  const physicalSats = positiveDecimal(raw.physical_sats, 'physical_sats')
+  // A purchase buys the carrier outright; a recycle splits it into a returnable loan and a priced
+  // receipt; a receiver-paid carrier is the payee's Taxi loaning the whole dust at no price.
+  const loanSats = decimal(raw.loan_sats, 'loan_sats')
+  const receiptSats = decimal(raw.receipt_sats, 'receipt_sats')
+  const serviceFareSats = decimal(raw.service_fare_sats, 'service_fare_sats')
+  const pricedSats = decimal(raw.priced_sats, 'priced_sats')
+  if (mode === 'recycle') {
+    positiveDecimal(raw.loan_sats, 'loan_sats')
+    positiveDecimal(raw.receipt_sats, 'receipt_sats')
+    if (loanSats + receiptSats !== physicalSats) {
+      throw new Error('carrier terms split does not sum to the physical carrier')
+    }
+    if (serviceFareSats < 0n) throw new Error('carrier terms service_fare_sats must not be negative')
+    if (pricedSats !== receiptSats + serviceFareSats) {
+      throw new Error('carrier terms priced sats is not the receipt plus the service fare')
+    }
+  } else if (mode === 'recycle_receiver') {
+    if (loanSats !== physicalSats)
+      throw new Error('carrier terms loan_sats must equal physical_sats on a recycle_receiver')
+    if (receiptSats !== 0n) throw new Error('carrier terms receipt_sats must be zero on a recycle_receiver')
+    if (serviceFareSats !== 0n) throw new Error('carrier terms service_fare_sats must be zero on a recycle_receiver')
+    if (pricedSats !== 0n) throw new Error('carrier terms priced_sats must be zero on a recycle_receiver')
+  } else {
+    if (loanSats !== 0n) throw new Error('carrier terms loan_sats must be zero on a purchase')
+    if (receiptSats !== 0n) throw new Error('carrier terms receipt_sats must be zero on a purchase')
+    if (serviceFareSats < 0n) throw new Error('carrier terms service_fare_sats must not be negative')
+    if (pricedSats !== physicalSats + serviceFareSats) {
+      throw new Error('carrier terms priced sats is not the physical carrier plus the service fare')
+    }
+  }
+  const taxiUrl = raw.taxi_url
+  const taxiKey = raw.taxi_key
+  if (mode === 'recycle_receiver') {
+    if (typeof taxiUrl !== 'string' || taxiUrl.length === 0 || taxiUrl.length > 512) {
+      throw new Error('carrier terms taxi_url must be a non-empty bounded string on a recycle_receiver')
+    }
+    if (typeof taxiKey !== 'string' || !/^[0-9a-f]{64}$/.test(taxiKey)) {
+      throw new Error('carrier terms taxi_key must be 64 lowercase hex on a recycle_receiver')
+    }
+  }
+  return {
+    mode,
+    ...(mode === 'recycle' || mode === 'recycle_receiver' ? { quoteId: quoteId as string } : {}),
+    physicalSats,
+    loanSats,
+    receiptSats,
+    serviceFareSats,
+    pricedSats,
+    expiresAt,
+    ...(mode === 'recycle_receiver' ? { taxiUrl: taxiUrl as string, taxiKey: taxiKey as string } : {}),
+  }
 }
 
 type Raw = Record<string, string | number | null>
@@ -212,9 +365,16 @@ const toRow = (raw: Raw): AssetRfqSwapRow => ({
     raw.quote_gives_base === null || raw.quote_gives_base === undefined ? null : Number(raw.quote_gives_base) === 1,
   fillPriceMantissa: bigIntOrNull(raw.fill_price_mantissa),
   fillPriceScale: numberOrNull(raw.fill_price_scale),
+  carrierTerms: carrierTermsOrNull(raw.carrier_terms),
   contractVersion: text(raw.contract_version),
   emulatorPubkey: text(raw.emulator_pubkey),
 })
+
+const carrierTermsOrNull = (value: unknown): AssetRfqCarrierTerms | null => {
+  if (value === null || value === undefined) return null
+  if (typeof value !== 'string') throw new Error('carrier terms column is not text')
+  return carrierTermsFromJson(JSON.parse(value))
+}
 
 const bigIntOrNull = (value: string | number | null | undefined): bigint | null =>
   value === null || value === undefined ? null : BigInt(String(value))
@@ -300,6 +460,9 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
   }
 
   private async insertQuoteRows(record: AssetRfqQuoteRecord): Promise<AssetRfqSwapRow> {
+    // Checked here because the read is: a row it refuses would poison every later listNonTerminal.
+    const carrierTerms = record.carrierTerms === undefined ? null : carrierTermsToJson(record.carrierTerms)
+    if (carrierTerms !== null) carrierTermsFromJson(carrierTerms)
     const at = this.now()
     await this.driver.run(sql.insertQuote, [
       record.id,
@@ -326,6 +489,7 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
       record.quotePrice?.impliedMantissa.toString() ?? null,
       record.quotePrice?.scale ?? null,
       record.quotePrice === undefined ? null : record.quotePrice.givesBase ? 1 : 0,
+      carrierTerms === null ? null : JSON.stringify(carrierTerms),
       record.contractVersion ?? null,
       record.emulatorPubkey ?? null,
     ])
@@ -490,6 +654,14 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
         row.offerPkScript !== proof.offerPkScript
       )
         return false
+      // A carrier fill settles through its own adapter, never this resolver.
+      const carrier = await this.driver.get<Raw>(sql.carrierAttemptById, [proof.id])
+      if (
+        row.carrierTerms?.mode === 'recycle' ||
+        row.carrierTerms?.mode === 'recycle_receiver' ||
+        carrier?.carrier_attempt != null
+      )
+        return false
       const reason = `direct fill cancelled by confirmed conflict ${txid}`
       const recovered = `direct fill recovered as ${txid}`
       if (cancelled && row.state === 'refused' && row.fillTxid === null && row.failureReason === reason) return true
@@ -530,5 +702,133 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
       throw new Error(`fail() cannot act on ${from}: it is terminal, so there is nothing left to fail`)
     }
     return super.fail(id, from, reason)
+  }
+
+  /** Its own read: {@link AssetRfqSwapRow} is projected to the client. */
+  async readCarrierAttempt(id: string): Promise<CarrierAttempt | null> {
+    const raw = await this.driver.get<Raw>(sql.carrierAttemptById, [id])
+    if (!raw) throw new Error(`no asset rfq swap ${id}`)
+    return decodeCarrierAttemptOrNull(raw.carrier_attempt)
+  }
+
+  /** Pinned before the first carrier quote is asked for: once, and only while this row's own fill is in flight. */
+  async prepareCarrierAttempt(id: string, snapshot: unknown): Promise<boolean> {
+    const attempt: CarrierAttempt = { phase: 'prepared', snapshot: detachJsonObject(snapshot, 'snapshot') }
+    const terms = (await this.get(id)).carrierTerms
+    if (terms?.mode !== 'recycle' && terms?.mode !== 'recycle_receiver') {
+      throw new Error(`asset rfq swap ${id} was not quoted as a recycle, so it has no carrier attempt to make`)
+    }
+    const result = await this.driver.run(sql.prepareCarrierAttempt, [encodeCarrierAttempt(attempt), id])
+    return result.changes === 1
+  }
+
+  async bindCarrierAttempt(id: string, expected: CarrierAttempt, binding: unknown): Promise<boolean> {
+    const bound = detachJsonObject(binding, 'binding')
+    if (expected.phase !== 'prepared') {
+      throw new Error(`carrier attempt ${id} is '${expected.phase}', not prepared: its binding is already fixed`)
+    }
+    return this.casCarrierAttempt(id, expected, { phase: 'quoted', snapshot: expected.snapshot, binding: bound })
+  }
+
+  async markCarrierAttemptSubmitting(id: string, expected: CarrierAttempt): Promise<boolean> {
+    if (expected.phase !== 'quoted') {
+      throw new Error(`carrier attempt ${id} is '${expected.phase}', not quoted: there is no verified quote to submit`)
+    }
+    return this.casCarrierAttempt(id, expected, { ...expected, phase: 'submitting' })
+  }
+
+  /** Records which transaction the caller proved. A cancelling attempt settles too: the fill can beat its conflict. */
+  async settleCarrierAttempt(id: string, expected: CarrierAttempt, fillTxid: string): Promise<boolean> {
+    if (expected.phase !== 'submitting' && expected.phase !== 'cancelling') {
+      throw new Error(`carrier attempt ${id} is '${expected.phase}', not submitting: nothing was sent to settle`)
+    }
+    return this.casCarrierAttempt(id, expected, { ...expected, phase: 'settled', fillTxid })
+  }
+
+  /** Records the conflict's bytes before they are sent, only extending the binding: the fill graph must survive. */
+  async cancelCarrierAttempt(id: string, expected: CarrierAttempt, next: CarrierAttempt): Promise<boolean> {
+    if (expected.phase !== 'submitting' || next.phase !== 'cancelling') {
+      throw new Error(
+        `carrier attempt ${id} cannot go '${expected.phase}' -> '${next.phase}': only a submit is cancelled`,
+      )
+    }
+    const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
+    const before = detachJsonObject(expected.binding ?? {}, 'binding')
+    const after = detachJsonObject(next.binding ?? {}, 'binding')
+    if (!same(detachJsonObject(next.snapshot, 'snapshot'), detachJsonObject(expected.snapshot, 'snapshot'))) {
+      throw new Error(`carrier attempt ${id} cannot replace its snapshot while cancelling`)
+    }
+    if (Object.keys(before).some((key) => !same(after[key], before[key]))) {
+      throw new Error(`carrier attempt ${id} cannot rewrite its binding while cancelling, only extend it`)
+    }
+    return this.casCarrierAttempt(id, expected, next)
+  }
+
+  /** No attempt is durable proof nothing was sent: its write precedes every request naming a coin. */
+  async refuseUnattemptedCarrierFill(id: string, reason: string): Promise<boolean> {
+    const terms = (await this.get(id)).carrierTerms
+    if (terms?.mode !== 'recycle' && terms?.mode !== 'recycle_receiver') return false
+    const result = await this.driver.run(sql.refuseUnattemptedCarrierFill, [reason, this.now(), id])
+    if (result.changes !== 1) return false
+    await this.recordEvent(id, 'filling', 'refused', null)
+    announceTransition(this.onTransition, id, 'filling', 'refused')
+    return true
+  }
+
+  async refuseNeverSubmittedCarrierAttempt(id: string, expected: CarrierAttempt, reason: string): Promise<boolean> {
+    if (expected.phase !== 'prepared' && expected.phase !== 'quoted') {
+      throw new Error(`carrier attempt ${id} is '${expected.phase}', which is not proven never-submitted`)
+    }
+    return this.refuseCarrierAttempt(id, expected, { ...expected, phase: 'not_submitted' }, reason)
+  }
+
+  /** Only for a caller the chain has shown the conflict spend to. */
+  async refuseCancelledCarrierAttempt(id: string, expected: CarrierAttempt, reason: string): Promise<boolean> {
+    if (expected.phase !== 'cancelling') {
+      throw new Error(`carrier attempt ${id} is '${expected.phase}', not cancelling: no conflict spend was recorded`)
+    }
+    return this.refuseCarrierAttempt(id, expected, { ...expected, phase: 'cancelled' }, reason)
+  }
+
+  /** Not NON_TERMINAL: a stuck parent, or a settled attempt whose parent is not yet filled, is still ambiguous. */
+  async listUnresolvedCarrierAttempts(): Promise<CarrierAttemptRecord[]> {
+    const records: CarrierAttemptRecord[] = []
+    for (const raw of await this.driver.all<Raw>(sql.unresolvedCarrierAttempts)) {
+      const attempt = decodeCarrierAttempt(raw.carrier_attempt)
+      if (attempt.phase === 'not_submitted' || attempt.phase === 'cancelled') continue
+      const row = toRow(raw)
+      if (attempt.phase === 'settled' && row.state === 'filled') continue
+      records.push({ row, attempt })
+    }
+    return records
+  }
+
+  private async casCarrierAttempt(id: string, expected: CarrierAttempt, next: CarrierAttempt): Promise<boolean> {
+    const result = await this.driver.run(sql.casCarrierAttempt, [
+      encodeCarrierAttempt(next),
+      id,
+      encodeCarrierAttempt(expected),
+    ])
+    return result.changes === 1
+  }
+
+  /** One statement, since SqlDriver.transaction is best effort on D1: the checkpoint and the parent move together. */
+  private async refuseCarrierAttempt(
+    id: string,
+    expected: CarrierAttempt,
+    next: CarrierAttempt,
+    reason: string,
+  ): Promise<boolean> {
+    const result = await this.driver.run(sql.refuseCarrierAttempt, [
+      encodeCarrierAttempt(next),
+      reason,
+      this.now(),
+      id,
+      encodeCarrierAttempt(expected),
+    ])
+    if (result.changes !== 1) return false
+    await this.recordEvent(id, 'filling', 'refused', null)
+    announceTransition(this.onTransition, id, 'filling', 'refused')
+    return true
   }
 }

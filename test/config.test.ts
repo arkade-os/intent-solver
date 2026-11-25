@@ -96,6 +96,7 @@ const CONFIG_KEYS = [
   'WALLET_MNEMONIC',
   'ARKADE_OPERATOR_URL',
   'EMULATOR_URL',
+  'TAXI_URL',
   'SWAP_NETWORK',
   'MAX_EXPOSED_SATS',
   'MAX_SWAP_SATS',
@@ -171,6 +172,58 @@ describe('configFromKnobs — ALLOW_UNDRAINED_ONCHAIN_RECEIVE', () => {
     expect(configFromKnobs(process.env).allowUndrainedOnchainReceive).toBe(true)
     process.env.ALLOW_UNDRAINED_ONCHAIN_RECEIVE = 'yes'
     expect(configFromKnobs(process.env).allowUndrainedOnchainReceive).toBe(false)
+  })
+})
+
+describe('loadConfig — TAXI_URL', () => {
+  it('is undefined when unset', () => {
+    expect(configFromKnobs(process.env).taxiUrl).toBeUndefined()
+  })
+
+  it('reads a set-but-empty value as unset rather than as an empty base URL', () => {
+    process.env.TAXI_URL = '   '
+    expect(configFromKnobs(process.env).taxiUrl).toBeUndefined()
+  })
+
+  it('accepts https on mainnet', () => {
+    process.env.SWAP_NETWORK = 'bitcoin'
+    process.env.TAXI_URL = 'https://operator.example.com'
+    expect(configFromKnobs(process.env).taxiUrl).toBe('https://operator.example.com')
+  })
+
+  it('accepts http to loopback on mainnet — nothing reaches a wire', () => {
+    process.env.SWAP_NETWORK = 'bitcoin'
+    for (const url of ['http://localhost:7271', 'http://127.0.0.1:7271', 'http://[::1]:7271']) {
+      process.env.TAXI_URL = url
+      expect(configFromKnobs(process.env).taxiUrl).toBe(url)
+    }
+  })
+
+  it('refuses http to a remote host on mainnet', () => {
+    process.env.SWAP_NETWORK = 'bitcoin'
+    process.env.TAXI_URL = 'http://operator.example.com'
+    expect(() => configFromKnobs(process.env)).toThrow('TAXI_URL must use https on mainnet')
+  })
+
+  it('accepts http to a container host off mainnet — the regtest stack has no TLS', () => {
+    process.env.TAXI_URL = 'http://operator:7071'
+    expect(configFromKnobs(process.env).taxiUrl).toBe('http://operator:7071')
+  })
+
+  it('refuses a value that is not a URL rather than failing at first use', () => {
+    process.env.TAXI_URL = 'not-a-url'
+    expect(() => configFromKnobs(process.env)).toThrow('TAXI_URL must be an absolute URL')
+  })
+
+  it('refuses a host that merely starts with 127. — it is a name, not the loopback range', () => {
+    process.env.SWAP_NETWORK = 'bitcoin'
+    process.env.TAXI_URL = 'http://127.evil.com'
+    expect(() => configFromKnobs(process.env)).toThrow('TAXI_URL must use https on mainnet')
+  })
+
+  it('refuses a scheme that is neither http nor https, on any network', () => {
+    process.env.TAXI_URL = 'ftp://operator.example.com'
+    expect(() => configFromKnobs(process.env)).toThrow('TAXI_URL must be http or https')
   })
 })
 
