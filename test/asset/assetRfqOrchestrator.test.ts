@@ -547,6 +547,33 @@ describe('tick — driving a negotiation', () => {
     expect(await built.store.get('swap-1')).toMatchObject({ state: 'funded', fillPhase: null })
   })
 
+  it('walks the latch back when its write lands past the quote deadline', async () => {
+    let at: (seconds: number) => void = () => {}
+    const submitted: string[] = []
+    const built = await harness({
+      depositAt: async () => deposit(),
+      settle: async (_row, options) => {
+        if (!(await options?.markSubmitting?.())) throw new OfferNotSubmittedError('quote lapsed at the latch')
+        submitted.push('fill')
+        return 'fa'.repeat(32)
+      },
+    })
+    at = built.tick
+    const latch = built.store.markSubmitting.bind(built.store)
+    vi.spyOn(built.store, 'markSubmitting').mockImplementation(async (id) => {
+      const landed = await latch(id)
+      at(1_100)
+      return landed
+    })
+
+    await built.service.quote(request())
+    await built.service.tick('swap-1')
+    await built.service.tick('swap-1')
+
+    expect(submitted).toEqual([])
+    expect(await built.store.get('swap-1')).toMatchObject({ state: 'funded', fillPhase: null })
+  })
+
   it('walks a row a restart left mid-selection back to funded', async () => {
     const { service, store, settled } = await harness({ depositAt: async () => deposit() })
     await service.quote(request())

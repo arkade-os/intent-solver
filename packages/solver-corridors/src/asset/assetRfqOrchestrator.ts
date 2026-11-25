@@ -487,7 +487,13 @@ export class AssetRfqSwapService {
     try {
       const txid = await this.deps.settle(await this.deps.store.get(row.id), {
         // The deadline again at the latch: approval and the settle's own reads come after the decision.
-        markSubmitting: async () => this.now() <= row.validUntil && (await this.deps.store.markSubmitting(row.id)),
+        // Asked once more after the write, which can wait behind another transaction; nothing is sent yet.
+        markSubmitting: async () => {
+          if (this.now() > row.validUntil || !(await this.deps.store.markSubmitting(row.id))) return false
+          if (this.now() <= row.validUntil) return true
+          await this.deps.store.revertRejectedSubmit(row.id)
+          return false
+        },
       })
       const filled = await this.deps.store.transition(row.id, 'filling', 'filled', { fill_txid: txid })
       // AFTER the transition, never before. A feed read between `settle` and
