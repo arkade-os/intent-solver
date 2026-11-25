@@ -321,8 +321,7 @@ export class AssetRfqSwapService {
   private readonly newId: () => string
   private markets: readonly AssetRfqMarket[]
   private readonly serialise: Serialiser = createSerialiser()
-  /** The payee-named Taxi rows' own queue, so one slow Taxi holds back its rows and never the rest. */
-  private readonly serialiseNamed: Serialiser = createSerialiser()
+  /** Payee-named Taxi rows, each driven on its own: a slow or hostile Taxi holds back only its rows. */
   private readonly named = new Map<string, Promise<void>>()
 
   constructor(private readonly deps: AssetRfqDeps) {
@@ -541,11 +540,11 @@ export class AssetRfqSwapService {
     return this.serialise(() => this.drive(id))
   }
 
-  /** One drive per row at a time on the named queue; a sweep does not wait for it. */
+  /** One drive per row at a time, off the main queue; a sweep does not wait for it. */
   private driveNamed(id: string): Promise<void> {
     const running = this.named.get(id)
     if (running) return running
-    const work = this.serialiseNamed(() => this.drive(id)).finally(() => this.named.delete(id))
+    const work = this.drive(id, true).finally(() => this.named.delete(id))
     this.named.set(id, work)
     return work
   }
@@ -555,9 +554,14 @@ export class AssetRfqSwapService {
     await Promise.allSettled([...this.named.values()])
   }
 
-  private async drive(id: string): Promise<void> {
+  private async drive(id: string, named = false): Promise<void> {
     const row = await this.deps.store.findById(id)
     if (!row) return
+    // Re-read inside the queue: a row that became payee-named since the caller looked must leave it.
+    if (!named && payeeNamed(row)) {
+      this.driveNamed(id).catch((error: unknown) => this.deps.onError?.(id, error))
+      return
+    }
     switch (row.state) {
       case 'quoted':
         return this.whenQuoted(row)

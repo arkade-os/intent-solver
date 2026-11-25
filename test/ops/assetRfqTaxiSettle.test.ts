@@ -179,7 +179,7 @@ describe('the carrier fill signer', () => {
 })
 
 describe('the carrier fill settle', () => {
-  const submitted = async () => {
+  const submitted = async (post: () => Promise<never> = async () => ({}) as never) => {
     const store = await AssetRfqSwapStore.open(':memory:', () => 1_000)
     const carrierTerms = {
       mode: 'recycle' as const,
@@ -221,7 +221,8 @@ describe('the carrier fill settle', () => {
       script: hex.encode(funding.pkScript),
     }
     const floor = { kind: 'height' as const, value: 1_500n }
-    const submitFill = vi.fn(async (_request: unknown) => ({}) as never)
+    const submitFill = vi.fn(async (_request: unknown) => post())
+    const pins = createCarrierPinLedger()
     const settle = createTaxiReceiveCarrierSettler({
       store,
       taxiFor: () => ({ provider: 'https://taxi.example', fills: { submitFill } }),
@@ -231,7 +232,7 @@ describe('the carrier fill settle', () => {
       coins: async () => [coin],
       reserved: () => new Set(),
       reserve: () => () => {},
-      pins: createCarrierPinLedger(),
+      pins,
       dustSats: 330n,
       offerHex: () => '00',
       proceedsScript: payTo(0xc3),
@@ -241,12 +242,13 @@ describe('the carrier fill settle', () => {
       now: () => 1_000,
     }).settle
 
-    expect(await settle(await store.get('row'))).toEqual({ status: 'submitted' })
-    return { store, submitFill, coin }
+    const outcome = await settle(await store.get('row')).catch((error: unknown) => error)
+    return { store, submitFill, coin, pins, outcome }
   }
 
   it('binds the signed graph before it posts, and posts exactly the bytes it bound', async () => {
-    const { store, submitFill } = await submitted()
+    const { store, submitFill, outcome } = await submitted()
+    expect(outcome).toEqual({ status: 'submitted' })
     const bound = (await store.readCarrierAttempt('row'))!
     const graph = bound.binding!.graph as { ark_tx: string; checkpoints: string[] }
     expect(bound.phase).toBe('submitting')
@@ -295,6 +297,18 @@ describe('the carrier fill settle', () => {
     expect(restored).toEqual(['row'])
     expect(reserve).toHaveBeenCalledWith([{ txid: coin.txid, vout: coin.vout }])
     expect(pins.heldFor('row')).toHaveLength(1)
+    await store.close()
+  })
+
+  it('keeps a POST that timed out as submitted, pinned, for reconciliation rather than release', async () => {
+    const timedOut = new DOMException('The operation was aborted due to timeout', 'TimeoutError')
+    const { store, pins, outcome } = await submitted(async () => {
+      throw timedOut
+    })
+    expect(outcome).toBe(timedOut)
+    expect((await store.readCarrierAttempt('row'))?.phase).toBe('submitting')
+    expect(pins.heldFor('row')).toHaveLength(1)
+    expect((await store.get('row')).state).toBe('filling')
     await store.close()
   })
 })

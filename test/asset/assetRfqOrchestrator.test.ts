@@ -1437,3 +1437,53 @@ describe('a carrier fill', () => {
     expect(await store.get('swap-1')).toMatchObject({ state: 'refused' })
   })
 })
+
+describe('payee-named Taxi rows', () => {
+  it('a Taxi that never answers does not delay a row on a different Taxi', async () => {
+    const quote = (quoteId: string, makerPublicKey: string): ReceiveCarrierQuote => ({
+      quoteId,
+      makerPkScript: PK_SCRIPT,
+      makerPublicKey,
+      assetId: ASSET_A,
+      physicalSats: 330n,
+      loanSats: 330n,
+      receiptSats: 0n,
+      serviceFareSats: 0n,
+      taxiKey: 'd'.repeat(64),
+      inputExpiryFloor: { kind: 'height', value: 1_000_000n },
+      expiresAt: 1_600,
+    })
+    const settle = vi.fn((row: { id: string }) =>
+      row.id === 'swap-1' ? new Promise<never>(() => {}) : Promise.resolve({ status: 'submitted' as const }),
+    )
+    const { service, store } = await harness({
+      newId: sequentialIds(),
+      deriveOffer: perClientOffer,
+      depositAt: async (script) => deposit({ txid: script.slice(4) }),
+      receiveCarrierQuotes: {
+        resolve: async (request) => quote(request.quoteId, request.makerPublicKey),
+        available: async () => new Map([[ASSET_A, 10n ** 18n]]),
+        settle,
+        reconcile: vi.fn(async () => ({ status: 'pending' as const })),
+      },
+    })
+    for (const [n, key] of [
+      ['1', 'c'],
+      ['2', 'f'],
+    ] as const) {
+      const carrier = {
+        mode: 'recycle_receiver' as const,
+        quoteId: `q-${n}`,
+        taxiUrl: `https://taxi-${n}.example`,
+        taxiKey: 'd'.repeat(64),
+      }
+      const request_ = request({ rfqId: n.repeat(64), makerPublicKey: key.repeat(64), carrier })
+      expect(await service.quote(request_)).toMatchObject({ accepted: true })
+    }
+    await service.tickAll()
+    await service.tickAll()
+    await vi.waitFor(async () => expect((await store.get('swap-2')).state).toBe('filling'))
+    expect((await store.get('swap-1')).state).toBe('filling')
+    expect(settle).toHaveBeenCalledTimes(2)
+  })
+})

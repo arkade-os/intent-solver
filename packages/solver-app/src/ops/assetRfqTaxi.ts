@@ -417,6 +417,8 @@ export const TAXI_FILL_RATE_LIMIT = 60
 export const TAXI_QUOTE_GLOBAL_RATE_LIMIT = 40
 /** Bound how long an untrusted quote endpoint can hold the queue. */
 export const TAXI_QUOTE_TIMEOUT_MS = 2_000
+/** A POST that times out is ambiguous: its attempt stays submitting, pinned, for reconciliation. */
+export const TAXI_FILL_TIMEOUT_MS = 5_000
 const TAXI_CLIENT_RATE_WINDOW_SECONDS = 60
 const TAXI_CLIENT_CACHE_SIZE = 32
 
@@ -444,7 +446,7 @@ export const taxiClientCache = (deps: {
       timeoutMs: TAXI_QUOTE_TIMEOUT_MS,
       global: new RateLimiter(TAXI_QUOTE_GLOBAL_RATE_LIMIT, TAXI_CLIENT_RATE_WINDOW_SECONDS, nowSeconds),
     },
-    fill: {},
+    fill: { timeoutMs: TAXI_FILL_TIMEOUT_MS },
   }
   const cache = new Map<string, TaxiCarrierClient>()
   return (url, budget = 'quote') => {
