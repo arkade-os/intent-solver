@@ -49,8 +49,8 @@ export const registerOfferRoutes = (app: Hono, deps: AdminDeps): void => {
       cursor: query.cursor ?? null,
     }
 
-    // A deployment serving no market has no store. An empty page with
-    // `serving: false` rather than a 404, so the console can say which it is.
+    // A deployment serving no market has no store, or one opened only to recover a
+    // journalled fill. `serving: false` rather than a 404, so the console can say which.
     const store = deps.services.offerStore
     let page: { rows: OfferFillRow[]; nextCursor: string | null } = { rows: [], nextCursor: null }
     if (store) {
@@ -64,7 +64,7 @@ export const registerOfferRoutes = (app: Hono, deps: AdminDeps): void => {
     }
 
     return c.json({
-      serving: store !== null,
+      serving: deps.services.assetOffers !== null,
       offers: page.rows.map(offerJson),
       nextCursor: page.nextCursor,
       // The other half, and it is NOT in the store. @see admin/offerRefusals.ts
