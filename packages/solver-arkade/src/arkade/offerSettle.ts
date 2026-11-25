@@ -106,7 +106,10 @@ export const offerSettleFor = (
     const liveP = capture(outpointsAt(intent.offerPkScript))
     const raw = unwrap(await rawP)
     if (raw === null || raw === '') {
-      throw new Error(`no funding transaction for ${intent.offerTxid}: the offer cannot be rebuilt to fill it`)
+      // An empty read is not proof the transaction is gone, so a later sweep may try again.
+      throw new OfferNotSubmittedError(
+        `no funding transaction for ${intent.offerTxid}: the offer cannot be rebuilt to fill it`,
+      )
     }
 
     const found = offerFromFundingTx(raw)

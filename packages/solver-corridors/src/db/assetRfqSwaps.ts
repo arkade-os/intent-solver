@@ -161,6 +161,8 @@ export interface AssetRfqSwapRow {
   carrierTerms: AssetRfqCarrierTerms | null
   /** The contract version negotiated for this quote; null is the baseline, asset-swap-v2. */
   contractVersion: string | null
+  /** The offer's co-signer key, x-only. Null on rows quoted before it was stored: the deployment's own. */
+  emulatorPubkey: string | null
 }
 
 export interface AssetRfqQuoteRecord {
@@ -193,6 +195,7 @@ export interface AssetRfqQuoteRecord {
   carrierTerms?: AssetRfqCarrierTerms
   /** Omitted when the request named no `contract_versions`. */
   contractVersion?: string
+  emulatorPubkey?: string | null
 }
 
 export interface CarrierAttemptRecord {
@@ -364,6 +367,7 @@ const toRow = (raw: Raw): AssetRfqSwapRow => ({
   fillPriceScale: numberOrNull(raw.fill_price_scale),
   carrierTerms: carrierTermsOrNull(raw.carrier_terms),
   contractVersion: text(raw.contract_version),
+  emulatorPubkey: text(raw.emulator_pubkey),
 })
 
 const carrierTermsOrNull = (value: unknown): AssetRfqCarrierTerms | null => {
@@ -487,6 +491,7 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
       record.quotePrice === undefined ? null : record.quotePrice.givesBase ? 1 : 0,
       carrierTerms === null ? null : JSON.stringify(carrierTerms),
       record.contractVersion ?? null,
+      record.emulatorPubkey ?? null,
     ])
     await this.recordEvent(record.id, null, 'quoted', null)
     const row = await this.findById(record.id)

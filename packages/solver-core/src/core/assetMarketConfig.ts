@@ -452,12 +452,12 @@ export const assetMarketFrom = (body: AssetMarketBody): AssetMarketConfig => ({
 })
 
 // Wider than the sentry SECRET_KEY on purpose: price APIs name their key access_key, api-key or plain key.
-const FEED_SECRET = /key|token|secret|auth|pass|sign|credential|session/i
+const FEED_SECRET = /key|token|secret|auth|pass|sign|credential|session|app_?id/i
 
 /** Whether a feed URL carries a credential: userinfo, or a query parameter named like one. */
 export const feedCredential = (feedUrl: string): boolean => {
   const url = URL.parse(feedUrl)
-  if (url === null) return /@|[?&][^=&#]*(key|token|secret|auth|pass|sign|credential|session)/i.test(feedUrl)
+  if (url === null) return /@|[?&][^=&#]*(key|token|secret|auth|pass|sign|credential|session|app_?id)/i.test(feedUrl)
   return (
     url.username !== '' || url.password !== '' || [...url.searchParams.keys()].some((name) => FEED_SECRET.test(name))
   )

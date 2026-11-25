@@ -20,6 +20,7 @@ import {
   refundSwapScript,
 } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { refundSweptSwapScript } from '@arkade-os/solver-arkade/arkade/sweptRefund.js'
+import { assertCovenantScriptRow } from '@arkade-os/solver-arkade/arkade/covenantRow.js'
 import { covenantScriptFromRow } from '@arkade-os/solver-corridors/send/arkadeOps.js'
 import { EXPOSED } from '@arkade-os/solver-corridors/db/swaps.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
@@ -31,6 +32,18 @@ export type RefundOutcome = { txid: string } | { skipped: string }
 
 /** Nothing at the covenant script: already spent, or never funded. */
 export const NOTHING_AT_SCRIPT = 'nothing-at-script'
+
+/** Sats the indexer still shows at a swap's lockup script, spendable or swept. */
+export const satsLeftAtLockup = async (services: Services, corridor: string, id: string): Promise<number> => {
+  const held = await services.readers.get(corridor)?.lockupFor?.(id)
+  if (!held) throw new Error(`${corridor} cannot describe the lockup of swap ${id}, so it cannot be shown empty`)
+  const { pkScript } = assertCovenantScriptRow(held.lockup, corridor)
+  const outputs = [
+    ...(await findLockups(services.arkade, pkScript)),
+    ...(await findSweptLockups(services.arkade, pkScript)),
+  ]
+  return outputs.reduce((sum, output) => sum + output.value, 0)
+}
 
 /**
  * Push the covenant refund for ONE Lightning-corridor swap now, bypassing

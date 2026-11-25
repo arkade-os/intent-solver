@@ -170,6 +170,12 @@ export interface CorridorReader {
    */
   lockupFor?(id: string): Promise<{ lockup: unknown; preimage: string | null } | null>
 
+  /**
+   * Scripts of client-funded lockups this corridor has paid out against from a BTC rail and not yet
+   * started to claim. The balance checkpoint counts these as the solver's. Absent means none.
+   */
+  paidOutLockups?(): Promise<readonly string[]>
+
   committedSats(): Promise<number>
 
   /**

@@ -10,7 +10,7 @@
 
 import { hex } from '@scure/base'
 import type { OnchainTxOutcome } from '../ports/onchain.js'
-import { judgeClientLockup } from './clientLockup.js'
+import { judgeClientLockup, LOCKUP_REFUSAL } from './clientLockup.js'
 import {
   ARKADE_CLAIM_WINDOW_SECONDS,
   DEFAULT_ONCHAIN_LOCKUP_TIMEOUT,
@@ -143,7 +143,8 @@ const whenQuoted = async (row: OnchainSendPlanRow, reads: OnchainSendReads): Pro
     amountSats: row.amountSats,
     maxOutputs: reads.maxLockupOutputs(),
     tooLate: reads.now() >= row.createdAt + DEFAULT_ONCHAIN_LOCKUP_TIMEOUT,
-    lateReason: (claimable) => (claimable > 0 ? `lockup timeout with partial ${claimable} sats` : 'lockup timeout'),
+    lateReason: (claimable) =>
+      claimable > 0 ? `${LOCKUP_REFUSAL.timeout} with partial ${claimable} sats` : LOCKUP_REFUSAL.timeout,
     refusal:
       expiresTooSoon === null
         ? null

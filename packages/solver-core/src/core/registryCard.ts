@@ -21,7 +21,7 @@ import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js'
 import { ASSET_ID_HEX, ASSET_ID_HEX_LENGTH, ASSETS } from './marketKey.js'
 import { isSwapNetwork } from './networks.js'
 import { defaultPricePath } from './priceFeed.js'
-import type { AssetMarketPricingView } from './assetMarketConfig.js'
+import { feedCredential, type AssetMarketPricingView } from './assetMarketConfig.js'
 import { payoutSatsFor, type Corridor, type Fee } from './corridorPolicy.js'
 import type { Limits } from './limits.js'
 import type { SwapNetwork } from './networks.js'
@@ -253,6 +253,9 @@ const assetMarketEntry = (
   }
   if (!market.feedUrl.trim()) {
     throw new Error(`${pair} carries different assets, so it must publish a price_feed`)
+  }
+  if (feedCredential(market.feedUrl)) {
+    throw new Error(`${pair} price_feed carries a credential, which cannot be published in a solver card`)
   }
   if (!market.pricePath) {
     throw new Error(`${pair} price_path must be resolved before publishing; "" reads as the whole feed document`)

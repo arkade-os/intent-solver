@@ -142,6 +142,7 @@ import {
 import { marketServingDivergence } from './marketDivergence.js'
 import { offerInventoryFor } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { offerExitDelay, offerScriptFrom, xOnlyPubkey } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
+import { quoteCosignerKey } from '@arkade-os/solver-arkade/arkade/cosignerKey.js'
 import { largestOfferOutpoint, liveOfferOutpoints } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
 import { quotedOfferHexFor, quotedOfferSettleFor } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
 import { directFillRecoveryFor } from './directFillRecovery.js'
@@ -1021,6 +1022,13 @@ export const createServices = async (
     dustSats: arkade.dustSats,
     minOutputSats: arkade.dustSats > arkade.vtxoMinSats ? arkade.dustSats : arkade.vtxoMinSats,
     deriveOffer: offerScriptFrom(assetRfqDerivation),
+    // Fills still go through the emulator (the SDK's fillOffer), which cannot co-sign arkd's key, so
+    // only the default is accepted here until fills can be submitted to arkd.
+    cosignerKey: async (requested) => {
+      const key = await quoteCosignerKey({ emulatorPubkey: arkadeOps.emulatorPubkey }, requested)
+      // x-only, as the offer carries it; the hash-lock corridors store the compressed form instead.
+      return key === null ? null : hex.encode(xOnlyPubkey(hex.decode(key)))
+    },
     depositAt: async (offerPkScript, depositLeg) =>
       largestOfferOutpoint(await liveOfferOutpoints(arkade, offerPkScript), depositLeg),
     // The coins a fill could select, read fresh per decision: a journal-pinned coin is not inventory.

@@ -42,6 +42,8 @@ export interface QuotedOfferIntent {
   carrierTerms?: { mode: 'purchase' | 'recycle' | 'recycle_receiver' } | null
   /** The negotiated contract version; null is the baseline, asset-swap-v2. */
   contractVersion: string | null
+  /** Null on a row quoted before the key was stored: it was derived with the deployment's own. */
+  emulatorPubkey?: string | null
 }
 
 export interface QuotedOfferSettleDeps {
@@ -60,6 +62,7 @@ const termsOf = (intent: QuotedOfferIntent): QuotedOfferTerms => ({
   makerPkScript: intent.makerPkScript,
   makerPublicKey: intent.makerPublicKey,
   rfqId: intent.rfqId,
+  emulatorPubkey: intent.emulatorPubkey,
 })
 
 /** The offer a row's deposit was derived from, taker and nonce included: what a Taxi fill rebuilds its spend from. */

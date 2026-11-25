@@ -154,6 +154,26 @@ describe('quote', () => {
     expect(outcome.swap.validUntil).toBe(1_030)
   })
 
+  it('sizes valid_until from the price it struck, not from after a slow inventory read', async () => {
+    let at: (seconds: number) => void = () => {}
+    const built = await harness({
+      fetchPrice: async () => {
+        at(1_010)
+        return { mantissa: 100_000n, scale: 0 }
+      },
+      balance: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        at(1_100)
+        return new Map([[ASSET_A, 10n ** 18n]])
+      },
+    })
+    at = built.tick
+
+    const outcome = await built.service.quote(request())
+    if (!outcome.accepted) throw new Error('expected a quote')
+    expect(outcome.swap.validUntil).toBe(1_040)
+  })
+
   it('records the input flat fee and output spread in their native units', async () => {
     const { service } = await harness({
       markets: [{ ...MARKET, sellBaseFeeFlat: 300n }],
@@ -211,6 +231,21 @@ describe('quote', () => {
     const { service, store } = await harness()
     await service.quote(request(over))
     expect((await store.findByRfqId(RFQ_ID))?.contractVersion).toBe(stored)
+  })
+
+  it('derives on an accepted co-signer key and records it, refusing one it does not accept', async () => {
+    const operator = 'ab'.repeat(32)
+    const { service } = await harness({
+      cosignerKey: async (requested) => (requested === operator ? operator : null),
+      deriveOffer: (terms) => ({ pkScript: OFFER_SCRIPT, address: 'ark1qoffer', emulatorPubkey: terms.emulatorPubkey }),
+    })
+    expect(await service.quote(request({ emulatorPubkey: 'cd'.repeat(32) }))).toEqual({
+      accepted: false,
+      reason: 'unsupported_emulator_pubkey',
+    })
+    const outcome = await service.quote(request({ emulatorPubkey: operator }))
+    if (!outcome.accepted) throw new Error('expected a quote')
+    expect(outcome.swap.emulatorPubkey).toBe(operator)
   })
 
   it.each([
@@ -508,6 +543,52 @@ describe('tick — driving a negotiation', () => {
     await service.tick('swap-1')
     expect(atSettle).toEqual({ state: 'filling', phase: 'selecting' })
     expect(await store.get('swap-1')).toMatchObject({ state: 'filled', fillPhase: 'submitting' })
+  })
+
+  it('refuses the latch when the quote lapsed between the fill decision and the submission', async () => {
+    let at: (seconds: number) => void = () => {}
+    const built = await harness({
+      depositAt: async () => deposit(),
+      settle: async (_row, options) => {
+        at(1_100)
+        if (!(await options?.markSubmitting?.())) throw new OfferNotSubmittedError('quote lapsed before submission')
+        return 'fa'.repeat(32)
+      },
+    })
+    at = built.tick
+
+    await built.service.quote(request())
+    await built.service.tick('swap-1')
+    await built.service.tick('swap-1')
+
+    expect(await built.store.get('swap-1')).toMatchObject({ state: 'funded', fillPhase: null })
+  })
+
+  it('walks the latch back when its write lands past the quote deadline', async () => {
+    let at: (seconds: number) => void = () => {}
+    const submitted: string[] = []
+    const built = await harness({
+      depositAt: async () => deposit(),
+      settle: async (_row, options) => {
+        if (!(await options?.markSubmitting?.())) throw new OfferNotSubmittedError('quote lapsed at the latch')
+        submitted.push('fill')
+        return 'fa'.repeat(32)
+      },
+    })
+    at = built.tick
+    const latch = built.store.markSubmitting.bind(built.store)
+    vi.spyOn(built.store, 'markSubmitting').mockImplementation(async (id) => {
+      const landed = await latch(id)
+      at(1_100)
+      return landed
+    })
+
+    await built.service.quote(request())
+    await built.service.tick('swap-1')
+    await built.service.tick('swap-1')
+
+    expect(submitted).toEqual([])
+    expect(await built.store.get('swap-1')).toMatchObject({ state: 'funded', fillPhase: null })
   })
 
   it('walks a row a restart left mid-selection back to funded', async () => {

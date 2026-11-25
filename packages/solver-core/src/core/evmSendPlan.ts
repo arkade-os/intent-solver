@@ -76,8 +76,8 @@ export interface EvmSendObservation {
   preimage: string | null
   /** Wall clock, seconds. */
   nowSeconds: number
-  /** `block.number` now, for the refund timeout. */
-  evmTimelockHeight: TimelockHeight
+  /** `block.number` now, for the refund timeout. Null when not read, which never times out. */
+  evmTimelockHeight: TimelockHeight | null
 }
 
 export type EvmSendAction =
@@ -114,6 +114,7 @@ export const planEvmSend = (row: EvmSendPlanRow, seen: EvmSendObservation): EvmS
     }
     return { do: 'claim_arkade', preimage }
   }
+  const timedOut = seen.evmTimelockHeight !== null && seen.evmTimelockHeight >= row.evmTimeout
 
   switch (row.state) {
     case 'quoted':
@@ -157,7 +158,7 @@ export const planEvmSend = (row: EvmSendPlanRow, seen: EvmSendObservation): EvmS
       // RULE 3, ahead of the presence split: the depth probe reads a node that
       // cannot answer as UNPROVEN, never absent, so gating the timeout on
       // absence withholds it from exactly the lock that needs it.
-      if (seen.evmTimelockHeight >= row.evmTimeout) return { do: 'refund_evm' }
+      if (timedOut) return { do: 'refund_evm' }
       if (!seen.evmLockPresent) return { do: 'wait' }
       // Depth AND age, both required. @see evm/config.ts - on a rollup a lock
       // can be many confirmations deep and still vanish, because safety comes
@@ -169,7 +170,7 @@ export const planEvmSend = (row: EvmSendPlanRow, seen: EvmSendObservation): EvmS
     case 'awaiting_claim':
       // RULE 3. Only at or past the timeout; earlier the contract rejects the
       // refund and treating that as failure would strand the lock.
-      return seen.evmTimelockHeight >= row.evmTimeout ? { do: 'refund_evm' } : { do: 'wait' }
+      return timedOut ? { do: 'refund_evm' } : { do: 'wait' }
 
     case 'refunding_evm':
       // RULE 7, and the lock's presence splits the revert. Still there: nobody
@@ -184,7 +185,7 @@ export const planEvmSend = (row: EvmSendPlanRow, seen: EvmSendObservation): EvmS
         return { do: 'stick', reason: 'the ERC20 refund transaction reverted; the lock is still funded' }
       }
       // RULE 8. That `pending` is for want of a question, not a refund in flight.
-      if (row.evmRefundTxid === null && seen.evmLockPresent && seen.evmTimelockHeight >= row.evmTimeout) {
+      if (row.evmRefundTxid === null && seen.evmLockPresent && timedOut) {
         return { do: 'refund_evm' }
       }
       // RULE 9. Cannot race rule 8: a refund that landed drained the lock, so

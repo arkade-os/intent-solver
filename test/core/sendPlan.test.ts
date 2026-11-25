@@ -9,6 +9,8 @@ import {
   planSend,
   type PaymentPlanRow,
   type PaymentReads,
+  SEND_COUPLED_REFUNDED,
+  SEND_COUPLED_REFUSED,
   SEND_KEY_ROTATED,
   type SendAction,
   type ClientLockup,
@@ -271,6 +273,19 @@ describe('planSend: funded', () => {
       expect((await run(row('funded'), { ...coupledTo(live), coupledPreimage: null })).next).toEqual(WAIT)
     })
 
+    it('keeps waiting while our refund of the payout may still lose to the client claim', async () => {
+      const refunding = { ...live, state: 'refunding' }
+      expect((await run(row('funded'), { ...coupledTo(refunding), coupledPreimage: null })).next).toEqual(WAIT)
+    })
+
+    it('refunds the client once our refund took the payout back unclaimed', async () => {
+      const refunded = { ...live, state: 'refunded' }
+      expect(await run(row('funded'), { ...coupledTo(refunded), coupledPreimage: null })).toEqual({
+        reads: ['refundDeadline', 'coupledReceive', 'coupledPreimage'],
+        next: { do: 'refuse_coupled', reason: SEND_COUPLED_REFUNDED },
+      })
+    })
+
     it('refuses to collect when the receive took a real payment', async () => {
       const { reads, next } = await run(row('funded'), coupledTo({ ...live, htlcExpiresAt: NOW + HOUR }))
       expect(reads).toEqual(['refundDeadline', 'coupledReceive'])
@@ -289,7 +304,7 @@ describe('planSend: funded', () => {
       for (const status of ['pending', 'cancelled']) {
         expect(await run(row('funded'), { ...afterRefusal(refused), ownInvoice: status })).toEqual({
           reads: ['refundDeadline', 'coupledReceive', 'failedReceive', 'ownInvoice'],
-          next: { do: 'refuse_coupled' },
+          next: { do: 'refuse_coupled', reason: SEND_COUPLED_REFUSED },
         })
       }
     })
@@ -317,7 +332,7 @@ describe('planSend: funded', () => {
         await run(row('funded'), { ...afterRefusal(refused), currentWallet: 'wallet-a', ownInvoice: 'pending' }, known),
       ).toEqual({
         reads: ['refundDeadline', 'coupledReceive', 'failedReceive', 'currentWallet', 'ownInvoice'],
-        next: { do: 'refuse_coupled' },
+        next: { do: 'refuse_coupled', reason: SEND_COUPLED_REFUSED },
       })
       const changed = [
         { world: { currentWallet: 'wallet-b' }, start: known },

@@ -152,6 +152,11 @@ describe('offerSettleFor — it refuses before it spends', () => {
     expect(fulfill).not.toHaveBeenCalled()
   })
 
+  it('and leaves a funding transaction the indexer did not serve retryable', async () => {
+    const { settle } = build(null)
+    await expect(settle(intentFor(published, raw))).rejects.toBeInstanceOf(OfferNotSubmittedError)
+  })
+
   it('when the funding transaction carries no offer any more', async () => {
     const bare = new Transaction({ allowUnknownOutputs: true, disableScriptCheck: true })
     bare.addOutput({ script: SWAP_SCRIPT, amount: BigInt(DEPOSIT_SATS) })
