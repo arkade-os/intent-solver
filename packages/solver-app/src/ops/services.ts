@@ -1006,6 +1006,10 @@ export const createServices = async (
         : undefined,
       offerHex: quotedOfferHexFor(assetRfqDerivation),
       pins: carrierPins,
+      // Replayed once after a restart, as a lost reply is: the Taxi answers a same-terms repeat idempotently.
+      unanswered: (await assetRfqStore.listUnresolvedCarrierAttempts())
+        .filter(({ attempt }) => attempt.phase === 'submitting')
+        .map(({ row }) => row.id),
     })
   }
   const assetRfqService = new AssetRfqSwapService({

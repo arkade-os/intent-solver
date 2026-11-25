@@ -354,5 +354,8 @@ describe('createServices — the Taxi receive carrier', () => {
     expect(source.indexOf('restoreCarrierAttemptPins(')).toBeLessThan(gate)
     expect(source).toContain('...(receiveCarrierQuotes ? { receiveCarrierQuotes } : {})')
     expect(source).toContain("['assetRfqService', () => assetRfqService.stop()]")
+    expect(source).toMatch(
+      /unanswered: \(await assetRfqStore\.listUnresolvedCarrierAttempts\(\)\)\s*\.filter\(\(\{ attempt \}\) => attempt\.phase === 'submitting'\)/,
+    )
   })
 })

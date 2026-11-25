@@ -47,6 +47,7 @@ export interface TaxiCarrierFillComposition {
   solverKeys: readonly string[]
   serverKey: () => Uint8Array
   now: () => number
+  unanswered?: Iterable<string>
 }
 
 /** Keyed on the row's MODE, never on URL equality: a named Taxi spelling `TAXI_URL` is still a payer's input. */
@@ -81,7 +82,7 @@ export const completeTaxiReceiveCarrier = (
 ): ReceiveCarrierQuotes => {
   const proceedsScript = ArkAddress.decode(deps.proceedsAddress).pkScript
   const taxiFor = carrierTaxiFor(deps)
-  const unanswered = new Set<string>()
+  const unanswered = new Set(deps.unanswered)
   return {
     available: reader.available,
     resolve: reader.resolve,
@@ -142,6 +143,7 @@ export const taxiReceiveCarrierFor = async (args: {
   tipHeight?: () => Promise<number>
   offerHex: (row: AssetRfqSwapRow) => string
   pins: CarrierPinLedger
+  unanswered?: Iterable<string>
 }): Promise<ReceiveCarrierQuotes> => {
   const { ctx } = args
   const coins = () => carrierCoins(ctx.wallet)
@@ -183,5 +185,6 @@ export const taxiReceiveCarrierFor = async (args: {
     solverKeys: [hex.encode(await ctx.identity.xOnlyPublicKey())],
     serverKey: () => ctx.wallet.arkServerPublicKey,
     now: () => Math.floor(Date.now() / 1000),
+    unanswered: args.unanswered,
   })
 }
