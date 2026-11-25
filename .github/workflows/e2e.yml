@@ -239,10 +239,6 @@ jobs:
                    ARKD_CHECKPOINT_EXIT_DELAY=86400 AUTOMINE_INTERVAL=0 \
                    ARK_OFFCHAIN_INPUT_FEE=0.0 ARK_ONCHAIN_INPUT_FEE=0.0 \
                    ARK_OFFCHAIN_OUTPUT_FEE=0.0 ARK_ONCHAIN_OUTPUT_FEE=0.0
-            # Covenant renewal defaults to 3 days before expiry, so on this 2-day tree every covenant is
-            # renewing while its receiver claims it. Half the tree; the profile's compose never passes it.
-            sed -i -E "s/^( +)TAXI_VTXO_RENEWAL_THRESHOLD_SECONDS: .*$/&\n\1TAXI_RENEWAL_BEFORE_EXPIRY_SECONDS: '86400'/" docker/compose.ark.yml
-            grep -q "TAXI_RENEWAL_BEFORE_EXPIRY_SECONDS: '86400'" docker/compose.ark.yml
           fi
           node regtest.mjs start --profile "$E2E_PROFILES"
 
