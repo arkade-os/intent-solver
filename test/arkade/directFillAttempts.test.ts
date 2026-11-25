@@ -375,6 +375,33 @@ describe('durable direct-fill attempts', () => {
     expect((await store.read('offer:row'))?.phase).toBe('abandoned')
   })
 
+  it('pins a committed row it could not read back as soon as the journal reads it again', async () => {
+    const { db } = database()
+    let failReads = 0
+    const faulty: SQLExecutor = {
+      ...db,
+      run: async (sql, params) => {
+        await db.run(sql, params)
+        if (!sql.startsWith('INSERT INTO direct_fill_attempt')) return
+        failReads = 1
+        throw new Error('insert reply lost')
+      },
+      get: async <T>(sql: string, params?: unknown[]): Promise<T | undefined> => {
+        if (failReads > 0) {
+          failReads--
+          throw new Error('read unavailable')
+        }
+        return db.get<T>(sql, params)
+      },
+    }
+    const pins = createReservationLedger()
+    const store = await DirectFillAttempts.open(faulty, pins, 'wallet', script)
+    await expect(store.prepare(input)).rejects.toThrow('read unavailable')
+    expect(pins.reserved().size).toBe(0)
+    expect((await store.list()).map((attempt) => attempt.phase)).toEqual(['prepared'])
+    expect(pins.reserved()).toEqual(new Set([`${funding[0]!.txid}:0`]))
+  })
+
   it('does not clean up a prepared attempt while its builder is active', async () => {
     const { db } = database()
     const pins = createReservationLedger()
