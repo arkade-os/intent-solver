@@ -998,7 +998,9 @@ overview, newest first, each linking to its detail.
    no money and the row stays `stuck` as the incident record. It refuses while
    anything, spendable or swept, is still at the lockup script, and it covers
    the two Lightning corridors only: an onchain send can still hold your L1
-   HTLC, which an empty Arkade lockup does not show.
+   HTLC, which an empty Arkade lockup does not show. For the same reason it
+   refuses a row carrying `unrolled_claim` or `unrolled_refund`: that spend is
+   on L1, so settle it there first (see the unrolled notes above).
 
    There is no un-resolve: a second `resolve-stuck` only replaces the note. A
    resolved row stays reachable by direct lookup (the swap's detail, or

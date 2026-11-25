@@ -447,6 +447,10 @@ export const ACTIONS: Record<string, ActionDefinition> = {
       if (!detail) throw new Error(`no ${corridor} swap ${id}`)
       if (detail.swap.state !== 'stuck')
         throw new Error(`swap ${id} is ${detail.swap.state}; only a stuck row is resolved`)
+      // An unrolled lockup lives on L1, where the Arkade reads below cannot see a pending claim or refund.
+      const raw = detail.raw as { unrolledClaim?: string | null; unrolledRefund?: string | null }
+      if (raw.unrolledClaim || raw.unrolledRefund)
+        throw new Error(`swap ${id} has an unrolled spend on L1: settle it there before resolving`)
       const left = await satsLeftAtLockup(services, corridor, id)
       if (left > 0) throw new Error(`swap ${id} still has ${left} sats at its lockup: claim or refund before resolving`)
       await services.adminStore.resolveStuck(corridor, id, note)

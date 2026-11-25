@@ -724,6 +724,7 @@ describe('resolve-stuck', () => {
     swept = [] as number[],
     corridor = LN_SEND,
     held = { lockup, preimage: null } as unknown,
+    raw = {} as Record<string, unknown>,
   } = {}) => {
     const resolveStuck = vi.fn().mockResolvedValue(undefined)
     const getVtxos = vi.fn(async (query: { spendableOnly?: boolean }) => ({
@@ -734,7 +735,7 @@ describe('resolve-stuck', () => {
       arkade: { wallet: { indexerProvider: { getVtxos } } },
       readers: corridorSet({
         [corridor]: {
-          detail: async () => ({ swap: { state } }),
+          detail: async () => ({ swap: { state }, raw }),
           lockupFor: async () => held,
         },
       }),
@@ -780,6 +781,17 @@ describe('resolve-stuck', () => {
 
     expect(response.status).toBe(500)
     expect(await response.json()).toMatchObject({ message: expect.stringMatching(/Lightning corridors/) })
+    expect(resolveStuck).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['send', { unrolledClaim: '{"outputs":[]}' }],
+    ['receive', { unrolledRefund: '{"outputs":[]}' }],
+  ])('refuses a %s row with an unrolled spend, which the Arkade lockup reads cannot see', async (_, raw) => {
+    const { response, resolveStuck } = await resolve({ raw })
+
+    expect(response.status).toBe(500)
+    expect(await response.json()).toMatchObject({ message: expect.stringMatching(/unrolled/) })
     expect(resolveStuck).not.toHaveBeenCalled()
   })
 
