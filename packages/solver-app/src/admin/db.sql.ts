@@ -119,6 +119,16 @@ CREATE TABLE IF NOT EXISTS admin_notify_state (
   updated_at INTEGER NOT NULL
 );
 
+-- An operator's account of a stuck swap. The swap row stays stuck: that is the
+-- incident record, and a note beside it does not rewrite it.
+CREATE TABLE IF NOT EXISTS admin_stuck_resolution (
+  corridor    TEXT NOT NULL,
+  swap_id     TEXT NOT NULL,
+  note        TEXT NOT NULL,
+  resolved_at INTEGER NOT NULL,
+  PRIMARY KEY (corridor, swap_id)
+);
+
 -- One-shot DATA migrations, by name. NOT a schema version: the ALTER loop below
 -- is idempotent, so only a seed reading the ENVIRONMENT needs an explicit marker.
 CREATE TABLE IF NOT EXISTS admin_migration (
@@ -265,5 +275,11 @@ export const upsertNotifyState =
 
 export const pendingApprovals =
   'SELECT * FROM admin_swap_approval WHERE approved_at IS NULL ORDER BY requested_at, swap_id'
+
+export const upsertStuckResolution =
+  'INSERT INTO admin_stuck_resolution (corridor, swap_id, note, resolved_at) VALUES (?, ?, ?, ?) ' +
+  'ON CONFLICT(corridor, swap_id) DO UPDATE SET note = excluded.note, resolved_at = excluded.resolved_at'
+
+export const stuckResolutions = 'SELECT corridor, swap_id, note, resolved_at FROM admin_stuck_resolution'
 
 export const listActions = 'SELECT * FROM admin_action ORDER BY at DESC, id DESC LIMIT ?'
