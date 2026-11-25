@@ -9,19 +9,12 @@ export const operatorHolds = (key: string, info: ArkadeInfo): boolean => {
 
 /**
  * arkd's own form of a client-named x-only key it signs for: its current signer, or a deprecated one
- * whose cutoff has not passed (0 is none). Null refuses.
+ * with no cutoff (0), since arkd refuses a key's inputs past its cutoff, which can precede a refund. Null refuses.
  */
-export const operatorCosignerKey = (
-  requested: string,
-  info: ArkadeInfo,
-  nowSeconds: number = Math.floor(Date.now() / 1000),
-): string | null => {
+export const operatorCosignerKey = (requested: string, info: ArkadeInfo): string | null => {
   if (requested === toXOnlySignerHex(info.signerPubkey)) return info.signerPubkey
   const deprecated = info.deprecatedSigners.find(
-    (signer) =>
-      signer.pubkey &&
-      toXOnlySignerHex(signer.pubkey) === requested &&
-      (signer.cutoffDate === 0n || signer.cutoffDate > BigInt(nowSeconds)),
+    (signer) => signer.pubkey && signer.cutoffDate === 0n && toXOnlySignerHex(signer.pubkey) === requested,
   )
   return deprecated?.pubkey ?? null
 }
