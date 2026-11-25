@@ -3,7 +3,8 @@
 The root `package.json` overrides resolve these names to the archives here until the Taxi publishes
 them. A frozen install refuses any archive whose bytes differ from the `integrity` in
 `pnpm-lock.yaml`, which is the sha512 below. Each pins `@arkade-os/sdk` 0.5.14, the npm release the
-workspace pins, so one SDK copy is linked.
+workspace pins, so one SDK copy is linked. SDK 0.5.14 and swap 0.1.16 carry ts-sdk #1282, #1283 and
+#1284, which earlier builds of this branch vendored as `0.5.14-taxi.1` / `0.1.16-taxi.1`.
 
 | Archive                                   | Source                                                           | sha256                                                             | sha512 (lockfile `integrity`)                                                                     |
 | ----------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |

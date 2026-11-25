@@ -9,7 +9,8 @@ export const operatorHolds = (key: string, info: ArkadeInfo): boolean => {
 
 /**
  * arkd's own form of a client-named x-only key it signs for: its current signer, or a deprecated one
- * whose cutoff has not passed (0 is none). Null refuses.
+ * whose cutoff has not passed (0 is none). Null refuses. Checked at quote time only, so a rotation's
+ * cutoff must outlast the lockup timeout or a quote funded near it can no longer be co-signed.
  */
 export const operatorCosignerKey = (
   requested: string,
