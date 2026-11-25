@@ -344,3 +344,15 @@ describe('which commands sweep journalled direct fills at boot', () => {
     expect(oneShot).toContain('createServices(config, opts)')
   })
 })
+
+describe('createServices — the Taxi receive carrier', () => {
+  it('is wired only when TAXI_URL is configured, after re-pinning every unresolved attempt', () => {
+    const source = body()
+    const gate = source.indexOf('if (config.taxiUrl) {')
+    expect(gate).toBeGreaterThan(0)
+    expect(source.indexOf('receiveCarrierQuotes = await taxiReceiveCarrierFor(')).toBeGreaterThan(gate)
+    expect(source.indexOf('restoreCarrierAttemptPins(')).toBeLessThan(gate)
+    expect(source).toContain('...(receiveCarrierQuotes ? { receiveCarrierQuotes } : {})')
+    expect(source).toContain("['assetRfqService', () => assetRfqService.stop()]")
+  })
+})

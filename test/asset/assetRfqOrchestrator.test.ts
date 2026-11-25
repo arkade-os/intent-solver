@@ -29,6 +29,7 @@ import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 import { RFQ_ASSET_SWAP_DIRECTED } from '@arkade-os/solver-core/core/rfqContract.js'
 import {
   type ReceiveCarrierQuote,
+  type ReceiveCarrierQuotes,
   AssetRfqSwapService,
   type AssetRfqDeps,
   type ObservedDeposit,
@@ -1282,7 +1283,12 @@ describe('carrier admission', () => {
     const balance = vi.fn(async () => new Map())
     const { service, store } = await harness({
       balance,
-      receiveCarrierQuotes: { resolve: async () => quoteFor(), available },
+      receiveCarrierQuotes: {
+        settle: vi.fn(),
+        reconcile: vi.fn(),
+        resolve: async () => quoteFor(),
+        available,
+      },
     })
     expect(await service.quote(request({ carrier: receiver }))).toMatchObject({ accepted: true, carrierSats: 0n })
     expect(balance).not.toHaveBeenCalled()
@@ -1295,6 +1301,8 @@ describe('carrier admission', () => {
     const { service, store } = await harness({
       onError: (_id, error) => errors.push(error),
       receiveCarrierQuotes: {
+        settle: vi.fn(),
+        reconcile: vi.fn(),
         resolve: async () => quoteFor(),
         available: async () => {
           throw new Error('taxi down')
@@ -1310,6 +1318,8 @@ describe('carrier admission', () => {
   it('refuses an asset receiver fare that would leave the payee nothing', async () => {
     const { service } = await harness({
       receiveCarrierQuotes: {
+        settle: vi.fn(),
+        reconcile: vi.fn(),
         resolve: async () => quoteFor({ receiverFare: { currency: 'asset', units: 10n ** 30n } }),
         available: async () => new Map([[ASSET_A, 10n ** 18n]]),
       },
@@ -1318,5 +1328,112 @@ describe('carrier admission', () => {
       accepted: false,
       reason: 'price_unavailable',
     })
+  })
+})
+
+describe('a carrier fill', () => {
+  const quoteOf = (over: Partial<ReceiveCarrierQuote> = {}): ReceiveCarrierQuote => ({
+    quoteId: 'q-1',
+    makerPkScript: PK_SCRIPT,
+    makerPublicKey: XONLY,
+    assetId: ASSET_A,
+    physicalSats: 330n,
+    loanSats: 330n,
+    receiptSats: 0n,
+    serviceFareSats: 0n,
+    taxiKey: 'd'.repeat(64),
+    inputExpiryFloor: { kind: 'height', value: 1_000_000n },
+    expiresAt: 1_600,
+    ...over,
+  })
+  const receiver = {
+    mode: 'recycle_receiver' as const,
+    quoteId: 'q-1',
+    taxiUrl: 'https://taxi.example',
+    taxiKey: 'd'.repeat(64),
+  }
+  const adapter = (over: Partial<ReceiveCarrierQuotes> = {}): ReceiveCarrierQuotes => ({
+    resolve: async () => quoteOf(),
+    available: async () => new Map([[ASSET_A, 10n ** 18n]]),
+    settle: vi.fn(async () => ({ status: 'submitted' as const })),
+    reconcile: vi.fn(async () => ({ status: 'pending' as const })),
+    ...over,
+  })
+  const funded = async (carrier: ReceiveCarrierQuotes) => {
+    const settle = vi.fn(async () => 'fa'.repeat(32))
+    const built = await harness({
+      receiveCarrierQuotes: carrier,
+      depositAt: async () => deposit(),
+      settle,
+      newId: sequentialIds(),
+      deriveOffer: perClientOffer,
+    })
+    expect(await built.service.quote(request({ carrier: receiver }))).toMatchObject({ accepted: true })
+    await built.service.tick('swap-1')
+    expect((await built.store.get('swap-1')).state).toBe('funded')
+    return { ...built, genericSettle: settle }
+  }
+
+  it('settles through the adapter, never the generic spend, and fills on its proven outcome', async () => {
+    const carrier = adapter({ settle: vi.fn(async () => ({ status: 'settled' as const, txid: 'fb'.repeat(32) })) })
+    const { service, store, genericSettle } = await funded(carrier)
+    await service.tick('swap-1')
+    expect(carrier.settle).toHaveBeenCalledOnce()
+    expect(genericSettle).not.toHaveBeenCalled()
+    expect(await store.get('swap-1')).toMatchObject({ state: 'filled', fillTxid: 'fb'.repeat(32) })
+  })
+
+  it('reconciles a submitted fill until the adapter proves it, or parks it when it cannot be observed', async () => {
+    const carrier = adapter()
+    const { service, store } = await funded(carrier)
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).state).toBe('filling')
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).state).toBe('filling')
+    vi.mocked(carrier.reconcile).mockResolvedValueOnce({ status: 'stuck', reason: 'fill unobservable' })
+    await service.tick('swap-1')
+    expect(await store.get('swap-1')).toMatchObject({ state: 'stuck', failureReason: 'fill unobservable' })
+  })
+
+  it('keeps a slow payee Taxi on its own queue: the sweep and other quotes do not wait for it', async () => {
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const carrier = adapter({
+      settle: vi.fn(async () => {
+        await held
+        return { status: 'submitted' as const }
+      }),
+    })
+    const { service, store } = await funded(carrier)
+    expect(await service.tickAll()).toEqual([])
+    await vi.waitFor(() => expect(carrier.settle).toHaveBeenCalledOnce())
+    expect(await service.quote(request({ rfqId: 'f'.repeat(64), makerPublicKey: 'c'.repeat(64) }))).toMatchObject({
+      accepted: true,
+    })
+    await service.tickAll()
+    expect(carrier.settle).toHaveBeenCalledOnce()
+    release()
+    await service.stop()
+    expect((await store.get('swap-1')).state).toBe('filling')
+  })
+
+  it('refuses a carrier row at fill time when no adapter is configured', async () => {
+    const { service, store } = await funded(adapter())
+    const bare = new AssetRfqSwapService({
+      store,
+      markets: [MARKET],
+      solverPubkey: 'e'.repeat(64),
+      quoteValiditySeconds: 30,
+      dustSats: 330n,
+      now: () => 1_000,
+      fetchPrice: async () => ({ mantissa: 100_000n, scale: 0 }),
+      deriveOffer: () => ({ pkScript: OFFER_SCRIPT, address: 'ark1qoffer' }),
+      depositAt: async () => deposit(),
+      balance: async () => new Map(),
+      settle: async () => 'fa'.repeat(32),
+    })
+    expect(service).toBeDefined()
+    await bare.tick('swap-1')
+    expect(await store.get('swap-1')).toMatchObject({ state: 'refused' })
   })
 })

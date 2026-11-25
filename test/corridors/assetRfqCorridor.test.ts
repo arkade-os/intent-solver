@@ -9,7 +9,7 @@
  * possible moment.
  */
 
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { createCorridorSet } from '@arkade-os/solver-core/core/corridor.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import {
@@ -79,6 +79,8 @@ const harness = async (
       ? {}
       : {
           receiveCarrierQuotes: {
+            settle: vi.fn(),
+            reconcile: vi.fn(),
             resolve: async () => ({
               quoteId: 'q-1',
               makerPkScript: PK_SCRIPT,

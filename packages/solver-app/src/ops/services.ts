@@ -143,8 +143,10 @@ import { marketServingDivergence } from './marketDivergence.js'
 import { offerInventoryFor } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { offerExitDelay, offerScriptFrom, xOnlyPubkey } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
 import { largestOfferOutpoint, liveOfferOutpoints } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
-import { quotedOfferSettleFor } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
+import { quotedOfferHexFor, quotedOfferSettleFor } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
 import { directFillRecoveryFor } from './directFillRecovery.js'
+import { carrierChainTip, createCarrierPinLedger, restoreCarrierAttemptPins } from './assetRfqTaxi.js'
+import { taxiReceiveCarrierFor } from './assetRfqTaxiAdapter.js'
 
 export interface Services {
   directFillRecovery?: Awaited<ReturnType<typeof directFillRecoveryFor>>
@@ -977,6 +979,35 @@ export const createServices = async (
     // The same key the quote names as `solver_pubkey` below, so the client derives this covenant.
     taker: hex.decode(arkadeOps.providerPubkey),
   }
+  // On ROWS, not on TAXI_URL: unsetting the knob over an open attempt must not free the coins it may spend.
+  const carrierPins = createCarrierPinLedger()
+  const repinned = await restoreCarrierAttemptPins({
+    attempts: () => assetRfqStore.listUnresolvedCarrierAttempts(),
+    reserve: (outpoints) => arkade.reservations.reserve(outpoints),
+    pins: carrierPins,
+  })
+  if (repinned.length > 0) log(`receive carrier: re-pinned the inputs of ${repinned.length} unresolved attempt(s)`)
+  // OFF unless TAXI_URL is set, so a deployment without one quotes no recycle and is otherwise unchanged.
+  let receiveCarrierQuotes: Awaited<ReturnType<typeof taxiReceiveCarrierFor>> | undefined
+  if (config.taxiUrl) {
+    const allowPrivate = process.env.TAXI_RECEIVER_ALLOW_PRIVATE === '1'
+    if (config.arkade.isMainnet && allowPrivate)
+      throw new Error('TAXI_RECEIVER_ALLOW_PRIVATE=1 is not allowed on mainnet')
+    receiveCarrierQuotes = await taxiReceiveCarrierFor({
+      ctx: arkade,
+      store: assetRfqStore,
+      taxiUrl: config.taxiUrl,
+      policy: { isMainnet: config.arkade.isMainnet, allowPrivate },
+      emulatorKey: assetRfqDerivation.emulatorPubkey,
+      quoteValiditySeconds: policy.assetQuoteValiditySeconds,
+      // Uncached, unlike the shared tip: a new block can move the input expiry floor.
+      tipHeight: config.chainTipEsploraUrl
+        ? carrierChainTip(createEsploraClient(config.chainTipEsploraUrl)).height
+        : undefined,
+      offerHex: quotedOfferHexFor(assetRfqDerivation),
+      pins: carrierPins,
+    })
+  }
   const assetRfqService = new AssetRfqSwapService({
     quoteLimiter,
     store: assetRfqStore,
@@ -996,6 +1027,7 @@ export const createServices = async (
       emulatorUrl: config.emulatorUrl,
       derivation: assetRfqDerivation,
     }),
+    ...(receiveCarrierQuotes ? { receiveCarrierQuotes } : {}),
     approvalGate: gateFor('arkade asset RFQ'),
     onError: (id, error) => log(`asset rfq ${id} failed:`, error instanceof Error ? error.message : String(error)),
     onDeferred: (id, error) => log(`asset rfq ${id} deferred:`, error instanceof Error ? error.message : String(error)),
@@ -1733,6 +1765,7 @@ export const createServices = async (
         ['onchainStore', () => onchainStore.close()],
         ['receiveStore', () => receiveStore.close()],
         ['offerStore', () => offerStore?.close()],
+        ['assetRfqService', () => assetRfqService.stop()],
         ['assetRfqStore', () => assetRfqStore.close()],
         ['adminStore', () => adminStore.close()],
         ['arkade', () => arkade.close()],

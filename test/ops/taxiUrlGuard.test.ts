@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { lookup } from 'node:dns/promises'
 import { RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
-import { guardedTaxiFetch, normalizeTaxiUrl, publicTaxiAddress } from '@arkade-os/solver-app/ops/taxiUrlGuard.js'
+import {
+  createPinnedTaxiFetch,
+  guardedTaxiFetch,
+  normalizeTaxiUrl,
+  publicTaxiAddress,
+} from '@arkade-os/solver-app/ops/taxiUrlGuard.js'
 
 const mainnet = { isMainnet: true, allowPrivate: false }
 const regtest = { isMainnet: false, allowPrivate: false }
@@ -103,5 +108,40 @@ describe('a guarded Taxi fetch', () => {
     await expect(guarded('https://a.example.com')).rejects.toThrow('rate-limited: a.example.com')
     await expect(guarded('https://b.example.com')).rejects.toThrow('across every host')
     expect(base).toHaveBeenCalledOnce()
+  })
+})
+
+describe('the pinned Taxi fetch', () => {
+  it('connects to the address it pinned and carries the request and reply through', async () => {
+    const { createServer } = await import('node:http')
+    const server = createServer((request, response) => {
+      let body = ''
+      request.on('data', (chunk) => (body += chunk))
+      request.on('end', () => {
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({ method: request.method, host: request.headers.host, body }))
+      })
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as { port: number }).port
+    const pinned: string[] = []
+    const pinnedFetch = createPinnedTaxiFetch(async (host) => {
+      pinned.push(host)
+      return { address: '127.0.0.1', family: 4 }
+    })
+    try {
+      const reply = await pinnedFetch(`http://taxi.example:${port}/v1/fills`, { method: 'POST', body: 'signed' })
+      expect(reply.status).toBe(200)
+      expect(await reply.json()).toEqual({ method: 'POST', host: `taxi.example:${port}`, body: 'signed' })
+      expect(pinned).toEqual(['taxi.example'])
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
+
+  it('refuses before connecting when the name resolves to a private address', async () => {
+    const resolve = (async () => [{ address: '10.0.0.7', family: 4 }]) as never
+    const pinnedFetch = createPinnedTaxiFetch((host) => publicTaxiAddress(host, resolve))
+    await expect(pinnedFetch('https://taxi.example/v1/info')).rejects.toThrow('private address')
   })
 })

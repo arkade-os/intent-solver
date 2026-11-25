@@ -8,6 +8,7 @@ import { schnorr } from '@noble/curves/secp256k1.js'
 import { base64, hex } from '@scure/base'
 import {
   arkade,
+  createAssetPacket,
   CSVMultisigTapscript,
   EmulatorPacket,
   Extension,
@@ -23,9 +24,15 @@ import { prepareFillSubmission, sealFillGraph, signFillForTaxi } from '@arkade-t
 import { offerExitDelay, offerScriptFrom } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
 import { quotedOfferHexFor } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
 import { RFQ_ASSET_SWAP_DIRECTED, RFQ_ASSET_SWAP_DIRECTED_NONCE } from '@arkade-os/solver-core/core/rfqContract.js'
-import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
-import { createCarrierPinLedger } from '@arkade-os/solver-app/ops/assetRfqTaxi.js'
-import { carrierFillSigner, createTaxiReceiveCarrierSettler } from '@arkade-os/solver-app/ops/assetRfqTaxiSettle.js'
+import { AssetRfqSwapStore, type AssetRfqSwapRow } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
+import { createCarrierPinLedger, restoreCarrierAttemptPins } from '@arkade-os/solver-app/ops/assetRfqTaxi.js'
+import { createTaxiReceiveCarrierObserver } from '@arkade-os/solver-app/ops/assetRfqTaxiProof.js'
+import {
+  carrierFillSigner,
+  createTaxiReceiveCarrierSettler,
+  storedFillRequest,
+} from '@arkade-os/solver-app/ops/assetRfqTaxiSettle.js'
+import type { CarrierAttempt } from '@arkade-os/solver-corridors/db/carrierAttempt.js'
 
 const seed = (n: number) => new Uint8Array(32).fill(n)
 const SERVER_KEY = schnorr.getPublicKey(seed(0x59))
@@ -66,7 +73,8 @@ const spendEdge = (leaf: Uint8Array, n: number) => {
 }
 
 /** offer-fill/1: the directed deposit the Taxi gates, the solver's funding and the Taxi's carrier. */
-const directedFill = (depositKeys = [solverKey, SERVER_KEY, gateKey]): JointGraph => {
+/** `paid` pays the maker its dust and asset, and the solver its proceeds, as a real fill does. */
+const directedFill = (depositKeys = [solverKey, SERVER_KEY, gateKey], paid = false): JointGraph => {
   const edges = [
     spendEdge(MultisigTapscript.encode({ pubkeys: depositKeys }).script, 0x71),
     spendEdge(MultisigTapscript.encode({ pubkeys: [solverKey, SERVER_KEY] }).script, 0x72),
@@ -74,9 +82,23 @@ const directedFill = (depositKeys = [solverKey, SERVER_KEY, gateKey]): JointGrap
   ]
   const ark = new Transaction({ version: 3, lockTime: 0 })
   for (const { input } of edges) ark.addInput(input)
-  ark.addOutput({ script: payTo(0xa1), amount: 2_000n })
-  ark.addOutput({ script: payTo(0xb2), amount: 1_000n })
-  ark.addOutput(Extension.create([EmulatorPacket.create([{ vin: 0, script: GATE_SCRIPT }])]).txOut())
+  const gate = EmulatorPacket.create([{ vin: 0, script: GATE_SCRIPT }])
+  if (paid) {
+    const held = [{ assetId: ASSET, amount: 100n }]
+    for (const [script, amount] of [
+      [payTo(0xa1), 330n],
+      [payTo(0xc3), 1_999n],
+      [payTo(0xb2), 671n],
+    ] as const)
+      ark.addOutput({ script, amount })
+    ark.addOutput(
+      Extension.create([createAssetPacket(new Map([[1, held]]), [{ address: '', assets: held }]), gate]).txOut(),
+    )
+  } else {
+    ark.addOutput({ script: payTo(0xa1), amount: 2_000n })
+    ark.addOutput({ script: payTo(0xb2), amount: 1_000n })
+    ark.addOutput(Extension.create([gate]).txOut())
+  }
   const plan = {
     arkTx: base64.encode(ark.toPSBT()),
     checkpoints: edges.map(({ checkpoint }) => base64.encode(checkpoint.toPSBT())),
@@ -157,7 +179,7 @@ describe('the carrier fill signer', () => {
 })
 
 describe('the carrier fill settle', () => {
-  it('binds the signed graph before it posts, and posts exactly the bytes it bound', async () => {
+  const submitted = async () => {
     const store = await AssetRfqSwapStore.open(':memory:', () => 1_000)
     const carrierTerms = {
       mode: 'recycle' as const,
@@ -177,7 +199,7 @@ describe('the carrier fill settle', () => {
       fromAmount: 20_000n,
       toAssetId: ASSET,
       toAmount: 100n,
-      makerPkScript: `5120${'aa'.repeat(32)}`,
+      makerPkScript: hex.encode(payTo(0xa1)),
       makerPublicKey: 'bb'.repeat(32),
       offerPkScript: `5120${'dd'.repeat(32)}`,
       offerAddress: 'ark1qoffer',
@@ -185,11 +207,11 @@ describe('the carrier fill settle', () => {
       validUntil: 1_500,
       carrierTerms,
     })
-    await store.transition('row', 'quoted', 'funded', { deposit_txid: 'ff'.repeat(32), deposit_vout: 0 })
+    await store.transition('row', 'quoted', 'funded', { deposit_txid: '71'.repeat(32), deposit_vout: 0 })
     await store.transition('row', 'funded', 'filling')
     const funding = new VtxoScript([MultisigTapscript.encode({ pubkeys: [solverKey, SERVER_KEY] }).script])
     const coin = {
-      txid: '0a'.repeat(32),
+      txid: '72'.repeat(32),
       vout: 0,
       value: 5_000,
       expiresAtHeight: 2_000,
@@ -215,11 +237,16 @@ describe('the carrier fill settle', () => {
       proceedsScript: payTo(0xc3),
       solverKeys: [me],
       serverKey: () => SERVER_KEY,
-      fill: { rebuild: async () => directedFill(), sign: carrierFillSigner(solver) },
+      fill: { rebuild: async () => directedFill(undefined, true), sign: carrierFillSigner(solver) },
       now: () => 1_000,
     }).settle
 
     expect(await settle(await store.get('row'))).toEqual({ status: 'submitted' })
+    return { store, submitFill, coin }
+  }
+
+  it('binds the signed graph before it posts, and posts exactly the bytes it bound', async () => {
+    const { store, submitFill } = await submitted()
     const bound = (await store.readCarrierAttempt('row'))!
     const graph = bound.binding!.graph as { ark_tx: string; checkpoints: string[] }
     expect(bound.phase).toBe('submitting')
@@ -231,6 +258,43 @@ describe('the carrier fill settle', () => {
       checkpoints: graph.checkpoints,
       taxiInputIndexes: [2],
     })
+    await store.close()
+  })
+
+  it('replays the stored bytes once when the fill is not yet seen, and leaves the rest to the conflict', async () => {
+    const { store, submitFill } = await submitted()
+    const cancel = vi.fn(async () => ({ status: 'pending' as const }))
+    const resubmit = vi.fn(async (row: AssetRfqSwapRow, attempt: CarrierAttempt) => {
+      await submitFill(storedFillRequest(row, attempt))
+    })
+    const reconcile = createTaxiReceiveCarrierObserver({
+      store,
+      chain: { getVtxos: async () => ({ vtxos: [] }), getVirtualTxs: async () => ({ txs: [] }) },
+      pins: createCarrierPinLedger(),
+      cancel,
+      resubmit,
+    }).reconcile
+    const row = await store.get('row')
+    expect(await reconcile(row)).toEqual({ status: 'pending' })
+    expect(await reconcile(row)).toEqual({ status: 'pending' })
+    expect(resubmit).toHaveBeenCalledOnce()
+    expect(cancel).toHaveBeenCalledOnce()
+    expect(submitFill.mock.calls[1]![0]).toEqual(submitFill.mock.calls[0]![0])
+    await store.close()
+  })
+
+  it('re-pins an unresolved attempt at boot, from what the store holds', async () => {
+    const { store, coin } = await submitted()
+    const reserve = vi.fn(() => () => {})
+    const pins = createCarrierPinLedger()
+    const restored = await restoreCarrierAttemptPins({
+      attempts: () => store.listUnresolvedCarrierAttempts(),
+      reserve,
+      pins,
+    })
+    expect(restored).toEqual(['row'])
+    expect(reserve).toHaveBeenCalledWith([{ txid: coin.txid, vout: coin.vout }])
+    expect(pins.heldFor('row')).toHaveLength(1)
     await store.close()
   })
 })

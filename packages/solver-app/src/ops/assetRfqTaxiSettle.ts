@@ -14,6 +14,7 @@ import {
   CARRIER_FILL_MARGIN_SECONDS,
   receiveCarrierTaxiOf,
   type ReceiveCarrierQuotes,
+  type ReceiveCarrierSettleOutcome,
 } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import {
   carrierTaprootEvidence,
@@ -29,8 +30,6 @@ import { outpointKey, usableSatsOf } from '@arkade-os/solver-arkade/arkade/locku
 
 type Locktime = Readonly<{ kind: 'height' | 'time'; value: bigint }>
 
-/** `submitted` is not a failure: the row stays `filling` until reconciliation proves the fill. */
-export type ReceiveCarrierSettleOutcome = { status: 'submitted' } | { status: 'settled'; txid: string }
 type FillRequest = Parameters<TaxiClient['submitFill']>[0]
 
 export interface CarrierAttemptStore {
@@ -201,9 +200,7 @@ export const carrierFillSigner =
     })
   }
 
-export const createTaxiReceiveCarrierSettler = (
-  deps: TaxiCarrierSettleDeps,
-): { settle: (row: AssetRfqSwapRow) => Promise<ReceiveCarrierSettleOutcome> } => {
+export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pick<ReceiveCarrierQuotes, 'settle'> => {
   const settleOnce = async (row: AssetRfqSwapRow): Promise<ReceiveCarrierSettleOutcome> => {
     const terms = row.carrierTerms
     if ((terms?.mode !== 'recycle' && terms?.mode !== 'recycle_receiver') || terms.quoteId === undefined) {
@@ -339,25 +336,7 @@ export const createTaxiReceiveCarrierSettler = (
       if (!(await deps.store.markCarrierAttemptSubmitting(row.id, bound))) {
         throw new Error(`carrier fill ${row.id} could not mark itself submitting; nothing has been sent`)
       }
-      const persisted = (await deps.store.readCarrierAttempt(row.id))?.binding?.graph as
-        { ark_tx?: unknown; checkpoints?: unknown } | undefined
-      if (
-        typeof persisted?.ark_tx !== 'string' ||
-        !Array.isArray(persisted.checkpoints) ||
-        !persisted.checkpoints.every((checkpoint) => typeof checkpoint === 'string')
-      ) {
-        throw new Error(`carrier fill ${row.id} lost its bound graph before it was sent`)
-      }
-      const submission: FillRequest = {
-        operationId: row.id,
-        quoteId: terms.quoteId,
-        arkTx: persisted.ark_tx,
-        checkpoints: persisted.checkpoints as string[],
-        taxiInputIndexes,
-        covenantOutputIndex: 0,
-        assetUnits: row.toAmount,
-        validUntil,
-      }
+      const submission = storedFillRequest(row, await deps.store.readCarrierAttempt(row.id))
       liable = true
       await taxi.fills.submitFill(submission)
     } catch (error) {
@@ -394,5 +373,33 @@ const releaseIfProvenNeverSubmitted = async (
   // Only the caller that WINS the terminal CAS may release, and only its own.
   if (await deps.store.refuseNeverSubmittedCarrierAttempt(pin.id, current, `not filled: ${reason}`)) {
     pin.release()
+  }
+}
+
+/** The fill request a bound attempt was posted with, rebuilt from what the store holds so a retry replays it. */
+export const storedFillRequest = (row: AssetRfqSwapRow, attempt: CarrierAttempt | null): FillRequest => {
+  const binding = attempt?.binding
+  const graph = binding?.graph as { ark_tx?: unknown; checkpoints?: unknown; input_owners?: unknown } | undefined
+  const checkpoints = graph?.checkpoints
+  const owners = graph?.input_owners
+  if (
+    typeof binding?.quote_id !== 'string' ||
+    typeof binding.expires_at !== 'number' ||
+    typeof graph?.ark_tx !== 'string' ||
+    !Array.isArray(checkpoints) ||
+    !checkpoints.every((checkpoint) => typeof checkpoint === 'string') ||
+    !Array.isArray(owners)
+  ) {
+    throw new Error(`carrier fill ${row.id} has no bound graph to send`)
+  }
+  return {
+    operationId: row.id,
+    quoteId: binding.quote_id,
+    arkTx: graph.ark_tx,
+    checkpoints: checkpoints as string[],
+    taxiInputIndexes: owners.flatMap((owner, index) => (owner === 'sponsor' ? [index] : [])),
+    covenantOutputIndex: 0,
+    assetUnits: row.toAmount,
+    validUntil: binding.expires_at,
   }
 }

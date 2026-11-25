@@ -8,6 +8,12 @@ import {
 } from '@arkade-os/sdk'
 import { hex } from '@scure/base'
 import { TaxiClient, verifyReceiveQuote, type VerifiedReceiveQuote } from '@arkade-taxi/client'
+import { esploraChainTip, type ChainTipProvider } from '@arkade-os/solver-rails/onchain/chainTip.js'
+import type { EsploraClient } from '@arkade-os/solver-rails-esplora/esplora.js'
+import { RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
+import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
+import { createPinnedTaxiFetch, guardedTaxiFetch, normalizeTaxiUrl, type TaxiUrlPolicy } from './taxiUrlGuard.js'
+import type { CarrierAttemptRecord } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { outpointKey, usableSatsOf } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
 import type { ReleaseReservation } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import type { JsonObject } from '@arkade-os/solver-corridors/db/carrierAttempt.js'
@@ -324,6 +330,7 @@ export const createTaxiReceiveCarrierReader = (deps: TaxiReceiveCarrierDeps): Ta
   }
 }
 
+/** Separate cheap quote traffic from funded-fill traffic. */
 export type TaxiBudget = 'quote' | 'fill'
 
 export interface CarrierPin {
@@ -386,4 +393,109 @@ const checkedOutpoints = (value: unknown, label: string): CarrierOutpoint[] => {
     }
     return { txid: input.txid, vout: input.vout as number }
   })
+}
+
+export interface TaxiCarrierComposition {
+  taxiUrl?: string
+  trust: () => Promise<TaxiCarrierTrust>
+  maxServiceFareSats: bigint
+  coins: () => Promise<readonly CarrierCoin[]>
+  reserved: () => ReadonlySet<string>
+  quoteValiditySeconds: number
+  tipHeight?: () => Promise<number>
+  /** SSRF policy for request-named URLs; configured URLs are trusted separately. */
+  policy: TaxiUrlPolicy
+}
+
+/** Do not cache the chain tip: a newly mined block can invalidate the expiry floor. */
+export const carrierChainTip = (client: EsploraClient): ChainTipProvider => esploraChainTip(client, { cacheMs: 0 })
+
+export const TAXI_QUOTE_RATE_LIMIT = 20
+/** Funded fills use at most six requests per host. */
+export const TAXI_FILL_RATE_LIMIT = 60
+/** Shared by every named host, so fresh subdomains cannot multiply it: ten receiver-paid quotes a minute, 4 reads each. */
+export const TAXI_QUOTE_GLOBAL_RATE_LIMIT = 40
+/** Bound how long an untrusted quote endpoint can hold the queue. */
+export const TAXI_QUOTE_TIMEOUT_MS = 2_000
+const TAXI_CLIENT_RATE_WINDOW_SECONDS = 60
+const TAXI_CLIENT_CACHE_SIZE = 32
+
+/** Bounded FIFO cache per URL and budget; configured URLs still use bounded reads. */
+export const taxiClientCache = (deps: {
+  configuredUrl?: string
+  policy: TaxiUrlPolicy
+}): ((url?: string, budget?: TaxiBudget) => TaxiCarrierClient) => {
+  const configured = deps.configuredUrl
+    ? new TaxiClient({
+        baseUrl: deps.configuredUrl,
+        fetch: guardedTaxiFetch(
+          fetch,
+          new RateLimiter(Number.MAX_SAFE_INTEGER, TAXI_CLIENT_RATE_WINDOW_SECONDS, nowSeconds),
+        ),
+      })
+    : undefined
+  const requestFetch = deps.policy.allowPrivate ? fetch : createPinnedTaxiFetch()
+  const limiters: Record<TaxiBudget, RateLimiter> = {
+    quote: new RateLimiter(TAXI_QUOTE_RATE_LIMIT, TAXI_CLIENT_RATE_WINDOW_SECONDS, nowSeconds),
+    fill: new RateLimiter(TAXI_FILL_RATE_LIMIT, TAXI_CLIENT_RATE_WINDOW_SECONDS, nowSeconds),
+  }
+  const guards: Record<TaxiBudget, Parameters<typeof guardedTaxiFetch>[2]> = {
+    quote: {
+      timeoutMs: TAXI_QUOTE_TIMEOUT_MS,
+      global: new RateLimiter(TAXI_QUOTE_GLOBAL_RATE_LIMIT, TAXI_CLIENT_RATE_WINDOW_SECONDS, nowSeconds),
+    },
+    fill: {},
+  }
+  const cache = new Map<string, TaxiCarrierClient>()
+  return (url, budget = 'quote') => {
+    if (url === undefined) {
+      if (!configured) throw new Error('no receive-carrier Taxi is configured for this request')
+      return configured
+    }
+    const normalized = normalizeTaxiUrl(url, deps.policy)
+    const key = `${budget} ${normalized}`
+    const cached = cache.get(key)
+    if (cached) return cached
+    if (cache.size >= TAXI_CLIENT_CACHE_SIZE) {
+      const oldest = cache.keys().next().value
+      if (oldest !== undefined) cache.delete(oldest)
+    }
+    const client = new TaxiClient({
+      baseUrl: normalized,
+      fetch: guardedTaxiFetch(requestFetch, limiters[budget], guards[budget]),
+    })
+    cache.set(key, client)
+    return client
+  }
+}
+
+export const taxiReceiveCarrier = async (deps: TaxiCarrierComposition): Promise<TaxiReceiveCarrierReader> =>
+  createTaxiReceiveCarrierReader({
+    clientFor: taxiClientCache({
+      configuredUrl: deps.taxiUrl?.trim() || undefined,
+      policy: deps.policy,
+    }),
+    trust: await deps.trust(),
+    maxServiceFareSats: deps.maxServiceFareSats,
+    coins: deps.coins,
+    reserved: deps.reserved,
+    quoteValiditySeconds: deps.quoteValiditySeconds,
+    tipHeight: deps.tipHeight,
+  })
+
+/** Caller-scoped ownership prevents a losing CAS from releasing the winner's coins. */
+
+/** Restore unresolved pins before any tick; liability survives process-local reservations. */
+export const restoreCarrierAttemptPins = async (deps: {
+  attempts: () => Promise<readonly CarrierAttemptRecord[]>
+  reserve: (outpoints: readonly CarrierOutpoint[]) => ReleaseReservation
+  pins: CarrierPinLedger
+}): Promise<readonly string[]> => {
+  const records = await deps.attempts()
+  const pinned = records.map(({ row, attempt }) => ({
+    id: row.id,
+    inputs: decodeCarrierAttemptInputs(attempt.snapshot, row.id),
+  }))
+  for (const { id, inputs } of pinned) deps.pins.adopt(id, deps.reserve(inputs))
+  return pinned.map(({ id }) => id)
 }

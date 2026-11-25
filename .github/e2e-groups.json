@@ -8,7 +8,8 @@
       "assetOffer.e2e.test.ts",
       "assetLockup.e2e.test.ts",
       "assetDustLockup.e2e.test.ts",
-      "assetRfqRelay.e2e.test.ts"
+      "assetRfqRelay.e2e.test.ts",
+      "assetRfqCarrierConflict.e2e.test.ts"
     ],
     "mintAsset": true,
     "lnd": false,
