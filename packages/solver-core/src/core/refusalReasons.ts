@@ -46,6 +46,7 @@ type OrchestratorRefusal =
   | 'invalid_refund_address'
   | 'invalid_payout_address'
   | 'invalid_claim_packet'
+  | 'unsupported_emulator_pubkey'
   | 'rate_limited'
   | 'coupled_deadline_unsafe'
   | 'coupled_invoice_mismatch'
@@ -185,6 +186,11 @@ export const REFUSAL_EXPLANATIONS: Record<RefusalReason, RefusalExplanation> = {
   invalid_claim_packet: {
     meaning: 'The supplied claim packet could not be attached to the Arkade funding transaction.',
     whatToDo: 'Ask the client for a valid sealed claim packet or have them omit it for a collaborative claim.',
+  },
+  unsupported_emulator_pubkey: {
+    meaning:
+      "The client named a covenant co-signer key that is neither this deployment's default nor one arkd signs for: its current signer, or a deprecated signer before its cutoff. The asset RFQ corridor accepts only the default.",
+    whatToDo: "Nothing, unless the client named arkd's key: then check that it and this solver use the same arkd.",
   },
   rate_limited: {
     meaning: 'This requester key exceeded the quote quota for the current window.',

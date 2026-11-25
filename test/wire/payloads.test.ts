@@ -114,6 +114,7 @@ const QUOTE_REFUSALS = [
   'recourse_after_evm_timeout',
   'recourse_after_refund_deadline',
   'recourse_window_unservable',
+  'unsupported_emulator_pubkey',
   'unsupported_pair',
   'unsupported_payload',
   'unsupported_token',
