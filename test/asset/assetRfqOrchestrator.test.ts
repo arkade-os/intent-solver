@@ -28,6 +28,7 @@ import { IMPLIED_PRICE_HEADROOM } from '@arkade-os/solver-core/core/assetRfq.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 import { RFQ_ASSET_SWAP_DIRECTED } from '@arkade-os/solver-core/core/rfqContract.js'
 import {
+  type ReceiveCarrierQuote,
   AssetRfqSwapService,
   type AssetRfqDeps,
   type ObservedDeposit,
@@ -1251,5 +1252,70 @@ describe('a direct fill the journal proved after its reply was lost', () => {
       fillPriceMantissa: 90_000n,
     })
     expect(reads).toBe(2)
+  })
+})
+
+describe('carrier admission', () => {
+  const quoteFor = (over: Partial<ReceiveCarrierQuote> = {}): ReceiveCarrierQuote => ({
+    quoteId: 'q-1',
+    makerPkScript: PK_SCRIPT,
+    makerPublicKey: XONLY,
+    assetId: ASSET_A,
+    physicalSats: 330n,
+    loanSats: 330n,
+    receiptSats: 0n,
+    serviceFareSats: 0n,
+    taxiKey: 'd'.repeat(64),
+    expiresAt: 1_600,
+    ...over,
+  })
+  const receiver = {
+    mode: 'recycle_receiver' as const,
+    quoteId: 'q-1',
+    taxiUrl: 'https://taxi.example',
+    taxiKey: 'd'.repeat(64),
+  }
+
+  it("reads a carrier fill's inventory from the adapter, never the generic balance", async () => {
+    const available = vi.fn(async () => new Map([[ASSET_A, 10n ** 18n]]))
+    const balance = vi.fn(async () => new Map())
+    const { service, store } = await harness({
+      balance,
+      receiveCarrierQuotes: { resolve: async () => quoteFor(), available },
+    })
+    expect(await service.quote(request({ carrier: receiver }))).toMatchObject({ accepted: true, carrierSats: 0n })
+    expect(balance).not.toHaveBeenCalled()
+    expect(available).toHaveBeenCalledWith(expect.objectContaining({ receiverPaid: true, admission: true }))
+    expect((await store.get('swap-1')).carrierTerms).toMatchObject({ mode: 'recycle_receiver', pricedSats: 0n })
+  })
+
+  it('refuses when the carrier inventory cannot be read, and records nothing', async () => {
+    const errors: unknown[] = []
+    const { service, store } = await harness({
+      onError: (_id, error) => errors.push(error),
+      receiveCarrierQuotes: {
+        resolve: async () => quoteFor(),
+        available: async () => {
+          throw new Error('taxi down')
+        },
+      },
+    })
+    const outcome = await service.quote(request({ carrier: receiver }))
+    expect(outcome).toMatchObject({ accepted: false, reason: 'price_unavailable' })
+    expect(errors).toEqual([new Error('taxi down')])
+    expect(await store.findByRfqId(RFQ_ID)).toBeNull()
+  })
+
+  it('refuses an asset receiver fare that would leave the payee nothing', async () => {
+    const { service } = await harness({
+      receiveCarrierQuotes: {
+        resolve: async () => quoteFor({ receiverFare: { currency: 'asset', units: 10n ** 30n } }),
+        available: async () => new Map([[ASSET_A, 10n ** 18n]]),
+      },
+    })
+    expect(await service.quote(request({ carrier: receiver }))).toMatchObject({
+      accepted: false,
+      reason: 'price_unavailable',
+    })
   })
 })

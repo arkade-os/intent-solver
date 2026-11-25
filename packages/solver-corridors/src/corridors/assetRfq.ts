@@ -44,6 +44,7 @@ import { rfqRefusalPayload } from '../wire/payloads.js'
 import { parseRfq } from './rfq.js'
 import {
   AssetRfqRequest,
+  assetRfqCarrierChoice,
   assetRfqPairFor,
   assetRfqQuotePayload,
   assetRfqStatusPayload,
@@ -251,6 +252,7 @@ export const respondToAssetRfqRequest = async (
     makerPublicKey: request.profile.maker_public_key,
     requesterKey: options?.requesterKey,
     contractVersion: options?.contractVersion,
+    ...(request.profile.carrier === undefined ? {} : { carrier: assetRfqCarrierChoice(request.profile) }),
   })
   if (outcome.accepted) {
     // Off the OUTCOME, not the service: the serialiser wraps `quote` alone, and nothing revalidates this
