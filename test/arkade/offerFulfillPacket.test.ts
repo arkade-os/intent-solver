@@ -12,16 +12,19 @@
  * = 0`. Every other asset on every input must still be declared or arkd
  * answers ASSET_NOT_FOUND.
  */
-import { describe, it, expect, vi } from 'vitest'
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
 import { base64, hex } from '@scure/base'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import {
   fulfillOffer,
+  offerInventoryFor,
   OfferNotSubmittedError,
   OfferSubmitRejectedError,
 } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
+import { DirectFillAttempts } from '@arkade-os/solver-arkade/arkade/directFillAttempts.js'
+import { createDirectFillRecovery } from '@arkade-os/solver-app/ops/directFillRecovery.js'
 import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
-import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { sqliteExecutor, type ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { RFQ_ASSET_SWAP_DIRECTED } from '@arkade-os/solver-core/core/rfqContract.js'
 
 const state = vi.hoisted(() => ({
@@ -30,6 +33,10 @@ const state = vi.hoisted(() => ({
   checkpointTxs: [] as string[],
   prevTxs: new Map<string, string>(),
   submitError: undefined as Error | undefined,
+  /** arkd accepted the fill, and its reply never came back. */
+  replyLost: false,
+  /** Whether the indexer shows the last accepted fill yet. */
+  finalized: true,
 }))
 
 vi.mock('@arkade-os/sdk', async (importOriginal) => {
@@ -54,8 +61,24 @@ vi.mock('@arkade-os/sdk', async (importOriginal) => {
     RestArkProvider: OperatorProvider,
     RestOperatorProvider: OperatorProvider,
     RestIndexerProvider: class {
-      async getVtxos() {
-        return { vtxos: state.vtxos }
+      async getVtxos(options?: { outpoints?: { txid: string; vout: number }[] }) {
+        if (!options?.outpoints || state.arkTx === undefined) return { vtxos: state.vtxos }
+        if (!state.finalized) return { vtxos: [] }
+        // What the indexer says once the last accepted fill is final: its inputs spent, its outputs live.
+        const ark = mod.Transaction.fromPSBT(base64.decode(state.arkTx))
+        const checkpoints = state.checkpointTxs.map((psbt) => mod.Transaction.fromPSBT(base64.decode(psbt)))
+        return {
+          vtxos: options.outpoints.flatMap((point): Record<string, unknown>[] => {
+            const spender = checkpoints.find((tx) => {
+              const input = tx.getInput(0)
+              return input.txid && hex.encode(input.txid) === point.txid && input.index === point.vout
+            })
+            if (spender) return [{ ...point, spentBy: spender.id, arkTxId: ark.id }]
+            if (point.txid !== ark.id) return []
+            const output = ark.getOutput(point.vout)
+            return [{ ...point, script: hex.encode(output.script!), value: Number(output.amount) }]
+          }),
+        }
       }
       async getVirtualTxs(txids: string[]) {
         return { txs: txids.map((t) => state.prevTxs.get(t)).filter((p): p is string => p !== undefined) }
@@ -67,6 +90,9 @@ vi.mock('@arkade-os/sdk', async (importOriginal) => {
         if (state.submitError) throw state.submitError
         state.arkTx = arkTx
         state.checkpointTxs = checkpointTxs
+        for (const raw of [arkTx, ...checkpointTxs])
+          state.prevTxs.set(mod.Transaction.fromPSBT(base64.decode(raw)).id, raw)
+        if (state.replyLost) throw new Error('accepted fill reply lost')
         return { signedArkTx: arkTx, signedCheckpointTxs: checkpointTxs }
       }
     },
@@ -79,7 +105,8 @@ vi.mock('@arkade-os/swap/protocol', async (importOriginal) => {
   return { ...mod, fillOffer: vi.fn(mod.fillOffer) }
 })
 
-const { ArkAddress, Extension, MultisigTapscript, Transaction, VtxoScript, asset } = await import('@arkade-os/sdk')
+const { ArkAddress, Extension, MultisigTapscript, RestIndexerProvider, Transaction, VtxoScript, asset } =
+  await import('@arkade-os/sdk')
 const { fillOffer, offerVtxoScript } = await import('@arkade-os/swap/protocol')
 type Offer = import('@arkade-os/swap/protocol').Offer
 
@@ -92,6 +119,19 @@ const ASSET_B = `${'bb'.repeat(32)}0000`
 const takerKey = schnorr.getPublicKey(new Uint8Array(32).fill(0x7a))
 const identity = { xOnlyPublicKey: async () => takerKey, sign: async (tx: unknown) => tx }
 
+const PROCEEDS = new ArkAddress(SERVER_KEY, hex.decode('22'.repeat(32)), 'tark')
+/** One wallet database per test, so its journal and pins are the ones the test reads back. */
+let wallet: { db: ReturnType<typeof sqliteExecutor>; reservations: ReturnType<typeof createReservationLedger> }
+let directFills: DirectFillAttempts
+const journalOn = (reservations = createReservationLedger()) =>
+  DirectFillAttempts.open(wallet.db, reservations, 'packet-test', hex.encode(PROCEEDS.pkScript))
+beforeEach(async () => {
+  wallet = { db: sqliteExecutor(':memory:'), reservations: createReservationLedger() }
+  directFills = await journalOn(wallet.reservations)
+  Object.assign(state, { arkTx: undefined, checkpointTxs: [], replyLost: false, finalized: true })
+})
+afterEach(() => wallet.db.close())
+
 /** Only what `fulfillOffer` and the SDK client below it reach for. `spendable`
  * is what the gate would have handed back, which is the half this repo keeps. */
 const ctx = (spendable: unknown[], read: () => Promise<unknown[]> = async () => spendable): ArkadeContext =>
@@ -99,13 +139,16 @@ const ctx = (spendable: unknown[], read: () => Promise<unknown[]> = async () => 
     wallet: {
       identity,
       arkServerPublicKey: SERVER_KEY,
+      indexerProvider: new RestIndexerProvider('http://arkade'),
       getSpendableVtxos: read,
-      getAddress: async () => new ArkAddress(SERVER_KEY, hex.decode('22'.repeat(32)), 'tark').encode(),
+      getAddress: async () => PROCEEDS.encode(),
       getContractManager: async () => null,
     },
     identity,
     operatorUrl: 'http://arkade',
-    reservations: createReservationLedger(),
+    reservations: wallet.reservations,
+    directFills,
+    dustSats: 330n,
   }) as unknown as ArkadeContext
 
 let minted = 0
@@ -305,6 +348,7 @@ describe('the asset packet fulfillOffer submits', () => {
     expect(outcome).toBeInstanceOf(OfferNotSubmittedError)
     expect(state.arkTx).toBeUndefined()
     expect(spending.reservations.reserved().size).toBe(0)
+    expect(await directFills.list()).toEqual([])
   })
 
   it('leaves a FAILED latch write untyped — a broken database is not a clean refusal', async () => {
@@ -352,10 +396,134 @@ describe('the asset packet fulfillOffer submits', () => {
       )
       expect(outcome).toBe(rejected)
       expect(outcome).not.toBeInstanceOf(OfferNotSubmittedError)
-      expect(spending.reservations.reserved().size).toBe(0)
+      // Not knowing where the coin went, the journal keeps it until the sweep does.
+      expect(spending.reservations.reserved().size).toBe(1)
+      expect((await directFills.list())[0]?.phase).toBe('submitting')
     } finally {
       state.submitError = undefined
     }
+  })
+})
+
+describe('the direct-fill journal around a fill', () => {
+  const deposit = () => {
+    const coin = { ...mintCoin(60_000), assets: [{ assetId: ASSET_B, amount: 900n }] }
+    state.vtxos = [coin]
+    return { txid: coin.txid, vout: coin.vout, value: coin.value }
+  }
+  const offer = () => offerFor({ wantAmount: 50_000n, offerAsset: asset.AssetId.fromString(ASSET_B) })
+  const outpoints = (coins: { txid: string; vout: number }[]) => new Set(coins.map((c) => `${c.txid}:${c.vout}`))
+  const refusing = (outpoint: string) =>
+    new Error(
+      `Failed to submit tx to emulator: ${JSON.stringify({
+        details: [
+          {
+            code: 6,
+            name: 'VTXO_ALREADY_SPENT',
+            metadata: { vtxo_outpoint: outpoint, vtxo_outpoints: `[${outpoint}]` },
+          },
+        ],
+      })}`,
+    )
+
+  it('keeps every selected coin through a lost reply, so neither a retry nor a restart can spend it twice', async () => {
+    const at = deposit()
+    const coins = [fundingCoin(20_000), fundingCoin(30_000)]
+    const context = ctx(coins)
+    state.replyLost = true
+    await expect(fulfillOffer(context, 'http://emulator.test', offer(), at)).rejects.toThrow('accepted fill reply lost')
+    state.replyLost = false
+    expect(context.reservations.reserved()).toEqual(outpoints(coins))
+    expect((await offerInventoryFor(context)).get(null)).toBe(0n)
+    await expect(fulfillOffer(context, 'http://emulator.test', offer(), at)).rejects.toThrow('no spendable coins')
+
+    const restarted = createReservationLedger()
+    await journalOn(restarted)
+    expect(restarted.reserved()).toEqual(outpoints(coins))
+  })
+
+  it("returns the fill on the emulator's word and leaves the journal to the sweep until the indexer agrees", async () => {
+    const at = deposit()
+    const context = ctx([fundingCoin(80_000)])
+    state.finalized = false
+    const txid = await fulfillOffer(context, 'http://emulator.test', offer(), at)
+    expect(txid).toBe(Transaction.fromPSBT(base64.decode(state.arkTx!)).id)
+    expect((await directFills.list())[0]?.phase).toBe('submitting')
+    expect(context.reservations.reserved().size).toBe(1)
+
+    state.finalized = true
+    await createDirectFillRecovery({
+      attempts: directFills,
+      chain: context.wallet.indexerProvider,
+      parent: () => null,
+      coins: async () => [],
+      serverUnrollScript: {} as never,
+      graph: { ark: {} as never, signer: identity as never, serverKey: SERVER_KEY, solverKeys: [] },
+    }).sweep()
+    expect(await directFills.list()).toEqual([])
+    expect(context.reservations.reserved().size).toBe(0)
+  })
+
+  it('closes a settled standalone fill on the spot once the indexer shows it', async () => {
+    const at = deposit()
+    const context = ctx([fundingCoin(80_000)])
+    const txid = await fulfillOffer(context, 'http://emulator.test', offer(), at)
+    expect(await directFills.read(`standalone:${at.txid}:${at.vout}`)).toMatchObject({
+      phase: 'settled',
+      outcomeTxid: txid,
+      acknowledged: true,
+    })
+    expect(context.reservations.reserved().size).toBe(0)
+  })
+
+  it('sends nothing, retryably, when the journal row cannot be written', async () => {
+    const at = deposit()
+    const context = ctx([fundingCoin(80_000)])
+    const run = wallet.db.run.bind(wallet.db)
+    vi.spyOn(wallet.db, 'run').mockImplementation(async (sql, params) => {
+      if (sql.startsWith('INSERT INTO direct_fill_attempt')) throw new Error('database full')
+      return run(sql, params)
+    })
+    const outcome = await fulfillOffer(context, 'http://emulator.test', offer(), at).catch((error: unknown) => error)
+    expect(outcome).toBeInstanceOf(OfferNotSubmittedError)
+    expect(state.arkTx).toBeUndefined()
+    expect(context.reservations.reserved().size).toBe(0)
+  })
+
+  it('closes a graph arkd refused as rejected, so the same row retries and fills', async () => {
+    const at = deposit()
+    const coin = fundingCoin(80_000)
+    const context = ctx([coin])
+    const parent = { kind: 'rfq' as const, id: 'row' }
+    state.submitError = refusing(`${coin.txid}:${coin.vout}`)
+    const outcome = await fulfillOffer(context, 'http://emulator.test', offer(), at, { parent }).catch((e) => e)
+    state.submitError = undefined
+    expect(outcome).toMatchObject({ depositSpent: false, spentOutpoints: [`${coin.txid}:${coin.vout}`] })
+    expect(await directFills.read('rfq:row')).toMatchObject({ phase: 'rejected', acknowledged: true })
+    expect(context.reservations.reserved().size).toBe(0)
+
+    const txid = await fulfillOffer(context, 'http://emulator.test', offer(), at, { parent })
+    expect(await directFills.read('rfq:row')).toMatchObject({
+      phase: 'settled',
+      outcomeTxid: txid,
+      acknowledged: false,
+    })
+  })
+
+  it('sends nothing when another process closed its row first, and says so below the latch', async () => {
+    const at = deposit()
+    const context = ctx([fundingCoin(80_000)])
+    const markSubmitting = async () => {
+      const elsewhere = await journalOn()
+      const row = (await elsewhere.list())[0]!
+      return elsewhere.change(row, { ...row, phase: 'abandoned' })
+    }
+    const outcome = await fulfillOffer(context, 'http://emulator.test', offer(), at, { markSubmitting }).catch(
+      (error: unknown) => error,
+    )
+    expect(outcome).toBeInstanceOf(OfferSubmitRejectedError)
+    expect(outcome).toMatchObject({ depositSpent: false, spentOutpoints: [] })
+    expect(state.arkTx).toBeUndefined()
   })
 })
 

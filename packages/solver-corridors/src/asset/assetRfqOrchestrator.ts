@@ -59,6 +59,7 @@ import {
 } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { assetRfqPairFor } from '../wire/assetRfqPayloads.js'
 import { AssetRfqSwapStore, type AssetRfqSwapRow } from '../db/assetRfqSwaps.js'
+import type { DirectFillParentProof } from '../db/offerFills.js'
 
 /**
  * A market this deployment serves, plus where its price comes from.
@@ -572,5 +573,16 @@ export class AssetRfqSwapService {
       return
     }
     await this.deps.store.fail(row.id, 'filling', 'fill outcome unknown after restart; check the offer address')
+  }
+
+  /** The journal's proof that a fill landed, recorded in the queue the fills run in, with the mark a lost reply skipped. */
+  recoverDirectFill(proof: DirectFillParentProof, fillTxid: string): Promise<boolean> {
+    return this.serialise(async () => {
+      const before = await this.deps.store.findById(proof.id)
+      const recovered = await this.deps.store.recoverDirectFill(proof, fillTxid)
+      if (recovered && before?.state !== 'filled' && before?.fillPriceMantissa === null)
+        await this.recordFillMark(before)
+      return recovered
+    })
   }
 }

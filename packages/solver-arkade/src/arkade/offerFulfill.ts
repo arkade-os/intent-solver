@@ -24,7 +24,14 @@
  * - **The § 5.1 abort.** Re-checked here rather than trusted from the caller,
  *   because this is the function that spends.
  */
-import { selectVirtualCoins, selectCoinsWithAsset, type ExtendedVirtualCoin } from '@arkade-os/sdk'
+import {
+  ArkAddress,
+  RestEmulatorProvider,
+  VtxoScript,
+  selectVirtualCoins,
+  selectCoinsWithAsset,
+  type ExtendedVirtualCoin,
+} from '@arkade-os/sdk'
 import {
   ASSET_CARRIER_SATS,
   bindingFromOffer,
@@ -38,6 +45,8 @@ import { type ArkadeContext } from './wallet.js'
 import { outpointKey } from './lockupFunding.js'
 import { offerIsConsistent } from './offerConsistency.js'
 import { depositSpentBy, type DepositSpendProbe } from './depositSpend.js'
+import type { DirectFillAttempt, DirectFillParent } from './directFillAttempts.js'
+import { assertDirectFillResponse, directFillFinalized, validateDirectFillGraph } from './directFillGraph.js'
 
 /** The dust carrier output[0] takes when the maker is paid in an ASSET, not sats.
  * Re-exported from the SDK rather than restated: it is a covenant constant, and a
@@ -47,8 +56,8 @@ export { ASSET_CARRIER_SATS }
 /**
  * A fill refusal that provably submitted nothing, so a caller holding the row in
  * `filling` may walk it back. Raised only ABOVE `fillOffer` — the call that
- * builds AND submits — at the taker check, the two coin-selection refusals below and at each
- * settle adapter's deposit-liveness guard. The other guards stay plain on
+ * builds AND submits — at the taker check, the two coin-selection refusals below, the journal
+ * write and at each settle adapter's deposit-liveness guard. The other guards stay plain on
  * purpose: they mean the row disagrees with the chain, which needs a human.
  * @see FundNotSubmittedError, the same boundary on receive.
  */
@@ -132,7 +141,12 @@ export interface FulfillOptions {
    * write cannot say whether the latch landed. @see OfferFillStore.markSubmitting
    */
   markSubmitting?: () => Promise<boolean>
+  /** The row the direct-fill journal records this fill under. Absent journals it by the deposit. */
+  parent?: DirectFillParent
 }
+
+/** Generic and live only: a recoverable coin needs a batch, and a contract coin a leaf of its own. */
+const FILL_FUNDING_FILTER = { withRecoverable: false, genericallySpendableOnly: true } as const
 
 export interface OfferDepositOutpoint {
   txid: string
@@ -193,12 +207,11 @@ export const fulfillOffer = async (
   const wantedAssetId = offer.wantAsset?.toString()
   // GATED, as `fundLockup` reads it: `getVtxos` carries the escrowed and locked buckets
   // `offerInventory.ts` keeps out of the float this fill was admitted against.
-  const spendable = (await ctx.wallet.getSpendableVtxos()) as ExtendedVirtualCoin[]
+  const spendable = (await ctx.wallet.getSpendableVtxos(FILL_FUNDING_FILTER)) as ExtendedVirtualCoin[]
   // The gate hides escrow but not the solver's own in-flight spends. Drop what a
   // funding or renewal has pinned, then reserve our pick below in the same turn, so
   // neither side takes the other's coins. @see arkade/reservations.ts
-  const reserved = ctx.reservations.reserved()
-  const free = spendable.filter((coin) => !reserved.has(outpointKey(coin.txid, coin.vout)))
+  const free = unreserved(ctx, spendable)
 
   // What output[0] must carry in SATS. An asset-wanting maker is paid through
   // the asset packet, so its BTC leg is only this server's own dust (§ 4.1).
@@ -230,15 +243,59 @@ export const fulfillOffer = async (
   if (funding.length === 0) throw new OfferNotSubmittedError(`no spendable coins to pay the maker ${wantAmount} sats`)
 
   const release = ctx.reservations.reserve(funding)
+  const outpoint = outpointKey(deposit.txid, deposit.vout)
+  let attempt: DirectFillAttempt | undefined
+  let entered = false
+  // The journal holds the exact graph before arkd sees it, so a lost reply stays recoverable.
+  const emulator = new RestEmulatorProvider(emulatorUrl)
+  const submitTx = emulator.submitTx.bind(emulator)
+  emulator.submitTx = async (arkTx, checkpoints) => {
+    if (attempt?.phase !== 'prepared') throw new Error(`direct fill of ${outpoint} has no prepared journal row`)
+    const graph = { arkTx, checkpoints }
+    validateDirectFillGraph(graph, [attempt.deposit, ...attempt.funding])
+    const submitting: DirectFillAttempt = { ...attempt, phase: 'submitting', graph }
+    if (!(await ctx.directFills.change(attempt, submitting))) {
+      throw new OfferSubmitRejectedError(
+        `direct fill ${attempt.key} was closed before it was sent; nothing was submitted`,
+        [],
+        false,
+      )
+    }
+    attempt = submitting
+    entered = true
+    const response = await submitTx(arkTx, checkpoints)
+    assertDirectFillResponse(graph, response)
+    return response
+  }
   try {
-    // THE LAST AWAIT BEFORE THE SUBMISSION, and it has to be: anything awaited after
-    // the latch is a window where a crash leaves a row claiming a fill never sent.
+    attempt = await ctx.directFills
+      .prepare({
+        parent: options?.parent ?? { kind: 'standalone', id: outpoint },
+        deposit: { txid: deposit.txid, vout: deposit.vout },
+        funding: funding.map((coin) => ({
+          txid: coin.txid,
+          vout: coin.vout,
+          value: coin.value,
+          script: hex.encode(VtxoScript.decode(coin.tapTree).pkScript),
+          assets: assetsOn(coin).map(({ assetId, amount }) => ({ assetId, amount: amount.toString() })),
+        })),
+        offerPkScript: hex.encode(offer.swapPkScript),
+        proceedsScript: hex.encode(ArkAddress.decode(await ctx.wallet.getAddress()).pkScript),
+      })
+      .catch((error: unknown) => {
+        throw new OfferNotSubmittedError(`the fill of ${outpoint} could not be journalled; nothing was submitted`, {
+          cause: error,
+        })
+      })
+    // The journal pins the funding from here, across a restart as well.
+    release()
+    // The last await here before `fillOffer`; its own awaits up to the submission are what the journal row covers.
     if (options?.markSubmitting && !(await options.markSubmitting())) {
       throw new OfferNotSubmittedError(
         `another attempt already holds the fill for ${deposit.txid}:${deposit.vout}; nothing was submitted`,
       )
     }
-    return await fillOffer(ctx.wallet, ctx.operatorUrl, binding, {
+    const txid = await fillOffer(ctx.wallet, ctx.operatorUrl, binding, {
       // Inputs 1..n, in this order. Every asset a coin carries is declared, not
       // just the two the swap is about: arkd refuses with ASSET_NOT_FOUND when an
       // input owns an asset the packet does not mention, and selection picks for
@@ -253,7 +310,7 @@ export const fulfillOffer = async (
       })),
       fundingOutpoint: { txid: deposit.txid, vout: deposit.vout },
       assetCarrierSats: carrierSats,
-      emulator: emulatorUrl,
+      emulator,
       // No `emulatorPubkey`: that override is 33-byte COMPRESSED and an offer
       // carries the x-only 32, which cannot be widened — the parity bit is not in
       // it. It only ever names the client's own key anyway; the covenant here is
@@ -264,7 +321,6 @@ export const fulfillOffer = async (
       // built, let alone sent. Absence is no proof, so ask the indexer; uncertainty leaves
       // `depositSpent` false and the caller walks the row back.
       if (error instanceof NoSpendableDepositError) {
-        const outpoint = outpointKey(deposit.txid, deposit.vout)
         const spentBy = await depositSpentBy(options?.probe ?? ctx.wallet?.indexerProvider, deposit)
         throw new OfferSubmitRejectedError(
           spentBy === null
@@ -285,17 +341,74 @@ export const fulfillOffer = async (
       const oursToo = funding.some((coin) => spent.includes(outpointKey(coin.txid, coin.vout).toLowerCase()))
       if (depositSpent && oursToo) throw error
       // Any other shape sent nothing, whichever input it named; only a named deposit ends the row.
-      throw new OfferSubmitRejectedError(
+      const rejected = new OfferSubmitRejectedError(
         `arkd refused the fill: ${spent.join(', ')} already spent; nothing was submitted`,
         spent,
         depositSpent,
         { cause: error },
       )
+      // The row may retry only once the journal agrees this graph can never land.
+      if (entered && !(await closeRejected(ctx, attempt!).catch(() => false))) throw error
+      throw rejected
     })
+    await settleIfFinal(ctx, attempt.key, txid)
+    return txid
+  } catch (error) {
+    // Left `prepared` if this fails too: the sweep abandons it once this invocation ends.
+    if (attempt && !entered) await abandonUnsent(ctx, attempt.key).catch(() => {})
+    throw error
   } finally {
-    // Freed on failure too, where nothing else would release the pin.
-    release()
+    if (attempt) ctx.directFills.finishInvocation(attempt.key)
+    else release()
   }
+}
+
+const unreserved = (ctx: ArkadeContext, coins: ExtendedVirtualCoin[]): ExtendedVirtualCoin[] => {
+  const reserved = ctx.reservations.reserved()
+  return coins.filter((coin) => !reserved.has(outpointKey(coin.txid, coin.vout)))
+}
+
+const closeRejected = async (ctx: ArkadeContext, sent: DirectFillAttempt): Promise<boolean> => {
+  const rejected: DirectFillAttempt = { ...sent, phase: 'rejected' }
+  return (await ctx.directFills.change(sent, rejected)) && (await ctx.directFills.acknowledge(rejected))
+}
+
+const abandonUnsent = async (ctx: ArkadeContext, key: string): Promise<void> => {
+  const stored = await ctx.directFills.read(key)
+  if (stored?.phase !== 'prepared') return
+  const abandoned: DirectFillAttempt = { ...stored, phase: 'abandoned' }
+  if (await ctx.directFills.change(stored, abandoned)) await ctx.directFills.acknowledge(abandoned)
+}
+
+/** The emulator's reply returns the txid; the journal settles only on the indexer's word, else the sweep does. */
+const settleIfFinal = async (ctx: ArkadeContext, key: string, txid: string): Promise<void> => {
+  try {
+    const sent = await ctx.directFills.read(key)
+    if (sent?.phase !== 'submitting' || sent.graph === undefined) return
+    if (!(await directFillFinalized(ctx.wallet.indexerProvider, sent.graph, [sent.deposit, ...sent.funding]))) return
+    const settled: DirectFillAttempt = { ...sent, phase: 'settled', outcomeTxid: txid }
+    if ((await ctx.directFills.change(sent, settled)) && sent.parent.kind === 'standalone') {
+      await ctx.directFills.acknowledge(settled)
+    }
+  } catch {
+    // The fill has landed; whatever failed here, the sweep meets again and reports.
+  }
+}
+
+/** What a fill could select right now, per leg, so admission reads the coins selection will. */
+export const offerInventoryFor = async (ctx: ArkadeContext): Promise<ReadonlyMap<string | null, bigint>> => {
+  const spendable = unreserved(ctx, (await ctx.wallet.getSpendableVtxos(FILL_FUNDING_FILTER)) as ExtendedVirtualCoin[])
+  const inventory = new Map<string | null, bigint>([[null, 0n]])
+  for (const coin of spendable) {
+    inventory.set(null, inventory.get(null)! + BigInt(coin.value))
+    for (const { assetId, amount } of assetsOn(coin)) inventory.set(assetId, (inventory.get(assetId) ?? 0n) + amount)
+  }
+  // An asset riding a selected coin leaves on the taker's own output, which needs its dust.
+  if (spendable.some((coin) => assetsOn(coin).length > 0)) {
+    const sats = inventory.get(null)! - ctx.dustSats
+    inventory.set(null, sats > 0n ? sats : 0n)
+  }
+  return inventory
 }
 
 /** The maker's script, hex, for logging a fill against its offer. */

@@ -123,10 +123,15 @@ describe('the four Arkade seams', () => {
     expect(body()).not.toContain('offerExitDelay(arkade.unilateralDelays')
   })
 
-  it('reads AVAILABLE inventory, never the total', () => {
+  it('reads the coins a fill could select, never the total', () => {
     // A wallet whose batch expired reports millions and can spend nothing;
     // quoting off `total` accepts every swap and fails every fill.
-    expect(body()).toContain('balance: async () => offerInventoryFrom(await arkade.wallet.getBalance())')
+    expect(body()).toContain('balance: () => offerInventoryFor(arkade)')
+  })
+
+  it('records a journalled rfq fill through the service, and sweeps at boot only in the daemon', () => {
+    expect(body()).toContain('recoverDirectFill: (proof, txid) => assetRfqService.recoverDirectFill(proof, txid)')
+    expect(body()).toContain("if (opts?.directFills === 'active') await directFillRecovery.sweep()")
   })
 
   it('watches ONE outpoint, because a fill spends one input', () => {

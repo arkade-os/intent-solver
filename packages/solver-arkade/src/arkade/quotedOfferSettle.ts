@@ -26,6 +26,7 @@ const assertSafeSats = (sats: bigint): number => {
 
 /** The negotiated row, structurally. `AssetRfqSwapRow` satisfies it. */
 export interface QuotedOfferIntent {
+  id: string
   rfqId: string
   offerPkScript: string
   fromAssetId: string | null
@@ -122,7 +123,7 @@ export const quotedOfferSettleFor = (
         // an input that does not exist.
         assetAmount: intent.fromAssetId === null ? undefined : held,
       },
-      options,
+      { ...options, parent: { kind: 'rfq', id: intent.id } },
     )
   }
 }

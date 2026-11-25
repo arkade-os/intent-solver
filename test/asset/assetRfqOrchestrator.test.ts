@@ -1223,3 +1223,33 @@ describe('a tick whose exit another writer already took', () => {
     expect(errors).toEqual([])
   })
 })
+
+describe('a direct fill the journal proved after its reply was lost', () => {
+  it('records the fill and its mark once, beside the ticks it would race', async () => {
+    let reads = 0
+    const { service, store } = await harness({
+      depositAt: async () => deposit(),
+      fetchPrice: async () => {
+        reads += 1
+        return { mantissa: reads === 1 ? 100_000n : 90_000n, scale: 0 }
+      },
+      settle: async () => {
+        throw new Error('accepted fill reply lost')
+      },
+    })
+    await service.quote(request())
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).state).toBe('stuck')
+    const proof = { id: 'swap-1', depositTxid: deposit().txid, depositVout: 0, offerPkScript: OFFER_SCRIPT }
+
+    expect(await service.recoverDirectFill(proof, 'fb'.repeat(32))).toBe(true)
+    expect(await service.recoverDirectFill(proof, 'fb'.repeat(32))).toBe(true)
+    expect(await store.get('swap-1')).toMatchObject({
+      state: 'filled',
+      fillTxid: 'fb'.repeat(32),
+      fillPriceMantissa: 90_000n,
+    })
+    expect(reads).toBe(2)
+  })
+})

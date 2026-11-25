@@ -35,6 +35,8 @@ export interface DirectFillRecoveryDeps {
   now?: () => number
   conflictAfterSeconds?: number
   onError?: (key: string, error: unknown) => void
+  /** Per-attempt backoff: a pending directed fill arkd v0.9.16 cannot finalize fails every sweep. */
+  backoff?: { shouldSkip(key: string): boolean; clear(key: string): void }
 }
 
 export const DIRECT_FILL_CONFLICT_AFTER_SECONDS = 900
@@ -44,7 +46,8 @@ export const createDirectFillRecovery = (deps: DirectFillRecoveryDeps) => {
   let running: Promise<void> | undefined
 
   const acknowledge = async (attempt: DirectFillAttempt): Promise<void> => {
-    if (attempt.phase === 'abandoned') {
+    // Neither sent anything a parent must hear about; the fill path already answered it.
+    if (attempt.phase === 'abandoned' || attempt.phase === 'rejected') {
       await deps.attempts.acknowledge(attempt)
       return
     }
@@ -77,7 +80,7 @@ export const createDirectFillRecovery = (deps: DirectFillRecoveryDeps) => {
   }
 
   const recover = async (attempt: DirectFillAttempt): Promise<void> => {
-    if (['settled', 'cancelled', 'abandoned'].includes(attempt.phase)) return acknowledge(attempt)
+    if (['settled', 'cancelled', 'abandoned', 'rejected'].includes(attempt.phase)) return acknowledge(attempt)
     if (deps.attempts.invocationActive(attempt.key)) return
     if (attempt.phase === 'prepared') {
       const abandoned: DirectFillAttempt = { ...attempt, phase: 'abandoned' }
@@ -139,8 +142,10 @@ export const createDirectFillRecovery = (deps: DirectFillRecoveryDeps) => {
       if (running) return running
       running = (async () => {
         for (const attempt of await deps.attempts.list()) {
+          if (deps.backoff?.shouldSkip(attempt.key)) continue
           try {
             await recover(attempt)
+            deps.backoff?.clear(attempt.key)
           } catch (error) {
             deps.onError?.(attempt.key, error)
           }
@@ -157,6 +162,7 @@ export const directFillRecoveryFor = async (
   ctx: ArkadeContext,
   parent: DirectFillRecoveryDeps['parent'],
   onError?: DirectFillRecoveryDeps['onError'],
+  backoff?: DirectFillRecoveryDeps['backoff'],
 ) =>
   createDirectFillRecovery({
     attempts: ctx.directFills,
@@ -174,4 +180,5 @@ export const directFillRecoveryFor = async (
     serverUnrollScript: ctx.wallet.serverUnrollScript,
     parent,
     onError,
+    backoff,
   })

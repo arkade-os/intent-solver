@@ -1,8 +1,8 @@
 [
   {
     "name": "asset",
-    "why": "The only group that mints an asset. An asset coin in the shared float changes what every later sats-only spend can select, so nothing that measures the sats float runs beside it.",
-    "profiles": "emulator",
+    "why": "The only group that mints an asset, and the one running arkade-regtest's Nostr relay for the two-party RFQ. An asset coin in the shared float changes what every later sats-only spend can select, so nothing that measures the sats float runs beside it.",
+    "profiles": "emulator,nostr",
     "files": [
       "assetRfqCorridor.e2e.test.ts",
       "assetOffer.e2e.test.ts",
