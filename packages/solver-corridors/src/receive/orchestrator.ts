@@ -792,6 +792,11 @@ export class ReceiveSwapService {
     // CONCURRENT one, where two workers both read an empty script and both spend.
     // Losing means another worker holds this swap, so yield the tick, don't fail.
     if (!(await store.claimFundLease(row.id, 'armed'))) return false
+    // The planner's expiry rule, asked again past the lease write: nothing is funded yet.
+    if (this.now() >= row.invoiceExpiresAt) {
+      await store.fail(row.id, 'armed', 'refused to fund: invoice_expired')
+      return false
+    }
 
     // Nothing was funded before — create the exposure now. The txid this
     // returns is what the confirmation below keys off.

@@ -936,6 +936,22 @@ describe('ReceiveSwapService.tick — funding gate reuse (evaluateReceiveFunding
     expect(arkade.state.fundCalls).toHaveLength(0)
   })
 
+  it('does not fund when the invoice expires while the fund lease is taken', async () => {
+    const outcome = await service.quote(quoteRequest())
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    ln.armHold(paymentHash, now + 4 * 3600)
+    const take = store.claimFundLease.bind(store)
+    vi.spyOn(store, 'claimFundLease').mockImplementation(async (...args) => {
+      now = outcome.swap.invoiceExpiresAt
+      return take(...args)
+    })
+
+    const row = await service.tick(outcome.swap.id)
+    expect(row.state).toBe('refused')
+    expect(row.failureReason).toBe('refused to fund: invoice_expired')
+    expect(arkade.state.fundCalls).toHaveLength(0)
+  })
+
   it('funds once armed with a comfortable settle window, and LEAVES refund_locktime exactly as quoted', async () => {
     const outcome = await service.quote(quoteRequest())
     if (!outcome.accepted) throw new Error('expected acceptance')
