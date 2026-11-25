@@ -224,8 +224,9 @@ jobs:
           POSTGRES_PORT: '29372'
         run: |
           set -eu
-          sed -i 's/DATABASE_ENABLED: "true"/DATABASE_ENABLED: "false"/' docker/compose.base.yml
-          grep -q 'DATABASE_ENABLED: "false"' docker/compose.base.yml
+          # Either quote style: the taxi lane's newer arkade-regtest writes it single-quoted.
+          sed -i -E "s/DATABASE_ENABLED: (['\"])true(['\"])/DATABASE_ENABLED: \1false\2/" docker/compose.base.yml
+          grep -qE "DATABASE_ENABLED: ['\"]false['\"]" docker/compose.base.yml
           if [ "$SECONDS_TYPED" = "true" ] && [ "$GROUP_NAME" != "taxi" ]; then
             export ARKD_VTXO_TREE_EXPIRY=6144 ARKD_UNILATERAL_EXIT_DELAY=512 \
                    ARKD_PUBLIC_UNILATERAL_EXIT_DELAY=512 ARKD_BOARDING_EXIT_DELAY=2048 \
@@ -233,8 +234,7 @@ jobs:
           fi
           # The Taxi refuses coins inside its expiry headroom, and the conservation checks want no fees.
           if [ "$GROUP_NAME" = "taxi" ]; then
-            export ARKD_SCHEDULER_TYPE=gocron ARKD_SESSION_DURATION=10 ARKD_ROUND_INTERVAL=3 \
-                   ARKD_VTXO_TREE_EXPIRY=172800 ARKD_UNILATERAL_EXIT_DELAY=86400 \
+            export ARKD_SESSION_DURATION=10 ARKD_VTXO_TREE_EXPIRY=172800 ARKD_UNILATERAL_EXIT_DELAY=86400 \
                    ARKD_PUBLIC_UNILATERAL_EXIT_DELAY=86400 ARKD_BOARDING_EXIT_DELAY=7776000 \
                    ARKD_CHECKPOINT_EXIT_DELAY=86400 AUTOMINE_INTERVAL=0 \
                    ARK_OFFCHAIN_INPUT_FEE=0.0 ARK_ONCHAIN_INPUT_FEE=0.0 \

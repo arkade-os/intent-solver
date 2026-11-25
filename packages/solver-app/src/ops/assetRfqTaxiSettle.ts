@@ -84,6 +84,8 @@ export interface TaxiCarrierSettleDeps {
   serverKey: () => Uint8Array
   fill: CarrierFillSeams
   now: () => number
+  /** Rows whose POST was sent and never answered, for reconciliation to replay once. */
+  unanswered?: Set<string>
 }
 
 const contributionOf = (coin: CarrierCoin, leg: AssetLeg, dustSats: bigint): bigint => {
@@ -341,6 +343,7 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
       await taxi.fills.submitFill(submission)
     } catch (error) {
       if (wrote && !liable) await releaseIfProvenNeverSubmitted(deps, pin, messageOf(error))
+      if (liable) deps.unanswered?.add(row.id)
       throw error
     }
     return { status: 'submitted' }

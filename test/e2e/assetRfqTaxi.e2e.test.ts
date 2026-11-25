@@ -13,6 +13,7 @@ import { decodeOffer, offerVtxoScript, requestArkadeSwap } from '@arkade-os/swap
 import { RFQ_ASSET_SWAP_DIRECTED, RFQ_ASSET_SWAP_DIRECTED_NONCE } from '@arkade-os/solver-core/core/rfqContract.js'
 import { receiverPaidTransport } from './support/receiverPaidTransport.js'
 import { nostrRfqTransport } from '@arkade-os/swap/nostr'
+import { attesting } from '@arkade-os/swap/advanced'
 import { base64, hex } from '@scure/base'
 import { createArkadeContext, type ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { envToDocument } from '@arkade-os/solver-app/config/fromEnv.js'
@@ -496,7 +497,8 @@ describe('running solver to Taxi on regtest', () => {
         process.env.ARKADE_OPERATOR_URL!,
       )
       const rfqId = randomBytes(32).toString('hex')
-      const swap = await requestArkadeSwap(buyer.wallet, carrier.transport, {
+      // The wrapper builds a new transport, so the responder the directed taker check needs is attested here.
+      const swap = await requestArkadeSwap(buyer.wallet, attesting(carrier.transport, solverPublicKey), {
         rfqId,
         amount: 10_000,
         wantAsset: asset.AssetId.fromString(assetId),
@@ -554,9 +556,11 @@ describe('running solver to Taxi on regtest', () => {
           { cause: error },
         )
       })
-      expect(fillBodies).toHaveLength(1)
-      expect(acceptedFills).toBe(1)
-      expect(droppedFillReplies).toBe(1)
+      // A lost reply may be replayed once, never re-signed: every POST carried the same bytes.
+      expect(new Set(fillBodies).size).toBe(1)
+      expect(fillBodies.length).toBeLessThanOrEqual(2)
+      expect(acceptedFills).toBe(fillBodies.length)
+      expect(droppedFillReplies).toBe(fillBodies.length)
       const status = await taxi.status(claim.transferId)
       const transfer = await taxi.verifyIncomingClaim(
         claim,

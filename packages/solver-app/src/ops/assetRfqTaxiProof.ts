@@ -52,6 +52,8 @@ export interface TaxiCarrierProofDeps {
   cancel: (row: AssetRfqSwapRow, attempt: CarrierAttempt) => Promise<ReceiveCarrierReconcileOutcome>
   /** Posts the bound bytes again: the Taxi answers a repeated operation idempotently. */
   resubmit?: (row: AssetRfqSwapRow, attempt: CarrierAttempt) => Promise<void>
+  /** Shared with the settle: only a POST it saw go unanswered is replayed. */
+  unanswered?: Set<string>
 }
 
 export interface CarrierFillProof {
@@ -253,11 +255,11 @@ const releaseEveryPin = (pins: CarrierPinLedger, id: string): void => {
 
 export const createTaxiReceiveCarrierObserver = (
   deps: TaxiCarrierProofDeps,
-): Pick<ReceiveCarrierQuotes, 'reconcile'> => ({ reconcile: observeWith(deps, new Set<string>(), new Set<string>()) })
+): Pick<ReceiveCarrierQuotes, 'reconcile'> => ({ reconcile: observeWith(deps, new Set<string>()) })
 
 /** Raise contradictions once per adapter while retaining the pins. */
 const observeWith =
-  (deps: TaxiCarrierProofDeps, raised: Set<string>, resent: Set<string>) =>
+  (deps: TaxiCarrierProofDeps, raised: Set<string>) =>
   async (row: AssetRfqSwapRow): Promise<ReceiveCarrierReconcileOutcome> => {
     const attempt = await deps.store.readCarrierAttempt(row.id)
     // No attempt means no POST; a racing prepare owns and releases its own pin.
@@ -295,9 +297,8 @@ const observeWith =
       throw error
     }
     if (proof === null) {
-      // A lost reply may have left the Taxi without the fill: replay it once per process before any conflict.
-      if (attempt.phase === 'submitting' && deps.resubmit && !resent.has(row.id)) {
-        resent.add(row.id)
+      // A lost reply may have left the Taxi without the fill: replay it once before any conflict.
+      if (attempt.phase === 'submitting' && deps.resubmit && deps.unanswered?.delete(row.id)) {
         await deps.resubmit(row, attempt)
         return { status: 'pending' }
       }

@@ -81,12 +81,14 @@ export const completeTaxiReceiveCarrier = (
 ): ReceiveCarrierQuotes => {
   const proceedsScript = ArkAddress.decode(deps.proceedsAddress).pkScript
   const taxiFor = carrierTaxiFor(deps)
+  const unanswered = new Set<string>()
   return {
     available: reader.available,
     resolve: reader.resolve,
     ...createTaxiReceiveCarrierSettler({
       store: deps.store,
       taxiFor,
+      unanswered,
       resolve: reader.resolve,
       receiveQuote: reader.verified,
       coins: deps.coins,
@@ -108,6 +110,7 @@ export const completeTaxiReceiveCarrier = (
       store: deps.store,
       chain: deps.chain,
       pins: deps.pins,
+      unanswered,
       resubmit: async (row, attempt) => {
         const request = storedFillRequest(row, attempt)
         if (deps.now() < (request.validUntil ?? 0)) await taxiFor(row).fills.submitFill(request)
