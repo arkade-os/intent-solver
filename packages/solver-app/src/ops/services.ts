@@ -987,7 +987,7 @@ export const createServices = async (
     pins: carrierPins,
   })
   if (repinned.length > 0) log(`receive carrier: re-pinned the inputs of ${repinned.length} unresolved attempt(s)`)
-  // OFF unless TAXI_URL is set, so a deployment without one quotes no recycle and is otherwise unchanged.
+  // OFF unless TAXI_URL is set: without it recycle carriers are refused before quoting; purchase needs no Taxi.
   let receiveCarrierQuotes: Awaited<ReturnType<typeof taxiReceiveCarrierFor>> | undefined
   if (config.taxiUrl) {
     const allowPrivate = process.env.TAXI_RECEIVER_ALLOW_PRIVATE === '1'
