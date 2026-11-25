@@ -218,8 +218,15 @@ describe('direct fill committed graph recovery', () => {
         signedCheckpointTxs: [encode(unsigned), response.signedCheckpointTxs[1]!],
       }),
     ).toThrow('witness UTXO')
-    const changedLeaf = parse(graph.checkpoints[0]!)
-    expect(() => changedLeaf.updateInput(0, { tapLeafScript: [ownTree.leaves[0]!] })).toThrow('Taproot commitment')
+    const strippedLeaf = parse(graph.checkpoints[0]!)
+    strippedLeaf.updateInput(0, { tapLeafScript: undefined })
+    expect(strippedLeaf.id).toBe(altered.id)
+    expect(() =>
+      assertDirectFillResponse(graph, {
+        ...response,
+        signedCheckpointTxs: [encode(strippedLeaf), response.signedCheckpointTxs[1]!],
+      }),
+    ).toThrow('tapLeafScript changed')
     expect(() =>
       assertDirectFillResponse(graph, { signedArkTx: graph.arkTx, signedCheckpointTxs: graph.checkpoints }),
     ).not.toThrow()
