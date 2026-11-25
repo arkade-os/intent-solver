@@ -184,7 +184,7 @@ afterAll(async () => {
     for (const client of broker.clients) client.terminate()
     await new Promise<void>((resolve) => broker.close(() => resolve()))
   }
-  arkade?.close()
+  await arkade?.close()
 })
 
 const market = (over: Partial<AssetRfqMarket> = {}): AssetRfqMarket => ({

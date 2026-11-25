@@ -84,7 +84,7 @@ try {
   }
 } finally {
   await transport?.close()
-  arkade.close()
+  await arkade.close()
 }
 
 process.exit(process.exitCode ?? 0)

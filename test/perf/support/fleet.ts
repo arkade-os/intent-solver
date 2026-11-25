@@ -82,7 +82,7 @@ export interface FleetWallet {
 
 export interface Fleet {
   wallets: readonly FleetWallet[]
-  close(): void
+  close(): Promise<void>
 }
 
 /**
@@ -120,8 +120,11 @@ export const openFleet = async (arkade: E2eArkade, size: number): Promise<Fleet>
   )
   return {
     wallets,
-    close: () => {
-      for (const wallet of wallets) wallet.ctx.close()
+    close: async () => {
+      const failures = (await Promise.allSettled(wallets.map((wallet) => wallet.ctx.close()))).flatMap((result) =>
+        result.status === 'rejected' ? [result.reason] : [],
+      )
+      if (failures.length > 0) throw new AggregateError(failures, `${failures.length} fleet wallets did not close`)
     },
   }
 }

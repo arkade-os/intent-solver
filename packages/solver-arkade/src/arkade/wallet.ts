@@ -13,6 +13,7 @@ import {
   ArkAddress,
   buildOffchainTx,
   claimWithPreimageIdentity,
+  collectBatchRegistrations,
   ConditionWitness,
   createAssetPacket,
   EmulatorPacket,
@@ -28,11 +29,17 @@ import {
   signAndSubmitOffchainTx,
   Transaction,
   Wallet,
+  type Outpoint,
   type Recipient,
   type TapLeafScript,
   type VirtualCoin,
 } from '@arkade-os/sdk'
-import { SQLiteContractRepository, SQLiteWalletRepository, type SQLExecutor } from '@arkade-os/sdk/repositories/sqlite'
+import {
+  SQLiteBatchRegistrationRepository,
+  SQLiteContractRepository,
+  SQLiteWalletRepository,
+  type SQLExecutor,
+} from '@arkade-os/sdk/repositories/sqlite'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { base64, hex } from '@scure/base'
 import {
@@ -71,6 +78,27 @@ export const sqliteExecutor = (path: string): SQLExecutor & { close(): void } =>
     // Without this the WAL is never checkpointed. process.exit() skips it, and
     // the sidecar grows to many times the size of the database it fronts.
     close: () => db.close(),
+  }
+}
+
+/** The session that may have popped an intent, then one whole session after it. */
+const RELEASE_AFTER_SESSIONS = 2
+
+/**
+ * The SDK journal, except a registration that ends without a commitment keeps its inputs locked
+ * for `releaseDelayMs`. The SDK frees them on a delete ACK or "no matching intents", and neither
+ * proves arkd will not batch the intent: it matches before it deletes, and a popped intent matches nothing.
+ */
+export class DelayedReleaseBatchRegistrations extends SQLiteBatchRegistrationRepository {
+  releaseDelayMs = Number.POSITIVE_INFINITY
+
+  override async getLockedVtxoOutpoints(): Promise<Outpoint[]> {
+    const [live, ended] = await Promise.all([
+      super.getLockedVtxoOutpoints(),
+      collectBatchRegistrations(this, { states: ['cancelled', 'batch_failed'] }),
+    ])
+    const now = Date.now()
+    return [...live, ...ended.filter((r) => now - r.updatedAt < this.releaseDelayMs).flatMap((r) => r.proofInputs)]
   }
 }
 
@@ -164,8 +192,8 @@ export interface ArkadeContext {
    * agree on nothing. @see reservations.ts
    */
   reservations: ReservationLedger
-  /** Checkpoint and release the SQLite handle. */
-  close(): void
+  /** Drain wallet resources before checkpointing and releasing SQLite. */
+  close(): Promise<void>
 }
 
 /**
@@ -251,6 +279,7 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
   const identity = MnemonicIdentity.fromMnemonic(config.mnemonic, { isMainnet: config.isMainnet })
   const executor = sqliteExecutor(config.databasePath)
   const latencyDiagnostics = latencyDiagnosticsEnabled()
+  const intentRepository = new DelayedReleaseBatchRegistrations(executor)
 
   const wallet = await Wallet.create({
     identity,
@@ -264,6 +293,7 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
     storage: {
       walletRepository: new SQLiteWalletRepository(executor),
       contractRepository: new SQLiteContractRepository(executor),
+      intentRepository,
     },
     // Passing undefined is safe and is NOT the same as passing a hole: the SDK takes
     // `config.onchainProvider || new EsploraProvider(default)` (SDK
@@ -297,52 +327,74 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
     settlementConfig: false,
   })
 
-  // Everything else the swap needs -- the providers, the server key, the unroll
-  // script -- the wallet already built and exposes. Only the server's minimum
-  // exit delay still has to be fetched.
-  const info = await wallet.arkProvider.getInfo()
+  let closing: Promise<void> | undefined
+  const close = () =>
+    (closing ??= (async () => {
+      await wallet.dispose()
+      executor.close()
+    })())
 
-  // The URL alone does not prove which chain the server is on, and every other
-  // network fact (invoice prefix, address HRP, key derivation) came from config.
-  // A mismatch means paying this network's invoices to claim vtxos on another
-  // chain — refuse to start rather than discover it with money in flight.
-  if (info.network !== config.expectedArkdNetwork) {
-    throw new Error(
-      `Arkade server at ${config.operatorUrl} reports network '${info.network}', ` +
-        `expected '${config.expectedArkdNetwork}' — check rails.arkade.operatorUrl / network`,
+  try {
+    // Everything else the swap needs -- the providers, the server key, the unroll
+    // script -- the wallet already built and exposes. Only the server's minimum
+    // exit delay still has to be fetched.
+    const info = await wallet.arkProvider.getInfo()
+
+    // The URL alone does not prove which chain the server is on, and every other
+    // network fact (invoice prefix, address HRP, key derivation) came from config.
+    // A mismatch means paying this network's invoices to claim vtxos on another
+    // chain — refuse to start rather than discover it with money in flight.
+    if (info.network !== config.expectedArkdNetwork) {
+      throw new Error(
+        `Arkade server at ${config.operatorUrl} reports network '${info.network}', ` +
+          `expected '${config.expectedArkdNetwork}' — check rails.arkade.operatorUrl / network`,
+      )
+    }
+
+    const dustSats = BigInt(info.dust)
+    // A quote prices against this; zero would remove the sats leg's dust floor.
+    if (dustSats <= 0n) {
+      throw new Error(`Arkade server at ${config.operatorUrl} reports dust=${info.dust}, which no asset can ride on`)
+    }
+    const vtxoMinSats = BigInt(info.vtxoMinAmount ?? 0)
+    if (vtxoMinSats < 0n || vtxoMinSats > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new Error(`Arkade server at ${config.operatorUrl} reports invalid vtxoMinAmount=${info.vtxoMinAmount}`)
+    }
+    const sessionSeconds = Number(info.sessionDuration)
+    if (!Number.isSafeInteger(sessionSeconds) || sessionSeconds <= 0) {
+      throw new Error(
+        `Arkade server at ${config.operatorUrl} reports sessionDuration=${info.sessionDuration}, ` +
+          'which gives an abandoned intent no time to leave a batch',
+      )
+    }
+    intentRepository.releaseDelayMs = RELEASE_AFTER_SESSIONS * sessionSeconds * 1000
+
+    const advertisedExitDelay = Number(info.unilateralExitDelay)
+    const { unit: advertisedUnit, notices } = resolveTimelockUnit({
+      advertisedExitDelay,
+      unilateralExitDelayOverride: config.unilateralExitDelayOverride,
+      isMainnet: config.isMainnet,
+    })
+    for (const notice of notices) log(notice)
+
+    return {
+      wallet,
+      identity,
+      operatorUrl: config.operatorUrl,
+      unilateralDelays: deriveUnilateralDelays(config.unilateralExitDelayOverride ?? advertisedExitDelay),
+      advertisedExitDelay,
+      dustSats,
+      vtxoMinSats,
+      timelockUnit: advertisedUnit,
+      hrp: config.arkadeHrp,
+      reservations: createReservationLedger(),
+      close,
+    }
+  } catch (error) {
+    await close().catch((cleanup) =>
+      log('Arkade wallet did not dispose after a failed start; SQLite stays open:', cleanup),
     )
-  }
-
-  const dustSats = BigInt(info.dust)
-  // A quote prices against this; zero would remove the sats leg's dust floor.
-  if (dustSats <= 0n) {
-    throw new Error(`Arkade server at ${config.operatorUrl} reports dust=${info.dust}, which no asset can ride on`)
-  }
-  const vtxoMinSats = BigInt(info.vtxoMinAmount ?? 0)
-  if (vtxoMinSats < 0n || vtxoMinSats > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new Error(`Arkade server at ${config.operatorUrl} reports invalid vtxoMinAmount=${info.vtxoMinAmount}`)
-  }
-
-  const advertisedExitDelay = Number(info.unilateralExitDelay)
-  const { unit: advertisedUnit, notices } = resolveTimelockUnit({
-    advertisedExitDelay,
-    unilateralExitDelayOverride: config.unilateralExitDelayOverride,
-    isMainnet: config.isMainnet,
-  })
-  for (const notice of notices) log(notice)
-
-  return {
-    wallet,
-    identity,
-    operatorUrl: config.operatorUrl,
-    unilateralDelays: deriveUnilateralDelays(config.unilateralExitDelayOverride ?? advertisedExitDelay),
-    advertisedExitDelay,
-    dustSats,
-    vtxoMinSats,
-    timelockUnit: advertisedUnit,
-    hrp: config.arkadeHrp,
-    reservations: createReservationLedger(),
-    close: () => executor.close(),
+    throw error
   }
 }
 

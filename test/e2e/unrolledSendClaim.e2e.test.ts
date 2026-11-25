@@ -42,7 +42,7 @@ describe('an unrolled send lockup is claimed without arkd co-signing', () => {
 
   afterAll(async () => {
     await store?.close()
-    arkade?.close()
+    await arkade?.close()
   })
 
   it(

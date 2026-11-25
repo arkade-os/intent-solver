@@ -63,12 +63,7 @@ try {
   }
 } finally {
   await transport?.close()
-  arkade.close()
+  await arkade.close()
 }
 
-// The SDK's ContractWatcher owns a poll interval that `arkade.close()` does not
-// stop, so an otherwise-finished process sits there forever — every tick then
-// querying the handle we just released ("database connection is not open").
-// send-client-relay.mjs ends the same way. Order matters: close() first,
-// because process.exit() skips the WAL checkpoint (packages/solver-arkade/src/arkade/wallet.ts:51).
 process.exit(process.exitCode ?? 0)

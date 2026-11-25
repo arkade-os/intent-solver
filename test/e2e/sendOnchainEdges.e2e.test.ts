@@ -151,7 +151,7 @@ describe('e2e arkade:BTC->onchain:BTC (send) — refusals, wrong preimages and t
   afterAll(async () => {
     await store?.close()
     await onchain?.close?.()
-    arkade?.close()
+    await arkade?.close()
   })
 
   it('refuses a second live quote for the same payment hash', async () => {
