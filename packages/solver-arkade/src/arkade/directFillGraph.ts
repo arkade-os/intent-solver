@@ -374,6 +374,15 @@ export const recoverDirectFillGraph = async (
   return true
 }
 
+const conflictPacket = (funding: readonly DirectFillFunding[]) =>
+  refundAssetPacket(
+    funding.map((coin) => ({
+      ...coin,
+      assets: (coin.assets ?? []).map((entry) => ({ assetId: entry.assetId, amount: BigInt(entry.amount) })),
+    })),
+    'aggregate',
+  )
+
 export const validateDirectFillConflict = (
   graph: DirectFillGraph,
   funding: readonly DirectFillFunding[],
@@ -386,13 +395,7 @@ export const validateDirectFillConflict = (
       throw new Error('direct fill conflict differs from its recorded funding')
     }
   }
-  const packet = refundAssetPacket(
-    funding.map((coin) => ({
-      ...coin,
-      assets: (coin.assets ?? []).map((entry) => ({ assetId: entry.assetId, amount: BigInt(entry.amount) })),
-    })),
-    'aggregate',
-  )
+  const packet = conflictPacket(funding)
   const extension = packet ? hex.encode(Extension.create([packet]).serialize()) : undefined
   const total = built.checkpoints.reduce((sum, tx) => sum + tx.getInput(0).witnessUtxo!.amount, 0n)
   const output = built.arkTx.getOutput(0)
@@ -440,13 +443,7 @@ export const buildDirectFillConflict = async (
     [{ script: hex.decode(proceedsScript), amount: coins.reduce((sum, coin) => sum + BigInt(coin.value), 0n) }],
     deps.serverUnrollScript,
   )
-  const packet = refundAssetPacket(
-    coins.map((coin) => ({
-      ...coin,
-      assets: (coin.assets ?? []).map((entry) => ({ assetId: entry.assetId, amount: BigInt(entry.amount) })),
-    })),
-    'aggregate',
-  )
+  const packet = conflictPacket(coins)
   if (packet) attachEmulatorPackets(arkTx, [packet])
   const signed = await deps.signer.sign(
     arkTx,
