@@ -22,7 +22,7 @@
     "profiles": "emulator,nostr,taxi",
     "files": ["assetRfqTaxi.e2e.test.ts"],
     "regtestRef": "185da8e2863fb461d12b898a0a692b0623476254",
-    "taxiRef": "8db40b996c0fedbdc687718dab2137a26c7312fb",
+    "taxiRef": "1e831e7ddc0c71c3f78e3bb6dc6d4bdadf11fa52",
     "mintAsset": true,
     "lnd": false,
     "evmChain": false,
