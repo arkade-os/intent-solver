@@ -543,10 +543,9 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
   it(
     'funds the carrier the solver published, and attaches none to a BTC deposit',
     async () => {
-      // Deliberately NOT the SDK's compile-time constant: a client that ignored
-      // `carrier_sats` would fund that instead, and the deposit would not match.
-      const published = arkade.ctx.dustSats + 70n
-      expect(published, 'the fixture must differ from the constant or this proves nothing').not.toBe(ASSET_CARRIER_SATS)
+      // The dust, which is all a priced market publishes: since swap 0.1.14 a client refuses a
+      // carrier above it as carrier_malformed, so a figure above the dust proves nothing here.
+      const published = arkade.ctx.dustSats
       const { ingress, store, tickAll } = await harness({ carrierSats: published })
       try {
         const transport = requestTransport()
