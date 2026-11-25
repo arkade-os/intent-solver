@@ -20,14 +20,15 @@
 import { createServer, type Server } from 'node:http'
 import { randomBytes, randomInt } from 'node:crypto'
 import { join } from 'node:path'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { ArkAddress, isVtxoSpent, asset, Transaction } from '@arkade-os/sdk'
-import { createOffer, cancelOffer, type Offer } from '@arkade-os/swap/protocol'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { ArkAddress, DefaultVtxo, Extension, isVtxoSpent, SingleKey, asset, Transaction } from '@arkade-os/sdk'
+import { createOffer, cancelOffer, type FillOutpoint, type Offer } from '@arkade-os/swap/protocol'
 import { InMemoryAssetSwapRepository } from '@arkade-os/swap'
 import { base64, hex } from '@scure/base'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
 import { GiveUp, poll, sleep } from '@arkade-os/solver-core/util/poll.js'
 import type { AssetLeg } from '@arkade-os/solver-core/core/assetRfq.js'
+import { RFQ_ASSET_SWAP_DIRECTED, RFQ_ASSET_SWAP_DIRECTED_NONCE } from '@arkade-os/solver-core/core/rfqContract.js'
 import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
 import { ASSET_CARRIER_SATS, fulfillOffer } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import {
@@ -36,6 +37,7 @@ import {
   offerScriptFrom,
   type OfferDerivation,
 } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
+import { quotedOffersSettleFor } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
 import {
   AssetRfqSwapService,
   type AssetRfqMarket,
@@ -319,6 +321,208 @@ describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
       const status = await corridor.statusFor(filled.rfqId)
       expect(status).toMatchObject({ type: 'rfq_status', state: 'settled' })
       await store.close()
+    },
+    SWAP_TIMEOUT_MS,
+  )
+
+  it(
+    'settles three directed swaps from distinct outpoints in one transaction',
+    async () => {
+      const { ctx, emulator } = arkade
+      const derive = offerScriptFrom(derivation())
+      const terms = [
+        {
+          fromAmount: 7_000n,
+          toAmount: 601n,
+          fromAssetId: null,
+          toAssetId: assetId,
+          contractVersion: RFQ_ASSET_SWAP_DIRECTED,
+        },
+        {
+          fromAmount: 2_003n,
+          toAmount: 3_000n,
+          fromAssetId: assetId,
+          toAssetId: null,
+          contractVersion: RFQ_ASSET_SWAP_DIRECTED_NONCE,
+        },
+        {
+          fromAmount: 8_000n,
+          toAmount: 907n,
+          fromAssetId: null,
+          toAssetId: assetId,
+          contractVersion: RFQ_ASSET_SWAP_DIRECTED_NONCE,
+        },
+      ]
+      const offers = await Promise.all(
+        terms.map(async (trade) => {
+          const pubKey = await SingleKey.fromRandomBytes().xOnlyPublicKey()
+          const makerScript = new DefaultVtxo.Script({
+            pubKey,
+            serverPubKey: ctx.wallet.arkServerPublicKey,
+            csvTimelock: offerExitDelay(ctx.advertisedExitDelay),
+          })
+          const makerPublicKey = hex.encode(pubKey)
+          const makerPkScript = hex.encode(makerScript.pkScript)
+          const rfqId = randomBytes(32).toString('hex')
+          const offer = derive(
+            {
+              rfqId,
+              makerPublicKey,
+              makerPkScript,
+              wantAmount: trade.toAmount,
+              wantAssetId: trade.toAssetId,
+              offerAssetId: trade.fromAssetId,
+            },
+            trade.contractVersion,
+          )
+          return {
+            ...trade,
+            rfqId,
+            makerPublicKey,
+            makerPkScript,
+            offerPkScript: offer.pkScript,
+            address: offer.address,
+          }
+        }),
+      )
+
+      const [firstRecipient, ...otherRecipients] = offers.map(({ address, fromAmount, fromAssetId }) =>
+        fromAssetId === null
+          ? { address, amount: Number(fromAmount) }
+          : { address, amount: Number(ctx.dustSats), assets: [{ assetId: fromAssetId, amount: fromAmount }] },
+      )
+      const fundingTxid = await ctx.wallet.send({ recipients: [firstRecipient!, ...otherRecipients] })
+      const intents = await Promise.all(
+        offers.map(async ({ address: _address, ...offer }) => {
+          const deposit = await poll(
+            async () => {
+              const found = await depositAt(offer.offerPkScript)
+              return found?.txid === fundingTxid ? found : null
+            },
+            { attempts: 30, intervalMs: 1000, whenExhausted: 'batch deposit never appeared at its offer script' },
+          )
+          return { ...offer, depositTxid: deposit.txid, depositVout: deposit.vout }
+        }),
+      )
+      expect(new Set(intents.map(({ depositVout }) => depositVout)).size).toBe(3)
+
+      const settleBatch = quotedOffersSettleFor({ ctx, emulatorUrl: emulator.url, derivation: derivation() })
+      const outpoints = intents.map(({ depositTxid: txid, depositVout: vout }) => ({ txid, vout }))
+      const readOutpoints = async (outpoints: FillOutpoint[]) =>
+        (await ctx.wallet.indexerProvider.getVtxos({ outpoints })).vtxos
+      const [first, second, third] = intents
+      const announced: { txid: string; funding: readonly FillOutpoint[] }[] = []
+      const recordCandidate = async (txid: string, funding: readonly FillOutpoint[]) => {
+        announced.push({ txid, funding })
+        return false
+      }
+      await expect(
+        settleBatch([first!, { ...second!, contractVersion: null }, third!], { markSubmitting: recordCandidate }),
+      ).rejects.toThrow(/requires directed offer covenants/)
+      await expect(
+        settleBatch([first!, { ...second!, depositVout: third!.depositVout }, third!], {
+          markSubmitting: recordCandidate,
+        }),
+      ).rejects.toThrow()
+      await expect(settleBatch([first!, first!], { markSubmitting: recordCandidate })).rejects.toThrow(
+        /duplicate batch fill input/,
+      )
+      const settleWithHigherMinimum = quotedOffersSettleFor({
+        ctx: { ...ctx, vtxoMinSats: ctx.dustSats + 1n },
+        emulatorUrl: emulator.url,
+        derivation: derivation(),
+      })
+      await expect(settleWithHigherMinimum(intents, { markSubmitting: recordCandidate })).rejects.toThrow(
+        /cannot use its quoted carrier/,
+      )
+      expect(announced).toEqual([])
+
+      await expect(settleBatch(intents, { markSubmitting: recordCandidate })).rejects.toThrow()
+      expect(announced).toHaveLength(1)
+      const declined = announced[0]!
+      expect(declined.txid).toMatch(/^[0-9a-f]{64}$/)
+      expect(declined.funding.length).toBeGreaterThan(0)
+      const live = await readOutpoints([...outpoints, ...declined.funding])
+      expect(live).toHaveLength(outpoints.length + declined.funding.length)
+      expect(live.every((coin) => !isVtxoSpent(coin))).toBe(true)
+
+      const makerSats = intents.reduce(
+        (sum, intent) => sum + (intent.toAssetId === null ? intent.toAmount : ctx.dustSats),
+        0n,
+      )
+      const expectedChange = live.reduce((sum, coin) => sum + BigInt(coin.value), 0n) - makerSats
+      const outputCap = (expectedChange + 1n) / 2n
+      const operatorInfo = await ctx.wallet.arkProvider.getInfo()
+      const getInfo = vi
+        .spyOn(ctx.wallet.arkProvider, 'getInfo')
+        .mockResolvedValue({ ...operatorInfo, vtxoMaxAmount: outputCap })
+      const fillTxid = await settleBatch(intents, {
+        markSubmitting: async (txid, funding) => {
+          announced.push({ txid, funding })
+          return true
+        },
+      }).finally(() => getInfo.mockRestore())
+      expect(announced).toHaveLength(2)
+      expect(announced[1]).toEqual({ txid: fillTxid, funding: declined.funding })
+      const submittedOutpoints = [...outpoints, ...announced[1]!.funding]
+      const { fill, spent } = await poll(
+        async () => {
+          const spent = await readOutpoints(submittedOutpoints)
+          if (
+            spent.length !== submittedOutpoints.length ||
+            spent.some((coin) => !isVtxoSpent(coin) || coin.arkTxId !== fillTxid)
+          )
+            return null
+          const { txs } = await ctx.wallet.indexerProvider.getVirtualTxs([fillTxid])
+          return txs[0] ? { fill: Transaction.fromPSBT(base64.decode(txs[0])), spent } : null
+        },
+        { attempts: 30, intervalMs: 1000, whenExhausted: 'the fill did not spend every recorded input' },
+      )
+
+      expect(fill.inputsLength).toBe(submittedOutpoints.length)
+      for (const [i, outpoint] of submittedOutpoints.entries()) {
+        const coin = spent.find(({ txid, vout }) => txid === outpoint.txid && vout === outpoint.vout)
+        expect(hex.encode(fill.getInput(i).txid!)).toBe(coin?.spentBy)
+      }
+      for (const [i, intent] of intents.entries()) {
+        const output = fill.getOutput(i)
+        expect(hex.encode(output.script!)).toBe(intent.makerPkScript)
+        expect(output.amount).toBe(intent.toAssetId === null ? intent.toAmount : ctx.dustSats)
+      }
+      let satsIn = 0n
+      let satsOut = 0n
+      for (let i = 0; i < fill.inputsLength; i++) satsIn += fill.getInput(i).witnessUtxo!.amount
+      for (let i = 0; i < fill.outputsLength; i++) satsOut += fill.getOutput(i).amount!
+      expect(satsOut).toBe(satsIn)
+
+      const extension = Extension.fromTx(fill)
+      expect(extension.getEmulatorPacket()?.entries.map(({ vin }) => vin)).toEqual([0, 1, 2])
+      const groups = extension.getAssetPacket()!.groups
+      const swapped = groups.filter((group) => group.assetId?.toString() === assetId)
+      expect(swapped).toHaveLength(1)
+      const [group] = swapped
+      expect(group!.inputs).toContainEqual(expect.objectContaining({ vin: 1, amount: second!.fromAmount }))
+      const paid = first!.toAmount + third!.toAmount
+      const walletAssets = group!.inputs.reduce(
+        (sum, input) => (input.vin >= intents.length ? sum + input.amount : sum),
+        0n,
+      )
+      expect(walletAssets).toBeGreaterThanOrEqual(paid)
+      const surplus = walletAssets + second!.fromAmount - paid
+      expect(surplus).toBeGreaterThan(0n)
+      expect(group!.outputs).toEqual([
+        expect.objectContaining({ vout: 0, amount: first!.toAmount }),
+        expect.objectContaining({ vout: 2, amount: third!.toAmount }),
+        expect.objectContaining({ vout: 3, amount: surplus }),
+      ])
+      const solverPayout = ArkAddress.decode(await ctx.wallet.getAddress()).pkScript
+      const change = [fill.getOutput(3), fill.getOutput(4)]
+      expect(change.reduce((sum, output) => sum + output.amount!, 0n)).toBe(expectedChange)
+      for (const output of change) {
+        expect(output.script).toEqual(solverPayout)
+        expect(output.amount).toBeLessThanOrEqual(outputCap)
+        expect(output.amount).toBeGreaterThanOrEqual(ctx.dustSats)
+      }
     },
     SWAP_TIMEOUT_MS,
   )

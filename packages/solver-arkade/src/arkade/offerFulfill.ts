@@ -303,12 +303,13 @@ export const makerScriptHex = (offer: Offer): string => hex.encode(offer.makerPk
 
 /**
  * Assets a coin carries, normalised.
+ * Shared by single-offer and grouped funding selection.
  *
  * `getVtxos` reports asset amounts as STRINGS while the contract manager
  * reports bigints, and an asset amount is 256-bit — so the string form is the
  * one that must not go near a `number`.
  */
-const assetsOn = (coin: ExtendedVirtualCoin): { assetId: string; amount: bigint }[] => {
+export const assetsOn = (coin: ExtendedVirtualCoin): { assetId: string; amount: bigint }[] => {
   const assets = (coin as unknown as { assets?: { assetId: string; amount: bigint | string }[] }).assets ?? []
   return assets
     .map((entry) => ({ assetId: entry.assetId, amount: BigInt(entry.amount) }))
