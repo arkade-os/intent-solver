@@ -1800,6 +1800,23 @@ describe('tick: refusals before money moves', () => {
       expect(unrolledCalls).toEqual([third.txid, third.txid])
     })
 
+    it('stays claiming past the deadline when the swept claim fails and the outpoint read fails too', async () => {
+      batchClaimFake()
+      const row = await claimingAdopted([second, third])
+      arkade.sweptLockups = [second]
+      arkade.findLockupOutpoints = async () => {
+        throw new Error('indexer unavailable')
+      }
+      arkade.claimUnrolled = async () => ({ kind: 'waiting' })
+      arkade.claimSwept = async () => {
+        throw new Error('no fee coin can cover the batch')
+      }
+      clock = row.refundLocktime + 1
+
+      await expect(service.tick(row.id)).rejects.toThrow('no fee coin')
+      expect((await store.get(row.id)).state).toBe('claiming')
+    })
+
     it('keeps a pending L1 claim advancing while a batch awaits evidence at the refund deadline', async () => {
       const batch = batchClaimFake()
       const row = await claimingAdopted([second, third])

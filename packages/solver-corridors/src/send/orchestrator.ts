@@ -1914,8 +1914,10 @@ export class SendSwapService {
       } catch (error) {
         if (!journaledThisCall && (await store.get(row.id)).claimBatch === journalRaw) {
           // Nothing was journaled, so this tick still advances the L1 claims the failure would hold back.
-          const unrolled = await advanceL1().catch(() => null)
+          // A failed read leaves them unknown, which keeps the row claiming.
+          const unrolled = await advanceL1().catch(() => undefined)
           if (
+            unrolled !== undefined &&
             (unrolled === null || unrolled.settled) &&
             (await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip))
           ) {
