@@ -126,6 +126,8 @@ export interface ReceiveCarrierQuote {
   serviceFareSats: bigint
   /** `recycle_receiver` only: which Taxi answered, re-checked against the request's `taxi_key`. */
   taxiKey?: string
+  /** Locktime domain and minimum expiry a carrier fill's inputs must clear. */
+  inputExpiryFloor: Readonly<{ kind: 'height' | 'time'; value: bigint }>
   /** Receiver-paid only: what the payee pays its Taxi at claim; an asset fare comes out of the delivery. */
   receiverFare?: Readonly<{ currency: 'sats' | 'asset'; units: bigint }>
   /** Unix seconds, read against `now` so a stale quote cannot be priced. */
@@ -143,6 +145,8 @@ export interface ReceiveCarrierQuoteRequest {
   /** Absent resolves against the configured Taxi. */
   taxi?: { url: string; operatorKey: string }
   receiverPaid?: boolean
+  /** Settle's post-sign re-read only: the fill request bound the quote, so it must be bound to this fill. */
+  boundFillId?: string
 }
 
 export interface ReceiveCarrierQuotes {

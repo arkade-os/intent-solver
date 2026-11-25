@@ -1266,6 +1266,7 @@ describe('carrier admission', () => {
     receiptSats: 0n,
     serviceFareSats: 0n,
     taxiKey: 'd'.repeat(64),
+    inputExpiryFloor: { kind: 'height', value: 1_000_000n },
     expiresAt: 1_600,
     ...over,
   })

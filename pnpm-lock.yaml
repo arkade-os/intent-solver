@@ -51,6 +51,9 @@ importers:
       '@arkade-os/solver-transport':
         specifier: workspace:*
         version: link:packages/solver-transport
+      '@arkade-taxi/client':
+        specifier: file:packages/solver-app/vendor/carrier/arkade-taxi-client-1.1.0-ed341c0.tgz
+        version: file:packages/solver-app/vendor/carrier/arkade-taxi-client-1.1.0-ed341c0.tgz
       '@hono/node-server':
         specifier: ^2.1.0
         version: 2.1.0(hono@4.13.0)

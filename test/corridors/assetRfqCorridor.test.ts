@@ -88,6 +88,7 @@ const harness = async (
               loanSats: 329n,
               receiptSats: 1n,
               serviceFareSats: 0n,
+              inputExpiryFloor: { kind: 'height' as const, value: 1_000_000n },
               expiresAt: 1_600,
               ...options.carrier,
             }),
