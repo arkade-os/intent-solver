@@ -1466,6 +1466,31 @@ describe('tick: refusals before money moves', () => {
       expect(done.claimArkTxid).toBe('claim-txid')
     })
 
+    it('keeps a pending L1 claim advancing when the Arkade claim fails past the refund deadline', async () => {
+      batchClaimFake()
+      const row = await claimingAdopted([second, third])
+      arkade.lockups = [third]
+      arkade.findLockupOutpoints = async () => [
+        { ...second, spent: false, unrolled: true },
+        { ...third, spent: false, unrolled: false },
+      ]
+      const unrolledCalls: string[] = []
+      arkade.claimUnrolled = async (_row, output, record, save) => {
+        unrolledCalls.push(output.txid)
+        const claim = record ?? { txid: 'l1-claim', tx: null, feeRate: 10, broadcastAt: clock, cpfpTxid: null }
+        if (!record) await save(claim)
+        return { kind: 'pending', record: claim }
+      }
+      clock = row.refundLocktime + 1
+      arkade.claim = async () => {
+        throw new Error('arkd down')
+      }
+
+      await expect(service.tick(row.id)).rejects.toThrow('arkd down')
+      expect((await store.get(row.id)).state).toBe('claiming')
+      expect(unrolledCalls).toEqual([second.txid])
+    })
+
     it('claims only adopted spendable outputs when no batch is needed', async () => {
       batchClaimFake()
       const row = await claimingAdopted([first])
@@ -1747,6 +1772,56 @@ describe('tick: refusals before money moves', () => {
       const done = await service.tick(row.id)
       expect(done.state).toBe('stuck')
       expect(done.failureReason).toContain('does not match adopted')
+    })
+
+    it('advances a pending L1 claim across ticks while the swept claim fails before it journals anything', async () => {
+      batchClaimFake()
+      const row = await claimingAdopted([second, third])
+      arkade.sweptLockups = [second]
+      arkade.findLockupOutpoints = async () => [
+        { ...second, spent: false, unrolled: false },
+        { ...third, spent: false, unrolled: true },
+      ]
+      const unrolledCalls: string[] = []
+      arkade.claimUnrolled = async (_row, output, record, save) => {
+        unrolledCalls.push(output.txid)
+        const claim = record ?? { txid: 'l1-claim', tx: null, feeRate: 10, broadcastAt: clock, cpfpTxid: null }
+        if (!record) await save(claim)
+        return { kind: 'pending', record: claim }
+      }
+      arkade.claimSwept = async () => {
+        throw new Error('no fee coin can cover the batch')
+      }
+
+      await expect(service.tick(row.id)).rejects.toThrow('no fee coin')
+      clock = row.refundLocktime + 1
+      await expect(service.tick(row.id)).rejects.toThrow('no fee coin')
+      expect((await store.get(row.id)).state).toBe('claiming')
+      expect(unrolledCalls).toEqual([third.txid, third.txid])
+    })
+
+    it('keeps a pending L1 claim advancing while a batch awaits evidence at the refund deadline', async () => {
+      const batch = batchClaimFake()
+      const row = await claimingAdopted([second, third])
+      arkade.sweptLockups = [second]
+      arkade.findLockupOutpoints = async () => [
+        { ...second, spent: false, unrolled: false },
+        { ...third, spent: false, unrolled: true },
+      ]
+      const unrolledCalls: string[] = []
+      arkade.claimUnrolled = async (_row, output, record, save) => {
+        unrolledCalls.push(output.txid)
+        const claim = record ?? { txid: 'l1-claim', tx: null, feeRate: 10, broadcastAt: clock, cpfpTxid: null }
+        if (!record) await save(claim)
+        return { kind: 'pending', record: claim }
+      }
+      batch.setPending(true)
+      expect((await service.tick(row.id)).state).toBe('claiming')
+
+      clock = row.refundLocktime + 1
+      await expect(service.tick(row.id)).rejects.toThrow('awaits exact payout evidence')
+      expect((await store.get(row.id)).state).toBe('claiming')
+      expect(unrolledCalls).toEqual([third.txid, third.txid])
     })
 
     it('never marks a journaled batch claimed from an empty indexer view', async () => {
@@ -2521,6 +2596,28 @@ describe('tick: failure and recovery', () => {
     expect(row.failureReason).toContain('reconcile before retry')
   })
 
+  it('does not re-submit a mid-payment row while the live Lightning node cannot be identified', async () => {
+    const { swap } = await quoted()
+    Object.defineProperty(ln, 'walletFingerprint', {
+      value: async () => {
+        throw new Error('node unreachable')
+      },
+      configurable: true,
+    })
+    arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT }]
+    await store.transition(swap.id, 'quoted', 'funded', { lockup_value: AMOUNT })
+    await store.transition(swap.id, 'funded', 'paying', {
+      pay_attempted_at: clock - NO_RECORD_GRACE_SECONDS,
+      idempotency_key: `swap-${PAYMENT_HASH}`,
+      payment_wallet: 'wallet-a',
+    })
+    ln.payments.set('pay-1', { id: 'pay-1', status: 'pending' })
+
+    await expect(service.tick(swap.id)).rejects.toThrow()
+    expect(ln.payCalls).toHaveLength(0)
+    expect((await store.get(swap.id)).state).toBe('paying')
+  })
+
   describe('a row with a payment id, polled as failed', () => {
     const polledAsFailed = async (
       state: 'paying' | 'paid',
@@ -3078,6 +3175,20 @@ describe('tick: failure and recovery', () => {
       expect(arkade.claimCalls).toHaveLength(1)
     })
 
+    it('keeps a pending L1 claim advancing when the Arkade claim fails past the refund deadline', async () => {
+      const row = await claiming()
+      arkade.lockups = [{ txid: 'f1', vout: 0, value: AMOUNT / 2 }]
+      outpoints = [{ txid: 'f1', vout: 0, unrolled: false }, ...outpoints]
+      clock = row.refundLocktime + 1
+      arkade.claim = async () => {
+        throw new Error('arkd down')
+      }
+
+      await expect(service.tick(row.id)).rejects.toThrow('arkd down')
+      expect((await store.get(row.id)).state).toBe('claiming')
+      expect(l1.calls.map((c) => c.lockup)).toEqual(['u1:0'])
+    })
+
     it('stays claiming while an adopted output is hidden by a lagging read, then claims it', async () => {
       const { swap } = await quoted()
       const adopted = [
@@ -3172,6 +3283,18 @@ describe('tick: failure and recovery', () => {
       expect(done.state).toBe('stuck')
       expect(done.failureReason).toContain('u1:0 spent on L1 by an unrecognized transaction; destination needs review')
       expect(done.failureReason).toContain('unilateralClaim')
+    })
+
+    it('advances a recorded claim when the outpoint read fails, then surfaces the error', async () => {
+      const row = await claiming()
+      expect((await service.tick(row.id)).state).toBe('claiming')
+      l1.calls.length = 0
+      arkade.findLockupOutpoints = async () => {
+        throw new Error('indexer unavailable')
+      }
+
+      await expect(service.tick(row.id)).rejects.toThrow('indexer unavailable')
+      expect(l1.calls.map((c) => c.lockup)).toEqual(['u1:0'])
     })
   })
 })
@@ -4058,6 +4181,24 @@ describe('a payment whose commitment outlived its id', () => {
     // The whole point: no second submit. That call cannot succeed, and making
     // it is what kept this row spinning.
     expect(ln.payCalls).toHaveLength(submitted)
+  })
+
+  it.each([
+    ['settled', { status: 'settled', preimage: FORGED_PREIMAGE }],
+    ['returned', { status: 'returned' }],
+  ] as const)('acts on a %s commitment only as far as an unreadable node allows', async (_, htlc) => {
+    Object.defineProperty(ln, 'walletFingerprint', { value: async () => 'wallet-a', configurable: true })
+    const wedged = await wedgedInPaying()
+    Object.defineProperty(ln, 'walletFingerprint', {
+      value: async () => {
+        throw new Error('node unreachable')
+      },
+    })
+    ln.sendHtlc = htlc
+
+    if (htlc.status === 'settled') expect((await service.tick(wedged.id)).state).toBe('claimed')
+    else await expect(service.tick(wedged.id)).rejects.toThrow(/cannot read which Lightning node/)
+    expect(arkade.refundCalls).toHaveLength(0)
   })
 
   it('refunds when the backend says the commitment was returned', async () => {

@@ -58,8 +58,9 @@ export const claimClientLockup = async <S extends string>(claim: ClientLockupCla
     if (outputs.length > 0) txid = await arkade.claim(covenantRow, outputs, preimage)
   } catch (error) {
     // Past the deadline the client's refund is open and racing us, and nothing cooperative is left to
-    // retry. The row names the way out that needs no server. Before the deadline the failure is retried.
-    if (await claim.refundDeadlineReached()) {
+    // retry. The row names the way out that needs no server. Before the deadline the failure is retried,
+    // and so it is while an L1 claim is still out: only a claiming row has that claim advanced.
+    if ((unrolled === null || unrolled.settled) && (await claim.refundDeadlineReached())) {
       const detail = error instanceof Error ? error.message : String(error)
       await store.fail(row.id, edge.from, `claim failing past the refund deadline: ${detail} — ${recourseOf(claim)}`)
       return false
@@ -111,7 +112,12 @@ const whenLockupIsShort = async <S extends string>(claim: ClientLockupClaim<S>, 
   }
   // A throw keeps the row claiming, so the sweep retries a finalize arkd refused.
   const pending = evidence === 'spent' ? await arkade.finalizePendingClaim?.(covenantRow, preimage) : null
-  if (pending) return store.transition(row.id, edge.from, edge.to, { claim_ark_txid: pending })
+  if (pending) {
+    const leftover = await lockupLeftover(arkade, row, [], null)
+    if (leftover.length === 0) return store.transition(row.id, edge.from, edge.to, { claim_ark_txid: pending })
+    const pastDeadline = await claim.refundDeadlineReached()
+    return awaitLeftover(store, row.id, edge.from, pending, leftover, pastDeadline, () => recourseOf(claim))
+  }
 
   if (outpointsP) {
     const outpoints = unwrap(await outpointsP)

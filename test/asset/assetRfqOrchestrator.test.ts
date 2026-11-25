@@ -152,6 +152,26 @@ describe('quote', () => {
     expect(outcome.swap.validUntil).toBe(1_030)
   })
 
+  it('sizes valid_until from the price it struck, not from after a slow inventory read', async () => {
+    let at: (seconds: number) => void = () => {}
+    const built = await harness({
+      fetchPrice: async () => {
+        at(1_010)
+        return { mantissa: 100_000n, scale: 0 }
+      },
+      balance: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        at(1_100)
+        return new Map([[ASSET_A, 10n ** 18n]])
+      },
+    })
+    at = built.tick
+
+    const outcome = await built.service.quote(request())
+    if (!outcome.accepted) throw new Error('expected a quote')
+    expect(outcome.swap.validUntil).toBe(1_040)
+  })
+
   it('records the input flat fee and output spread in their native units', async () => {
     const { service } = await harness({
       markets: [{ ...MARKET, sellBaseFeeFlat: 300n }],
@@ -506,6 +526,52 @@ describe('tick — driving a negotiation', () => {
     await service.tick('swap-1')
     expect(atSettle).toEqual({ state: 'filling', phase: 'selecting' })
     expect(await store.get('swap-1')).toMatchObject({ state: 'filled', fillPhase: 'submitting' })
+  })
+
+  it('refuses the latch when the quote lapsed between the fill decision and the submission', async () => {
+    let at: (seconds: number) => void = () => {}
+    const built = await harness({
+      depositAt: async () => deposit(),
+      settle: async (_row, options) => {
+        at(1_100)
+        if (!(await options?.markSubmitting?.())) throw new OfferNotSubmittedError('quote lapsed before submission')
+        return 'fa'.repeat(32)
+      },
+    })
+    at = built.tick
+
+    await built.service.quote(request())
+    await built.service.tick('swap-1')
+    await built.service.tick('swap-1')
+
+    expect(await built.store.get('swap-1')).toMatchObject({ state: 'funded', fillPhase: null })
+  })
+
+  it('walks the latch back when its write lands past the quote deadline', async () => {
+    let at: (seconds: number) => void = () => {}
+    const submitted: string[] = []
+    const built = await harness({
+      depositAt: async () => deposit(),
+      settle: async (_row, options) => {
+        if (!(await options?.markSubmitting?.())) throw new OfferNotSubmittedError('quote lapsed at the latch')
+        submitted.push('fill')
+        return 'fa'.repeat(32)
+      },
+    })
+    at = built.tick
+    const latch = built.store.markSubmitting.bind(built.store)
+    vi.spyOn(built.store, 'markSubmitting').mockImplementation(async (id) => {
+      const landed = await latch(id)
+      at(1_100)
+      return landed
+    })
+
+    await built.service.quote(request())
+    await built.service.tick('swap-1')
+    await built.service.tick('swap-1')
+
+    expect(submitted).toEqual([])
+    expect(await built.store.get('swap-1')).toMatchObject({ state: 'funded', fillPhase: null })
   })
 
   it('walks a row a restart left mid-selection back to funded', async () => {

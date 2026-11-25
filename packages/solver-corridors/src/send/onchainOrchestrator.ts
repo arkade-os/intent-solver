@@ -658,10 +658,12 @@ export class OnchainSendSwapService {
    */
   async refundNow(id: string): Promise<string | null> {
     const row = await this.deps.store.get(id)
-    const preimage = await this.clientClaimPreimage(row)
+    // A claim already on the row is not undone by a spend read that has fallen behind.
+    const found = row.preimage === null ? await this.clientClaimPreimage(row) : null
+    const preimage = row.preimage ?? (found && hex.encode(found))
     if (preimage) {
       throw new Error(
-        `swap ${id}: the client already claimed the onchain HTLC, preimage ${hex.encode(preimage)} — ` +
+        `swap ${id}: the client already claimed the onchain HTLC, preimage ${preimage} — ` +
           'refunding the arkade lockup would pay them twice; claim the lockup with that preimage instead',
       )
     }
@@ -894,7 +896,8 @@ export class OnchainSendSwapService {
   }
 
   private async lockupHeld(row: OnchainSendSwapRow): Promise<number> {
-    return (await this.deps.arkade.findLockups(row.pkScript)).reduce((sum, o) => sum + o.value, 0)
+    // Sats outputs only, as at adoption: value on an asset vtxo a claim cannot spend is not cover.
+    return satsOutputs(await this.deps.arkade.findLockups(row.pkScript)).reduce((sum, o) => sum + o.value, 0)
   }
 
   /** Read again right before money moves: an approval wait or a failing `fund()` is time the client can spend unrolling it. */
@@ -957,6 +960,9 @@ export class OnchainSendSwapService {
       await store.releaseFundLease(row.id)
       throw error
     }
+    // Signing is time the window can close in. A re-drive's lease holder finishes what it started.
+    const late = fresh ? this.fundingRefusal(row) : null
+    if (late) return this.refuseFunding(row, fresh, late)
     if (!(await store.recordFundingTx(row.id, signed.tx))) return false
     return this.publishFunding(row, signed.tx, false)
   }
@@ -978,7 +984,12 @@ export class OnchainSendSwapService {
     if ((await onchain.transactionOutcome(txid)) === 'unknown') {
       const refusal = recheck ? (this.fundingRefusal(row) ?? (await this.lockupShortfall(row))) : null
       if (refusal) {
-        await store.fail(row.id, 'funding_onchain', `${refusal}; recorded funding ${txid} was never seen on chain`)
+        // An earlier broadcast may still land: its outpoint is what reclaims that leg.
+        await store.transition(row.id, 'funding_onchain', 'stuck', {
+          funding_txid: txid,
+          funding_vout: vout,
+          failure_reason: `${refusal}; recorded funding ${txid} was never seen on chain`,
+        })
         return false
       }
       await onchain.broadcastRaw(tx)
@@ -1081,7 +1092,10 @@ export class OnchainSendSwapService {
     const broadcastAt = row.onchainRefundBroadcastAt ?? row.updatedAt
     if (!bumpDue(broadcastAt, this.now())) return null
     const estimate = await this.deps.onchain.estimateFeeRate()
-    const previousFeeRate = row.onchainRefundFeeRate ?? estimate
+    // A version the backend never saw sets no fee to outbid: its broadcast threw after the pre-commit.
+    const latest = row.onchainRefundTxid
+    const unseen = latest !== null && (await this.deps.onchain.transactionOutcome(latest)) === 'unknown'
+    const previousFeeRate = unseen ? null : (row.onchainRefundFeeRate ?? estimate)
     const attempt = await this.pushOnchainHtlcRefund(row, fundingTxid, fundingVout, { estimate, previousFeeRate })
     return attempt.broadcast ? attempt.txid : null
   }

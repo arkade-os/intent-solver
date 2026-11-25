@@ -1139,7 +1139,7 @@ export class SendSwapService {
     // human — the same identity guard the coupled refund and `paymentVerdict`
     // apply, here on a row that has no id yet. `stuck`, not `refused`: a payment
     // may exist on the other node, so a refund is not safe.
-    const { other } = await this.payingNode(row)
+    const { other, unconfirmed } = await this.payingNode(row)
     if (other !== null) {
       await this.deps.store.fail(row.id, 'paying', `refused to re-submit: ${other} — reconcile before retry`)
       return false
@@ -1160,6 +1160,11 @@ export class SendSwapService {
     // classes and the method reads its own instance state.
     const { ln } = this.deps
     const committed = await ln.getSendHtlcState?.(row.paymentHash)
+    // A settled answer proves itself with its preimage; anything else needs to know which node answered.
+    // Thrown, not parked, for the reason `believeFailureOnlyFromPayingNode` gives.
+    if (unconfirmed && committed?.status !== 'settled') {
+      throw new Error(`swap ${row.id}: not re-submitting: cannot read which Lightning node is answering`)
+    }
     if (committed) return this.recoverCommitted(row, committed)
     // A probe that reaches the backend before the submission it follows is
     // recorded answers null either way, so inside the grace it is not yet the
@@ -1751,6 +1756,27 @@ export class SendSwapService {
     const reservedKeys = new Set<string>()
     const pendingBatches: SweptClaimJournal[] = []
     let batchError: unknown
+    const selected = new Set(adopted.map(outpointKey))
+    let unrolledClaim = row.unrolledClaim
+    if (unrolledClaim !== null) {
+      const parsed: unknown = JSON.parse(unrolledClaim)
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        throw new Error(`swap ${row.id}: invalid unrolled claim journal`)
+      }
+      unrolledClaim = JSON.stringify(Object.fromEntries(Object.entries(parsed).filter(([key]) => selected.has(key))))
+    }
+    const advanceL1 = () =>
+      advanceUnrolledClaims(
+        store,
+        { id: row.id, pkScript: row.pkScript, unrolledClaim },
+        {
+          findLockupOutpoints: async (script) =>
+            (await arkade.findLockupOutpoints!(script)).filter((output) => selected.has(outpointKey(output))),
+          claimUnrolled: arkade.claimUnrolled?.bind(arkade),
+        },
+        row,
+        row.preimage!,
+      )
     const currentSwept = seenSwept
     for (let index = 0; index < batches.length;) {
       const batch = batches[index]!
@@ -1886,15 +1912,22 @@ export class SendSwapService {
           onPrepared,
         )
       } catch (error) {
-        if (
-          !journaledThisCall &&
-          (await store.get(row.id)).claimBatch === journalRaw &&
-          (await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip))
-        ) {
-          const detail = error instanceof Error ? error.message : String(error)
-          const recourse = unilateralExitRecourse(row, { solverPubkey: arkade.providerPubkey })
-          await store.fail(row.id, 'claiming', `batch claim failing past the refund deadline: ${detail} — ${recourse}`)
-          return false
+        if (!journaledThisCall && (await store.get(row.id)).claimBatch === journalRaw) {
+          // Nothing was journaled, so this tick still advances the L1 claims the failure would hold back.
+          const unrolled = await advanceL1().catch(() => null)
+          if (
+            (unrolled === null || unrolled.settled) &&
+            (await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip))
+          ) {
+            const detail = error instanceof Error ? error.message : String(error)
+            const recourse = unilateralExitRecourse(row, { solverPubkey: arkade.providerPubkey })
+            await store.fail(
+              row.id,
+              'claiming',
+              `batch claim failing past the refund deadline: ${detail} — ${recourse}`,
+            )
+            return false
+          }
         }
         throw error
       }
@@ -1912,7 +1945,6 @@ export class SendSwapService {
       }
     }
 
-    const selected = new Set(adopted.map(outpointKey))
     const found = (await arkade.findLockups(row.pkScript)).filter(
       (output) => selected.has(outpointKey(output)) && !reservedKeys.has(outpointKey(output)),
     )
@@ -1920,25 +1952,7 @@ export class SendSwapService {
       throw new Error(`swap ${row.id}: spendable lockup value or assets changed`)
     }
     const spendable = boundedSpendInputs(found, this.now())
-    let unrolledClaim = row.unrolledClaim
-    if (unrolledClaim !== null) {
-      const parsed: unknown = JSON.parse(unrolledClaim)
-      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-        throw new Error(`swap ${row.id}: invalid unrolled claim journal`)
-      }
-      unrolledClaim = JSON.stringify(Object.fromEntries(Object.entries(parsed).filter(([key]) => selected.has(key))))
-    }
-    const unrolled = await advanceUnrolledClaims(
-      store,
-      { id: row.id, pkScript: row.pkScript, unrolledClaim },
-      {
-        findLockupOutpoints: async (script) =>
-          (await arkade.findLockupOutpoints!(script)).filter((output) => selected.has(outpointKey(output))),
-        claimUnrolled: arkade.claimUnrolled?.bind(arkade),
-      },
-      row,
-      row.preimage,
-    )
+    const unrolled = await advanceL1()
     let txid: string | null = null
     let spendableClaimed: FundedOutput[] = []
     try {
@@ -1952,7 +1966,11 @@ export class SendSwapService {
         }
       }
     } catch (error) {
-      if (await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip)) {
+      // An L1 claim still out keeps the row claiming, as in `claimClientLockup`.
+      if (
+        (unrolled === null || unrolled.settled) &&
+        (await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip))
+      ) {
         const detail = error instanceof Error ? error.message : String(error)
         const recourse = unilateralExitRecourse(row, { solverPubkey: arkade.providerPubkey })
         await store.fail(row.id, 'claiming', `claim failing past the refund deadline: ${detail} — ${recourse}`)
@@ -1963,7 +1981,11 @@ export class SendSwapService {
     if (pendingBatches.length > 0) {
       if (txid !== null) await store.patch(row.id, { claim_ark_txid: txid })
       // Deadline first: past it a retry cannot beat the client's refund, so the row must name its recourse.
-      if (await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip)) {
+      // An L1 claim still out keeps the row claiming, as above.
+      if (
+        (unrolled === null || unrolled.settled) &&
+        (await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip))
+      ) {
         const detail =
           batchError === undefined ? '' : `: ${batchError instanceof Error ? batchError.message : String(batchError)}`
         const recourse = unilateralExitRecourse(row, { solverPubkey: arkade.providerPubkey })
