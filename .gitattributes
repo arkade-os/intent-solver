@@ -10,3 +10,4 @@
 # untouched. Fixing it here rather than with `endOfLine` in `.prettierrc` keeps
 # CI enforcing LF for everyone instead of silencing the check per contributor.
 * text=auto eol=lf
+packages/solver-app/vendor/carrier/*.tgz binary
