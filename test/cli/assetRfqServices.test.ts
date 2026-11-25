@@ -10,6 +10,8 @@
  * configured markets really do become registered corridors — is, at the bottom.
  */
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
 import { DirectFillAttempts } from '@arkade-os/solver-arkade/arkade/directFillAttempts.js'
@@ -324,5 +326,21 @@ describe('a market that stopped serving stays readable across a restart', () => 
     expect(source).toContain(seeded)
     expect(source).toContain(built)
     expect(source.indexOf(seeded)).toBeLessThan(source.indexOf(built))
+  })
+})
+
+describe('which commands sweep journalled direct fills at boot', () => {
+  const cli = readFileSync(fileURLToPath(new URL('../../packages/solver-app/src/cli.ts', import.meta.url)), 'utf8')
+
+  it('is the daemon commands, and never a one-shot sharing their wallet file', () => {
+    for (const command of ['async watch()', 'async serve()', 'async relay()']) {
+      const at = cli.indexOf(command)
+      expect(cli.slice(at, at + 400)).toContain(
+        "createServices(config, { rebalance: 'active', directFills: 'active' })",
+      )
+    }
+    expect(cli.match(/directFills: 'active'/g)).toHaveLength(3)
+    const oneShot = cli.slice(cli.indexOf('const withServices = async'), cli.indexOf('const quoteAsClient'))
+    expect(oneShot).toContain('createServices(config, opts)')
   })
 })
