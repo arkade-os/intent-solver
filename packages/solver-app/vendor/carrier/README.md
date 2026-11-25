@@ -12,8 +12,9 @@ published. A frozen install refuses any archive whose bytes differ from the `int
 | `arkade-taxi-covenant-1.1.2-1e831e7d.tgz`   | ArkLabsHQ/arkade-taxi `1e831e7ddc0c71c3f78e3bb6dc6d4bdadf11fa52` | `2e8b2c706744d49460d14cf8e5ea56d486082f94f2bbbb47b747d4e3ba4b87fa` | `sha512-KF4XZ0gW1av8mo/pYWJZtWvva+nmJDKvfLqSyvkqXHY7jDyTr6Q0by7+0kDlQ3zWODZ/33q/VCmVm29sUqTbmQ==` |
 | `arkade-taxi-protocol-1.1.2-1e831e7d.tgz`   | ArkLabsHQ/arkade-taxi `1e831e7ddc0c71c3f78e3bb6dc6d4bdadf11fa52` | `901741662fea6773825be4ad6e07a0806ec690b04ef79652df90aef33116f7f2` | `sha512-9fVt2j5shJtpsES7+G0PcAHRFDrn30Dyo4MPzPmqBUzdJq4RlCd2XSXDQkm+DuXHt330vlCjE4+8xnK/2BeW6w==` |
 
-The SDK commit is ts-sdk master with arkade-os/ts-sdk#1282 and #1283; the Taxi commit is v1.1.2
-(ArkLabsHQ/arkade-taxi#49).
+The SDK commit is the head of ts-sdk's `provenance/taxi-cohort-20261124` branch: master with
+arkade-os/ts-sdk#1282 and #1283. The Taxi commit is the merge of ArkLabsHQ/arkade-taxi#49, which cut
+1.1.2; the Taxi repository has no tags.
 
 Check an archive:
 
