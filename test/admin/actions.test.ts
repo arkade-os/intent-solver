@@ -723,6 +723,7 @@ describe('resolve-stuck', () => {
     spendable = [] as number[],
     swept = [] as number[],
     corridor = LN_SEND,
+    held = { lockup, preimage: null } as unknown,
   } = {}) => {
     const resolveStuck = vi.fn().mockResolvedValue(undefined)
     const getVtxos = vi.fn(async (query: { spendableOnly?: boolean }) => ({
@@ -734,7 +735,7 @@ describe('resolve-stuck', () => {
       readers: corridorSet({
         [corridor]: {
           detail: async () => ({ swap: { state } }),
-          lockupFor: async () => ({ lockup, preimage: null }),
+          lockupFor: async () => held,
         },
       }),
     })
@@ -779,6 +780,14 @@ describe('resolve-stuck', () => {
 
     expect(response.status).toBe(500)
     expect(await response.json()).toMatchObject({ message: expect.stringMatching(/Lightning corridors/) })
+    expect(resolveStuck).not.toHaveBeenCalled()
+  })
+
+  it('refuses a swap whose corridor cannot describe its lockup', async () => {
+    const { response, resolveStuck } = await resolve({ held: null })
+
+    expect(response.status).toBe(500)
+    expect(await response.json()).toMatchObject({ message: expect.stringMatching(/cannot be shown empty/) })
     expect(resolveStuck).not.toHaveBeenCalled()
   })
 })

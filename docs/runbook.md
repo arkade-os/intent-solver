@@ -1000,6 +1000,11 @@ overview, newest first, each linking to its detail.
    the two Lightning corridors only: an onchain send can still hold your L1
    HTLC, which an empty Arkade lockup does not show.
 
+   There is no un-resolve: a second `resolve-stuck` only replaces the note. A
+   resolved row stays reachable by direct lookup (the swap's detail, or
+   `GET /api/swaps/<corridor>/<id>`), so if its lockup were ever funded again,
+   look there; the stuck list no longer shows it.
+
 ### The other corridors
 
 The procedure above is `arkade:BTC->lightning:BTC`, and `read-payment` is that
