@@ -27,6 +27,8 @@ export interface Reservation {
   release(): void
 }
 
+const noReservation = () => {}
+
 const releasing = (undo: readonly (() => void)[]): Reservation => {
   let released = false
   return {
@@ -73,16 +75,18 @@ export class AdmissionControl implements AdmissionStrategy {
    * The exposure half, for a caller already holding {@link serialise}. Split so
    * {@link admit} decides BOTH ceilings in one critical section.
    */
-  private claimExposure(sats: number, capSats: number, committed: number): (() => void) | null {
+  private claimExposure(sats: number, capSats: number, committed: number, reserve = true): (() => void) | null {
     if (committed + this.reserved + sats > capSats) return null
+    if (!reserve) return noReservation
     this.reserved += sats
     return () => {
       this.reserved -= sats
     }
   }
 
-  private claimFloat(required: number, availableSats: number, owed: number): (() => void) | null {
+  private claimFloat(required: number, availableSats: number, owed: number, reserve: boolean): (() => void) | null {
     if (owed + this.reservedFloat + required > availableSats) return null
+    if (!reserve) return noReservation
     this.reservedFloat += required
     return () => {
       this.reservedFloat -= required
@@ -131,12 +135,20 @@ export class AdmissionControl implements AdmissionStrategy {
    * that wants something else supplies its own `admit` without this class being
    * involved at all.
    */
-  async admit(request: AdmissionRequest): Promise<Reservation | null> {
+  admit(request: AdmissionRequest): Promise<Reservation | null> {
+    return this.check(request, true)
+  }
+
+  async canAdmit(request: AdmissionRequest): Promise<boolean> {
+    return (await this.check(request, false)) !== null
+  }
+
+  private async check(request: AdmissionRequest, reserve: boolean): Promise<Reservation | null> {
     if (!(request.giveSats > 0)) throw new RangeError(`admit() needs a positive size, got ${request.giveSats}`)
     const generation = this.inventoryGeneration
     const guardedInventory = request.inventory ?? (await this.inventoryFor?.(request))
     return this.serialise(async (): Promise<Reservation | null> => {
-      const exposure = this.claimExposure(request.giveSats, request.capSats, await request.committedSats())
+      const exposure = this.claimExposure(request.giveSats, request.capSats, await request.committedSats(), reserve)
       if (exposure === null) {
         request.onRefused?.('exposure')
         return null
@@ -167,8 +179,10 @@ export class AdmissionControl implements AdmissionStrategy {
             request.onRefused?.('float')
             return null
           }
-          const held = this.restoreInventory(inventory.poolId, inventory.requiredSats)
-          undo.push(() => held.release())
+          if (reserve) {
+            const held = this.restoreInventory(inventory.poolId, inventory.requiredSats)
+            undo.push(() => held.release())
+          }
         }
         if (float === undefined) return releasing(undo)
         // Missing includes the window after a withdrawal invalidates the held
@@ -178,7 +192,7 @@ export class AdmissionControl implements AdmissionStrategy {
           request.onRefused?.('float')
           return null
         }
-        const claimed = this.claimFloat(float.requiredSats, float.available.sats, await float.owedSats())
+        const claimed = this.claimFloat(float.requiredSats, float.available.sats, await float.owedSats(), reserve)
         if (claimed === null) {
           undo.forEach((release) => release())
           request.onRefused?.('float')

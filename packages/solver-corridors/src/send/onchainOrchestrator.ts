@@ -16,7 +16,11 @@
 
 import { hex } from '@scure/base'
 import { Transaction } from '@arkade-os/sdk'
-import type { AdmissionStrategy, FloatRequirement } from '@arkade-os/solver-core/core/admissionStrategy.js'
+import type {
+  AdmissionRequest,
+  AdmissionStrategy,
+  FloatRequirement,
+} from '@arkade-os/solver-core/core/admissionStrategy.js'
 import { RFQ_PAIR_ONCHAIN_SEND } from '../wire/onchainPayloads.js'
 import {
   DEFAULT_ONCHAIN_LOCKUP_TIMEOUT,
@@ -362,11 +366,7 @@ export class OnchainSendSwapService {
     // insert succeeds, and handed back on every path that does not insert.
     const refusal: { ceiling?: 'exposure' | 'float' } = {}
     const reservation = await this.admission.admit({
-      pair: RFQ_PAIR_ONCHAIN_SEND,
-      giveSats: giveSats,
-      capSats: this.deps.maxExposedSats,
-      committedSats: this.deps.totalCommitted,
-      float: this.floatRequirement(payoutSats),
+      ...this.admissionRequest(giveSats, payoutSats),
       onRefused: (ceiling) => {
         refusal.ceiling = ceiling
       },
@@ -464,6 +464,16 @@ export class OnchainSendSwapService {
     }
   }
 
+  private admissionRequest(giveSats: number, payoutSats: number): AdmissionRequest {
+    return {
+      pair: RFQ_PAIR_ONCHAIN_SEND,
+      giveSats,
+      capSats: this.deps.maxExposedSats,
+      committedSats: this.deps.totalCommitted,
+      float: this.floatRequirement(payoutSats),
+    }
+  }
+
   // Dust PLUS the refund's own fee: under it an unclaimed HTLC cannot be returned, and its claim leaf never expires.
   private refundablePayoutFloor(): number {
     this.refundVsize ??= refundSpendVsize({
@@ -504,6 +514,23 @@ export class OnchainSendSwapService {
     )
       return undefined
     return { fromAmount, toAmount }
+  }
+
+  async canBid(fromAmount: number, toAmount: number, side: 'from' | 'to'): Promise<boolean> {
+    if (!this.admission.canAdmit) return false
+    const giveSats =
+      side === 'to' ? this.pricing.giveFor({ pair: RFQ_PAIR_ONCHAIN_SEND, payoutSats: toAmount }) : fromAmount
+    const payoutSats = side === 'from' ? this.pricing.payoutFor({ pair: RFQ_PAIR_ONCHAIN_SEND, giveSats }) : toAmount
+    const { minSats, maxSats } = this.deps.limits
+    if (
+      !Number.isSafeInteger(giveSats) ||
+      giveSats < minSats ||
+      giveSats > maxSats ||
+      !Number.isSafeInteger(payoutSats) ||
+      payoutSats < this.refundablePayoutFloor()
+    )
+      return false
+    return this.admission.canAdmit(this.admissionRequest(giveSats, payoutSats))
   }
 
   tick(id: string): Promise<OnchainSendSwapRow> {
