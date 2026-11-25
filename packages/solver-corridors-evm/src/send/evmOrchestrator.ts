@@ -22,7 +22,6 @@ import type { EvmSendQuoteRecord, EvmSendSwapRow, EvmSendSwapStore } from '../db
 import { sendLockFromRow } from '../evm/lockFromRow.js'
 import {
   EvmClaimVerificationError,
-  asTimelockHeight,
   type EvmCall,
   type EvmHtlcBackend,
   type EvmTransactionOutcome,
@@ -335,7 +334,7 @@ export class EvmSendSwapService {
         evmLockAgeSeconds: 0,
         preimage: row.preimage,
         nowSeconds: this.now(),
-        evmTimelockHeight: asTimelockHeight(0),
+        evmTimelockHeight: null,
       }
     }
     const lock = this.deps.lockFor(row)
