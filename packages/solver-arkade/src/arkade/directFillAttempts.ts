@@ -177,7 +177,11 @@ export class DirectFillAttempts {
       acknowledged: number
       body: string
     }>('SELECT * FROM direct_fill_attempt WHERE id = ?', [key])
-    return row ? this.parse(row) : undefined
+    if (!row) return undefined
+    // Pinned wherever it is read: a prepare that lost its read-back left a durable row unpinned.
+    const attempt = this.parse(row)
+    this.pin(attempt)
+    return attempt
   }
 
   async list(): Promise<DirectFillAttempt[]> {
@@ -196,7 +200,9 @@ export class DirectFillAttempts {
       acknowledged: number
       body: string
     }>('SELECT * FROM direct_fill_attempt WHERE acknowledged = 0 ORDER BY id')
-    return rows.map((row) => this.parse(row))
+    const attempts = rows.map((row) => this.parse(row))
+    for (const attempt of attempts) this.pin(attempt)
+    return attempts
   }
 
   private pin(attempt: DirectFillAttempt): void {

@@ -369,17 +369,22 @@ export class OfferFillStore {
       )
         return false
       const reason = `direct fill cancelled by confirmed conflict ${txid}`
+      const recovered = `direct fill recovered as ${txid}`
       if (cancelled && row.state === 'stuck' && row.fillTxid === null && row.failureReason === reason) return true
-      if (!cancelled && row.state === 'filled' && row.fillTxid === txid) return true
+      if (!cancelled && row.fillTxid === txid && (row.state === 'filled' || row.failureReason?.startsWith(recovered)))
+        return true
       if (row.state !== 'filling' && row.state !== 'stuck') return false
       if (row.failureReason?.startsWith('direct fill cancelled by confirmed conflict ')) return false
       if (row.fillTxid !== null && (cancelled || row.fillTxid !== txid)) return false
-      const next: OfferFillState = cancelled ? 'stuck' : 'filled'
+      // A stuck row gave up its outpoint and a later row may hold it now: record the fill, never displace that row.
+      const holder =
+        cancelled || row.state !== 'stuck' ? undefined : await this.findLiveByOutpoint(row.offerTxid, row.offerVout)
+      const next: OfferFillState = cancelled || holder ? 'stuck' : 'filled'
       const result = await this.driver.run(sql.resolveDirectFill, [
         next,
         this.now(),
         cancelled ? null : txid,
-        cancelled ? reason : null,
+        cancelled ? reason : holder ? `${recovered} after ${holder.id} took its outpoint` : null,
         proof.id,
         row.state,
         proof.depositTxid,

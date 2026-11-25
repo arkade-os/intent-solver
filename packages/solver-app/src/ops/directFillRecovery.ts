@@ -5,12 +5,14 @@ import type { DirectFillAttempt, DirectFillAttempts } from '@arkade-os/solver-ar
 import {
   buildDirectFillConflict,
   directFillFinalized,
+  DirectFillUnfinalizableError,
   recoverDirectFillGraph,
   submitDirectFillConflict,
   validateDirectFillGraph,
   type DirectFillChain,
   type DirectFillCoin,
   type DirectFillGraphDeps,
+  type DirectFillOutpoint,
 } from '@arkade-os/solver-arkade/arkade/directFillGraph.js'
 
 export interface DirectFillParentProof {
@@ -35,15 +37,37 @@ export interface DirectFillRecoveryDeps {
   now?: () => number
   conflictAfterSeconds?: number
   onError?: (key: string, error: unknown) => void
-  /** Per-attempt backoff: a pending directed fill arkd v0.9.16 cannot finalize fails every sweep. */
+  /** Per-attempt backoff for an attempt whose recovery keeps failing, such as an unreachable arkd. */
   backoff?: { shouldSkip(key: string): boolean; clear(key: string): void }
 }
 
 export const DIRECT_FILL_CONFLICT_AFTER_SECONDS = 900
+export const DIRECT_FILL_UNFINALIZABLE_RECHECK_SECONDS = 60
 
 export const createDirectFillRecovery = (deps: DirectFillRecoveryDeps) => {
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000))
+  const unfinalizable = new Map<string, number>()
   let running: Promise<void> | undefined
+
+  // A pending graph only another signer can finish is reported once, re-asked once a minute,
+  // and must not keep the attempt from its conflict; a failed lookup still rejects.
+  const finalizePending = async (
+    attempt: DirectFillAttempt,
+    expected: readonly DirectFillOutpoint[],
+  ): Promise<boolean> => {
+    const recheckAt = unfinalizable.get(attempt.key)
+    if (recheckAt !== undefined && now() < recheckAt) return false
+    try {
+      const finalized = await recoverDirectFillGraph(deps.graph, attempt.graph!, expected, attempt.funding)
+      unfinalizable.delete(attempt.key)
+      return finalized
+    } catch (error) {
+      if (!(error instanceof DirectFillUnfinalizableError)) throw error
+      if (recheckAt === undefined) deps.onError?.(attempt.key, error)
+      unfinalizable.set(attempt.key, now() + DIRECT_FILL_UNFINALIZABLE_RECHECK_SECONDS)
+      return false
+    }
+  }
 
   const acknowledge = async (attempt: DirectFillAttempt): Promise<void> => {
     // Neither sent anything a parent must hear about; the fill path already answered it.
@@ -100,7 +124,7 @@ export const createDirectFillRecovery = (deps: DirectFillRecoveryDeps) => {
       await submitDirectFillConflict(deps.graph, attempt.conflict!, attempt.funding)
       return
     }
-    if (await recoverDirectFillGraph(deps.graph, graph, expected, attempt.funding)) return
+    if (await finalizePending(attempt, expected)) return
     if (now() - attempt.createdAt < (deps.conflictAfterSeconds ?? DIRECT_FILL_CONFLICT_AFTER_SECONDS)) return
 
     const { vtxos } = await deps.chain.getVtxos({ outpoints: attempt.funding })
