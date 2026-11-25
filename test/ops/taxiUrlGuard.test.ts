@@ -119,7 +119,8 @@ describe('the pinned Taxi fetch', () => {
       request.on('data', (chunk) => (body += chunk))
       request.on('end', () => {
         response.setHeader('content-type', 'application/json')
-        response.end(JSON.stringify({ method: request.method, host: request.headers.host, body }))
+        const { host, 'content-length': length, 'transfer-encoding': encoding } = request.headers
+        response.end(JSON.stringify({ method: request.method, host, length, encoding, body }))
       })
     })
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -132,7 +133,7 @@ describe('the pinned Taxi fetch', () => {
     try {
       const reply = await pinnedFetch(`http://taxi.example:${port}/v1/fills`, { method: 'POST', body: 'signed' })
       expect(reply.status).toBe(200)
-      expect(await reply.json()).toEqual({ method: 'POST', host: `taxi.example:${port}`, body: 'signed' })
+      expect(await reply.json()).toEqual({ method: 'POST', host: `taxi.example:${port}`, length: '6', body: 'signed' })
       expect(pinned).toEqual(['taxi.example'])
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()))
