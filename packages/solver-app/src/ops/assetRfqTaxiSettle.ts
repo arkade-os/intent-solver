@@ -271,13 +271,13 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
     const pin = deps.pins.adopt(row.id, deps.reserve(outpoints))
 
     const prepared: CarrierAttempt = { phase: 'prepared', snapshot }
-    let wrote = false
+    let mayHaveWritten = false
     let liable = false
     try {
-      wrote = true
+      mayHaveWritten = true
       if (!(await deps.store.prepareCarrierAttempt(row.id, snapshot))) {
         // Losing the prepare CAS releases only this caller's pin.
-        wrote = false
+        mayHaveWritten = false
         pin.release()
         throw new Error(`carrier fill ${row.id} could not prepare its attempt; the operator was asked nothing`)
       }
@@ -342,7 +342,7 @@ export const createTaxiReceiveCarrierSettler = (deps: TaxiCarrierSettleDeps): Pi
       liable = true
       await taxi.fills.submitFill(submission)
     } catch (error) {
-      if (wrote && !liable) await releaseIfProvenNeverSubmitted(deps, pin, messageOf(error))
+      if (mayHaveWritten && !liable) await releaseIfProvenNeverSubmitted(deps, pin, messageOf(error))
       if (liable) deps.unanswered?.add(row.id)
       throw error
     }
