@@ -54,7 +54,7 @@ export interface FloatRequirement {
 }
 
 export interface AdmissionStrategy {
-  /** Check current headroom for a public bid without holding it. */
+  /** Check current headroom for a public bid without holding it. Without it, send corridors post no open-RFQ bids. */
   canAdmit?(request: AdmissionRequest): Promise<boolean>
 
   /**
