@@ -289,17 +289,26 @@ const mergeSignatures = (target: Transaction, original: Transaction): void => {
   }
 }
 
+/** A pending graph lacks signatures only their owners can add, so this solver cannot finalize it. */
+export class DirectFillUnfinalizableError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'DirectFillUnfinalizableError'
+  }
+}
+
 const assertFullySigned = (tx: Transaction, serverKey: Uint8Array): void => {
   for (let i = 0; i < tx.inputsLength; i++) {
     const signers = requiredSigners(tx, i, serverKey)
-    if (
-      tx
-        .getInput(i)
-        .tapScriptSig?.some(
-          ([data, signature]) => signature.length !== 64 || !signers.includes(hex.encode(data.pubKey)),
-        )
-    ) {
+    const signatures = tx.getInput(i).tapScriptSig ?? []
+    if (signatures.some(([data, signature]) => signature.length !== 64 || !signers.includes(hex.encode(data.pubKey)))) {
       throw new Error('direct fill requires only its leaf signers with DEFAULT signatures')
+    }
+    const missing = signers.filter((signer) => !signatures.some(([data]) => hex.encode(data.pubKey) === signer))
+    if (missing.length > 0) {
+      throw new DirectFillUnfinalizableError(
+        `Missing signatures from: ${missing.map((signer) => signer.slice(0, 16)).join(', ')}...`,
+      )
     }
     verifyTapscriptSignatures(tx, i, signers)
   }

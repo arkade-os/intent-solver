@@ -16,7 +16,7 @@ import { sqliteExecutor } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { DirectFillAttempts, type DirectFillAttempt } from '@arkade-os/solver-arkade/arkade/directFillAttempts.js'
 import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import { createDirectFillRecovery } from '@arkade-os/solver-app/ops/directFillRecovery.js'
-import type { DirectFillChain } from '@arkade-os/solver-arkade/arkade/directFillGraph.js'
+import { DirectFillUnfinalizableError, type DirectFillChain } from '@arkade-os/solver-arkade/arkade/directFillGraph.js'
 
 const solver = SingleKey.fromHex('11'.repeat(32))
 const server = SingleKey.fromHex('22'.repeat(32))
@@ -85,6 +85,59 @@ const recoveryFor = (attempts: DirectFillAttempts) =>
     },
     coins: async () => [],
     serverUnrollScript: unroll,
+  })
+const emulator = SingleKey.fromHex('44'.repeat(32))
+const directedTree = new VtxoScript([
+  MultisigTapscript.encode({ pubkeys: [solverKey, serverKey, await emulator.xOnlyPublicKey()] }).script,
+])
+// Journals a directed fill and returns what arkd <= v0.9.21 keeps of it: its own signature on rebuilt checkpoints.
+const pendingDirected = async (store: DirectFillAttempts) => {
+  const built = buildOffchainTx(
+    [
+      { ...deposit, value: 5_000, tapLeafScript: directedTree.leaves[0]!, tapTree: directedTree.encode() },
+      { ...funding[0]!, tapLeafScript: tree.leaves[0]!, tapTree: tree.encode() },
+    ],
+    [{ script: tree.pkScript, amount: 10_000n }],
+    unroll,
+  )
+  const arkTx = await solver.sign(built.arkTx, [0, 1])
+  const checkpoints = await Promise.all(built.checkpoints.map(async (tx) => encode(await solver.sign(tx, [0]))))
+  const prepared = await store.prepare({ ...input, offerPkScript: hex.encode(directedTree.pkScript) })
+  await store.change(prepared, { ...prepared, phase: 'submitting', graph: { arkTx: encode(arkTx), checkpoints } })
+  store.finishInvocation(prepared.key)
+  return {
+    arkTxid: arkTx.id,
+    finalArkTx: encode(await server.sign(await emulator.sign(arkTx, [0]), [0, 1])),
+    signedCheckpointTxs: await Promise.all(built.checkpoints.map(async (tx) => encode(await server.sign(tx, [0])))),
+  }
+}
+const arkHolding = (pending: Awaited<ReturnType<typeof pendingDirected>>) => ({
+  getPendingTxs: vi.fn(async () => [pending]),
+  submitTx: vi.fn(async (raw: string, checkpoints: string[]) => {
+    const tx = await server.sign(Transaction.fromPSBT(base64.decode(raw)), [0])
+    const signed = checkpoints.map(async (psbt) =>
+      encode(await server.sign(Transaction.fromPSBT(base64.decode(psbt)), [0])),
+    )
+    return { arkTxid: tx.id, finalArkTx: encode(tx), signedCheckpointTxs: await Promise.all(signed) }
+  }),
+  finalizeTx: vi.fn(async () => {}),
+})
+const unspentRecovery = (
+  attempts: DirectFillAttempts,
+  ark: ReturnType<typeof arkHolding>,
+  now: () => number,
+  onError: (key: string, error: unknown) => void,
+) =>
+  createDirectFillRecovery({
+    attempts,
+    parent: () => null,
+    chain: { getVtxos: async ({ outpoints }) => ({ vtxos: outpoints }), getVirtualTxs: async () => ({ txs: [] }) },
+    graph: { ark, signer: solver, serverKey, solverKeys: [hex.encode(solverKey)] },
+    coins: async () =>
+      funding.map((coin) => ({ ...coin, forfeitTapLeafScript: tree.leaves[0]!, tapTree: tree.encode() })),
+    serverUnrollScript: unroll,
+    now,
+    onError,
   })
 
 describe('durable direct-fill attempts', () => {
@@ -373,6 +426,67 @@ describe('durable direct-fill attempts', () => {
     expect(await store.list()).toEqual([])
     expect(pins.reserved().size).toBe(1)
     expect((await store.read('offer:row'))?.phase).toBe('abandoned')
+  })
+
+  it('pins a committed row it could not read back as soon as the journal reads it again', async () => {
+    const { db } = database()
+    let failReads = 0
+    const faulty: SQLExecutor = {
+      ...db,
+      run: async (sql, params) => {
+        await db.run(sql, params)
+        if (!sql.startsWith('INSERT INTO direct_fill_attempt')) return
+        failReads = 1
+        throw new Error('insert reply lost')
+      },
+      get: async <T>(sql: string, params?: unknown[]): Promise<T | undefined> => {
+        if (failReads > 0) {
+          failReads--
+          throw new Error('read unavailable')
+        }
+        return db.get<T>(sql, params)
+      },
+    }
+    const pins = createReservationLedger()
+    const store = await DirectFillAttempts.open(faulty, pins, 'wallet', script)
+    await expect(store.prepare(input)).rejects.toThrow('read unavailable')
+    expect(pins.reserved().size).toBe(0)
+    expect((await store.list()).map((attempt) => attempt.phase)).toEqual(['prepared'])
+    expect(pins.reserved()).toEqual(new Set([`${funding[0]!.txid}:0`]))
+  })
+
+  it('falls back to its conflict when a pending fill only the emulator can finalize outlives the bound', async () => {
+    const { db } = database()
+    const pins = createReservationLedger()
+    const store = await DirectFillAttempts.open(db, pins, 'wallet', script, () => 1_000)
+    const ark = arkHolding(await pendingDirected(store))
+    const onError = vi.fn()
+    let clock = 1_100
+    const recovery = unspentRecovery(store, ark, () => clock, onError)
+    await recovery.sweep()
+    await recovery.sweep()
+    expect(onError).toHaveBeenCalledOnce()
+    expect(onError.mock.calls[0]![1]).toBeInstanceOf(DirectFillUnfinalizableError)
+    expect(ark.getPendingTxs).toHaveBeenCalledOnce()
+    expect(ark.submitTx).not.toHaveBeenCalled()
+    clock = 2_000
+    await recovery.sweep()
+    expect(ark.submitTx).toHaveBeenCalledOnce()
+    expect((await store.list())[0]?.phase).toBe('cancelling')
+    expect(pins.reserved().size).toBe(1)
+    expect(onError).toHaveBeenCalledOnce()
+  })
+
+  it('keeps a failed pending lookup fatal, even past the conflict bound', async () => {
+    const { db } = database()
+    const store = await DirectFillAttempts.open(db, createReservationLedger(), 'wallet', script, () => 1_000)
+    const ark = arkHolding(await pendingDirected(store))
+    ark.getPendingTxs.mockRejectedValue(new Error('arkd unavailable'))
+    const onError = vi.fn()
+    await unspentRecovery(store, ark, () => 2_000, onError).sweep()
+    expect(onError).toHaveBeenCalledWith('offer:row', new Error('arkd unavailable'))
+    expect(ark.submitTx).not.toHaveBeenCalled()
+    expect((await store.list())[0]?.phase).toBe('submitting')
   })
 
   it('does not clean up a prepared attempt while its builder is active', async () => {

@@ -12,6 +12,32 @@ const original = 'bb'.repeat(32)
 const conflict = 'cc'.repeat(32)
 const script = `5120${'dd'.repeat(32)}`
 const proof = { id: 'parent', depositTxid: deposit, depositVout: 0, offerPkScript: script }
+const intent = (id: string) => ({
+  id,
+  offerTxid: deposit,
+  offerVout: 0,
+  offerPkScript: script,
+  contractVersion: OFFER_CONTRACT_V1,
+  wantAssetId: null,
+  wantAmount: 10n,
+  offerAssetId: null,
+  offerAmount: 20n,
+})
+const quote = (id: string, rfqId: string) => ({
+  id,
+  rfqId,
+  pair: 'arkade:BTC->arkade:BTC',
+  fromAssetId: null,
+  fromAmount: 20n,
+  toAssetId: null,
+  toAmount: 10n,
+  makerPkScript: script,
+  makerPublicKey: 'ee'.repeat(32),
+  offerPkScript: script,
+  offerAddress: 'ark1qoffer',
+  solverPubkey: 'ff'.repeat(32),
+  validUntil: 2000,
+})
 
 for (const kind of ['public', 'rfq'] as const) {
   describe(`${kind} direct fill recovery`, () => {
@@ -22,34 +48,10 @@ for (const kind of ['public', 'rfq'] as const) {
       const store = kind === 'public' ? await OfferFillStore.open(driver) : await AssetRfqSwapStore.open(driver)
       try {
         if (store instanceof OfferFillStore) {
-          await store.insertIntent({
-            id: proof.id,
-            offerTxid: deposit,
-            offerVout: 0,
-            offerPkScript: script,
-            contractVersion: OFFER_CONTRACT_V1,
-            wantAssetId: null,
-            wantAmount: 10n,
-            offerAssetId: null,
-            offerAmount: 20n,
-          })
+          await store.insertIntent(intent(proof.id))
           await store.transition(proof.id, 'fillable', 'filling')
         } else {
-          await store.insertQuote({
-            id: proof.id,
-            rfqId: 'ee'.repeat(32),
-            pair: 'arkade:BTC->arkade:BTC',
-            fromAssetId: null,
-            fromAmount: 20n,
-            toAssetId: null,
-            toAmount: 10n,
-            makerPkScript: script,
-            makerPublicKey: 'ee'.repeat(32),
-            offerPkScript: script,
-            offerAddress: 'ark1qoffer',
-            solverPubkey: 'ff'.repeat(32),
-            validUntil: 2000,
-          })
+          await store.insertQuote(quote(proof.id, 'ee'.repeat(32)))
           await store.transition(proof.id, 'quoted', 'funded', { deposit_txid: deposit, deposit_vout: 0 })
           await store.transition(proof.id, 'funded', 'filling')
         }
@@ -105,6 +107,23 @@ for (const kind of ['public', 'rfq'] as const) {
           )
         }))
     }
+    it('records a proven fill on the stuck row, never retaking a key a later row now holds', () =>
+      fixture(async (store, driver) => {
+        await store.fail(proof.id, 'filling', 'lost reply')
+        if (store instanceof OfferFillStore) await store.insertIntent(intent('later'))
+        else await store.insertQuote(quote('later', 'dd'.repeat(32)))
+        const before = (await events(driver)).length
+        expect(await store.recoverDirectFill(proof, original)).toBe(true)
+        expect(await store.recoverDirectFill(proof, original)).toBe(true)
+        expect(await store.cancelDirectFill(proof, conflict)).toBe(false)
+        expect(await store.findById(proof.id)).toMatchObject({
+          state: 'stuck',
+          fillTxid: original,
+          failureReason: `direct fill recovered as ${original} after later took its ${kind === 'public' ? 'outpoint' : 'offer script'}`,
+        })
+        expect((await store.findById('later'))?.state).toBe(kind === 'public' ? 'fillable' : 'quoted')
+        expect((await events(driver)).length).toBe(before + 1)
+      }))
     for (const mismatch of [{ id: 'other' }, { depositTxid: conflict }, { depositVout: 1 }, { offerPkScript: '00' }]) {
       it(`rejects identity mismatch ${Object.keys(mismatch)[0]}`, () =>
         fixture(async (store, driver) => {
