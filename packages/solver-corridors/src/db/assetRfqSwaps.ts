@@ -49,6 +49,7 @@ import {
   type RawRow,
   type StoreShape,
 } from './baseSwapStore.js'
+import * as sql from './assetRfqSwaps.sql.js'
 import { pageQuery, takePage, type PageOptions, type PageRawFields } from '@arkade-os/solver-core/core/page.js'
 import { RFQ_ASSET_SWAP_DIRECTED } from '@arkade-os/solver-core/core/rfqContract.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
@@ -60,7 +61,7 @@ export type { AssetRfqSwapState }
 
 export const NON_TERMINAL: readonly AssetRfqSwapState[] = AssetRfqMachine.live
 export const EXPOSED: readonly AssetRfqSwapState[] = AssetRfqMachine.exposed
-const LEGACY_DIRECTED_QUOTE = `contract_version = '${RFQ_ASSET_SWAP_DIRECTED}'`
+const LEGACY_DIRECTED_QUOTE = sql.legacyDirectedQuote(RFQ_ASSET_SWAP_DIRECTED)
 
 /**
  * Columns a transition may set.
@@ -165,70 +166,6 @@ export interface AssetRfqQuoteRecord {
   contractVersion?: string
 }
 
-const COLUMNS = `
-  id               TEXT PRIMARY KEY,
-  state            TEXT NOT NULL,
-  created_at       INTEGER NOT NULL,
-  updated_at       INTEGER NOT NULL,
-  rfq_id           TEXT NOT NULL,
-  pair             TEXT NOT NULL,
-  from_asset_id    TEXT,
-  from_amount      TEXT NOT NULL,
-  from_decimals    INTEGER,
-  from_flat_fee    TEXT,
-  to_asset_id      TEXT,
-  to_amount        TEXT NOT NULL,
-  to_decimals      INTEGER,
-  to_spread        TEXT,
-  maker_pk_script  TEXT NOT NULL,
-  maker_public_key TEXT NOT NULL,
-  offer_pk_script  TEXT NOT NULL,
-  offer_address    TEXT NOT NULL,
-  solver_pubkey    TEXT NOT NULL,
-  valid_until      INTEGER NOT NULL,
-  deposit_txid     TEXT,
-  deposit_vout     INTEGER,
-  fill_txid        TEXT,
-  failure_reason   TEXT,
-  quote_implied_mantissa TEXT,
-  quote_implied_scale    INTEGER,
-  quote_gives_base       INTEGER,
-  fill_price_mantissa    TEXT,
-  fill_price_scale       INTEGER,
-  fill_phase             TEXT,
-  contract_version       TEXT
-`
-
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS asset_rfq_swap (${COLUMNS});
-CREATE INDEX IF NOT EXISTS idx_asset_rfq_swap_state ON asset_rfq_swap(state);
-
--- § 4.5's natural key. The atomic class has no payment hash, and the spec says
--- so outright: "a profile without one — the atomic class today — is identified
--- by rfq_id alone". UNIQUE across ALL states, not merely the live ones: a
--- reused rfq_id is a conflict whatever became of the first negotiation, which
--- is the rule the two send legs already enforce by looking the id up.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_asset_rfq_swap_rfq_id ON asset_rfq_swap(rfq_id);
-
--- Two LIVE rows must never watch one offer address. Identical terms derive an
--- identical covenant (§ 7.2), so two negotiations can legitimately land on the
--- same script — and a single deposit there would then have two rows claiming
--- it, of which at most one fill can succeed. Partial, so a lapsed or stuck
--- negotiation does not block a later legitimate one at the same address.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_asset_rfq_swap_live_offer
-  ON asset_rfq_swap(offer_pk_script) WHERE state IN (${AssetRfqMachine.sqlList(AssetRfqMachine.where('holdsOfferScript'))});
-
-CREATE TABLE IF NOT EXISTS asset_rfq_swap_event (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  swap_id    TEXT NOT NULL REFERENCES asset_rfq_swap(id),
-  at         INTEGER NOT NULL,
-  from_state TEXT,
-  to_state   TEXT NOT NULL,
-  detail     TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_asset_rfq_swap_event_swap ON asset_rfq_swap_event(swap_id);
-`
-
 type Raw = Record<string, string | number | null>
 
 // Amounts are TEXT, not INTEGER, for the reason `offerFills.ts` gives: an asset
@@ -296,7 +233,7 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
 
   static async open(driver: SqlDriver | string, now: () => number = nowSeconds): Promise<AssetRfqSwapStore> {
     const store = new AssetRfqSwapStore(typeof driver === 'string' ? betterSqliteDriver(driver) : driver, now)
-    await store.driver.exec(SCHEMA)
+    await store.driver.exec(sql.schema(AssetRfqMachine.sqlList(AssetRfqMachine.where('holdsOfferScript'))))
     await store.migrate()
     return store
   }
@@ -306,13 +243,13 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
    * corridor. `PRAGMA table_info` answers empty for a missing table rather than
    * throwing, which `migrate` already relies on. */
   static async tableExists(driver: SqlDriver): Promise<boolean> {
-    return (await driver.all<{ name: string }>(`PRAGMA table_info(asset_rfq_swap)`)).length > 0
+    return (await driver.all<{ name: string }>(sql.tableInfo)).length > 0
   }
 
   /**
    * Additive migration, for the reason the other stores state: `CREATE TABLE IF
-   * NOT EXISTS` never alters an existing table, so a column added above must be
-   * added here too.
+   * NOT EXISTS` never alters an existing table, so a column added to the schema must be
+   * added to `ADDED_COLUMNS` too.
    *
    * This store's FIRST, and its failure mode is why it is tested rather than
    * assumed: `insertQuote` names its columns explicitly, so a missing ALTER
@@ -321,21 +258,8 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
    * operator told it was a duplicate-id problem.
    */
   private async migrate(): Promise<void> {
-    await addColumns(this.driver, 'asset_rfq_swap', [
-      ['quote_implied_mantissa', 'TEXT'],
-      ['quote_implied_scale', 'INTEGER'],
-      ['quote_gives_base', 'INTEGER'],
-      ['from_decimals', 'INTEGER'],
-      ['from_flat_fee', 'TEXT'],
-      ['to_decimals', 'INTEGER'],
-      ['to_spread', 'TEXT'],
-      ['fill_price_mantissa', 'TEXT'],
-      ['fill_price_scale', 'INTEGER'],
-      ['fill_phase', 'TEXT'],
-      ['contract_version', 'TEXT'],
-    ])
-    await this.driver.exec(`CREATE INDEX IF NOT EXISTS idx_asset_rfq_swap_legacy_directed_offer
-      ON asset_rfq_swap(offer_pk_script) WHERE ${LEGACY_DIRECTED_QUOTE}`)
+    await addColumns(this.driver, 'asset_rfq_swap', sql.ADDED_COLUMNS)
+    await this.driver.exec(sql.createLegacyDirectedOfferIndex(LEGACY_DIRECTED_QUOTE))
   }
 
   /**
@@ -355,11 +279,7 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
     // latency, and ONLY the marked ones, biasing exactly the rows being
     // compared. It also windows `ledgerRows` (a fill could fall out of the
     // window it settled in) and is published to the client in `rfq_status`.
-    await this.driver.run(`UPDATE asset_rfq_swap SET fill_price_mantissa = ?, fill_price_scale = ? WHERE id = ?`, [
-      mark.mantissa.toString(),
-      mark.scale,
-      id,
-    ])
+    await this.driver.run(sql.recordFillMark, [mark.mantissa.toString(), mark.scale, id])
   }
 
   /**
@@ -371,43 +291,38 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
    * against — the client would fund an address nothing is watching.
    */
   async insertQuote(record: AssetRfqQuoteRecord): Promise<AssetRfqSwapRow> {
+    return this.driver.transaction(() => this.insertQuoteRows(record))
+  }
+
+  private async insertQuoteRows(record: AssetRfqQuoteRecord): Promise<AssetRfqSwapRow> {
     const at = this.now()
-    await this.driver.run(
-      `INSERT INTO asset_rfq_swap (
-         id, state, created_at, updated_at, rfq_id, pair, from_asset_id, from_amount,
-         from_decimals, from_flat_fee, to_asset_id, to_amount, to_decimals, to_spread,
-         maker_pk_script, maker_public_key, offer_pk_script,
-         offer_address, solver_pubkey, valid_until, deposit_txid, deposit_vout, fill_txid, failure_reason,
-         quote_implied_mantissa, quote_implied_scale, quote_gives_base, contract_version
-       ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?)`,
-      [
-        record.id,
-        at,
-        at,
-        record.rfqId,
-        record.pair,
-        record.fromAssetId,
-        record.fromAmount.toString(),
-        record.fromDecimals ?? null,
-        record.fromFlatFee?.toString() ?? null,
-        record.toAssetId,
-        record.toAmount.toString(),
-        record.toDecimals ?? null,
-        record.toSpread?.toString() ?? null,
-        record.makerPkScript,
-        record.makerPublicKey,
-        record.offerPkScript,
-        record.offerAddress,
-        record.solverPubkey,
-        record.validUntil,
-        // All three or none — the spread at the call site is all-or-nothing, so
-        // a half-recorded mark cannot reach the column.
-        record.quotePrice?.impliedMantissa.toString() ?? null,
-        record.quotePrice?.scale ?? null,
-        record.quotePrice === undefined ? null : record.quotePrice.givesBase ? 1 : 0,
-        record.contractVersion ?? null,
-      ],
-    )
+    await this.driver.run(sql.insertQuote, [
+      record.id,
+      at,
+      at,
+      record.rfqId,
+      record.pair,
+      record.fromAssetId,
+      record.fromAmount.toString(),
+      record.fromDecimals ?? null,
+      record.fromFlatFee?.toString() ?? null,
+      record.toAssetId,
+      record.toAmount.toString(),
+      record.toDecimals ?? null,
+      record.toSpread?.toString() ?? null,
+      record.makerPkScript,
+      record.makerPublicKey,
+      record.offerPkScript,
+      record.offerAddress,
+      record.solverPubkey,
+      record.validUntil,
+      // All three or none — the spread at the call site is all-or-nothing, so
+      // a half-recorded mark cannot reach the column.
+      record.quotePrice?.impliedMantissa.toString() ?? null,
+      record.quotePrice?.scale ?? null,
+      record.quotePrice === undefined ? null : record.quotePrice.givesBase ? 1 : 0,
+      record.contractVersion ?? null,
+    ])
     await this.recordEvent(record.id, null, 'quoted', null)
     const row = await this.findById(record.id)
     if (!row) throw new Error(`asset rfq swap ${record.id} vanished immediately after insert`)
@@ -415,7 +330,7 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
   }
 
   async findById(id: string): Promise<AssetRfqSwapRow | undefined> {
-    const raw = await this.driver.get<Raw>(`SELECT * FROM asset_rfq_swap WHERE id = ?`, [id])
+    const raw = await this.driver.get<Raw>(sql.byId, [id])
     return raw ? toRow(raw) : undefined
   }
 
@@ -429,7 +344,7 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
   /** The live negotiation watching an offer script, if this solver has one. */
   async findLiveByOfferScript(offerPkScript: string): Promise<AssetRfqSwapRow | undefined> {
     const raw = await this.driver.get<Raw>(
-      `SELECT * FROM asset_rfq_swap WHERE offer_pk_script = ? AND state IN (${AssetRfqMachine.sqlList(AssetRfqMachine.where('holdsOfferScript'))})`,
+      sql.liveByOfferScript(AssetRfqMachine.sqlList(AssetRfqMachine.where('holdsOfferScript'))),
       [offerPkScript],
     )
     return raw ? toRow(raw) : undefined
@@ -439,18 +354,14 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
    * offer at the same address (identical terms derive an identical covenant) is
    * legitimate once our row is done. @see AssetOfferDeps.rfqHolds */
   async heldByLiveNegotiation(offerPkScript: string): Promise<boolean> {
-    const raw = await this.driver.get<Raw>(
-      `SELECT 1 AS held FROM asset_rfq_swap WHERE offer_pk_script = ? AND state IN (${AssetRfqMachine.sqlList(AssetRfqMachine.live)})`,
-      [offerPkScript],
-    )
+    const raw = await this.driver.get<Raw>(sql.heldByLiveNegotiation(AssetRfqMachine.sqlList(AssetRfqMachine.live)), [
+      offerPkScript,
+    ])
     return raw !== undefined && raw !== null
   }
 
   async hasLegacyDirectedQuote(offerPkScript: string): Promise<boolean> {
-    const raw = await this.driver.get(
-      `SELECT 1 FROM asset_rfq_swap WHERE offer_pk_script = ? AND ${LEGACY_DIRECTED_QUOTE} LIMIT 1`,
-      [offerPkScript],
-    )
+    const raw = await this.driver.get(sql.hasLegacyDirectedQuote(LEGACY_DIRECTED_QUOTE), [offerPkScript])
     return raw !== undefined && raw !== null
   }
 
@@ -473,8 +384,7 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
    */
   override async committedSats(pair?: string): Promise<number> {
     const raws = await this.driver.all<Raw>(
-      `SELECT to_amount FROM asset_rfq_swap WHERE state IN (${AssetRfqMachine.sqlList(AssetRfqMachine.where('outgoing'))}) AND to_asset_id IS NULL` +
-        (pair === undefined ? '' : ' AND pair = ?'),
+      sql.committedSats(AssetRfqMachine.sqlList(AssetRfqMachine.where('outgoing')), pair !== undefined),
       pair === undefined ? [] : [pair],
     )
     return raws.reduce((total, raw) => total + Number(String(raw.to_amount)), 0)
@@ -496,9 +406,7 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
   ): Promise<{ rows: AssetRfqSwapRow[]; truncated: boolean }> {
     const limit = clampLedgerLimit(window.limit)
     const raw = await this.driver.all<Raw>(
-      `SELECT * FROM asset_rfq_swap WHERE updated_at >= ? AND updated_at < ?` +
-        (pair === undefined ? '' : ' AND pair = ?') +
-        ` ORDER BY updated_at DESC LIMIT ?`,
+      sql.ledgerRows(pair !== undefined),
       pair === undefined ? [window.since, window.until, limit + 1] : [window.since, window.until, pair, limit + 1],
     )
     return { rows: raw.slice(0, limit).map(toRow), truncated: raw.length > limit }
@@ -506,9 +414,9 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
 
   // Not the base's, which would turn `searchTerm` into a search this store never ran.
   override async page(options: PageOptions = {}): Promise<{ rows: AssetRfqSwapRow[]; nextCursor: string | null }> {
-    const { sql, params, limit } = pageQuery('asset_rfq_swap', options)
-    const raw = await this.driver.all<Raw & PageRawFields>(sql, params)
-    const { page, nextCursor } = takePage(raw, limit)
+    const paged = pageQuery('asset_rfq_swap', options)
+    const raw = await this.driver.all<Raw & PageRawFields>(paged.sql, paged.params)
+    const { page, nextCursor } = takePage(raw, paged.limit)
     return { rows: page.map(toRow), nextCursor }
   }
 
@@ -530,11 +438,7 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
   }
 
   private async revertFilling(id: string, phase: FillPhase): Promise<boolean> {
-    const result = await this.driver.run(
-      `UPDATE asset_rfq_swap SET state = 'funded', fill_phase = NULL, updated_at = ?
-       WHERE id = ? AND state = 'filling' AND fill_phase = ?`,
-      [this.now(), id, phase],
-    )
+    const result = await this.driver.run(sql.revertFilling, [this.now(), id, phase])
     if (result.changes === 1) {
       await this.recordEvent(id, 'filling', 'funded', null)
       announceTransition(this.onTransition, id, 'filling', 'funded')
@@ -551,17 +455,13 @@ export class AssetRfqSwapStore extends BaseSwapStore<AssetRfqSwapRow, AssetRfqSw
       'filling',
       'refused',
       { failure_reason: reason, fill_phase: null },
-      `fill_phase = 'submitting'`,
+      sql.phaseIsSubmitting,
     )
   }
 
   /** THE LATCH. @see OfferFillStore.markSubmitting */
   async markSubmitting(id: string): Promise<boolean> {
-    const result = await this.driver.run(
-      `UPDATE asset_rfq_swap SET fill_phase = 'submitting', updated_at = ?
-       WHERE id = ? AND state = 'filling' AND fill_phase = 'selecting'`,
-      [this.now(), id],
-    )
+    const result = await this.driver.run(sql.markSubmitting, [this.now(), id])
     return result.changes === 1
   }
 

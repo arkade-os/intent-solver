@@ -51,15 +51,14 @@ import {
   evaluateEvmSendAcceptance,
   type EvmSendAcceptanceRefusal,
 } from '@arkade-os/solver-core/core/evmSend.js'
-import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { arkadeAddressPkScript, clientFundedLockupScript } from '@arkade-os/solver-arkade/arkade/quoteLockup.js'
+import { refundRecord } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { evmSendCovenantRowFor } from '../evm/covenantRow.js'
-import { scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 import { EvmPayoutFundingQuarantinedError } from '@arkade-os/solver-core/ports/evmPayoutFunding.js'
 import { nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { guardedTick, sweep } from '@arkade-os/solver-core/util/sweep.js'
 import { hex } from '@scure/base'
-import { ArkAddress } from '@arkade-os/sdk'
 import {
   checkedActivationTxid,
   payoutFundingBinding,
@@ -553,15 +552,8 @@ export class EvmSendSwapService {
     if (served === undefined) return { accepted: false, reason: 'unsupported_token' }
     const { token, market, limits, fee } = served
 
-    let refundPkScript: Uint8Array
-    try {
-      refundPkScript = ArkAddress.decode(request.refundAddress).pkScript
-      if (!request.refundAddress.toLowerCase().startsWith(`${arkade.hrp}1`)) {
-        return { accepted: false, reason: 'invalid_refund_address' }
-      }
-    } catch {
-      return { accepted: false, reason: 'invalid_refund_address' }
-    }
+    const refundPkScript = arkadeAddressPkScript(request.refundAddress, arkade.hrp, null)
+    if (refundPkScript === null) return { accepted: false, reason: 'invalid_refund_address' }
 
     const nowSeconds = this.now()
     const acceptance = evaluateEvmSendAcceptance({
@@ -656,25 +648,12 @@ export class EvmSendSwapService {
       // and here the pkScript is what we are deriving. The field mapping is the
       // one `evmSendCovenantRowFor` uses in the other direction — the SOLVER is
       // the receiver on this leg, because the solver claims the client's sats.
-      const arkadeScript = new CovenantSwapScript({
-        receiver: hex.decode(arkade.providerPubkey),
-        server: serverKey,
-        // The 20-byte ripemd160(sha256(P)) the script wants, never a raw decode of
-        // the wire's sha256 form.
-        preimageHash: scriptHashFromPaymentHash(request.paymentHash),
+      const arkadeScript = clientFundedLockupScript(arkade, {
+        paymentHash: request.paymentHash,
         refundLocktime: acceptance.refundLocktime,
-        claimDelay: arkade.delays.unilateralClaimDelay,
-        client: hex.decode(request.clientRefundPubkey),
-        clientRefundDelay: arkade.delays.unilateralRefundWithoutReceiverDelay,
-        refundWithoutServerDelay: arkade.delays.unilateralRefundDelay,
-        // Every quote from here on carries the current, full covenant suite —
-        // no legacy selector. See `NonInteractiveParameters.legacy`'s own doc comment
-        // for why that is not simply always omitted.
-        nonInteractiveParameters: {
-          emulatorPubkey: hex.decode(arkade.emulatorPubkey),
-          receiverPkScript: hex.decode(arkade.receiverPkScript),
-          senderPkScript: refundPkScript,
-        },
+        delays: arkade.delays,
+        clientRefundPubkey: request.clientRefundPubkey,
+        refundPkScript,
       })
 
       const candidate: EvmSendQuoteRecord = {
@@ -916,7 +895,7 @@ export class EvmSendSwapService {
           continue
         }
         const txid = await arkade.refund(evmSendCovenantRowFor(row), outputs)
-        await store.patch(row.id, { refund_outcome: 'pushed', refund_ark_txid: txid })
+        await store.patch(row.id, refundRecord(outputs, txid, this.now()))
         pushed.push(row.id)
       } catch (error) {
         this.deps.onTickError?.(row.id, error)

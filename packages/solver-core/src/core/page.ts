@@ -13,6 +13,8 @@
  * admin swap list merges their pages into one stream.
  */
 
+import * as sql from './page.sql.js'
+
 export interface PageOptions {
   /** Corridor-native state words. Empty or absent means every state. */
   states?: readonly string[]
@@ -99,6 +101,7 @@ export interface FindByStatesOptions {
   limit?: number
   /** Order by `updated_at` descending instead of `created_at` ascending. */
   newestFirst?: boolean
+  excludeIds?: readonly string[]
 }
 
 export interface Cursor {
@@ -155,14 +158,11 @@ export const pageQuery = (table: string, options: PageOptions): { sql: string; p
   const params: unknown[] = []
 
   if (options.states && options.states.length > 0) {
-    clauses.push(`state IN (${options.states.map(() => '?').join(',')})`)
+    clauses.push(sql.stateIn(options.states.map(() => '?').join(',')))
     params.push(...options.states)
   }
-  // The tie-break on rowid is what makes the cursor total: created_at is a
-  // second-resolution clock, so several swaps quoted in the same second would
-  // otherwise be an unordered set the cursor could land in the middle of.
   if (cursor) {
-    clauses.push('(created_at < ? OR (created_at = ? AND rowid < ?))')
+    clauses.push(sql.beforeCursor)
     params.push(cursor.createdAt, cursor.createdAt, cursor.rowid)
   }
 
@@ -172,17 +172,12 @@ export const pageQuery = (table: string, options: PageOptions): { sql: string; p
       throw new PageRequestError(`search term must be at least ${MIN_SEARCH_LENGTH} characters`)
     }
     assertSearchable(options.search.columns)
-    // Bracketed as one clause. Without the outer parentheses this ORs against
-    // the state and cursor conditions instead of ANDing with them — SQLite
-    // binds AND tighter than OR — and a search silently returns rows the
-    // caller filtered out.
-    clauses.push(`(${options.search.columns.map((c) => `${c} LIKE ? ESCAPE '${LIKE_ESCAPE}'`).join(' OR ')})`)
+    clauses.push(sql.searchColumns(options.search.columns, LIKE_ESCAPE))
     params.push(...options.search.columns.map(() => `%${escapeLike(term)}%`))
   }
 
-  const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : ''
-  const sql = `SELECT *, rowid AS _rowid FROM ${table} ${where} ORDER BY created_at DESC, rowid DESC LIMIT ?`
-  return { sql, params: [...params, limit + 1], limit }
+  const where = clauses.length > 0 ? sql.where(clauses) : ''
+  return { sql: sql.page(table, where), params: [...params, limit + 1], limit }
 }
 
 /**

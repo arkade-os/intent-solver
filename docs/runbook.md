@@ -174,7 +174,10 @@ Checkpoints track Arkade's total BTC and asset balances, Lightning outbound
 liquidity, and confirmed plus unconfirmed onchain BTC. Inbound Lightning
 capacity is excluded; a shared Lightning/onchain pool is counted once. Asset
 quantities stay in their own atomic units. EVM wallets and custom fund sources
-are not covered.
+are not covered. A lockup a client funded counts as the client's until the
+solver has paid out against it (a Lightning send in `paid`, an onchain send in
+`awaiting_claim`), so a refund is no loss and a slow preimage or onchain claim
+is no drop.
 
 A decrease since the last complete checkpoint emits `POSSIBLE LOSS` with the
 before, after, and decrease amounts. For journaled rebalances, checkpoints
@@ -262,7 +265,9 @@ Each decrease is then followed against its own before amount. The first later
 complete checkpoint where that asset is back at or above it emits `RECOVERED`,
 naming the checkpoint that reported the drop. Followed decreases are carried in
 the checkpoint record, so restarts and incomplete reads do not lose them; only
-the 20 most recent unrecovered ones are kept. `RECOVERED` means the balance is
+the 20 most recent unrecovered ones are kept, each for a day after it was seen.
+A drop still open after a day only comes back once profit refills it, so it
+gets no `RECOVERED`. `RECOVERED` means the balance is
 back, not that the cause was reconciled. A drop that offsets a gain from the
 previous minute, such as the second leg of one swap, gets its follow-up only
 once the balance passes the amount before that drop.
@@ -932,8 +937,9 @@ overview, newest first, each linking to its detail.
    | `not-paid-refund-is-safe`    | terminal failure, and our own node is not holding an htlc for it. The sats never left.                                         |
    | `paid-do-not-refund`         | settled, or a preimage exists. **You paid.**                                                                                   |
    | `self-payment-do-not-refund` | the payer side failed, but **our own node holds an armed or settled htlc** for this invoice. The payee side may still collect. |
-   | `undecided-push-nothing`     | neither — including a backend that has no record of the payment id. Do not act on it.                                          |
+   | `undecided-push-nothing`     | neither — including a backend with no record of the payment id, or a wallet that cannot be read. Do not act on it.             |
    | `never-submitted`            | no payment id on the row; nothing was ever sent.                                                                               |
+   | `other-wallet-push-nothing`  | the row records another backend or wallet than the one running now. This node cannot say what became of the payment.           |
 
    The response also carries `ownInvoice`, which says how the self-payment
    question was answered: a hold status, `not-ours`, `probe-failed` (the node
@@ -983,6 +989,23 @@ overview, newest first, each linking to its detail.
    was re-driven indefinitely, and one retried for six days.
 
    It does NOT refund or claim. Decide that separately, with `read-payment`.
+
+5. **Once nothing is left at the lockup, `resolve-stuck`.** A stuck row whose
+   lockup was already spent (by the client's refund, your claim, or the
+   client's claim of a receive payout) has nothing left to claim or refund, so
+   it would sit in the count forever. `resolve-stuck` records your account of
+   it, in the confirmation's reason field, and takes it off the count. It moves
+   no money and the row stays `stuck` as the incident record. It refuses while
+   anything, spendable or swept, is still at the lockup script, and it covers
+   the two Lightning corridors only: an onchain send can still hold your L1
+   HTLC, which an empty Arkade lockup does not show. For the same reason it
+   refuses a row carrying `unrolled_claim` or `unrolled_refund`: that spend is
+   on L1, so settle it there first (see the unrolled notes above).
+
+   There is no un-resolve: a second `resolve-stuck` only replaces the note. A
+   resolved row stays reachable by direct lookup (the swap's detail, or
+   `GET /api/swaps/<corridor>/<id>`), so if its lockup were ever funded again,
+   look there; the stuck list no longer shows it.
 
 ### The other corridors
 
@@ -1271,7 +1294,7 @@ which is why the boundary is the funding window and not the margin.
 
 A row that reaches it from `paying` lands in **`stuck`**, not `refused` — the
 crash-recovery path re-submits without re-asking any pay-time gate, so the gate
-lives in `submitPayment` too, and a row leaving an exposed state needs a human
+is asked before every submission too (`planPayment`), and a row leaving an exposed state needs a human
 rather than the refund sweep. Settle it the usual way — `read-payment` first,
 plus whatever HTLC lookup the rail in use provides, since that half is
 backend-specific and lives with the backend — before refunding or claiming.

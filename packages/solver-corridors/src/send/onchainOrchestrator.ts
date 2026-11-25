@@ -18,7 +18,6 @@ import { hex } from '@scure/base'
 import { Transaction } from '@arkade-os/sdk'
 import type { AdmissionStrategy, FloatRequirement } from '@arkade-os/solver-core/core/admissionStrategy.js'
 import { RFQ_PAIR_ONCHAIN_SEND } from '../wire/onchainPayloads.js'
-import { ArkAddress } from '@arkade-os/sdk'
 import {
   DEFAULT_ONCHAIN_LOCKUP_TIMEOUT,
   HTLC_REFUND_MTP_MARGIN,
@@ -31,12 +30,12 @@ import {
 import type { Limits } from '@arkade-os/solver-core/core/limits.js'
 import { FREE, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { fixedFeePricing, type PricingStrategy } from '@arkade-os/solver-core/core/pricing.js'
-import { paymentHashFromPreimage, scriptHashFromPaymentHash } from '@arkade-os/solver-core/core/preimage.js'
-import { CovenantSwapScript } from '@arkade-os/solver-arkade/arkade/covenant.js'
+import { paymentHashFromPreimage } from '@arkade-os/solver-core/core/preimage.js'
+import { arkadeAddressPkScript, clientFundedLockupScript } from '@arkade-os/solver-arkade/arkade/quoteLockup.js'
 import { claimOutputs, satsOutputs, type FundedOutput } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
 import { advanceUnrolledClaims, awaitLeftover, lockupLeftover, settleUnrolledClaims } from '../unrolledSpendStep.js'
-import { boundedSpendInputs, MAX_LOCKUP_SPEND_INPUTS } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { MAX_LOCKUP_SPEND_INPUTS, refundRecord } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { buildOnchainHtlc, ONCHAIN_NETWORKS } from '@arkade-os/solver-rails/onchain/htlc.js'
 import {
   buildOnchainRefundTx,
@@ -309,20 +308,9 @@ export class OnchainSendSwapService {
   async quote(request: OnchainQuoteRequest): Promise<QuoteOutcome> {
     const { store, arkade, limits, network } = this.deps
 
-    let refundPkScript: Uint8Array
-    try {
-      const address = ArkAddress.decode(request.refundAddress)
-      refundPkScript = address.pkScript
-      if (!request.refundAddress.toLowerCase().startsWith(`${arkade.hrp}1`)) {
-        return { accepted: false, reason: 'invalid_refund_address' }
-      }
-      // Only a refund to THIS server is recoverable without another deployment's cooperation.
-      if (hex.encode(address.serverPubKey) !== arkade.serverPubkey) {
-        return { accepted: false, reason: 'invalid_refund_address' }
-      }
-    } catch {
-      return { accepted: false, reason: 'invalid_refund_address' }
-    }
+    // Only a refund to THIS server is recoverable without another deployment's cooperation.
+    const refundPkScript = arkadeAddressPkScript(request.refundAddress, arkade.hrp, arkade.serverPubkey)
+    if (refundPkScript === null) return { accepted: false, reason: 'invalid_refund_address' }
 
     // exact-in: the client names what it GIVES. exact-out: it names what it
     // RECEIVES, and the give is solved up from the corridor's fee — the
@@ -390,25 +378,12 @@ export class OnchainSendSwapService {
       // The client's solo refund leaf has no CLTV: opening before our last claim, they could unroll, refund, then claim the HTLC.
       const ladder = unilateralLadderFor(arkade.delays, arkadeClaimDeadline(acceptance.htlcLocktime), this.now())
       const serverKey = hex.decode(arkade.serverPubkey)
-      const arkadeScript = new CovenantSwapScript({
-        receiver: hex.decode(arkade.providerPubkey),
-        server: serverKey,
-        // The Arkade-side script's `preimageHash` param is the 20-byte
-        // ripemd160(sha256(P)) — same helper the Lightning leg already uses
-        // (`src/send/orchestrator.ts`'s `scriptHashFromPaymentHash(decoded.paymentHash)`),
-        // never a raw decode of the wire's sha256 form.
-        preimageHash: scriptHashFromPaymentHash(request.paymentHash),
+      const arkadeScript = clientFundedLockupScript(arkade, {
+        paymentHash: request.paymentHash,
         refundLocktime: acceptance.refundLocktime,
-        claimDelay: ladder.unilateralClaimDelay,
-        client: hex.decode(request.clientRefundPubkey),
-        clientRefundDelay: ladder.unilateralRefundWithoutReceiverDelay,
-        refundWithoutServerDelay: ladder.unilateralRefundDelay,
-        // Every quote from here on carries the current, full covenant suite.
-        nonInteractiveParameters: {
-          emulatorPubkey: hex.decode(arkade.emulatorPubkey),
-          receiverPkScript: hex.decode(arkade.receiverPkScript),
-          senderPkScript: refundPkScript,
-        },
+        delays: ladder,
+        clientRefundPubkey: request.clientRefundPubkey,
+        refundPkScript,
       })
 
       // acceptance.htlcLocktime is ALREADY an absolute unix-seconds CLTV
@@ -587,9 +562,7 @@ export class OnchainSendSwapService {
       return null
     }
     const txid = await arkade.refund(covenantRowFor(row), outputs)
-    // The wallet spends only what boundedSpendInputs selects: the row stays refundable for what it left.
-    const all = boundedSpendInputs(outputs, this.now()).length === outputs.length
-    await store.patch(row.id, all ? { refund_outcome: 'pushed', refund_ark_txid: txid } : { refund_ark_txid: txid })
+    await store.patch(row.id, refundRecord(outputs, txid, this.now()))
     return txid
   }
 

@@ -84,13 +84,18 @@ const stuckSwaps = async (deps: AdminDeps): Promise<{ rows: AdminSwap[]; total: 
   // Newest first: `created_at` ascending buries the most recently parked rows —
   // the ones an operator is most likely to be looking for — below a cap that
   // fills with the oldest.
+  const resolutions = await services.adminStore.listStuckResolutions()
+  const resolvedIn = (corridor: string) =>
+    resolutions.filter((resolution) => resolution.corridor === corridor).map(({ swapId }) => swapId)
+  const sendResolved = resolvedIn('arkade:BTC->lightning:BTC')
+  const receiveResolved = resolvedIn('lightning:BTC->arkade:BTC')
   const page = { limit: STUCK_PER_CORRIDOR, newestFirst: true } as const
   const [send, receive, onchainSend, ...counts] = await Promise.all([
-    services.store.findByStates(['stuck'], page),
-    services.receiveStore.findByStates(['stuck'], page),
+    services.store.findByStates(['stuck'], { ...page, excludeIds: sendResolved }),
+    services.receiveStore.findByStates(['stuck'], { ...page, excludeIds: receiveResolved }),
     services.onchainStore.findByStates(['stuck'], page),
-    services.store.countByStates(['stuck']),
-    services.receiveStore.countByStates(['stuck']),
+    services.store.countByStates(['stuck'], sendResolved),
+    services.receiveStore.countByStates(['stuck'], receiveResolved),
     services.onchainStore.countByStates(['stuck']),
   ])
   return {

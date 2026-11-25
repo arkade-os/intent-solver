@@ -278,6 +278,8 @@ export const RFQ_REFUSAL_REASONS: Record<string, RfqRefusalReason> = {
   // size and this token; it just cannot put a number on it right now, which is
   // exactly what the closed set's `pricing_unavailable` names.
   price_unavailable: 'pricing_unavailable',
+  // The payout cannot be prepared right now; the request itself is fine and may be sent again.
+  execution_unavailable: 'pricing_unavailable',
   // Malformed input: a token amount that is not a canonical decimal, and an
   // exact-out request on a corridor whose two legs are different assets.
   invalid_evm_amount: 'unsupported_payload',

@@ -21,7 +21,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { pageQuery, MIN_SEARCH_LENGTH, PageRequestError } from '@arkade-os/solver-core/core/page.js'
 
@@ -132,7 +132,7 @@ describe('pageQuery — searching', () => {
 /**
  * The column lists are interpolated into SQL, so a typo is not a type error —
  * it is a 500 the first time an operator searches. These check each list
- * against the schema constant in the same file.
+ * against the schema beside the store.
  */
 describe('each corridor searches columns it actually has', () => {
   const STORES = {
@@ -149,7 +149,14 @@ describe('each corridor searches columns it actually has', () => {
    * begins and slicing there captured nothing at all.
    */
   const searchedBy = (path: string, name: string): string[] => {
-    const source = readFileSync(fileURLToPath(new URL(`../../${path}`, import.meta.url)), 'utf8')
+    const read = (file: string): string =>
+      readFileSync(fileURLToPath(new URL(`../../${file}`, import.meta.url)), 'utf8')
+    const named = path.replace(/\.ts$/, '.sql.ts')
+    const inStore = read(path)
+    const source =
+      inStore.includes(`export const ${name}`) || !existsSync(new URL(`../../${named}`, import.meta.url))
+        ? inStore
+        : read(named)
     const start = source.indexOf(`export const ${name}`)
     if (start === -1) throw new Error(`${name} is gone from ${path}`)
     const open = source.indexOf('= [', start)
@@ -158,7 +165,12 @@ describe('each corridor searches columns it actually has', () => {
   }
 
   const declaredBy = (path: string): Set<string> => {
-    const source = readFileSync(fileURLToPath(new URL(`../../${path}`, import.meta.url)), 'utf8')
+    // The schema sits beside the store, in `<store>.sql.ts`, once a store's SQL has been named.
+    const named = fileURLToPath(new URL(`../../${path.replace(/\.ts$/, '.sql.ts')}`, import.meta.url))
+    const source = readFileSync(
+      existsSync(named) ? named : fileURLToPath(new URL(`../../${path}`, import.meta.url)),
+      'utf8',
+    )
     return new Set(
       [...source.matchAll(/^\s{2}([a-z_]+)\s+(?:TEXT|INTEGER)/gm)]
         .map((m) => m[1])

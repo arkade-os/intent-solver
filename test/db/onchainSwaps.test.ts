@@ -3,6 +3,7 @@ import Database from 'better-sqlite3'
 import { OnchainSendSwapStore } from '@arkade-os/solver-corridors/db/onchainSwaps.js'
 import { OnchainSendMachine } from '@arkade-os/solver-corridors/machines/onchainSend.js'
 import type { SqlDriver } from '@arkade-os/solver-corridors/db/driver.js'
+import { failingEventInserts, rowCount } from './failingEventInserts.js'
 
 let now = 1_000_000
 const clock = () => now
@@ -309,4 +310,12 @@ describe('owedPayoutSats()', () => {
       OnchainSendMachine.exposed.filter((state) => state !== 'funding_onchain'),
     )
   })
+})
+
+it('insertQuote() leaves no row behind when its event cannot be written', async () => {
+  const driver = failingEventInserts()
+  const broken = await OnchainSendSwapStore.open(driver, clock)
+  await expect(broken.insertQuote(baseQuote)).rejects.toThrow('event insert failed')
+  expect(await rowCount(driver, 'send_onchain_swap')).toBe(0)
+  await broken.close()
 })

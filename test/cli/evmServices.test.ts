@@ -144,7 +144,7 @@ describe('the EVM receive leg shares the BTC receive ops', () => {
     // to drift apart.
     const body = createServices()
     expect(body.match(/receiveArkadeOpsFromContext\(/g)).toHaveLength(1)
-    expect(body).toContain('evmReceiveArkadeDeps(receiveOps)')
+    expect(body).toContain('evmReceiveArkadeDeps(receiveOps, ')
   })
 })
 

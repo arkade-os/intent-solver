@@ -36,7 +36,7 @@ const SPENDABLE = [{ txid: 'a'.repeat(64), vout: 0, value: 1976 }]
 const UNPAID_LN = { getSendHtlcState: async () => null }
 const PAID_LN = { getSendHtlcState: async () => ({ status: 'settled', preimage: 'cc'.repeat(32) }) }
 
-const servicesWith = (state: string, ln: unknown = UNPAID_LN) => {
+const servicesWith = (state: string, ln: unknown = UNPAID_LN, stamped: Record<string, string> = {}) => {
   const patch = vi.fn(async () => {})
   let currentState = state
   const transition = vi.fn(async (_id: string, from: string, to: string) => {
@@ -59,6 +59,7 @@ const servicesWith = (state: string, ln: unknown = UNPAID_LN) => {
         paymentWallet: null,
         refundPkScript: hex.encode(Uint8Array.from([0x51, 0x20, ...new Uint8Array(32).fill(5)])),
         emulatorPubkey: 'ff'.repeat(33),
+        ...stamped,
       }),
       noteFundings,
       patch,
@@ -98,6 +99,15 @@ describe('refundNow refuses a swap the solver may already have paid out', () => 
 
   // `stuck` conflates paid and unpaid (a returned commitment lands here too), so
   // the row state alone cannot gate the refund — the payment itself must.
+  it('refuses a stuck row with no payment id whose payment another backend attempted', async () => {
+    findLockups.mockResolvedValueOnce(SPENDABLE)
+    const { services, stateNow } = servicesWith('stuck', UNPAID_LN, { paymentBackend: 'another-backend' })
+
+    await expect(refundNow(services as never, 'swap-1')).rejects.toThrow('other-wallet-push-nothing')
+    expect(refundSwapScript).not.toHaveBeenCalled()
+    expect(stateNow()).toBe('stuck')
+  })
+
   it('refuses a stuck row the backend says was actually paid', async () => {
     const { services, patch, transition } = servicesWith('stuck', PAID_LN)
     await expect(refundNow(services as never, 'swap-1')).rejects.toThrow(/verdict|twice|do not refund/i)
@@ -129,6 +139,15 @@ describe('refundNow refuses a swap the solver may already have paid out', () => 
     expect(refundSwapScript).not.toHaveBeenCalled()
     expect(refundSweptSwapScript).not.toHaveBeenCalled()
     expect(patch).not.toHaveBeenCalled()
+  })
+
+  it('does not record a refund as complete when one spend could not take every output', async () => {
+    const many = Array.from({ length: 17 }, (_, i) => ({ txid: String(i).padStart(64, '0'), vout: 0, value: 100 }))
+    findLockups.mockResolvedValue(many)
+    const { services, patch } = servicesWith('funded')
+
+    expect(await refundNow(services as never, 'swap-1')).toEqual({ txid: 'offchain-txid' })
+    expect(patch).toHaveBeenCalledWith('swap-1', { refund_ark_txid: 'offchain-txid' })
   })
 
   it('leaves a failed refund send in refused for a safe manual retry', async () => {

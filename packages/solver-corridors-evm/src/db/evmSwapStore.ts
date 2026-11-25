@@ -4,6 +4,7 @@ import type { SqlDriver } from '@arkade-os/solver-db/driver.js'
 import { pageQuery, takePage, type PageOptions, type PageRawFields } from '@arkade-os/solver-core/core/page.js'
 import { clampLedgerLimit, type LedgerWindow } from '@arkade-os/solver-core/analytics/economics.js'
 import { announceTransition, type TransitionHook } from '@arkade-os/solver-core/core/businessEvent.js'
+import * as sql from './evmSwapStore.sql.js'
 
 export type Raw = Record<string, string | number | null>
 
@@ -105,6 +106,11 @@ export abstract class EvmSwapStore<Row, State extends string> {
   }
 
   protected async insert(quote: CommonQuote, extra: Record<string, string | number | null> = {}): Promise<Row> {
+    Object.keys(extra).forEach(assertIdentifier)
+    return this.driver.transaction(() => this.insertRows(quote, extra))
+  }
+
+  private async insertRows(quote: CommonQuote, extra: Record<string, string | number | null>): Promise<Row> {
     const { table } = this.shape
     const values: Record<string, string | number | null> = {
       payment_hash: quote.paymentHash,
@@ -138,45 +144,36 @@ export abstract class EvmSwapStore<Row, State extends string> {
       ...extra,
     }
     const columns = Object.keys(values)
-    Object.keys(extra).forEach(assertIdentifier)
     const at = this.now()
-    await this.driver.run(
-      `INSERT INTO ${table} (id, state, created_at, updated_at, ${columns.join(', ')})
-       VALUES (?, 'quoted', ?, ?, ${columns.map(() => '?').join(', ')})`,
-      [quote.id, at, at, ...columns.map((column) => values[column])],
-    )
-    await this.driver.run(
-      `INSERT INTO ${table}_event (swap_id, at, from_state, to_state) VALUES (?, ?, NULL, 'quoted')`,
-      [quote.id, at],
-    )
+    await this.driver.run(sql.insertQuote(table, columns), [
+      quote.id,
+      at,
+      at,
+      ...columns.map((column) => values[column]),
+    ])
+    await this.driver.run(sql.recordQuoted(table), [quote.id, at])
     return this.get(quote.id)
   }
 
   async get(id: string): Promise<Row> {
-    const rows = (await this.driver.all(`SELECT * FROM ${this.shape.table} WHERE id = ?`, [id])) as Raw[]
+    const rows = (await this.driver.all(sql.byId(this.shape.table), [id])) as Raw[]
     const raw = rows[0]
     if (!raw) throw new Error('no evm ' + this.shape.noun + ' swap ' + id)
     return this.shape.toRow(raw)
   }
 
   async findByRfqId(rfqId: string): Promise<Row | null> {
-    const rows = (await this.driver.all(`SELECT * FROM ${this.shape.table} WHERE rfq_id = ?`, [rfqId])) as Raw[]
+    const rows = (await this.driver.all(sql.byRfqId(this.shape.table), [rfqId])) as Raw[]
     return rows[0] ? this.shape.toRow(rows[0]) : null
   }
 
   async findLiveByPaymentHash(paymentHash: string): Promise<Row | null> {
-    const rows = (await this.driver.all(
-      `SELECT * FROM ${this.shape.table} WHERE payment_hash = ? AND state != 'refused'`,
-      [paymentHash],
-    )) as Raw[]
+    const rows = (await this.driver.all(sql.liveByPaymentHash(this.shape.table), [paymentHash])) as Raw[]
     return rows[0] ? this.shape.toRow(rows[0]) : null
   }
 
   async findByPkScript(pkScript: string): Promise<Row | null> {
-    const rows = (await this.driver.all(
-      `SELECT * FROM ${this.shape.table} WHERE pk_script = ? ORDER BY created_at DESC`,
-      [pkScript],
-    )) as Raw[]
+    const rows = (await this.driver.all(sql.byPkScript(this.shape.table), [pkScript])) as Raw[]
     return rows[0] ? this.shape.toRow(rows[0]) : null
   }
 
@@ -186,12 +183,7 @@ export abstract class EvmSwapStore<Row, State extends string> {
     const { table, nonTerminal } = this.shape
     const placeholders = nonTerminal.map(() => '?').join(', ')
     const rows = (await this.driver.all(
-      'SELECT COALESCE(SUM(amount_sats), 0) AS total FROM ' +
-        table +
-        ' WHERE state IN (' +
-        placeholders +
-        ')' +
-        (tokenAddress === undefined ? '' : ' AND token_address = ?'),
+      sql.committedSats(table, placeholders, tokenAddress !== undefined),
       tokenAddress === undefined ? [...nonTerminal] : [...nonTerminal, tokenAddress],
     )) as Raw[]
     return Number(rows[0]?.total ?? 0)
@@ -200,10 +192,7 @@ export abstract class EvmSwapStore<Row, State extends string> {
   async findByStates(states: readonly State[]): Promise<Row[]> {
     if (states.length === 0) return []
     const placeholders = states.map(() => '?').join(', ')
-    const rows = (await this.driver.all(
-      'SELECT * FROM ' + this.shape.table + ' WHERE state IN (' + placeholders + ') ORDER BY created_at ASC',
-      [...states],
-    )) as Raw[]
+    const rows = (await this.driver.all(sql.byStates(this.shape.table, placeholders), [...states])) as Raw[]
     return rows.map(this.shape.toRow)
   }
 
@@ -212,10 +201,7 @@ export abstract class EvmSwapStore<Row, State extends string> {
   }
 
   async history(swapId: string): Promise<{ at: number; from: string | null; to: string; detail: string | null }[]> {
-    const rows = (await this.driver.all(
-      'SELECT at, from_state, to_state, detail FROM ' + this.shape.table + '_event WHERE swap_id = ? ORDER BY id ASC',
-      [swapId],
-    )) as Raw[]
+    const rows = (await this.driver.all(sql.history(this.shape.table), [swapId])) as Raw[]
     return rows.map((raw) => ({
       at: Number(raw.at),
       from: text(raw.from_state),
@@ -229,9 +215,7 @@ export abstract class EvmSwapStore<Row, State extends string> {
   async ledgerRows(window: LedgerWindow, tokenAddress?: string): Promise<{ rows: Row[]; truncated: boolean }> {
     const limit = clampLedgerLimit(window.limit)
     const raw = await this.driver.all<Raw>(
-      `SELECT * FROM ${this.shape.table} WHERE updated_at >= ? AND updated_at < ?` +
-        (tokenAddress === undefined ? '' : ' AND token_address = ?') +
-        ` ORDER BY updated_at DESC LIMIT ?`,
+      sql.ledgerRows(this.shape.table, tokenAddress !== undefined),
       tokenAddress === undefined
         ? [window.since, window.until, limit + 1]
         : [window.since, window.until, tokenAddress, limit + 1],
@@ -240,9 +224,9 @@ export abstract class EvmSwapStore<Row, State extends string> {
   }
 
   async page(options: PageOptions = {}): Promise<{ rows: Row[]; nextCursor: string | null }> {
-    const { sql, params, limit } = pageQuery(this.shape.table, options)
-    const raw = await this.driver.all<Raw & PageRawFields>(sql, params)
-    const { page, nextCursor } = takePage(raw, limit)
+    const paged = pageQuery(this.shape.table, options)
+    const raw = await this.driver.all<Raw & PageRawFields>(paged.sql, paged.params)
+    const { page, nextCursor } = takePage(raw, paged.limit)
     return { rows: page.map(this.shape.toRow), nextCursor }
   }
 
@@ -257,23 +241,17 @@ export abstract class EvmSwapStore<Row, State extends string> {
     assertColumns(columns, this.shape.transitionColumns, 'transition()')
     const at = this.now()
     const assignments = columns.map((column) => column + ' = ?').join(', ')
-    const result = await this.driver.run(
-      'UPDATE ' +
-        table +
-        ' SET state = ?, updated_at = ?' +
-        (assignments ? ', ' + assignments : '') +
-        ' WHERE id = ? AND state = ?',
-      [to, at, ...columns.map((column) => fields[column] as string | number | null), id, from],
-    )
+    const result = await this.driver.run(sql.transition(table, assignments), [
+      to,
+      at,
+      ...columns.map((column) => fields[column] as string | number | null),
+      id,
+      from,
+    ])
     if ((result?.changes ?? 0) === 0) {
       throw new Error('evm ' + noun + ' swap ' + id + ' is not in state ' + from)
     }
-    await this.driver.run('INSERT INTO ' + table + '_event (swap_id, at, from_state, to_state) VALUES (?, ?, ?, ?)', [
-      id,
-      at,
-      from,
-      to,
-    ])
+    await this.driver.run(sql.recordEvent(table), [id, at, from, to])
     announceTransition(this.onTransition, id, from, to)
   }
 
@@ -286,7 +264,7 @@ export abstract class EvmSwapStore<Row, State extends string> {
     if (columns.length === 0) return
     assertColumns(columns, this.shape.transitionColumns, 'patch()')
     const assignments = columns.map((column) => column + ' = ?').join(', ')
-    await this.driver.run('UPDATE ' + this.shape.table + ' SET updated_at = ?, ' + assignments + ' WHERE id = ?', [
+    await this.driver.run(sql.patch(this.shape.table, assignments), [
       this.now(),
       ...columns.map((column) => fields[column] as string | number | null),
       id,

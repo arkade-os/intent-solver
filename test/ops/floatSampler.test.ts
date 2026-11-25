@@ -31,16 +31,22 @@ const sampler = (over: Record<string, unknown> = {}) => {
   }
 }
 
-/** Reading is what triggers fetching: a sampler nobody read holds nothing. */
 const primed = async (over: Record<string, unknown> = {}) => {
   const s = sampler(over)
-  s.it.read()
   await settle()
   return s
 }
 
 describe('onchainFloatSampler', () => {
-  it('is null until the first read lands, and never blocks on it', async () => {
+  it('fetches at construction, so the first quote after boot is not refused', async () => {
+    const s = sampler()
+    expect(s.reads).toHaveLength(1)
+    await settle()
+    expect(s.it.read()).toEqual({ sats: 50_000, ageMs: 0 })
+    expect(s.reads).toHaveLength(1)
+  })
+
+  it('is null until the first fetch lands, and never blocks on it', async () => {
     const s = sampler()
     expect(s.it.read()).toBeNull()
     await settle()
@@ -105,10 +111,30 @@ describe('onchainFloatSampler', () => {
     expect(s.it.read()).toBeNull()
   })
 
+  it('refetches on invalidate rather than waiting for the next quote', async () => {
+    const s = await primed()
+    s.set({ confirmedSats: 20_000 })
+    s.it.invalidate()
+    expect(s.reads).toHaveLength(2)
+    await settle()
+    expect(s.it.read()?.sats).toBe(20_000)
+  })
+
+  it('discards a fetch begun before invalidate, which may predate the withdrawal', async () => {
+    const pending: Array<(b: { confirmedSats: number }) => void> = []
+    const s = sampler({ getBalance: () => new Promise((resolve) => pending.push(resolve)) })
+    s.it.invalidate()
+    pending[0]!({ confirmedSats: 50_000 })
+    await settle()
+    expect(s.it.read()).toBeNull()
+    pending[1]!({ confirmedSats: 20_000 })
+    await settle()
+    expect(s.it.read()?.sats).toBe(20_000)
+  })
+
   it('announces a pool shared with lightning once, where the gate is only advisory', async () => {
     const s = sampler()
     s.set({ confirmedSats: 50_000, sharedWithLightning: true })
-    s.it.read()
     await settle()
     s.it.read()
     s.tick(60_000)

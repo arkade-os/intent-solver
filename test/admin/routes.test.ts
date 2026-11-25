@@ -76,6 +76,7 @@ const fakeServices = (over: Record<string, unknown> = {}) => {
       getOverrides: vi.fn().mockResolvedValue({}),
       listMarkets: vi.fn().mockResolvedValue([]),
       listPendingApprovals: vi.fn().mockResolvedValue([]),
+      listStuckResolutions: vi.fn().mockResolvedValue([]),
       repairedServing: [],
     },
     bootOverrides: {},
@@ -107,6 +108,48 @@ const app = (over: Record<string, unknown> = {}, deps: Partial<AdminDeps> = {}) 
 
 const get = (path: string, over = {}, deps: Partial<AdminDeps> = {}) =>
   app(over, deps).fetch(new Request(`http://admin${path}`))
+
+describe('GET /api/overview — stuck swaps', () => {
+  it('leaves a resolved stuck swap off the list and the count', async () => {
+    const stuck = (id: string) => ({
+      id,
+      state: 'stuck',
+      amountSats: 553,
+      paymentHash: 'ab'.repeat(32),
+      createdAt: 1,
+      updatedAt: 2,
+      failureReason: 'lightning payment failed terminally',
+      refundOutcome: 'pushed',
+    })
+    const rows = [stuck('swap-1'), stuck('swap-2')]
+    const send = store({
+      findByStates: vi.fn(async (states: string[], options?: { excludeIds?: string[] }) =>
+        states.includes('stuck') ? rows.filter((row) => !options?.excludeIds?.includes(row.id)) : [],
+      ),
+      countByStates: vi.fn(async (states: string[], excludeIds: string[] = []) =>
+        states.includes('stuck') ? rows.filter((row) => !excludeIds.includes(row.id)).length : 0,
+      ),
+    })
+    const response = await get('/api/overview?balances=false', {
+      store: send,
+      adminStore: {
+        getOverrides: vi.fn().mockResolvedValue({}),
+        listMarkets: vi.fn().mockResolvedValue([]),
+        listPendingApprovals: vi.fn().mockResolvedValue([]),
+        listStuckResolutions: vi
+          .fn()
+          .mockResolvedValue([
+            { corridor: 'arkade:BTC->lightning:BTC', swapId: 'swap-1', note: 'refunded', resolvedAt: 3 },
+          ]),
+        repairedServing: [],
+      },
+    })
+    const body = (await response.json()) as { attention: { stuckCount: number; stuck: { id: string }[] } }
+
+    expect(body.attention.stuckCount).toBe(1)
+    expect(body.attention.stuck.map((row) => row.id)).toEqual(['swap-2'])
+  })
+})
 
 describe('GET /api/swaps', () => {
   it('merges all four corridors into one list', async () => {
@@ -327,6 +370,7 @@ describe('GET /api/overview', () => {
     const adminStore = {
       getOverrides: vi.fn().mockResolvedValue({}),
       listPendingApprovals: vi.fn().mockResolvedValue([]),
+      listStuckResolutions: vi.fn().mockResolvedValue([]),
       listMarkets: vi.fn().mockResolvedValue([
         {
           marketKey: `arkade:BTC->arkade:${USDA}`,
