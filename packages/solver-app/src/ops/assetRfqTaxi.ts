@@ -9,6 +9,8 @@ import {
 import { hex } from '@scure/base'
 import { TaxiClient, verifyReceiveQuote, type VerifiedReceiveQuote } from '@arkade-taxi/client'
 import { outpointKey, usableSatsOf } from '@arkade-os/solver-arkade/arkade/lockupFunding.js'
+import type { ReleaseReservation } from '@arkade-os/solver-arkade/arkade/reservations.js'
+import type { JsonObject } from '@arkade-os/solver-corridors/db/carrierAttempt.js'
 import type { AssetLeg } from '@arkade-os/solver-core/core/assetRfq.js'
 import { CARRIER_FILL_MARGIN_SECONDS } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import type {
@@ -323,3 +325,65 @@ export const createTaxiReceiveCarrierReader = (deps: TaxiReceiveCarrierDeps): Ta
 }
 
 export type TaxiBudget = 'quote' | 'fill'
+
+export interface CarrierPin {
+  readonly id: string
+  /** Frees this reservation and no other. Idempotent. */
+  release(): void
+}
+
+/** Pins survive the settle call until durable evidence permits release. */
+export interface CarrierPinLedger {
+  adopt(id: string, release: ReleaseReservation): CarrierPin
+  heldFor(id: string): readonly CarrierPin[]
+}
+
+export const createCarrierPinLedger = (): CarrierPinLedger => {
+  const held = new Map<string, Set<CarrierPin>>()
+  return {
+    adopt(id, release) {
+      const owed = held.get(id) ?? new Set<CarrierPin>()
+      held.set(id, owed)
+      const pin: CarrierPin = {
+        id,
+        release() {
+          if (!owed.delete(pin)) return
+          if (owed.size === 0) held.delete(id)
+          release()
+        },
+      }
+      owed.add(pin)
+      return pin
+    },
+    heldFor: (id) => [...(held.get(id) ?? [])],
+  }
+}
+
+const CANONICAL_TXID = /^[0-9a-f]{64}$/
+
+export interface CarrierOutpoint {
+  txid: string
+  vout: number
+}
+
+/** Shared snapshot codec: writer and reader must agree on reserved outpoints. */
+export const encodeCarrierAttemptInputs = (outpoints: readonly CarrierOutpoint[]): JsonObject => ({
+  inputs: checkedOutpoints(outpoints, 'carrier attempt inputs').map(({ txid, vout }) => ({ txid, vout })),
+})
+
+export const decodeCarrierAttemptInputs = (snapshot: JsonObject, id: string): readonly CarrierOutpoint[] =>
+  checkedOutpoints(snapshot.inputs, `carrier attempt ${id} inputs`)
+
+const checkedOutpoints = (value: unknown, label: string): CarrierOutpoint[] => {
+  if (!Array.isArray(value) || value.length === 0) throw new Error(`${label}: names no inputs`)
+  return value.map((raw) => {
+    const input = raw as { txid?: unknown; vout?: unknown }
+    if (typeof input?.txid !== 'string' || !CANONICAL_TXID.test(input.txid)) {
+      throw new Error(`${label}: non-canonical input txid`)
+    }
+    if (!Number.isInteger(input.vout) || (input.vout as number) < 0) {
+      throw new Error(`${label}: non-canonical input vout`)
+    }
+    return { txid: input.txid, vout: input.vout as number }
+  })
+}

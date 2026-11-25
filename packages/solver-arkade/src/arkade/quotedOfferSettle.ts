@@ -18,6 +18,8 @@ import { fulfillOffer, OfferNotSubmittedError, type FulfillOptions } from './off
 import { heldOf } from './offerFill.js'
 import { liveOfferOutpoints, type OfferOutpoint } from './offerOutpoints.js'
 import { offerScriptFrom, type OfferDerivation, type QuotedOfferTerms } from './offerTerms.js'
+import { encodeOffer } from '@arkade-os/swap/protocol'
+import { hex } from '@scure/base'
 
 const assertSafeSats = (sats: bigint): number => {
   if (sats > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error(`deposit of ${sats} sats exceeds a safe integer`)
@@ -59,6 +61,18 @@ const termsOf = (intent: QuotedOfferIntent): QuotedOfferTerms => ({
   makerPublicKey: intent.makerPublicKey,
   rfqId: intent.rfqId,
 })
+
+/** The offer a row's deposit was derived from, taker and nonce included: what a Taxi fill rebuilds its spend from. */
+export const quotedOfferHexFor = (derivation: OfferDerivation): ((intent: QuotedOfferIntent) => string) => {
+  const derive = offerScriptFrom(derivation)
+  return (intent) => {
+    const derived = derive(termsOf(intent), intent.contractVersion ?? undefined)
+    if (derived.pkScript.toLowerCase() !== intent.offerPkScript.toLowerCase()) {
+      throw new Error(`the recorded terms derive ${derived.pkScript}, not the offer script ${intent.offerPkScript}`)
+    }
+    return hex.encode(encodeOffer(derived.offer))
+  }
+}
 
 export const quotedOfferSettleFor = (
   deps: QuotedOfferSettleDeps,
