@@ -17,7 +17,7 @@ import {
   Transaction,
   VtxoScript,
 } from '@arkade-os/sdk'
-import { decodeOffer } from '@arkade-os/swap/protocol'
+import { decodeOffer, offerVtxoScript, type AssetSwapContractVersion } from '@arkade-os/swap/protocol'
 import { digestJointGraph, OFFER_FILL_TEMPLATE, type JointGraph } from '@arkade-os/swap'
 import { prepareFillSubmission, sealFillGraph, signFillForTaxi } from '@arkade-taxi/client'
 import { offerExitDelay, offerScriptFrom } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
@@ -122,7 +122,12 @@ describe('the offer a Taxi fill rebuilds from', () => {
         offerPkScript: offerScriptFrom(derivation)(terms, contractVersion).pkScript,
       }
       const offer = decodeOffer(hex.decode(quotedOfferHexFor(derivation)(row)))
-      expect(hex.encode(offer.swapPkScript)).toBe(row.offerPkScript)
+      // Recompiled from the decoded offer, so the taker and nonce provably survived the round trip.
+      expect(
+        hex.encode(
+          offerVtxoScript(offer, derivation.serverPubkey, contractVersion as AssetSwapContractVersion).pkScript,
+        ),
+      ).toBe(row.offerPkScript)
       expect(offer.taker).toEqual(solverKey)
       expect(offer.nonce !== undefined).toBe(contractVersion === RFQ_ASSET_SWAP_DIRECTED_NONCE)
       expect(() => quotedOfferHexFor(derivation)({ ...row, toAmount: 1n })).toThrow('derive')

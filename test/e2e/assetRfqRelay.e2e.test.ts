@@ -793,7 +793,11 @@ describe('Alice, Bob and the solver over the regtest Nostr relay', () => {
         expect(await assetUnits(alice.wallet)).toBe(0n)
         // The journal closed the fill: nothing it recorded is still held.
         await poll(
-          async () => ((await arkade.ctx.directFills.list()).some((attempt) => attempt.parent.id === id) ? null : true),
+          async () => {
+            // The sweep is what closes it, so each poll drives one.
+            await tickAll()
+            return (await arkade.ctx.directFills.list()).some((attempt) => attempt.parent.id === id) ? null : true
+          },
           { attempts: 15, intervalMs: 1_000, whenExhausted: `the journal never released ${id}` },
         )
       } finally {

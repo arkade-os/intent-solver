@@ -105,8 +105,16 @@ vi.mock('@arkade-os/swap/protocol', async (importOriginal) => {
   return { ...mod, fillOffer: vi.fn(mod.fillOffer) }
 })
 
-const { ArkAddress, Extension, MultisigTapscript, RestIndexerProvider, Transaction, VtxoScript, asset } =
-  await import('@arkade-os/sdk')
+const {
+  ArkAddress,
+  Extension,
+  MultisigTapscript,
+  RestIndexerProvider,
+  Transaction,
+  VtxoScript,
+  asset,
+  scriptFromTapLeafScript,
+} = await import('@arkade-os/sdk')
 const { fillOffer, offerVtxoScript } = await import('@arkade-os/swap/protocol')
 type Offer = import('@arkade-os/swap/protocol').Offer
 
@@ -765,7 +773,14 @@ describe('a directed deposit', () => {
     await fulfillOffer(ctx([fundingCoin(80_000)]), 'http://emulator.test', directed(takerKey), deposit())
 
     expect(vi.mocked(fillOffer).mock.calls[0]![2]).toMatchObject({ version: RFQ_ASSET_SWAP_DIRECTED, taker: takerKey })
-    expect(state.arkTx).toBeDefined()
+    // The leaf the Taxi carrier signer pre-signs as taker: one fulfill leaf, [taker, server, emulator].
+    const leaf = Transaction.fromPSBT(base64.decode(state.arkTx!)).getInput(0).tapLeafScript!
+    expect(leaf).toHaveLength(1)
+    const keys = MultisigTapscript.decode(scriptFromTapLeafScript(leaf[0]!)).params.pubkeys.map((key) =>
+      hex.encode(key),
+    )
+    expect(keys).toHaveLength(3)
+    expect(keys.slice(0, 2)).toEqual([hex.encode(takerKey), hex.encode(SERVER_KEY)])
   })
 
   it('refuses a deposit quoted for another taker above the latch, sending nothing', async () => {
