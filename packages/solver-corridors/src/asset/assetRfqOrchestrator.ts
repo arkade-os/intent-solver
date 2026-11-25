@@ -111,6 +111,8 @@ export interface OfferTerms {
   makerPkScript: string
   makerPublicKey: string
   rfqId: string
+  /** The co-signer key, x-only. Absent: the derivation's own. */
+  emulatorPubkey?: string
 }
 
 export interface AssetRfqDeps {
@@ -136,7 +138,12 @@ export interface AssetRfqDeps {
    * The offer covenant this solver will watch, derived from terms it has
    * already fixed. `offerVtxoScript` in the composition root.
    */
-  deriveOffer: (terms: OfferTerms, contractVersion?: string) => { pkScript: string; address: string }
+  deriveOffer: (
+    terms: OfferTerms,
+    contractVersion?: string,
+  ) => { pkScript: string; address: string; emulatorPubkey?: string }
+  /** The x-only key to build on for a client-named co-signer key, or null to refuse. Absent: refuse any. */
+  cosignerKey?: (requested: string) => Promise<string | null>
   /** What is funded at the offer's script, or null while nothing is. */
   depositAt: (offerPkScript: string, depositLeg: AssetLeg | null) => Promise<ObservedDeposit | null>
   /** Spendable balance per asset id — `available`, never `total`. */
@@ -166,6 +173,7 @@ export type AssetRfqQuoteRefusal =
   | 'payout_below_dust'
   | 'insufficient_inventory'
   | 'duplicate_swap'
+  | 'unsupported_emulator_pubkey'
 
 export type AssetRfqQuoteOutcome =
   | { accepted: true; swap: AssetRfqSwapRow; carrierSats: bigint }
@@ -181,6 +189,7 @@ export interface AssetRfqQuoteRequest {
   makerPublicKey: string
   /** The negotiated contract version, if any. Absent derives the corridor's baseline. */
   contractVersion?: string
+  emulatorPubkey?: string
 }
 
 /** How much of one leg a deposit holds — sats when the leg is BTC. */
@@ -284,6 +293,11 @@ export class AssetRfqSwapService {
     if (request.requesterKey !== undefined && !this.quoteLimiter.take(request.requesterKey)) {
       return { accepted: false, reason: 'rate_limited' }
     }
+    const emulatorPubkey =
+      request.emulatorPubkey === undefined
+        ? undefined
+        : ((await this.deps.cosignerKey?.(request.emulatorPubkey)) ?? null)
+    if (emulatorPubkey === null) return { accepted: false, reason: 'unsupported_emulator_pubkey' }
 
     const inventoryP = capture(this.deps.balance())
     let feed: Price
@@ -294,6 +308,7 @@ export class AssetRfqSwapService {
       this.deps.onError?.('price', error)
       return { accepted: false, reason: 'price_unavailable', detail: 'the market feed could not be read' }
     }
+    const pricedAt = this.now()
 
     const resolved = decomposeAssetQuote({
       pair,
@@ -326,6 +341,7 @@ export class AssetRfqSwapService {
         makerPkScript: request.makerPkScript,
         makerPublicKey: request.makerPublicKey,
         rfqId: request.rfqId,
+        emulatorPubkey,
       },
       request.contractVersion,
     )
@@ -349,8 +365,9 @@ export class AssetRfqSwapService {
         makerPublicKey: request.makerPublicKey,
         offerPkScript: offer.pkScript,
         offerAddress: offer.address,
+        emulatorPubkey: offer.emulatorPubkey ?? null,
         solverPubkey: this.deps.solverPubkey,
-        validUntil: this.now() + this.deps.quoteValiditySeconds,
+        validUntil: pricedAt + this.deps.quoteValiditySeconds,
         // The price this quote FIXED — not the feed it was derived from.
         // Against a feed read at fill time it measures how far the market moved
         // while the quote was outstanding; against its own feed it would measure
@@ -485,7 +502,14 @@ export class AssetRfqSwapService {
     if (!(await this.deps.store.transition(row.id, 'funded', 'filling', { ...seen, fill_phase: 'selecting' }))) return
     try {
       const txid = await this.deps.settle(await this.deps.store.get(row.id), {
-        markSubmitting: () => this.deps.store.markSubmitting(row.id),
+        // The deadline again at the latch: approval and the settle's own reads come after the decision.
+        // Asked once more after the write, which can wait behind another transaction; nothing is sent yet.
+        markSubmitting: async () => {
+          if (this.now() > row.validUntil || !(await this.deps.store.markSubmitting(row.id))) return false
+          if (this.now() <= row.validUntil) return true
+          await this.deps.store.revertRejectedSubmit(row.id)
+          return false
+        },
       })
       const filled = await this.deps.store.transition(row.id, 'filling', 'filled', { fill_txid: txid })
       // AFTER the transition, never before. A feed read between `settle` and

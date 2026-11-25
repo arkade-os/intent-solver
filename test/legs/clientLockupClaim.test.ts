@@ -174,6 +174,17 @@ describe('claimClientLockup: the lockup reads short', () => {
     expect(writes).toEqual([['transition', 'swap', 'claiming', 'claimed', { claim_ark_txid: 'pending-txid' }]])
   })
 
+  it('keeps collecting when a finalized claim leaves an adopted output unaccounted for', async () => {
+    const other = { txid: 'f2', vout: 0, value: 1_000 }
+    const set = setUp({ row: { lockupOutpoints: JSON.stringify([OURS, other]), amountSats: 2_000 } })
+    set.world.lockups = []
+    set.world.evidence = 'spent'
+    set.world.pending = 'pending-txid'
+    set.world.outpoints = [{ ...OURS, spent: true, unrolled: false }]
+
+    await expect(set.run()).rejects.toThrow('f2:0 not yet collected')
+  })
+
   it('needs a human for a spend it cannot call its own, in the words the boot-time re-arm looks for', async () => {
     const { world, writes, run } = short()
     world.evidence = 'spent'

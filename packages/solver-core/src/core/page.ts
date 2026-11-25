@@ -101,6 +101,7 @@ export interface FindByStatesOptions {
   limit?: number
   /** Order by `updated_at` descending instead of `created_at` ascending. */
   newestFirst?: boolean
+  excludeIds?: readonly string[]
 }
 
 export interface Cursor {

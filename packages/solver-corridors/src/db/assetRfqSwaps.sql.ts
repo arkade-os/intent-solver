@@ -33,7 +33,8 @@ const COLUMNS = `
   carrier_terms          TEXT,
   carrier_attempt        TEXT,
   fill_phase             TEXT,
-  contract_version       TEXT
+  contract_version       TEXT,
+  emulator_pubkey        TEXT
 `
 
 export const schema = (holdsOfferScriptStates: string): string => `
@@ -82,6 +83,7 @@ export const ADDED_COLUMNS: readonly (readonly [column: string, type: string])[]
   ['carrier_attempt', 'TEXT'],
   ['fill_phase', 'TEXT'],
   ['contract_version', 'TEXT'],
+  ['emulator_pubkey', 'TEXT'],
 ]
 
 export const legacyDirectedQuote = (contractVersion: string): string => `contract_version = '${contractVersion}'`
@@ -97,8 +99,8 @@ export const insertQuote = `INSERT INTO asset_rfq_swap (
          from_decimals, from_flat_fee, to_asset_id, to_amount, to_decimals, to_spread,
          maker_pk_script, maker_public_key, offer_pk_script,
          offer_address, solver_pubkey, valid_until, deposit_txid, deposit_vout, fill_txid, failure_reason,
-         quote_implied_mantissa, quote_implied_scale, quote_gives_base, carrier_terms, contract_version
-       ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?)`
+         quote_implied_mantissa, quote_implied_scale, quote_gives_base, carrier_terms, contract_version, emulator_pubkey
+       ) VALUES (?, 'quoted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?)`
 
 export const byId = `SELECT * FROM asset_rfq_swap WHERE id = ?`
 

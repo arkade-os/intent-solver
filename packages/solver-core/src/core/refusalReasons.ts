@@ -22,6 +22,7 @@
 import type { SendAcceptanceRefusal, SendPaymentRefusal } from './send.js'
 import type { ReceiveFundingRefusal } from './receive.js'
 import type { InvoiceRejection } from '../invoice/decode.js'
+import { LOCKUP_REFUSAL } from './clientLockup.js'
 
 export interface RefusalExplanation {
   /** What the gate actually checked, and what it found. */
@@ -45,6 +46,7 @@ type OrchestratorRefusal =
   | 'invalid_refund_address'
   | 'invalid_payout_address'
   | 'invalid_claim_packet'
+  | 'unsupported_emulator_pubkey'
   | 'rate_limited'
   | 'coupled_deadline_unsafe'
   | 'coupled_invoice_mismatch'
@@ -185,6 +187,11 @@ export const REFUSAL_EXPLANATIONS: Record<RefusalReason, RefusalExplanation> = {
     meaning: 'The supplied claim packet could not be attached to the Arkade funding transaction.',
     whatToDo: 'Ask the client for a valid sealed claim packet or have them omit it for a collaborative claim.',
   },
+  unsupported_emulator_pubkey: {
+    meaning:
+      "The client named a covenant co-signer key that is neither this deployment's default nor one arkd signs for: its current signer, or a deprecated signer before its cutoff. The asset RFQ corridor accepts only the default.",
+    whatToDo: "Nothing, unless the client named arkd's key: then check that it and this solver use the same arkd.",
+  },
   rate_limited: {
     meaning: 'This requester key exceeded the quote quota for the current window.',
     whatToDo:
@@ -258,7 +265,7 @@ export const REFUSAL_EXPLANATIONS: Record<RefusalReason, RefusalExplanation> = {
  */
 const FREE_TEXT_FAILURES: readonly (readonly [string, RefusalExplanation])[] = [
   [
-    'overfunded lockup',
+    LOCKUP_REFUSAL.overfunded,
     {
       meaning:
         'More arrived at the swap address than the swap asked for. The claim leaf sweeps WHOLE vtxos, so paying this would hand us the excess with no path for the client to recover it.',
@@ -266,14 +273,14 @@ const FREE_TEXT_FAILURES: readonly (readonly [string, RefusalExplanation])[] = [
     },
   ],
   [
-    'invoice expired before funding completed',
+    LOCKUP_REFUSAL.invoiceExpired,
     {
       meaning: 'The client funded, or part-funded, but the invoice lapsed before we could pay it.',
       whatToDo: 'Nothing. The sweep refunds whatever arrived.',
     },
   ],
   [
-    'lockup arrived after the funding deadline',
+    LOCKUP_REFUSAL.arrivedLate,
     {
       meaning:
         'A full lockup was first seen after the quote’s funding window closed. The refund deadline is anchored at quote time, so paying a late lockup eats the claim window we quoted against.',
@@ -281,7 +288,7 @@ const FREE_TEXT_FAILURES: readonly (readonly [string, RefusalExplanation])[] = [
     },
   ],
   [
-    'lockup timeout',
+    LOCKUP_REFUSAL.timeout,
     {
       meaning: 'The quote was never funded (or only partly) before its funding window closed, so it was abandoned.',
       whatToDo:

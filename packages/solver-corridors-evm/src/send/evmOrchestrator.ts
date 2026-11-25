@@ -53,6 +53,7 @@ import {
 } from '@arkade-os/solver-core/core/evmSend.js'
 import { arkadeAddressPkScript, clientFundedLockupScript } from '@arkade-os/solver-arkade/arkade/quoteLockup.js'
 import { refundRecord } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { quoteCosignerKey } from '@arkade-os/solver-arkade/arkade/cosignerKey.js'
 import { evmSendCovenantRowFor } from '../evm/covenantRow.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
 import { EvmPayoutFundingQuarantinedError } from '@arkade-os/solver-core/ports/evmPayoutFunding.js'
@@ -192,6 +193,8 @@ export interface EvmSendQuoteRequest {
   refundAddress: string
   /** The client's own refund key - the `refundWithoutReceiver` leaf. */
   clientRefundPubkey: string
+  /** The co-signer key the client derived with, x-only. Absent: the default. */
+  emulatorPubkey?: string
   /**
    * The transport's requester identity (socket IP, relay author), for quote
    * admission control. Absent for operator-local callers, who are never
@@ -205,6 +208,7 @@ export type EvmSendQuoteRefusal =
   | EvmSendAcceptanceRefusal
   | 'exact_out_unsupported'
   | 'invalid_refund_address'
+  | 'unsupported_emulator_pubkey'
   | 'fee_consumes_swap'
   | 'duplicate_swap'
   | 'provider_at_capacity'
@@ -322,6 +326,21 @@ export class EvmSendSwapService {
    * was true of neither.
    */
   private async observe(row: EvmSendSwapRow): Promise<EvmSendObservation> {
+    // RULE 4 is decided by the row alone, so an EVM read that fails must not withhold the claim.
+    if (row.preimage !== null) {
+      return {
+        arkadeLockupFunded: false,
+        evmLockPresent: false,
+        evmLockReverted: false,
+        evmRefundOutcome: 'pending',
+        evmRefundLanded: false,
+        evmLockConfirmations: 0,
+        evmLockAgeSeconds: 0,
+        preimage: row.preimage,
+        nowSeconds: this.now(),
+        evmTimelockHeight: null,
+      }
+    }
     const lock = this.deps.lockFor(row)
     const [funded, present, height, clock, lockReverted, refundOutcome, refundLanded] = await Promise.all([
       this.deps.arkadeLockupFunded(row),
@@ -554,6 +573,8 @@ export class EvmSendSwapService {
 
     const refundPkScript = arkadeAddressPkScript(request.refundAddress, arkade.hrp, null)
     if (refundPkScript === null) return { accepted: false, reason: 'invalid_refund_address' }
+    const emulatorPubkey = await quoteCosignerKey(arkade, request.emulatorPubkey)
+    if (emulatorPubkey === null) return { accepted: false, reason: 'unsupported_emulator_pubkey' }
 
     const nowSeconds = this.now()
     const acceptance = evaluateEvmSendAcceptance({
@@ -648,13 +669,16 @@ export class EvmSendSwapService {
       // and here the pkScript is what we are deriving. The field mapping is the
       // one `evmSendCovenantRowFor` uses in the other direction — the SOLVER is
       // the receiver on this leg, because the solver claims the client's sats.
-      const arkadeScript = clientFundedLockupScript(arkade, {
-        paymentHash: request.paymentHash,
-        refundLocktime: acceptance.refundLocktime,
-        delays: arkade.delays,
-        clientRefundPubkey: request.clientRefundPubkey,
-        refundPkScript,
-      })
+      const arkadeScript = clientFundedLockupScript(
+        { ...arkade, emulatorPubkey },
+        {
+          paymentHash: request.paymentHash,
+          refundLocktime: acceptance.refundLocktime,
+          delays: arkade.delays,
+          clientRefundPubkey: request.clientRefundPubkey,
+          refundPkScript,
+        },
+      )
 
       const candidate: EvmSendQuoteRecord = {
         id,
@@ -693,7 +717,7 @@ export class EvmSendSwapService {
         pkScript: hex.encode(arkadeScript.pkScript),
         lockupAddress: arkadeScript.address(arkade.hrp, serverKey).encode(),
         refundPkScript: hex.encode(refundPkScript),
-        emulatorPubkey: arkade.emulatorPubkey,
+        emulatorPubkey,
         clientRefundPubkey: request.clientRefundPubkey,
         receiverPkScript: arkade.receiverPkScript,
         nonInteractiveParameters: true,

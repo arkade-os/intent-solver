@@ -59,6 +59,7 @@ const intent = (over: Partial<QuotedOfferIntent> = {}): QuotedOfferIntent => {
       offerAssetId: base.fromAssetId,
       makerPkScript: base.makerPkScript,
       makerPublicKey: base.makerPublicKey,
+      emulatorPubkey: base.emulatorPubkey,
     },
     base.contractVersion ?? undefined,
   )
@@ -144,6 +145,24 @@ describe('quotedOfferSettleFor', () => {
     await settle(row)
     expect(hex.encode(fulfill.mock.calls[0]![2].swapPkScript)).toBe(row.offerPkScript)
   })
+
+  it.each([RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_DIRECTED])(
+    're-derives a %s offer with the recorded co-signer key',
+    async (contractVersion) => {
+      const operator = hex.encode(xonly(6))
+      const cases = [
+        [intent({ contractVersion, emulatorPubkey: operator }), operator],
+        [intent({ contractVersion, emulatorPubkey: null }), hex.encode(derivation.emulatorPubkey)],
+      ] as const
+      for (const [row, key] of cases) {
+        const { settle, fulfill } = settleWith([funded()])
+        await settle(row)
+        expect(hex.encode(fulfill.mock.calls[0]![2].emulatorPubkey)).toBe(key)
+        expect(hex.encode(fulfill.mock.calls[0]![2].swapPkScript)).toBe(row.offerPkScript)
+      }
+      expect(cases[0][0].offerPkScript).not.toBe(cases[1][0].offerPkScript)
+    },
+  )
 
   it('returns whatever txid the fill landed as', async () => {
     const { settle } = settleWith(

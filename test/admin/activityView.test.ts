@@ -256,6 +256,10 @@ describe('one activity page', () => {
     expect(harness(`#${view}`).viewFromHash()).toBe('activity')
   })
 
+  it.each(['constructor', '__proto__', 'toString'])('opens the overview for the unknown link #%s', (view) => {
+    expect(harness(`#${view}`).viewFromHash()).toBe('overview')
+  })
+
   it('keeps successful sections visible and marks a failed section instead of showing stale rows', async () => {
     const ui = harness('#activity', true)
     ui.state.data.offers = { stale: true }

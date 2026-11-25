@@ -53,6 +53,13 @@ export interface SwapApprovalRow extends SwapApprovalRequest {
   requestedAt: number
 }
 
+export interface StuckResolution {
+  corridor: string
+  swapId: string
+  note: string
+  resolvedAt: number
+}
+
 export interface AuditEntry {
   action: string
   /** What it acted on — a swap id, usually. Null for whole-wallet actions. */
@@ -661,6 +668,20 @@ export class AdminStore {
       assetId: row.asset_id === null || row.asset_id === undefined ? null : String(row.asset_id),
       amount: BigInt(String(row.amount)),
       requestedAt: Number(row.requested_at),
+    }))
+  }
+
+  async resolveStuck(corridor: string, swapId: string, note: string): Promise<void> {
+    await this.driver.run(sql.upsertStuckResolution, [corridor, swapId, note, this.now()])
+  }
+
+  async listStuckResolutions(): Promise<StuckResolution[]> {
+    const rows = await this.driver.all<Record<string, string | number>>(sql.stuckResolutions)
+    return rows.map((row) => ({
+      corridor: String(row.corridor),
+      swapId: String(row.swap_id),
+      note: String(row.note),
+      resolvedAt: Number(row.resolved_at),
     }))
   }
 

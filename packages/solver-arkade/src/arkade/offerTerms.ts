@@ -37,6 +37,8 @@ export interface QuotedOfferTerms {
   makerPkScript: string
   makerPublicKey: string
   rfqId: string
+  /** The co-signer key, x-only hex. Absent or null: the derivation's own. */
+  emulatorPubkey?: string | null
 }
 
 export interface OfferDerivation {
@@ -123,9 +125,13 @@ const derivableVersion = (id: string | undefined): AssetSwapContractVersion => {
  */
 export const offerScriptFrom = (
   deps: OfferDerivation,
-): ((terms: QuotedOfferTerms, contractVersion?: string) => { pkScript: string; address: string; offer: Offer }) => {
-  const emulatorPubkey = xOnlyPubkey(deps.emulatorPubkey)
+): ((
+  terms: QuotedOfferTerms,
+  contractVersion?: string,
+) => { pkScript: string; address: string; offer: Offer; emulatorPubkey: string }) => {
+  const fallback = xOnlyPubkey(deps.emulatorPubkey)
   return (terms, contractVersion) => {
+    const emulatorPubkey = terms.emulatorPubkey ? xOnlyPubkey(hex.decode(terms.emulatorPubkey)) : fallback
     const version = derivableVersion(contractVersion)
     const offer = offerFromTerms(
       terms,
@@ -144,6 +150,7 @@ export const offerScriptFrom = (
       pkScript: hex.encode(script.pkScript),
       address: script.address(deps.hrp, deps.serverPubkey).encode(),
       offer: { ...offer, swapPkScript: script.pkScript },
+      emulatorPubkey: hex.encode(emulatorPubkey),
     }
   }
 }

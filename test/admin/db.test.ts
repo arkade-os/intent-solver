@@ -111,6 +111,33 @@ afterEach(async () => {
   await store.close()
 })
 
+describe('stuck resolutions', () => {
+  it('keeps one note per corridor and swap, the latest one', async () => {
+    await store.resolveStuck('arkade:BTC->lightning:BTC', 'swap-1', 'first look')
+    now += 60
+    await store.resolveStuck('arkade:BTC->lightning:BTC', 'swap-1', 'client refunded, payment failed')
+    await store.resolveStuck('lightning:BTC->arkade:BTC', 'swap-1', 'payout claimed, invoice expired')
+
+    expect(await store.listStuckResolutions()).toEqual(
+      expect.arrayContaining([
+        {
+          corridor: 'arkade:BTC->lightning:BTC',
+          swapId: 'swap-1',
+          note: 'client refunded, payment failed',
+          resolvedAt: 1_000_060,
+        },
+        {
+          corridor: 'lightning:BTC->arkade:BTC',
+          swapId: 'swap-1',
+          note: 'payout claimed, invoice expired',
+          resolvedAt: 1_000_060,
+        },
+      ]),
+    )
+    expect(await store.listStuckResolutions()).toHaveLength(2)
+  })
+})
+
 describe('adminDbPath', () => {
   it('follows the same suffixing rule as onchainDbPath and receiveDbPath', () => {
     expect(adminDbPath('.data/swaps.sqlite')).toBe('.data/swaps-admin.sqlite')

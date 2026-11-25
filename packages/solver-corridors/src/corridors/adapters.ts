@@ -129,6 +129,8 @@ const readerFor = <Row extends { id: string; pkScript: string; preimage: string 
 export const lightningSendReader = (store: SwapStore): CorridorReader => ({
   ...readerFor(LN_SEND, store, projectSend, rfqStatusPayload, (row) => row, sendEconomics),
   outstandingArkadeSats: async () => 0,
+  // Not `paying`: the rail may not have been debited yet, and counting the lockup first reads as a later loss.
+  paidOutLockups: async () => (await store.findByStates(['paid'])).map((row) => row.pkScript),
 })
 
 export const lightningReceiveReader = (store: ReceiveSwapStore): CorridorReader => ({
@@ -149,6 +151,7 @@ export const lightningReceiveReader = (store: ReceiveSwapStore): CorridorReader 
 export const onchainSendReader = (store: OnchainSendSwapStore): CorridorReader => ({
   ...readerFor(ONCHAIN_SEND, store, projectOnchainSend, onchainRfqStatusPayload, covenantRowFor, onchainSendEconomics),
   outstandingArkadeSats: async () => 0,
+  paidOutLockups: async () => (await store.findByStates(['awaiting_claim'])).map((row) => row.pkScript),
 })
 
 /**

@@ -30,6 +30,7 @@ import { unrolledClaimFallbackFor } from '@arkade-os/solver-arkade/arkade/unilat
 import { refundSweptSwapScript } from '@arkade-os/solver-arkade/arkade/sweptRefund.js'
 import { claimSweptSwapScript, deleteSweptClaimIntent } from '@arkade-os/solver-arkade/arkade/sweptClaim.js'
 import { verifySweptClaimCommitment } from '@arkade-os/solver-arkade/arkade/sweptClaimEvidence.js'
+import { operatorCosignerKey } from '@arkade-os/solver-arkade/arkade/cosignerKey.js'
 import type { ArkadeOps, CovenantScriptRow } from './orchestrator.js'
 
 /** The emulator service the refund covenant is signed by. */
@@ -76,6 +77,7 @@ export const arkadeOpsFromContext = async (ctx: ArkadeContext, emulator: Emulato
     providerPubkey,
     serverPubkey: hex.encode(ctx.wallet.arkServerPublicKey),
     emulatorPubkey: emulator.pubkey,
+    cosignerKeyFor: async (requested) => operatorCosignerKey(requested, await ctx.wallet.arkProvider.getInfo()),
     receiverPkScript,
     delays: ctx.unilateralDelays,
     hrp: ctx.hrp,

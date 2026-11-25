@@ -289,4 +289,24 @@ describe('AdmissionControl — the float ceiling', () => {
     expect(got).toBeNull()
     expect(ceilings).toEqual(['exposure'])
   })
+
+  it('answers canAdmit from current headroom without holding any of it', async () => {
+    const control = new AdmissionControl()
+    const inventory = { ...float(), poolId: 'arkade' }
+    expect(await control.canAdmit(req({ float: float(), inventory }))).toBe(true)
+    expect(control.outstandingSats).toBe(0)
+    expect(control.outstandingFloatSats).toBe(0)
+    expect(control.outstandingInventorySats('arkade')).toBe(0)
+  })
+
+  it('refuses canAdmit while an admitted quote holds the last headroom, until it is released', async () => {
+    const control = new AdmissionControl()
+    const ceilings: string[] = []
+    const one = float({ available: { sats: 15_000, ageMs: 0 } })
+    const held = await control.admit(req({ float: one }))
+    expect(await control.canAdmit(req({ float: one, onRefused: (c: string) => ceilings.push(c) }))).toBe(false)
+    expect(ceilings).toEqual(['float'])
+    held?.release()
+    expect(await control.canAdmit(req({ float: one }))).toBe(true)
+  })
 })

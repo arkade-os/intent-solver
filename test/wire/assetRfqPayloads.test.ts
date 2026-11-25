@@ -130,6 +130,7 @@ const row = (over: Partial<AssetRfqSwapRow> = {}): AssetRfqSwapRow => ({
   fillPriceScale: null,
   carrierTerms: null,
   contractVersion: null,
+  emulatorPubkey: null,
   ...over,
 })
 
