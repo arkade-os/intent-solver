@@ -22,6 +22,7 @@ import {
 
 export const SEND_KEY_ROTATED = 'provider key rotated since quote; refusing to pay an unclaimable lockup'
 export const SEND_COUPLED_REFUSED = 'coupled receive refused before funding; client refund pending'
+export const SEND_COUPLED_REFUNDED = 'coupled receive refunded its unclaimed payout; client refund pending'
 
 export interface SendPlanRow {
   state: string
@@ -79,7 +80,7 @@ export type SendAction =
   | { do: 'wait'; alert?: string }
   | { do: 'adopt_lockup' }
   | { do: 'collect'; preimage: string }
-  | { do: 'refuse_coupled' }
+  | { do: 'refuse_coupled'; reason: string }
   | { do: 'start_paying' }
   /** `lockupValue`, when given, is written first so the refund sweep returns all of it. */
   | { do: 'fail'; reason: string; lockupValue?: number }
@@ -152,7 +153,9 @@ const whenFunded = async (row: SendPlanRow, reads: SendReads): Promise<SendActio
 const collectFromCoupledReceive = async (coupled: SendPlanCoupledReceive, reads: SendReads): Promise<SendAction> => {
   if (coupled.htlcExpiresAt !== null) return fail('refused to collect: receive took a real htlc')
   const preimage = await reads.coupledPreimage(coupled)
-  return preimage === null ? WAIT : { do: 'collect', preimage }
+  if (preimage !== null) return { do: 'collect', preimage }
+  // `refunded`: our refund spent the payout, so the client can no longer claim it and reveal the preimage.
+  return coupled.state === 'refunded' ? { do: 'refuse_coupled', reason: SEND_COUPLED_REFUNDED } : WAIT
 }
 
 const afterCoupledReceiveRefused = async (failed: SendPlanCoupledReceive, reads: SendReads): Promise<SendAction> => {
@@ -166,7 +169,7 @@ const afterCoupledReceiveRefused = async (failed: SendPlanCoupledReceive, reads:
   }
   const status = await reads.ownInvoice()
   const invoiceUnpaid = status === 'pending' || status === 'cancelled'
-  return invoiceUnpaid ? { do: 'refuse_coupled' } : WAIT
+  return invoiceUnpaid ? { do: 'refuse_coupled', reason: SEND_COUPLED_REFUSED } : WAIT
 }
 
 const mintedByThisNode = (
