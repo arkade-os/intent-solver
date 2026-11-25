@@ -978,6 +978,7 @@ export const createServices = async (
     // only the default is accepted here until fills can be submitted to arkd.
     cosignerKey: async (requested) => {
       const key = await quoteCosignerKey({ emulatorPubkey: arkadeOps.emulatorPubkey }, requested)
+      // x-only, as the offer carries it; the hash-lock corridors store the compressed form instead.
       return key === null ? null : hex.encode(xOnlyPubkey(hex.decode(key)))
     },
     depositAt: async (offerPkScript, depositLeg) =>

@@ -242,6 +242,8 @@ export const respondToLightningRfqRequest = async (
       existing?.state === 'quoted' &&
       existing.clientRefundPubkey === request.profile.client_refund_pubkey &&
       existing.refundPkScript === hex.encode(ArkAddress.decode(request.profile.refund_address).pkScript) &&
+      // A refused key is null too, and must not match a row quoted before the column existed.
+      existing.emulatorPubkey !== null &&
       existing.emulatorPubkey === (await service.cosignerKey(request.profile.emulator_pubkey))
     ) {
       return {
