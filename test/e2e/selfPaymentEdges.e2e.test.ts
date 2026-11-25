@@ -22,6 +22,7 @@ import { arkadeOpsFromContext } from '@arkade-os/solver-corridors/send/arkadeOps
 import { SendSwapService } from '@arkade-os/solver-corridors/send/orchestrator.js'
 import { findClaimPreimage, findLockupOutpoints } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { MIN_CLAIM_WINDOW } from '@arkade-os/solver-core/core/send.js'
+import { SEND_COUPLED_REFUNDED } from '@arkade-os/solver-core/core/sendPlan.js'
 import { HOUR, rawDelaySeconds } from '@arkade-os/solver-core/core/timelocks.js'
 import { nowSeconds, poll } from '@arkade-os/solver-core/util/poll.js'
 import { newPreimage } from './support/preimage.js'
@@ -256,13 +257,14 @@ describe('e2e self-payment refresh — edges and failure spine', () => {
       // It never learned P, so it never could have collected the other leg.
       expect(refunded.preimage).toBeNull()
 
-      // The send leg is the client's to unwind: their lockup refunds to them at
-      // `Ds`, which the deadline invariant guarantees is still shut here. The
-      // solver has not claimed it and cannot, having never seen P.
-      const stillWaiting = await send.tick(sendRow.id)
-      expect(stillWaiting.state).toBe('funded')
-      expect(stillWaiting.preimage).toBeNull()
+      // The client can no longer claim the payout and reveal P, so the send leg returns their
+      // lockup now rather than leaving it to their own refund at `Ds`, still shut here.
       expect(sendRow.refundLocktime).toBeGreaterThan(nowSeconds())
+      const unwound = await send.tick(sendRow.id)
+      expect(unwound.state).toBe('refused')
+      expect(unwound.failureReason).toBe(SEND_COUPLED_REFUNDED)
+      expect(unwound.preimage).toBeNull()
+      expect(unwound.refundAttempt).toBe('pushed')
     },
     SWAP_TIMEOUT_MS,
   )

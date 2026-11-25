@@ -110,6 +110,7 @@ export const openRfqPreview = (
         bounded > limits.maxSats
       )
         return undefined
+      if (sendService && !(await sendService.canBid(give, take, open.amount_side))) return undefined
       fromAmount = BigInt(give)
       toAmount = BigInt(take)
     } else {

@@ -3796,6 +3796,7 @@ const ACTION_LABELS = {
   'onchain-claim-now': 'Claim on L1',
   'reclaim-l1-htlc': 'Reclaim L1 HTLC',
   'park-swap': 'Park',
+  'resolve-stuck': 'Resolve',
   'fund-withdraw': 'Send',
   'pool-mint': 'Reshape pool',
   'restart-solver': 'Restart',
@@ -3818,7 +3819,9 @@ const armedButton = (name, d) => {
       class: contrary ? 'contrary' : money ? 'supported' : '',
       title: because ?? undefined,
       onclick: () => {
-        if (name !== 'park-swap') return armDialog(name, { id: d.swap.id }, contrary ? because : null)
+        if (name !== 'park-swap' && name !== 'resolve-stuck') {
+          return armDialog(name, { id: d.swap.id }, contrary ? because : null)
+        }
         // `corridor` because park-swap is offered on EVERY row and now dispatches
         // through the registry: a swap id is unique only within its own store.
         // The reason is typed in the confirmation itself.
@@ -3915,6 +3918,7 @@ const detailDialog = () => {
   // are for. `refunded` deliberately lands in `failed` rather than `done`
   // (see DELIVERED in src/admin/projection.ts), so it keeps them too.
   const delivered = d.swap.phase === 'done'
+  const stuck = d.swap.state === 'stuck'
   const armed = delivered
     ? []
     : [
@@ -3925,6 +3929,9 @@ const detailDialog = () => {
         d.swap.corridor === 'arkade:BTC->onchain:BTC' ? 'onchain-refund-now' : null,
         d.swap.corridor === 'arkade:BTC->onchain:BTC' ? 'onchain-claim-now' : null,
         d.swap.corridor === 'arkade:BTC->onchain:BTC' ? 'reclaim-l1-htlc' : null,
+        stuck && (d.swap.corridor === 'arkade:BTC->lightning:BTC' || d.swap.corridor === 'lightning:BTC->arkade:BTC')
+          ? 'resolve-stuck'
+          : null,
         // Every corridor: a row that cannot progress is not a Lightning-only
         // problem, and this is the only thing that stops the sweep re-driving it.
         'park-swap',
@@ -4191,6 +4198,7 @@ const runAction = async (name, body) => {
 /** A swap action's question names its amount; the rest name what they act on. */
 const CONFIRM_TITLES = {
   'park-swap': 'Park this swap?',
+  'resolve-stuck': 'Resolve this stuck swap?',
   'fund-withdraw': 'Send this withdrawal?',
   'pool-mint': 'Reshape the VTXO pool?',
   'restart-solver': 'Restart the solver?',
@@ -4236,7 +4244,7 @@ const armDialog = async (name, body, override = null, overrideTitle = null) => {
         : definition?.confirmKind?.startsWith('literal:')
           ? definition.confirmKind.slice('literal:'.length)
           : body.id,
-    typed: '', // the reason `park-swap` records on the row; no other action takes typed input
+    typed: '', // the reason `park-swap` and `resolve-stuck` record; no other action takes typed input
     armedAt: performance.now(),
     opener: document.activeElement,
   }
@@ -4258,7 +4266,7 @@ const confirmDialog = () => {
   const d = state.dialog
   if (!d) return null
   if (d.kind === 'revert') return revertDialog(d)
-  const needsReason = d.name === 'park-swap'
+  const needsReason = d.name === 'park-swap' || d.name === 'resolve-stuck'
   return h(
     'div.scrim',
     // Not mid-action: the answer, a failure above all, has to land in this dialog.
@@ -5725,7 +5733,7 @@ const viewFromHash = () => {
   if (view === 'markets' || view === 'settings') return 'pricing'
   if (view === 'backends' || view === 'diagnostics' || view === 'discovery') return 'health'
   if (ACTIVITY_SECTIONS.includes(view)) return 'activity'
-  return BODIES[view] ? view : 'overview'
+  return Object.hasOwn(BODIES, view) ? view : 'overview'
 }
 
 const go = (view) => {

@@ -16,7 +16,11 @@
 
 import { hex } from '@scure/base'
 import { Transaction } from '@arkade-os/sdk'
-import type { AdmissionStrategy, FloatRequirement } from '@arkade-os/solver-core/core/admissionStrategy.js'
+import type {
+  AdmissionRequest,
+  AdmissionStrategy,
+  FloatRequirement,
+} from '@arkade-os/solver-core/core/admissionStrategy.js'
 import { RFQ_PAIR_ONCHAIN_SEND } from '../wire/onchainPayloads.js'
 import {
   DEFAULT_ONCHAIN_LOCKUP_TIMEOUT,
@@ -33,6 +37,7 @@ import { fixedFeePricing, type PricingStrategy } from '@arkade-os/solver-core/co
 import { paymentHashFromPreimage } from '@arkade-os/solver-core/core/preimage.js'
 import { arkadeAddressPkScript, clientFundedLockupScript } from '@arkade-os/solver-arkade/arkade/quoteLockup.js'
 import { claimOutputs, satsOutputs, type FundedOutput } from '@arkade-os/solver-arkade/arkade/wallet.js'
+import { quoteCosignerKey } from '@arkade-os/solver-arkade/arkade/cosignerKey.js'
 import { unilateralExitRecourse } from '@arkade-os/solver-arkade/arkade/unilateralExit.js'
 import { advanceUnrolledClaims, awaitLeftover, lockupLeftover, settleUnrolledClaims } from '../unrolledSpendStep.js'
 import { MAX_LOCKUP_SPEND_INPUTS, refundRecord } from '@arkade-os/solver-arkade/arkade/wallet.js'
@@ -138,6 +143,7 @@ export type QuoteRefusal =
   | 'provider_at_capacity'
   | 'insufficient_float'
   | 'invalid_refund_address'
+  | 'unsupported_emulator_pubkey'
 
 export type QuoteOutcome =
   { accepted: true; swap: OnchainSendSwapRow; lockupDeadline: number } | { accepted: false; reason: QuoteRefusal }
@@ -165,6 +171,8 @@ export interface OnchainQuoteRequest {
    * script.
    */
   clientRefundPubkey: string
+  /** The co-signer key the client derived with, x-only. Absent: the default. */
+  emulatorPubkey?: string
   rfqId?: string
 }
 
@@ -356,17 +364,15 @@ export class OnchainSendSwapService {
     if (request.requesterKey !== undefined && !this.quoteLimiter.take(request.requesterKey)) {
       return { accepted: false, reason: 'rate_limited' }
     }
+    const emulatorPubkey = await quoteCosignerKey(arkade, request.emulatorPubkey)
+    if (emulatorPubkey === null) return { accepted: false, reason: 'unsupported_emulator_pubkey' }
     // RESERVED, not merely observed: the row below is what makes this swap
     // visible to `totalCommitted()`, and until it lands a concurrent quote
     // would read the same headroom and take it too. Held until the
     // insert succeeds, and handed back on every path that does not insert.
     const refusal: { ceiling?: 'exposure' | 'float' } = {}
     const reservation = await this.admission.admit({
-      pair: RFQ_PAIR_ONCHAIN_SEND,
-      giveSats: giveSats,
-      capSats: this.deps.maxExposedSats,
-      committedSats: this.deps.totalCommitted,
-      float: this.floatRequirement(payoutSats),
+      ...this.admissionRequest(giveSats, payoutSats),
       onRefused: (ceiling) => {
         refusal.ceiling = ceiling
       },
@@ -378,13 +384,16 @@ export class OnchainSendSwapService {
       // The client's solo refund leaf has no CLTV: opening before our last claim, they could unroll, refund, then claim the HTLC.
       const ladder = unilateralLadderFor(arkade.delays, arkadeClaimDeadline(acceptance.htlcLocktime), this.now())
       const serverKey = hex.decode(arkade.serverPubkey)
-      const arkadeScript = clientFundedLockupScript(arkade, {
-        paymentHash: request.paymentHash,
-        refundLocktime: acceptance.refundLocktime,
-        delays: ladder,
-        clientRefundPubkey: request.clientRefundPubkey,
-        refundPkScript,
-      })
+      const arkadeScript = clientFundedLockupScript(
+        { ...arkade, emulatorPubkey },
+        {
+          paymentHash: request.paymentHash,
+          refundLocktime: acceptance.refundLocktime,
+          delays: ladder,
+          clientRefundPubkey: request.clientRefundPubkey,
+          refundPkScript,
+        },
+      )
 
       // acceptance.htlcLocktime is ALREADY an absolute unix-seconds CLTV
       // (src/core/onchainSend.ts's htlcLocktimeFor) — no block-height/chain-tip
@@ -425,7 +434,7 @@ export class OnchainSendSwapService {
           pkScript: hex.encode(arkadeScript.pkScript),
           lockupAddress: arkadeScript.address(arkade.hrp, serverKey).encode(),
           refundPkScript: hex.encode(refundPkScript),
-          emulatorPubkey: arkade.emulatorPubkey,
+          emulatorPubkey,
           clientRefundPubkey: request.clientRefundPubkey,
           receiverPkScript: arkade.receiverPkScript,
           nonInteractiveParameters: true,
@@ -461,6 +470,16 @@ export class OnchainSendSwapService {
       requiredSats: payoutSats + float.fundingFeeSats(),
       available: float.read(),
       owedSats: () => this.deps.store.owedPayoutSats(),
+    }
+  }
+
+  private admissionRequest(giveSats: number, payoutSats: number): AdmissionRequest {
+    return {
+      pair: RFQ_PAIR_ONCHAIN_SEND,
+      giveSats,
+      capSats: this.deps.maxExposedSats,
+      committedSats: this.deps.totalCommitted,
+      float: this.floatRequirement(payoutSats),
     }
   }
 
@@ -504,6 +523,23 @@ export class OnchainSendSwapService {
     )
       return undefined
     return { fromAmount, toAmount }
+  }
+
+  async canBid(fromAmount: number, toAmount: number, side: 'from' | 'to'): Promise<boolean> {
+    if (!this.admission.canAdmit) return false
+    const giveSats =
+      side === 'to' ? this.pricing.giveFor({ pair: RFQ_PAIR_ONCHAIN_SEND, payoutSats: toAmount }) : fromAmount
+    const payoutSats = side === 'from' ? this.pricing.payoutFor({ pair: RFQ_PAIR_ONCHAIN_SEND, giveSats }) : toAmount
+    const { minSats, maxSats } = this.deps.limits
+    if (
+      !Number.isSafeInteger(giveSats) ||
+      giveSats < minSats ||
+      giveSats > maxSats ||
+      !Number.isSafeInteger(payoutSats) ||
+      payoutSats < this.refundablePayoutFloor()
+    )
+      return false
+    return this.admission.canAdmit(this.admissionRequest(giveSats, payoutSats))
   }
 
   tick(id: string): Promise<OnchainSendSwapRow> {
@@ -658,10 +694,12 @@ export class OnchainSendSwapService {
    */
   async refundNow(id: string): Promise<string | null> {
     const row = await this.deps.store.get(id)
-    const preimage = await this.clientClaimPreimage(row)
+    // A claim already on the row is not undone by a spend read that has fallen behind.
+    const found = row.preimage === null ? await this.clientClaimPreimage(row) : null
+    const preimage = row.preimage ?? (found && hex.encode(found))
     if (preimage) {
       throw new Error(
-        `swap ${id}: the client already claimed the onchain HTLC, preimage ${hex.encode(preimage)} — ` +
+        `swap ${id}: the client already claimed the onchain HTLC, preimage ${preimage} — ` +
           'refunding the arkade lockup would pay them twice; claim the lockup with that preimage instead',
       )
     }
@@ -894,7 +932,8 @@ export class OnchainSendSwapService {
   }
 
   private async lockupHeld(row: OnchainSendSwapRow): Promise<number> {
-    return (await this.deps.arkade.findLockups(row.pkScript)).reduce((sum, o) => sum + o.value, 0)
+    // Sats outputs only, as at adoption: value on an asset vtxo a claim cannot spend is not cover.
+    return satsOutputs(await this.deps.arkade.findLockups(row.pkScript)).reduce((sum, o) => sum + o.value, 0)
   }
 
   /** Read again right before money moves: an approval wait or a failing `fund()` is time the client can spend unrolling it. */
@@ -957,6 +996,9 @@ export class OnchainSendSwapService {
       await store.releaseFundLease(row.id)
       throw error
     }
+    // Signing is time the window can close in. A re-drive's lease holder finishes what it started.
+    const late = fresh ? this.fundingRefusal(row) : null
+    if (late) return this.refuseFunding(row, fresh, late)
     if (!(await store.recordFundingTx(row.id, signed.tx))) return false
     return this.publishFunding(row, signed.tx, false)
   }
@@ -978,7 +1020,12 @@ export class OnchainSendSwapService {
     if ((await onchain.transactionOutcome(txid)) === 'unknown') {
       const refusal = recheck ? (this.fundingRefusal(row) ?? (await this.lockupShortfall(row))) : null
       if (refusal) {
-        await store.fail(row.id, 'funding_onchain', `${refusal}; recorded funding ${txid} was never seen on chain`)
+        // An earlier broadcast may still land: its outpoint is what reclaims that leg.
+        await store.transition(row.id, 'funding_onchain', 'stuck', {
+          funding_txid: txid,
+          funding_vout: vout,
+          failure_reason: `${refusal}; recorded funding ${txid} was never seen on chain`,
+        })
         return false
       }
       await onchain.broadcastRaw(tx)
@@ -1081,7 +1128,10 @@ export class OnchainSendSwapService {
     const broadcastAt = row.onchainRefundBroadcastAt ?? row.updatedAt
     if (!bumpDue(broadcastAt, this.now())) return null
     const estimate = await this.deps.onchain.estimateFeeRate()
-    const previousFeeRate = row.onchainRefundFeeRate ?? estimate
+    // A version the backend never saw sets no fee to outbid: its broadcast threw after the pre-commit.
+    const latest = row.onchainRefundTxid
+    const unseen = latest !== null && (await this.deps.onchain.transactionOutcome(latest)) === 'unknown'
+    const previousFeeRate = unseen ? null : (row.onchainRefundFeeRate ?? estimate)
     const attempt = await this.pushOnchainHtlcRefund(row, fundingTxid, fundingVout, { estimate, previousFeeRate })
     return attempt.broadcast ? attempt.txid : null
   }

@@ -174,7 +174,10 @@ Checkpoints track Arkade's total BTC and asset balances, Lightning outbound
 liquidity, and confirmed plus unconfirmed onchain BTC. Inbound Lightning
 capacity is excluded; a shared Lightning/onchain pool is counted once. Asset
 quantities stay in their own atomic units. EVM wallets and custom fund sources
-are not covered.
+are not covered. A lockup a client funded counts as the client's until the
+solver has paid out against it (a Lightning send in `paid`, an onchain send in
+`awaiting_claim`), so a refund is no loss and a slow preimage or onchain claim
+is no drop.
 
 A decrease since the last complete checkpoint emits `POSSIBLE LOSS` with the
 before, after, and decrease amounts. For journaled rebalances, checkpoints
@@ -262,7 +265,9 @@ Each decrease is then followed against its own before amount. The first later
 complete checkpoint where that asset is back at or above it emits `RECOVERED`,
 naming the checkpoint that reported the drop. Followed decreases are carried in
 the checkpoint record, so restarts and incomplete reads do not lose them; only
-the 20 most recent unrecovered ones are kept. `RECOVERED` means the balance is
+the 20 most recent unrecovered ones are kept, each for a day after it was seen.
+A drop still open after a day only comes back once profit refills it, so it
+gets no `RECOVERED`. `RECOVERED` means the balance is
 back, not that the cause was reconciled. A drop that offsets a gain from the
 previous minute, such as the second leg of one swap, gets its follow-up only
 once the balance passes the amount before that drop.
@@ -984,6 +989,23 @@ overview, newest first, each linking to its detail.
    was re-driven indefinitely, and one retried for six days.
 
    It does NOT refund or claim. Decide that separately, with `read-payment`.
+
+5. **Once nothing is left at the lockup, `resolve-stuck`.** A stuck row whose
+   lockup was already spent (by the client's refund, your claim, or the
+   client's claim of a receive payout) has nothing left to claim or refund, so
+   it would sit in the count forever. `resolve-stuck` records your account of
+   it, in the confirmation's reason field, and takes it off the count. It moves
+   no money and the row stays `stuck` as the incident record. It refuses while
+   anything, spendable or swept, is still at the lockup script, and it covers
+   the two Lightning corridors only: an onchain send can still hold your L1
+   HTLC, which an empty Arkade lockup does not show. For the same reason it
+   refuses a row carrying `unrolled_claim` or `unrolled_refund`: that spend is
+   on L1, so settle it there first (see the unrolled notes above).
+
+   There is no un-resolve: a second `resolve-stuck` only replaces the note. A
+   resolved row stays reachable by direct lookup (the swap's detail, or
+   `GET /api/swaps/<corridor>/<id>`), so if its lockup were ever funded again,
+   look there; the stuck list no longer shows it.
 
 ### The other corridors
 

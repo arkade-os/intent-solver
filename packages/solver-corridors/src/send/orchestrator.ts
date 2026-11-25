@@ -20,7 +20,11 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { AdmissionStrategy } from '@arkade-os/solver-core/core/admissionStrategy.js'
+import type {
+  AdmissionRequest,
+  AdmissionStrategy,
+  FloatRequirement,
+} from '@arkade-os/solver-core/core/admissionStrategy.js'
 import { RFQ_PAIR_SEND } from '../wire/payloads.js'
 import { hex } from '@scure/base'
 import {
@@ -49,6 +53,7 @@ import {
 } from '@arkade-os/solver-core/invoice/decode.js'
 import { preimageMatchesHash } from '@arkade-os/solver-core/core/preimage.js'
 import { arkadeAddressPkScript, clientFundedLockupScript } from '@arkade-os/solver-arkade/arkade/quoteLockup.js'
+import { quoteCosignerKey } from '@arkade-os/solver-arkade/arkade/cosignerKey.js'
 import { claimOutputs, satsOutputs } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import type { FundedOutput } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import {
@@ -74,7 +79,6 @@ import {
   planPayment,
   planPolledPayment,
   planSend,
-  SEND_COUPLED_REFUSED,
   submittedWithinGrace,
   type FailedPaymentRecourse,
   type SendReads,
@@ -363,6 +367,7 @@ export type QuoteRefusal =
   | 'provider_at_capacity'
   | 'insufficient_float'
   | 'invalid_refund_address'
+  | 'unsupported_emulator_pubkey'
   | 'rate_limited'
   // A coupled self-payment whose two refund deadlines are too close together
   // to be claimed safely. See `evaluateCouplingDeadlines`.
@@ -442,6 +447,11 @@ export class SendSwapService {
     this.sendHintScidDenylist = deps.sendHintScidDenylist ?? new Set()
   }
 
+  /** The co-signer key a quote builds on for the client's `emulator_pubkey`, or null to refuse. Public for the RFQ re-serve. */
+  cosignerKey(requested?: string): Promise<string | null> {
+    return quoteCosignerKey(this.deps.arkade, requested)
+  }
+
   /**
    * An open-RFQ bid: the most {@link quote} charges, so the binding quote can only meet or beat it. An estimated
    * quote swaps the flat for the routing estimate, priced here at the routing cap; past that cap the quote can lose.
@@ -458,6 +468,26 @@ export class SendSwapService {
     const { minSats, maxSats } = this.deps.limits
     if (!Number.isSafeInteger(fromAmount) || toAmount <= 0 || toAmount < minSats || toAmount > maxSats) return undefined
     return { fromAmount, toAmount }
+  }
+
+  async canBid(fromAmount: number, toAmount: number): Promise<boolean> {
+    if (!this.admission.canAdmit) return false
+    // An estimate can charge routing against the spread. The invoice that determines it is private at bid time.
+    const routingFeeSats = this.deps.ln.estimateSendFee
+      ? fromAmount - toAmount
+      : Math.min(maxRoutingFeeSats(toAmount), fromAmount - toAmount)
+    const float = await this.lightningFloatRequirement(toAmount + routingFeeSats)
+    return this.admission.canAdmit(this.admissionRequest(fromAmount, float))
+  }
+
+  private admissionRequest(giveSats: number, float?: FloatRequirement): AdmissionRequest {
+    return {
+      pair: RFQ_PAIR_SEND,
+      giveSats,
+      capSats: this.deps.maxExposedSats,
+      committedSats: this.deps.totalCommitted,
+      ...(float ? { float } : {}),
+    }
   }
 
   /**
@@ -489,7 +519,7 @@ export class SendSwapService {
   async quote(
     rawInvoice: string,
     refundAddress: string,
-    options: { rfqId?: string; requesterKey?: string; clientRefundPubkey: string },
+    options: { rfqId?: string; requesterKey?: string; clientRefundPubkey: string; emulatorPubkey?: string },
   ): Promise<QuoteOutcome> {
     const { store, arkade, limits, invoicePrefix } = this.deps
 
@@ -568,6 +598,8 @@ export class SendSwapService {
     if (options.requesterKey !== undefined && !this.quoteLimiter.take(options.requesterKey)) {
       return { accepted: false, reason: 'rate_limited' }
     }
+    const emulatorPubkey = await this.cosignerKey(options.emulatorPubkey)
+    if (emulatorPubkey === null) return { accepted: false, reason: 'unsupported_emulator_pubkey' }
     // The Lightning receive corridor, asked FIRST and by name, because its
     // answer is the one that can be something other than a refusal: a live row
     // there means this client is refreshing Arkade funds through us.
@@ -663,11 +695,10 @@ export class SendSwapService {
       feeEstimate?.feeSats ?? Math.min(maxRoutingFeeSats(decoded.amountSats), lockupSats - decoded.amountSats)
     const refusal: { ceiling?: 'exposure' | 'float' } = {}
     const reservation = await this.admission.admit({
-      pair: RFQ_PAIR_SEND,
-      giveSats: lockupSats,
-      capSats: this.deps.maxExposedSats,
-      committedSats: this.deps.totalCommitted,
-      ...(coupled ? {} : { float: await this.lightningFloatRequirement(decoded.amountSats + routingFeeSats) }),
+      ...this.admissionRequest(
+        lockupSats,
+        coupled ? undefined : await this.lightningFloatRequirement(decoded.amountSats + routingFeeSats),
+      ),
       onRefused: (ceiling) => {
         refusal.ceiling = ceiling
       },
@@ -690,13 +721,16 @@ export class SendSwapService {
         this.now,
         this.deps.chainTip,
       )
-      const script = clientFundedLockupScript(arkade, {
-        paymentHash: decoded.paymentHash,
-        refundLocktime,
-        delays: ladder,
-        clientRefundPubkey: options.clientRefundPubkey,
-        refundPkScript,
-      })
+      const script = clientFundedLockupScript(
+        { ...arkade, emulatorPubkey },
+        {
+          paymentHash: decoded.paymentHash,
+          refundLocktime,
+          delays: ladder,
+          clientRefundPubkey: options.clientRefundPubkey,
+          refundPkScript,
+        },
+      )
 
       try {
         // Awaited inside the try, so the driver's rejection lands in the catch.
@@ -724,7 +758,7 @@ export class SendSwapService {
           pkScript: hex.encode(script.pkScript),
           lockupAddress: script.address(arkade.hrp, serverKey).encode(),
           refundPkScript: hex.encode(refundPkScript),
-          emulatorPubkey: arkade.emulatorPubkey,
+          emulatorPubkey,
           clientRefundPubkey: options.clientRefundPubkey,
           receiverPkScript: arkade.receiverPkScript,
           nonInteractiveParameters: true,
@@ -1070,7 +1104,7 @@ export class SendSwapService {
     }
     if (next.do === 'collect') return this.claimWithPreimage(row.id, row.paymentHash, next.preimage, 'funded')
     if (next.do === 'refuse_coupled') {
-      const won = await store.transition(row.id, 'funded', 'refused', { failure_reason: SEND_COUPLED_REFUSED })
+      const won = await store.transition(row.id, 'funded', 'refused', { failure_reason: next.reason })
       if (won) await this.refundAfterTerminalFailure(row)
       return false
     }
@@ -1139,7 +1173,7 @@ export class SendSwapService {
     // human — the same identity guard the coupled refund and `paymentVerdict`
     // apply, here on a row that has no id yet. `stuck`, not `refused`: a payment
     // may exist on the other node, so a refund is not safe.
-    const { other } = await this.payingNode(row)
+    const { other, unconfirmed } = await this.payingNode(row)
     if (other !== null) {
       await this.deps.store.fail(row.id, 'paying', `refused to re-submit: ${other} — reconcile before retry`)
       return false
@@ -1160,6 +1194,11 @@ export class SendSwapService {
     // classes and the method reads its own instance state.
     const { ln } = this.deps
     const committed = await ln.getSendHtlcState?.(row.paymentHash)
+    // A settled answer proves itself with its preimage; anything else needs to know which node answered.
+    // Thrown, not parked, for the reason `believeFailureOnlyFromPayingNode` gives.
+    if (unconfirmed && committed?.status !== 'settled') {
+      throw new Error(`swap ${row.id}: not re-submitting: cannot read which Lightning node is answering`)
+    }
     if (committed) return this.recoverCommitted(row, committed)
     // A probe that reaches the backend before the submission it follows is
     // recorded answers null either way, so inside the grace it is not yet the
@@ -1751,6 +1790,27 @@ export class SendSwapService {
     const reservedKeys = new Set<string>()
     const pendingBatches: SweptClaimJournal[] = []
     let batchError: unknown
+    const selected = new Set(adopted.map(outpointKey))
+    let unrolledClaim = row.unrolledClaim
+    if (unrolledClaim !== null) {
+      const parsed: unknown = JSON.parse(unrolledClaim)
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        throw new Error(`swap ${row.id}: invalid unrolled claim journal`)
+      }
+      unrolledClaim = JSON.stringify(Object.fromEntries(Object.entries(parsed).filter(([key]) => selected.has(key))))
+    }
+    const advanceL1 = () =>
+      advanceUnrolledClaims(
+        store,
+        { id: row.id, pkScript: row.pkScript, unrolledClaim },
+        {
+          findLockupOutpoints: async (script) =>
+            (await arkade.findLockupOutpoints!(script)).filter((output) => selected.has(outpointKey(output))),
+          claimUnrolled: arkade.claimUnrolled?.bind(arkade),
+        },
+        row,
+        row.preimage!,
+      )
     const currentSwept = seenSwept
     for (let index = 0; index < batches.length;) {
       const batch = batches[index]!
@@ -1886,15 +1946,24 @@ export class SendSwapService {
           onPrepared,
         )
       } catch (error) {
-        if (
-          !journaledThisCall &&
-          (await store.get(row.id)).claimBatch === journalRaw &&
-          (await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip))
-        ) {
-          const detail = error instanceof Error ? error.message : String(error)
-          const recourse = unilateralExitRecourse(row, { solverPubkey: arkade.providerPubkey })
-          await store.fail(row.id, 'claiming', `batch claim failing past the refund deadline: ${detail} — ${recourse}`)
-          return false
+        if (!journaledThisCall && (await store.get(row.id)).claimBatch === journalRaw) {
+          // Nothing was journaled, so this tick still advances the L1 claims the failure would hold back.
+          // A failed read leaves them unknown, which keeps the row claiming.
+          const unrolled = await advanceL1().catch(() => undefined)
+          if (
+            unrolled !== undefined &&
+            (unrolled === null || unrolled.settled) &&
+            (await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip))
+          ) {
+            const detail = error instanceof Error ? error.message : String(error)
+            const recourse = unilateralExitRecourse(row, { solverPubkey: arkade.providerPubkey })
+            await store.fail(
+              row.id,
+              'claiming',
+              `batch claim failing past the refund deadline: ${detail} — ${recourse}`,
+            )
+            return false
+          }
         }
         throw error
       }
@@ -1912,7 +1981,6 @@ export class SendSwapService {
       }
     }
 
-    const selected = new Set(adopted.map(outpointKey))
     const found = (await arkade.findLockups(row.pkScript)).filter(
       (output) => selected.has(outpointKey(output)) && !reservedKeys.has(outpointKey(output)),
     )
@@ -1920,25 +1988,7 @@ export class SendSwapService {
       throw new Error(`swap ${row.id}: spendable lockup value or assets changed`)
     }
     const spendable = boundedSpendInputs(found, this.now())
-    let unrolledClaim = row.unrolledClaim
-    if (unrolledClaim !== null) {
-      const parsed: unknown = JSON.parse(unrolledClaim)
-      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-        throw new Error(`swap ${row.id}: invalid unrolled claim journal`)
-      }
-      unrolledClaim = JSON.stringify(Object.fromEntries(Object.entries(parsed).filter(([key]) => selected.has(key))))
-    }
-    const unrolled = await advanceUnrolledClaims(
-      store,
-      { id: row.id, pkScript: row.pkScript, unrolledClaim },
-      {
-        findLockupOutpoints: async (script) =>
-          (await arkade.findLockupOutpoints!(script)).filter((output) => selected.has(outpointKey(output))),
-        claimUnrolled: arkade.claimUnrolled?.bind(arkade),
-      },
-      row,
-      row.preimage,
-    )
+    const unrolled = await advanceL1()
     let txid: string | null = null
     let spendableClaimed: FundedOutput[] = []
     try {
@@ -1952,7 +2002,11 @@ export class SendSwapService {
         }
       }
     } catch (error) {
-      if (await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip)) {
+      // An L1 claim still out keeps the row claiming, as in `claimClientLockup`.
+      if (
+        (unrolled === null || unrolled.settled) &&
+        (await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip))
+      ) {
         const detail = error instanceof Error ? error.message : String(error)
         const recourse = unilateralExitRecourse(row, { solverPubkey: arkade.providerPubkey })
         await store.fail(row.id, 'claiming', `claim failing past the refund deadline: ${detail} — ${recourse}`)
@@ -1963,7 +2017,11 @@ export class SendSwapService {
     if (pendingBatches.length > 0) {
       if (txid !== null) await store.patch(row.id, { claim_ark_txid: txid })
       // Deadline first: past it a retry cannot beat the client's refund, so the row must name its recourse.
-      if (await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip)) {
+      // An L1 claim still out keeps the row claiming, as above.
+      if (
+        (unrolled === null || unrolled.settled) &&
+        (await refundDeadlineReached(row.refundLocktime, this.now, this.deps.chainTip))
+      ) {
         const detail =
           batchError === undefined ? '' : `: ${batchError instanceof Error ? batchError.message : String(batchError)}`
         const recourse = unilateralExitRecourse(row, { solverPubkey: arkade.providerPubkey })

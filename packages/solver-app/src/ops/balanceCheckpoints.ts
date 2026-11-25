@@ -84,7 +84,18 @@ export interface FollowedDecrease {
   asset: string
   before: string
   uncertainFeeAllowanceSats?: string
+  /** When the decrease was seen; rows stored before this field get the time they are first carried. */
+  at?: number
 }
+
+const followedFrom = (checkpoint: BalanceCheckpoint): FollowedDecrease[] =>
+  checkpoint.decreases.map(({ asset, before, uncertainFeeAllowanceSats }) => ({
+    checkpointId: checkpoint.id,
+    asset,
+    before,
+    at: checkpoint.startedAt,
+    ...(uncertainFeeAllowanceSats ? { uncertainFeeAllowanceSats } : {}),
+  }))
 
 export const rebalanceOverlapReady = (
   checkpoint: BalanceCheckpoint | null | undefined,
@@ -112,14 +123,15 @@ export const rebalanceOverlapReady = (
   })
 }
 
-// ponytail: oldest dropped past this; a time window instead if late follow-ups turn into noise.
+// A drop still open after a day only comes "back" once profit refills it, so its RECOVERED would be noise.
 const UNRECOVERED_LIMIT = 20
+const FOLLOW_SECONDS = 24 * 60 * 60
 const DEFERRAL_REMINDER_SECONDS = 30 * 60
 export const BALANCE_CHECKPOINT_INTERVAL_SECONDS = 60
 
 type CheckpointServices = Pick<
   Services,
-  'arkade' | 'ln' | 'onchain' | 'adminStore' | 'config' | 'providerPubkey' | 'rebalanceStore'
+  'arkade' | 'ln' | 'onchain' | 'adminStore' | 'config' | 'providerPubkey' | 'rebalanceStore' | 'readers'
 >
 
 export interface BalanceCheckpointReport {
@@ -437,14 +449,7 @@ const accountRebalances = (
             since: Math.min(previous.finishedAt, ...remaining.map((row) => row.chargedAt)),
             transferIds: remaining.map((row) => row.id),
             heldBtcDecreaseIds: previous.decreases.some(({ asset }) => asset === 'BTC') ? [previous.id] : [],
-            heldBtcWarnings: previous.decreases
-              .filter(({ asset }) => asset === 'BTC')
-              .map(({ asset, before, uncertainFeeAllowanceSats }) => ({
-                checkpointId: previous.id,
-                asset,
-                before,
-                ...(uncertainFeeAllowanceSats ? { uncertainFeeAllowanceSats } : {}),
-              })),
+            heldBtcWarnings: followedFrom(previous).filter(({ asset }) => asset === 'BTC'),
           }
         : undefined
   const comparisonTotalSats = String(
@@ -503,14 +508,7 @@ const accountDeferredRebalances = (
           transferIds: [...new Set([...(overrideIds ?? []), marker!.id])],
           overrideId: marker!.id,
           heldBtcDecreaseIds: previous.decreases.some(({ asset }) => asset === 'BTC') ? [previous.id] : [],
-          heldBtcWarnings: previous.decreases
-            .filter(({ asset }) => asset === 'BTC')
-            .map(({ asset, before, uncertainFeeAllowanceSats }) => ({
-              checkpointId: previous.id,
-              asset,
-              before,
-              ...(uncertainFeeAllowanceSats ? { uncertainFeeAllowanceSats } : {}),
-            })),
+          heldBtcWarnings: followedFrom(previous).filter(({ asset }) => asset === 'BTC'),
         })
   const byId = new Map(transfers.map((row) => [row.id, row]))
   const tracked = deferred.transferIds.map((id) => {
@@ -738,14 +736,7 @@ const accountOperatorWithdrawals = (
             anchorCheckpointId: previous.id,
             since: startedAt,
             heldBtcDecreaseIds: previous.decreases.some(({ asset }) => asset === 'BTC') ? [previous.id] : [],
-            heldBtcWarnings: previous.decreases
-              .filter(({ asset }) => asset === 'BTC')
-              .map(({ asset, before, uncertainFeeAllowanceSats }) => ({
-                checkpointId: previous.id,
-                asset,
-                before,
-                ...(uncertainFeeAllowanceSats ? { uncertainFeeAllowanceSats } : {}),
-              })),
+            heldBtcWarnings: followedFrom(previous).filter(({ asset }) => asset === 'BTC'),
           }
         : { anchorCheckpointId: 0, since: startedAt }
     : undefined
@@ -799,15 +790,23 @@ export const recordBalanceCheckpoint = async (services: CheckpointServices): Pro
   )
   const relevantWithdrawals = withdrawals?.filter((row) => row.source === 'arkade') ?? []
   const hasSentWithdrawal = relevantWithdrawals.some((row) => row.state === 'sent')
+  // A failed read counts nothing as paid out, which can add an alert but never hide one.
+  const paidOutLockups = (): Promise<readonly string[]> =>
+    within(
+      async () => (await Promise.all([...services.readers].map((reader) => reader.paidOutLockups?.() ?? []))).flat(),
+      10_000,
+    )().catch(() => [])
+  const paidOutBefore = await paidOutLockups()
+  const arkadeRead = hasSentWithdrawal ? 'arkadeWithHistory' : 'arkade'
   const [arkadeSnapshot, lightningSats, onchain] = await Promise.all([
-    read(hasSentWithdrawal ? 'arkadeWithHistory' : 'arkade', async () => {
+    read(arkadeRead, async () => {
       if (hasSentWithdrawal) await services.arkade.wallet.getSpendableVtxos({ requireSynced: true, maxSyncAgeMs: 0 })
       const history = hasSentWithdrawal ? await services.arkade.wallet.getTransactionHistory() : []
       const balance = await services.arkade.wallet.getBalance()
-      // `total` counts every lockup the wallet watches. One a user funded is theirs until we claim it,
-      // so counting it turns each refund into a loss. An unbounded age never syncs, so this reads the
-      // repository getBalance just read, even when its sync failed. Not atomic: a write landing between
-      // the two reads skews one sample, and the one-checkpoint alert hold absorbs it.
+      // `total` counts every lockup the wallet watches. One a user funded is theirs until we pay out
+      // against it, so counting it sooner turns each refund into a loss. An unbounded age never syncs, so
+      // this reads the repository getBalance just read, even when its sync failed. Not atomic: a write
+      // landing between the two reads skews one sample, and the one-checkpoint alert hold absorbs it.
       const lockups = await (
         await services.arkade.wallet.getContractManager()
       ).getContractsWithVtxos({ type: [LOCKUP_CONTRACT_TYPE] }, undefined, {
@@ -821,9 +820,37 @@ export const recordBalanceCheckpoint = async (services: CheckpointServices): Pro
           solverPubkey,
         ).map(({ script }) => script),
       )
-      const inFlight = lockups.filter(({ contract }) => theirs.has(contract.script)).flatMap(({ vtxos }) => vtxos)
+      return { balance, clientLockups: lockups.filter(({ contract }) => theirs.has(contract.script)), history }
+    }),
+    // A joined rail read may predate a payout whose lockup is counted, so none is joined while one is.
+    services.ln
+      ? read('lightning', async () => sats((await services.ln!.getBalance()).availableSats), paidOutBefore.length > 0)
+      : null,
+    services.onchain
+      ? read(
+          'onchain',
+          async () => {
+            const balance = await services.onchain!.getBalance()
+            return {
+              confirmedSats: sats(balance.confirmedSats),
+              unconfirmedSats: sats(balance.unconfirmedSats),
+              sharedWithLightning: balance.sharedWithLightning === true,
+            }
+          },
+          paidOutBefore.length > 0,
+        )
+      : null,
+  ])
+  // Paid out before the rail read, so its debit shows; still paid out after, so no claim output shows beside it.
+  const paidOutAfter = await paidOutLockups()
+  let arkade: BalanceCheckpoint['arkade'] = null
+  if (arkadeSnapshot) {
+    try {
+      const inFlight = arkadeSnapshot.clientLockups
+        .filter(({ contract }) => !(paidOutBefore.includes(contract.script) && paidOutAfter.includes(contract.script)))
+        .flatMap(({ vtxos }) => vtxos)
       const assets = new Map<string, bigint>()
-      for (const asset of balance.assets) {
+      for (const asset of arkadeSnapshot.balance.assets) {
         if (asset.amount < 0n) throw new Error('asset balance must be non-negative')
         assets.set(asset.assetId, (assets.get(asset.assetId) ?? 0n) + asset.amount)
       }
@@ -831,27 +858,14 @@ export const recordBalanceCheckpoint = async (services: CheckpointServices): Pro
         assets.set(asset.assetId, (assets.get(asset.assetId) ?? 0n) - asset.amount)
       }
       if ([...assets.values()].some((amount) => amount < 0n)) throw new Error('asset balance must be non-negative')
-      return {
-        arkade: {
-          totalSats: sats(balance.total - inFlight.reduce((sum, vtxo) => sum + vtxo.value, 0)),
-          assets: Object.fromEntries([...assets].map(([id, amount]) => [id, String(amount)])),
-        },
-        history,
+      arkade = {
+        totalSats: sats(arkadeSnapshot.balance.total - inFlight.reduce((sum, vtxo) => sum + vtxo.value, 0)),
+        assets: Object.fromEntries([...assets].map(([id, amount]) => [id, String(amount)])),
       }
-    }),
-    services.ln ? read('lightning', async () => sats((await services.ln!.getBalance()).availableSats)) : null,
-    services.onchain
-      ? read('onchain', async () => {
-          const balance = await services.onchain!.getBalance()
-          return {
-            confirmedSats: sats(balance.confirmedSats),
-            unconfirmedSats: sats(balance.unconfirmedSats),
-            sharedWithLightning: balance.sharedWithLightning === true,
-          }
-        })
-      : null,
-  ])
-  const arkade = arkadeSnapshot?.arkade ?? null
+    } catch (error) {
+      errors[arkadeRead] = messageOf(error)
+    }
+  }
   const withdrawalsAfterBalance = await read(
     'operatorWithdrawalsAfterBalance',
     () => services.adminStore.listOperatorWithdrawals(scope, withdrawalSince),
@@ -976,19 +990,16 @@ export const recordBalanceCheckpoint = async (services: CheckpointServices): Pro
             ...(previous.unrecovered ?? []),
             ...(previous.rebalance?.attributionDeferred?.heldBtcWarnings ?? []),
             ...(previous.operatorWithdrawals?.deferred?.heldBtcWarnings ?? []),
-            ...previous.decreases.map(({ asset, before, uncertainFeeAllowanceSats }) => ({
-              checkpointId: previous.id,
-              asset,
-              ...(uncertainFeeAllowanceSats ? { uncertainFeeAllowanceSats } : {}),
-              before,
-            })),
+            ...followedFrom(previous),
           ].map((row) => [`${row.checkpointId}:${row.asset}`, row] as const),
         ).values(),
-      ].map((row) =>
-        row.asset === 'BTC' && explainedDebitSats > 0n
-          ? { ...row, before: String(BigInt(row.before) - explainedDebitSats) }
-          : row,
-      )
+      ].map((row) => ({
+        ...row,
+        ...(row.asset === 'BTC' && explainedDebitSats > 0n
+          ? { before: String(BigInt(row.before) - explainedDebitSats) }
+          : {}),
+        at: row.at ?? startedAt,
+      }))
     : []
   if (btcDeferred) {
     const heldIds = new Set([
@@ -1028,10 +1039,13 @@ export const recordBalanceCheckpoint = async (services: CheckpointServices): Pro
     ...(rebalance?.attributionDeferred?.heldBtcDecreaseIds ?? rebalance?.delayedBtcWarningIds ?? []),
     ...(operatorWithdrawals?.deferred?.heldBtcDecreaseIds ?? operatorWithdrawals?.delayedBtcWarningIds ?? []),
   ])
+  // A decrease from the previous checkpoint has not been alerted yet, however old it is.
+  const followable = (row: FollowedDecrease) =>
+    row.checkpointId === previous?.id || startedAt - (row.at ?? startedAt) < FOLLOW_SECONDS
   const stillOpen = followed.filter((row) => !isBack(row))
   const protectedBtc = stillOpen.filter((row) => row.asset === 'BTC' && heldBtcIds.has(row.checkpointId))
   const room = Math.max(0, UNRECOVERED_LIMIT - protectedBtc.length)
-  const capped = room ? stillOpen.filter((row) => !protectedBtc.includes(row)).slice(-room) : []
+  const capped = room ? stillOpen.filter((row) => !protectedBtc.includes(row) && followable(row)).slice(-room) : []
   return services.adminStore.recordBalanceCheckpoint({
     scope,
     startedAt,
@@ -1046,7 +1060,7 @@ export const recordBalanceCheckpoint = async (services: CheckpointServices): Pro
     previousId: previous?.id ?? null,
     decreases,
     recovered: followed
-      .filter((d) => isBack(d) && !(d.asset === 'BTC' && delayed.has(d.checkpointId)))
+      .filter((d) => isBack(d) && followable(d) && !(d.asset === 'BTC' && delayed.has(d.checkpointId)))
       .map((d) => ({ ...d, after: String(level(d.asset)) })),
     unrecovered: [...protectedBtc, ...capped],
   })

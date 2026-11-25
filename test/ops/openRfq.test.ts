@@ -13,6 +13,9 @@ import { schnorr } from '@noble/curves/secp256k1.js'
 import { bytesToHex } from '@noble/hashes/utils.js'
 import { giveSatsFor, payoutSatsFor, type Fee } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { SendSwapService } from '@arkade-os/solver-corridors/send/orchestrator.js'
+import { OnchainSendSwapService } from '@arkade-os/solver-corridors/send/onchainOrchestrator.js'
+import { AdmissionControl } from '@arkade-os/solver-core/core/admission.js'
+import { networkFeePricing } from '@arkade-os/solver-core/core/pricing.js'
 import type { OpenRfq } from '@arkade-os/solver-core/core/openRfq.js'
 import {
   RFQ_ASSET_SWAP_DIRECTED,
@@ -42,7 +45,15 @@ const evmPolicies = [
 ]
 // The real send service on a backend with no routing estimator, so it bids the configured fee alone.
 const sendService = (corridorFee: Fee, limits: { minSats: number; maxSats: number }) =>
-  new SendSwapService({ ln: {}, limits, fee: corridorFee } as never)
+  new SendSwapService({
+    ln: { getBalance: async () => ({ availableSats: Number.MAX_SAFE_INTEGER }) },
+    limits,
+    fee: corridorFee,
+    store: { findByStates: async () => [] },
+    admission: new AdmissionControl(),
+    maxExposedSats: Number.MAX_SAFE_INTEGER,
+    totalCommitted: async () => 0,
+  } as never)
 const open = (pair: string, amount: string, amount_side: 'from' | 'to' = 'from'): OpenRfq => ({
   v: 1,
   type: 'rfq_open',
@@ -163,6 +174,114 @@ describe('public price previews', () => {
     expect(await preview(open(`${btc}->bolt11:bitcoin/slip44:0`, '1000'))).toBeUndefined()
   })
 
+  it.each(['bolt11', 'bitcoin'] as const)('only bids on %s with available capacity and float', async (rail) => {
+    const base = source()
+    const pair = rail === 'bolt11' ? 'arkade:BTC->lightning:BTC' : 'arkade:BTC->onchain:BTC'
+    const admission = new AdmissionControl()
+    let available = 0
+    let committed = 0
+    const owed = 100
+    const shared = { admission, fee, limits: bounds, maxExposedSats: 5_000, totalCommitted: async () => committed }
+    const services = {
+      ...base,
+      bootPolicy: {
+        ...base.bootPolicy,
+        corridorFees: { ...base.bootPolicy.corridorFees, [pair]: fee },
+        corridorLimits: { ...base.bootPolicy.corridorLimits, [pair]: bounds },
+      },
+      service: new SendSwapService({
+        ...shared,
+        ln: { getBalance: async () => ({ availableSats: available }) },
+        store: { findByStates: async () => [{ invoice: 'legacy', amountSats: owed, quotedRoutingFeeSats: 0 }] },
+      } as never),
+      onchainService: new OnchainSendSwapService({
+        ...shared,
+        network: 'bitcoin',
+        refundDestinationScript: new Uint8Array([0, 20, ...new Uint8Array(20)]),
+        float: { read: () => ({ sats: available, ageMs: 0 }), fundingFeeSats: () => 200 },
+        store: { owedPayoutSats: async () => owed },
+      } as never),
+    }
+    const preview = openRfqPreview(services as unknown as Services, { now: () => 1800000000 })
+    const request = open(`${btc}->${rail}:bitcoin/slip44:0`, '2000', 'to')
+
+    expect(await preview(request)).toBeUndefined()
+    available = rail === 'bolt11' ? 2_025 : 2_200
+    expect(await preview(request)).toBeUndefined()
+    available = 10_000
+    committed = 3_000
+    expect(await preview(request)).toBeUndefined()
+    committed = 0
+    const inFlight = await admission.reserve(3_000, shared.totalCommitted, shared.maxExposedSats)
+    expect(inFlight).not.toBeNull()
+    expect(await preview(request)).toBeUndefined()
+    inFlight?.release()
+    expect(await preview(request)).toMatchObject({ to_amount: '2000' })
+    expect(admission.outstandingSats).toBe(0)
+    expect(admission.outstandingFloatSats).toBe(0)
+  })
+
+  it('checks the live onchain payout and funding fee while retaining ceiling prices in the bid', async () => {
+    const base = source()
+    const pair = 'arkade:BTC->onchain:BTC'
+    let available = 10_000
+    let committed = 0
+    const services = {
+      ...base,
+      bootPolicy: {
+        ...base.bootPolicy,
+        corridorFees: { ...base.bootPolicy.corridorFees, [pair]: fee },
+        corridorLimits: { ...base.bootPolicy.corridorLimits, [pair]: bounds },
+      },
+      onchainService: new OnchainSendSwapService({
+        admission: new AdmissionControl(),
+        limits: bounds,
+        maxExposedSats: 10_000,
+        totalCommitted: async () => committed,
+        network: 'bitcoin',
+        refundDestinationScript: new Uint8Array([0, 20, ...new Uint8Array(20)]),
+        pricing: networkFeePricing({ base: { bps: 0, flatSats: 0 }, costSats: () => 100, capSats: 200 }),
+        float: { read: () => ({ sats: available, ageMs: 0 }), fundingFeeSats: () => 200 },
+        store: { owedPayoutSats: async () => 0 },
+      } as never),
+    }
+    const preview = openRfqPreview(services as unknown as Services, { now: () => 1800000000 })
+    const route = `${btc}->bitcoin:bitcoin/slip44:0`
+    const exactIn = open(route, '10000', 'from')
+
+    expect(await preview(exactIn)).toBeUndefined()
+    available = 10_100
+    expect(await preview(exactIn)).toMatchObject({ from_amount: '10000', to_amount: '9800' })
+    committed = 50
+    expect(await preview(open(route, '9850', 'to'))).toMatchObject({ from_amount: '10050', to_amount: '9850' })
+  })
+
+  it('checks float for the full Lightning bid when routing can be subsidized by the spread', async () => {
+    const base = source()
+    let available = 2_025
+    const services = {
+      ...base,
+      service: new SendSwapService({
+        admission: new AdmissionControl(),
+        limits: bounds,
+        fee: { bps: 100, flatSats: 0 },
+        maxExposedSats: 100_000,
+        totalCommitted: async () => 0,
+        ln: {
+          getBalance: async () => ({ availableSats: available }),
+          estimateSendFee: vi.fn(async () => ({ feeSats: 35, billableFeeSats: 0 })),
+        },
+        store: { findByStates: async () => [] },
+      } as never),
+    }
+    const preview = openRfqPreview(services as unknown as Services, { now: () => 1800000000 })
+    const request = open(`${btc}->bolt11:bitcoin/slip44:0`, '2000', 'to')
+
+    expect(await preview(request)).toBeUndefined()
+    available = 2_046
+    expect(await preview(request)).toMatchObject({ from_amount: '2046', to_amount: '2000' })
+  })
+
   it('refuses unsafe exact-out inversions while preserving safe maximum free previews', async () => {
     for (const bps of [1, 0]) {
       const base = source()
@@ -201,7 +320,7 @@ describe('public price previews', () => {
         corridorFees: { ...base.bootPolicy.corridorFees, 'arkade:BTC->onchain:BTC': fee },
         corridorLimits: { ...base.bootPolicy.corridorLimits, 'arkade:BTC->onchain:BTC': bounds },
       },
-      onchainService: { previewAmounts },
+      onchainService: { previewAmounts, canBid: async () => true },
     }
     const preview = openRfqPreview(services as unknown as Services, { now: () => 1800000000 })
     const priced = { from_amount: '10000', to_amount: '9850', valid_until: 1800000035 }
@@ -255,7 +374,7 @@ describe('public price previews', () => {
           'arkade:BTC->onchain:BTC': { minSats: 1000, maxSats: 10000 },
         },
       },
-      onchainService: { previewAmounts },
+      onchainService: { previewAmounts, canBid: async () => true },
     }
     const preview = openRfqPreview(services as unknown as Services, { now: () => 1800000000 })
     const pair = `${btc}->bitcoin:bitcoin/slip44:0`

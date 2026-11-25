@@ -3,6 +3,22 @@
  * every corridor that starts with such a lockup; what differs between them is passed in.
  */
 
+/**
+ * How each refusal text begins. Other code tells refusals apart by these words: the wire layer reports the
+ * late ones to the client as `expired`, and the console explains each. Rows already in the database carry
+ * them, so they never change.
+ */
+export const LOCKUP_REFUSAL = {
+  overfunded: 'overfunded lockup',
+  timeout: 'lockup timeout',
+  invoiceExpired: 'invoice expired before funding completed',
+  arrivedLate: 'lockup arrived after the funding deadline',
+} as const
+
+/** Whether `reason` is one of the refusals in `starts`. */
+export const isLockupRefusal = (reason: string | null, starts: readonly string[]): boolean =>
+  reason !== null && starts.some((start) => reason.startsWith(start))
+
 export interface ClientLockup {
   /** Every output at the lockup script. */
   held: number
@@ -35,7 +51,7 @@ export const judgeClientLockup = (lockup: ClientLockup, rules: ClientLockupRules
   const claimable = spendable.reduce((sum, o) => sum + o.value, 0)
 
   // A claim takes whole vtxos, so paying an overfunded lockup would keep the excess from the client.
-  if (claimable > amountSats) return refuse(`overfunded lockup: ${claimable} > ${amountSats} sats`, held)
+  if (claimable > amountSats) return refuse(`${LOCKUP_REFUSAL.overfunded}: ${claimable} > ${amountSats} sats`, held)
   if (claimable === amountSats && spendable.length > rules.maxOutputs) {
     return refuse(`lockup funded in ${spendable.length} outputs, over ${rules.maxOutputs}`, held)
   }

@@ -356,6 +356,21 @@ describe('findByStates', () => {
     expect(await store.countByStates(['paying'])).toBe(0)
     expect(await store.countByStates([])).toBe(0)
   })
+
+  it('leaves excluded ids out of both the page and the count, in the same query', async () => {
+    for (const [n, hash] of [
+      ['1', 'a'],
+      ['2', 'b'],
+      ['3', 'c'],
+    ] as const) {
+      await store.insertQuote(quote({ id: `swap-${n}`, paymentHash: hash.repeat(64) }))
+    }
+
+    const page = await store.findByStates(['quoted'], { limit: 1, excludeIds: ['swap-1', 'swap-2'] })
+    expect(page.map((r) => r.id)).toEqual(['swap-3'])
+    expect(await store.countByStates(['quoted'], ['swap-1', 'swap-2'])).toBe(1)
+    expect(await store.countByStates(['quoted'], [])).toBe(3)
+  })
 })
 
 describe('fail', () => {

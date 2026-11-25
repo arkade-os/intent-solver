@@ -60,10 +60,22 @@ export const advanceUnrolledClaims = async (
 ): Promise<UnrolledClaims | null> => {
   if (!arkade.findLockupOutpoints || !arkade.claimUnrolled) return null
   const steps = (row.unrolledClaim === null ? {} : JSON.parse(row.unrolledClaim)) as Record<string, UnrolledSpendStep>
-  const found = (await arkade.findLockupOutpoints(row.pkScript)).filter((o) => o.unrolled)
+  let error: unknown
+  const found = await arkade.findLockupOutpoints(row.pkScript).then(
+    (outpoints) => outpoints.filter((o) => o.unrolled),
+    (thrown: unknown) => {
+      error = thrown
+      return []
+    },
+  )
+  // A failed read cannot show the set is complete, so the row does not settle on it.
+  const complete = error === undefined
   // A claim already under way is followed through, whatever a lagging read leaves out.
   const keys = new Set([...Object.keys(steps), ...found.map((o) => `${o.txid}:${o.vout}`)])
-  if (keys.size === 0) return null
+  if (keys.size === 0) {
+    if (!complete) throw error
+    return null
+  }
   const unrolled = [...keys].map((key) => {
     const [txid, vout] = key.split(':')
     return { txid: txid!, vout: Number(vout) }
@@ -73,7 +85,6 @@ export const advanceUnrolledClaims = async (
     steps[key] = step
     await store.patch(row.id, { unrolled_claim: JSON.stringify(steps) })
   }
-  let error: unknown
   for (const { txid, vout } of unrolled) {
     const key = `${txid}:${vout}`
     const known = steps[key]
@@ -89,7 +100,7 @@ export const advanceUnrolledClaims = async (
   }
   const lost: string[] = []
   const confirmed: string[] = []
-  let settled = true
+  let settled = complete
   for (const { txid, vout } of unrolled) {
     const step = steps[`${txid}:${vout}`]
     if (step?.kind === 'spent') lost.push(`${txid}:${vout} ${SPENT_BY_ANOTHER}`)

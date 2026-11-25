@@ -785,6 +785,17 @@ describe('the preimage is persisted BEFORE the Arkade claim is attempted', () =>
     expect(preimageAtClaim).toBe('ab'.repeat(32))
     expect((await store.get('swap-1')).state).toBe('claimed')
   })
+
+  it('retries the Arkade claim from the stored preimage while an EVM read is unavailable', async () => {
+    const claimArkade = vi.fn().mockResolvedValue('ark-txid')
+    const { store, service } = await build({
+      claimArkade,
+      evm: { isLocked: vi.fn().mockRejectedValue(new Error('rpc unavailable')) } as never,
+    })
+    await store.transition('swap-1', 'quoted', 'claiming', { preimage: 'ab'.repeat(32) })
+    await expect(service.tick('swap-1')).resolves.toMatchObject({ state: 'claimed' })
+    expect(claimArkade).toHaveBeenCalledOnce()
+  })
 })
 
 describe('tickAll', () => {
