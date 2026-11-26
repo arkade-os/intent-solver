@@ -20,6 +20,7 @@ import type { OpenRfq } from '@arkade-os/solver-core/core/openRfq.js'
 import {
   RFQ_ASSET_SWAP_DIRECTED,
   RFQ_ASSET_SWAP_DIRECTED_NONCE,
+  RFQ_ASSET_SWAP_DIRECTED_NONCE_V2,
   RFQ_ASSET_SWAP_V2,
   RFQ_CONTRACT_VERSIONS,
   RFQ_EVM_RECEIVE_V1,
@@ -132,6 +133,8 @@ describe('public price previews', () => {
     const buy = open(`${to}->${from}`, '100', 'to')
     services.policy.rfqContractVersions = [RFQ_ASSET_SWAP_DIRECTED]
     expect(await preview(sell)).toBeUndefined()
+    services.policy.rfqContractVersions = [RFQ_ASSET_SWAP_DIRECTED_NONCE_V2]
+    expect(await preview(sell)).toMatchObject({ from_amount: '100', to_amount: '200' })
     services.policy.rfqContractVersions = [RFQ_ASSET_SWAP_DIRECTED_NONCE]
     expect(await preview(sell)).toMatchObject({ from_amount: '100', to_amount: '200' })
     expect(await preview(buy)).toMatchObject({ from_amount: '200', to_amount: '100' })
@@ -539,8 +542,13 @@ describe('public price previews', () => {
     expect(await priced(without(RFQ_ASSET_SWAP_V2), `${btc}->${tokenId}`, '100000')).toBeDefined()
     expect(await priced(without(RFQ_ASSET_SWAP_DIRECTED), `${btc}->${tokenId}`, '100000')).toBeDefined()
     expect(await priced(without(RFQ_ASSET_SWAP_DIRECTED_NONCE), `${btc}->${tokenId}`, '100000')).toBeDefined()
+    expect(await priced(without(RFQ_ASSET_SWAP_DIRECTED_NONCE_V2), `${btc}->${tokenId}`, '100000')).toBeDefined()
     expect(
-      await priced(without(RFQ_ASSET_SWAP_DIRECTED, RFQ_ASSET_SWAP_DIRECTED_NONCE), `${btc}->${tokenId}`, '100000'),
+      await priced(
+        without(RFQ_ASSET_SWAP_DIRECTED, RFQ_ASSET_SWAP_DIRECTED_NONCE, RFQ_ASSET_SWAP_DIRECTED_NONCE_V2),
+        `${btc}->${tokenId}`,
+        '100000',
+      ),
     ).toBeUndefined()
     expect(await priced(without(RFQ_EVM_SEND_V1), `${btc}->${evm}`, '10000')).toBeUndefined()
     expect(await priced(without(RFQ_EVM_RECEIVE_V1), `${evm}->${btc}`, '10000000')).toBeUndefined()

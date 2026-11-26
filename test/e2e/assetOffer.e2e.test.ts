@@ -96,6 +96,8 @@ describe('e2e arkade offers — publish, discover, settle', () => {
       const offer = await createOffer(arkade.ctx.wallet, {
         wantAmount,
         wantAsset: asset.AssetId.fromString(held.assetId),
+        // The SDK defaults new covenants to arkd's own key, which this stack's arkd cannot co-sign.
+        emulatorPubkey: arkade.emulator.pubkey,
       })
       const fundingTxid = await arkade.ctx.wallet.send({
         address: offer.address,
@@ -190,6 +192,7 @@ describe('e2e arkade offers — bounds, refused legibly and accepted at the edge
     const offer = await createOffer(arkade.ctx.wallet, {
       wantAmount: WANT_UNITS,
       wantAsset: asset.AssetId.fromString(assetId),
+      emulatorPubkey: arkade.emulator.pubkey,
     })
     const fundingTxid = await arkade.ctx.wallet.send({
       address: offer.address,

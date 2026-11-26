@@ -26,7 +26,11 @@ import {
 } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { IMPLIED_PRICE_HEADROOM } from '@arkade-os/solver-core/core/assetRfq.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
-import { RFQ_ASSET_SWAP_DIRECTED, RFQ_ASSET_SWAP_DIRECTED_NONCE } from '@arkade-os/solver-core/core/rfqContract.js'
+import {
+  RFQ_ASSET_SWAP_DIRECTED,
+  RFQ_ASSET_SWAP_DIRECTED_NONCE,
+  RFQ_ASSET_SWAP_DIRECTED_NONCE_V2,
+} from '@arkade-os/solver-core/core/rfqContract.js'
 import {
   AssetRfqSwapService,
   type AssetRfqDeps,
@@ -129,34 +133,37 @@ const deposit = (over: Partial<ObservedDeposit> = {}): ObservedDeposit => ({
 })
 
 describe('quote', () => {
-  it('quotes a distinct asset pair only with the nonce contract', async () => {
-    const { service, store } = await harness({
-      markets: [{ ...MARKET, base: ASSET_A, quote: ASSET_B, baseDecimals: 6, carrierSats: 0n }],
-      balance: async () => new Map([[ASSET_B, 10n ** 18n]]),
-      minOutputSats: 1_000n,
-    })
-    const crossAsset = request({ pair: `arkade:${ASSET_A}->arkade:${ASSET_B}`, amount: 100n })
-    try {
-      expect(await service.quote(crossAsset)).toMatchObject({ accepted: false, reason: 'unsupported_pair' })
-      expect(await service.quote({ ...crossAsset, contractVersion: RFQ_ASSET_SWAP_DIRECTED })).toMatchObject({
-        accepted: false,
-        reason: 'unsupported_pair',
+  it.each([RFQ_ASSET_SWAP_DIRECTED_NONCE, RFQ_ASSET_SWAP_DIRECTED_NONCE_V2])(
+    'quotes a distinct asset pair with %s, a nonce contract, and with nothing else',
+    async (nonceVersion) => {
+      const { service, store } = await harness({
+        markets: [{ ...MARKET, base: ASSET_A, quote: ASSET_B, baseDecimals: 6, carrierSats: 0n }],
+        balance: async () => new Map([[ASSET_B, 10n ** 18n]]),
+        minOutputSats: 1_000n,
       })
-      expect(await service.quote({ ...crossAsset, contractVersion: RFQ_ASSET_SWAP_DIRECTED_NONCE })).toMatchObject({
-        accepted: true,
-        carrierSats: 1_000n,
-        swap: {
-          fromAssetId: ASSET_A,
-          fromAmount: 100n,
-          toAssetId: ASSET_B,
-          toAmount: 9_950_000n,
-          contractVersion: RFQ_ASSET_SWAP_DIRECTED_NONCE,
-        },
-      })
-    } finally {
-      await store.close()
-    }
-  })
+      const crossAsset = request({ pair: `arkade:${ASSET_A}->arkade:${ASSET_B}`, amount: 100n })
+      try {
+        expect(await service.quote(crossAsset)).toMatchObject({ accepted: false, reason: 'unsupported_pair' })
+        expect(await service.quote({ ...crossAsset, contractVersion: RFQ_ASSET_SWAP_DIRECTED })).toMatchObject({
+          accepted: false,
+          reason: 'unsupported_pair',
+        })
+        expect(await service.quote({ ...crossAsset, contractVersion: nonceVersion })).toMatchObject({
+          accepted: true,
+          carrierSats: 1_000n,
+          swap: {
+            fromAssetId: ASSET_A,
+            fromAmount: 100n,
+            toAssetId: ASSET_B,
+            toAmount: 9_950_000n,
+            contractVersion: nonceVersion,
+          },
+        })
+      } finally {
+        await store.close()
+      }
+    },
+  )
 
   it('resolves both amounts and records the terms before answering', async () => {
     const { service, store } = await harness()

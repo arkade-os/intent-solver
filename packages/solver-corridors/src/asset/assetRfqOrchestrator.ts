@@ -51,7 +51,11 @@ import { capture, unwrap } from '@arkade-os/solver-core/util/capture.js'
 import { createSerialiser, type Serialiser } from '@arkade-os/solver-core/util/serialise.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
-import { RFQ_ASSET_SWAP_DIRECTED_NONCE } from '@arkade-os/solver-core/core/rfqContract.js'
+import {
+  NONCE_RFQ_CONTRACT_VERSIONS,
+  RFQ_ASSET_SWAP_DIRECTED_NONCE_V2,
+  bindsRfqNonce,
+} from '@arkade-os/solver-core/core/rfqContract.js'
 import { hasExactOfferAsset, heldOf } from '@arkade-os/solver-arkade/arkade/offerFill.js'
 import {
   DEPOSIT_SPENT_REASON,
@@ -268,11 +272,11 @@ export class AssetRfqSwapService {
       }
     }
     const twoAssets = pair.from !== null && pair.to !== null
-    if (twoAssets && request.contractVersion !== RFQ_ASSET_SWAP_DIRECTED_NONCE) {
+    if (twoAssets && !bindsRfqNonce(request.contractVersion)) {
       return {
         accepted: false,
         reason: 'unsupported_pair',
-        detail: `a two-asset quote requires ${RFQ_ASSET_SWAP_DIRECTED_NONCE}`,
+        detail: `a two-asset quote requires ${NONCE_RFQ_CONTRACT_VERSIONS.join(' or ')}`,
       }
     }
 
@@ -296,8 +300,9 @@ export class AssetRfqSwapService {
     if (request.requesterKey !== undefined && !this.quoteLimiter.take(request.requesterKey)) {
       return { accepted: false, reason: 'rate_limited' }
     }
+    // v2's leaves name no co-signer key (arkd co-signs `fulfill` on its own), so a named one cannot move the address.
     const emulatorPubkey =
-      request.emulatorPubkey === undefined
+      request.emulatorPubkey === undefined || request.contractVersion === RFQ_ASSET_SWAP_DIRECTED_NONCE_V2
         ? undefined
         : ((await this.deps.cosignerKey?.(request.emulatorPubkey)) ?? null)
     if (emulatorPubkey === null) return { accepted: false, reason: 'unsupported_emulator_pubkey' }

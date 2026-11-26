@@ -8,7 +8,14 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { ArkAddress, CSVMultisigTapscript, RestArkProvider, asset } from '@arkade-os/sdk'
-import { createOffer, offerFromBinding, offerVtxoScript } from '@arkade-os/swap/protocol'
+import {
+  assetRfqNonce,
+  bindingFromOffer,
+  createOffer,
+  offerFromBinding,
+  offerVtxoScript,
+  type AssetSwapContractVersion,
+} from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
 import {
   offerExitDelay,
@@ -17,7 +24,11 @@ import {
   xOnlyPubkey,
   type QuotedOfferTerms,
 } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
-import { RFQ_ASSET_SWAP_DIRECTED } from '@arkade-os/solver-core/core/rfqContract.js'
+import {
+  RFQ_ASSET_SWAP_DIRECTED,
+  RFQ_ASSET_SWAP_DIRECTED_NONCE,
+  RFQ_ASSET_SWAP_DIRECTED_NONCE_V2,
+} from '@arkade-os/solver-core/core/rfqContract.js'
 
 const xonly = (fill: number): Uint8Array => schnorr.getPublicKey(new Uint8Array(32).fill(fill))
 const SERVER = xonly(2)
@@ -68,7 +79,7 @@ const clientWallet = () => ({
 
 const clientOffer = async (
   unilateralExitDelay: number,
-  over: { contractVersion?: typeof RFQ_ASSET_SWAP_DIRECTED; taker?: Uint8Array } = {},
+  over: { contractVersion?: AssetSwapContractVersion; taker?: Uint8Array; nonce?: Uint8Array } = {},
 ) => {
   vi.stubGlobal('fetch', async (url: unknown) =>
     String(url).includes('/v1/info')
@@ -149,6 +160,34 @@ describe('the directed covenant', () => {
     expect(mine.address).toBe(theirs.address)
     expect(mine.pkScript).toBe(hex.encode(theirs.swapPkScript))
     expect(mine.pkScript).toBe(hex.encode(bound.swapPkScript))
+  })
+})
+
+describe('the single-key nonce covenant', () => {
+  const exitDelay = offerExitDelay(605_184)
+  const derive = (emulatorPubkey: Uint8Array, version: string) =>
+    offerScriptFrom({ serverPubkey: SERVER, emulatorPubkey, hrp: HRP, exitDelay, taker: TAKER })(terms, version)
+
+  it('derives the address the client derives, and fills through the binding of that version', async () => {
+    const mine = derive(EMULATOR, RFQ_ASSET_SWAP_DIRECTED_NONCE_V2)
+    const theirs = await clientOffer(605_184, {
+      contractVersion: RFQ_ASSET_SWAP_DIRECTED_NONCE_V2,
+      taker: TAKER,
+      nonce: assetRfqNonce(terms.rfqId),
+    })
+
+    expect(mine.address).toBe(theirs.address)
+    expect(mine.pkScript).toBe(hex.encode(theirs.swapPkScript))
+    expect(bindingFromOffer(mine.offer, SERVER).version).toBe(RFQ_ASSET_SWAP_DIRECTED_NONCE_V2)
+  })
+
+  it('compiles apart from the nonce covenant, and on no co-signer key', () => {
+    const v2 = derive(EMULATOR, RFQ_ASSET_SWAP_DIRECTED_NONCE_V2).pkScript
+    const nonce = derive(EMULATOR, RFQ_ASSET_SWAP_DIRECTED_NONCE).pkScript
+
+    expect(v2).not.toBe(nonce)
+    expect(derive(xonly(7), RFQ_ASSET_SWAP_DIRECTED_NONCE_V2).pkScript).toBe(v2)
+    expect(derive(xonly(7), RFQ_ASSET_SWAP_DIRECTED_NONCE).pkScript).not.toBe(nonce)
   })
 })
 

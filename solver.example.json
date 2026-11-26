@@ -124,6 +124,7 @@
       "onchain-send-v2",
       "asset-swap-directed-nonce",
       "asset-swap-directed",
+      "asset-swap-directed-nonce-v2",
       "evm-send-v1",
       "evm-receive-v1"
     ]

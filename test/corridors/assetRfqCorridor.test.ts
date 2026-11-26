@@ -11,7 +11,11 @@
 
 import { describe, it, expect } from 'vitest'
 import { createCorridorSet } from '@arkade-os/solver-core/core/corridor.js'
-import { RFQ_ASSET_SWAP_DIRECTED, RFQ_ASSET_SWAP_DIRECTED_NONCE } from '@arkade-os/solver-core/core/rfqContract.js'
+import {
+  RFQ_ASSET_SWAP_DIRECTED,
+  RFQ_ASSET_SWAP_DIRECTED_NONCE,
+  RFQ_ASSET_SWAP_DIRECTED_NONCE_V2,
+} from '@arkade-os/solver-core/core/rfqContract.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
 import { AssetRfqSwapService } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import {
@@ -84,11 +88,16 @@ const rfqRequest = (over: Record<string, unknown> = {}) => ({
 })
 
 describe('the descriptor', () => {
-  it('offers only the nonce version for two assets', () => {
+  it('offers only the nonce versions for two assets', () => {
     const market = { ...MARKET, base: `${'ab'.repeat(32)}0100` }
-    expect(assetRfqDescriptor(market, 'sell_base').contractVersions).toEqual([RFQ_ASSET_SWAP_DIRECTED_NONCE])
-    expect(assetRfqDescriptor(market, 'buy_base').contractVersions).toEqual([RFQ_ASSET_SWAP_DIRECTED_NONCE])
-    expect(BUY.contractVersions).toEqual([RFQ_ASSET_SWAP_DIRECTED_NONCE, RFQ_ASSET_SWAP_DIRECTED])
+    const nonceVersions = [RFQ_ASSET_SWAP_DIRECTED_NONCE, RFQ_ASSET_SWAP_DIRECTED_NONCE_V2]
+    expect(assetRfqDescriptor(market, 'sell_base').contractVersions).toEqual(nonceVersions)
+    expect(assetRfqDescriptor(market, 'buy_base').contractVersions).toEqual(nonceVersions)
+    expect(BUY.contractVersions).toEqual([
+      RFQ_ASSET_SWAP_DIRECTED_NONCE,
+      RFQ_ASSET_SWAP_DIRECTED,
+      RFQ_ASSET_SWAP_DIRECTED_NONCE_V2,
+    ])
   })
 
   it('names the directional pair each way round', () => {

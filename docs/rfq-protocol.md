@@ -1494,8 +1494,8 @@ NOT publish standing offers in order to serve this corridor.
 
 **Pairs.** The corridor quotes BTC/asset and pairs of two distinct Arkade
 assets. Each asset leg is a literal lowercase 68-hex asset ID per § 2. Two
-asset legs require `asset-swap-directed-nonce`. The covenant binds the payout
-asset and amount. The solver checks the funded output against the input asset
+asset legs require `asset-swap-directed-nonce` or
+`asset-swap-directed-nonce-v2`. The covenant binds the payout asset and amount. The solver checks the funded output against the input asset
 and amount in the recorded quote before filling.
 
 **Both amount sides.** `amount_side` is `"from"` or `"to"`. § 4.2 gives how
@@ -1562,6 +1562,18 @@ directed at another solver and leaves nonce-bearing deposits to the RFQ handler.
 To pause new nonce-bearing quotes, remove `asset-swap-directed-nonce` from the
 configured version list. Keep a solver build that can read the new version
 while those deposits can still settle or be recovered.
+
+**Contract version `asset-swap-directed-nonce-v2`.** The same nonce covenant,
+read with a single operator key. `fulfill` takes the `taker` signature and one
+co-signature from arkd on its own key tweaked by `fulfill`. No emulator key
+appears in any leaf, so the address does not depend on a co-signer key, and the
+solver ignores `profile.emulator_pubkey` for this version. `cancel` and the exit
+leaf are unchanged. The solver takes the client's first listed version it
+serves, and clients list this one last, so a deployment serving all three gives
+it only to a client that names it first. Filling it needs an arkd that
+runs Arkade Script in its signer. Against an arkd that cannot co-sign it, leave
+it out of the configured version list: its deposit could not be filled and
+would stay the client's to cancel.
 
 **Late funding, and who can undo it.** § 5's rule holds: a deposit first
 observed after `valid_until` MUST NOT be filled. It bites harder here than on a

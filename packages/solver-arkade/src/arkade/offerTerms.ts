@@ -16,6 +16,9 @@ import {
   RFQ_ASSET_SWAP_V2,
   RFQ_ASSET_SWAP_DIRECTED,
   RFQ_ASSET_SWAP_DIRECTED_NONCE,
+  RFQ_ASSET_SWAP_DIRECTED_NONCE_V2,
+  NONCE_RFQ_CONTRACT_VERSIONS,
+  bindsRfqNonce,
 } from '@arkade-os/solver-core/core/rfqContract.js'
 import { assetRfqNonce, offerVtxoScript, type AssetSwapContractVersion, type Offer } from '@arkade-os/swap/protocol'
 import { hex } from '@scure/base'
@@ -115,7 +118,13 @@ export const offerFromTerms = (
 // Keep the persisted baseline independent of the SDK's default.
 const derivableVersion = (id: string | undefined): AssetSwapContractVersion => {
   if (id === undefined || id === RFQ_ASSET_SWAP_V2) return RFQ_ASSET_SWAP_V2
-  if (id === RFQ_ASSET_SWAP_DIRECTED || id === RFQ_ASSET_SWAP_DIRECTED_NONCE) return id
+  if (
+    id === RFQ_ASSET_SWAP_DIRECTED ||
+    id === RFQ_ASSET_SWAP_DIRECTED_NONCE ||
+    id === RFQ_ASSET_SWAP_DIRECTED_NONCE_V2
+  ) {
+    return id
+  }
   throw new Error(`unsupported contract version ${id}`)
 }
 
@@ -135,8 +144,8 @@ export const offerScriptFrom = (
   return (terms, contractVersion) => {
     const emulatorPubkey = terms.emulatorPubkey ? xOnlyPubkey(hex.decode(terms.emulatorPubkey)) : fallback
     const version = derivableVersion(contractVersion)
-    if (terms.wantAssetId !== null && terms.offerAssetId !== null && version !== RFQ_ASSET_SWAP_DIRECTED_NONCE) {
-      throw new Error(`a two-asset quote requires ${RFQ_ASSET_SWAP_DIRECTED_NONCE}`)
+    if (terms.wantAssetId !== null && terms.offerAssetId !== null && !bindsRfqNonce(version)) {
+      throw new Error(`a two-asset quote requires ${NONCE_RFQ_CONTRACT_VERSIONS.join(' or ')}`)
     }
     const offer = offerFromTerms(
       terms,
@@ -144,7 +153,7 @@ export const offerScriptFrom = (
       deps.exitDelay,
       version === RFQ_ASSET_SWAP_V2 ? undefined : deps.taker,
     )
-    if (version === RFQ_ASSET_SWAP_DIRECTED_NONCE) {
+    if (bindsRfqNonce(version)) {
       offer.nonce = assetRfqNonce(terms.rfqId)
     }
     const script = offerVtxoScript(offer, deps.serverPubkey, version)

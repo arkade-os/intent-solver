@@ -974,8 +974,8 @@ export const createServices = async (
     dustSats: arkade.dustSats,
     minOutputSats: arkade.dustSats > arkade.vtxoMinSats ? arkade.dustSats : arkade.vtxoMinSats,
     deriveOffer: offerScriptFrom(assetRfqDerivation),
-    // Fills still go through the emulator (the SDK's fillOffer), which cannot co-sign arkd's key, so
-    // only the default is accepted here until fills can be submitted to arkd.
+    // Nonce and directed fills still go through the emulator, which cannot co-sign arkd's key, so only the
+    // default is accepted here. v2 never asks: its leaves name no co-signer key, and arkd co-signs its fills.
     cosignerKey: async (requested) => {
       const key = await quoteCosignerKey({ emulatorPubkey: arkadeOps.emulatorPubkey }, requested)
       // x-only, as the offer carries it; the hash-lock corridors store the compressed form instead.

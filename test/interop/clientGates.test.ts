@@ -329,7 +329,7 @@ describe('the shipped client and this solver stop funding an onchain SEND at the
       quote: sendQuote(),
       quoteId: 'rfq-onchain-send',
       now,
-      onchain: { htlcLocktime: quoted.htlcLocktime, minConfirmations: quoted.minConfirmations, direction: 'send' },
+      onchain: { htlcLocktime: quoted.htlcLocktime, minConfirmations: quoted.minConfirmations },
     })
 
   const solverFunds = (now: number) =>

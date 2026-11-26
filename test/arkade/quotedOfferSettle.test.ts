@@ -17,6 +17,7 @@ import {
   RFQ_ASSET_SWAP_V2,
   RFQ_ASSET_SWAP_DIRECTED,
   RFQ_ASSET_SWAP_DIRECTED_NONCE,
+  RFQ_ASSET_SWAP_DIRECTED_NONCE_V2,
 } from '@arkade-os/solver-core/core/rfqContract.js'
 import { quotedOfferSettleFor, type QuotedOfferIntent } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
 import type { OfferOutpoint } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
@@ -168,6 +169,7 @@ describe('quotedOfferSettleFor', () => {
 
   it.each([
     ['directed with nonce', RFQ_ASSET_SWAP_DIRECTED_NONCE],
+    ['single-key directed with nonce', RFQ_ASSET_SWAP_DIRECTED_NONCE_V2],
     ['directed', RFQ_ASSET_SWAP_DIRECTED],
     ['v2', RFQ_ASSET_SWAP_V2],
     ['NULL (baseline)', null],
@@ -310,6 +312,14 @@ describe('a quote exchanging two assets', () => {
     expect(offer.offerAsset).toBeUndefined()
     expect(offer.nonce).toBeDefined()
     expect(fulfill.mock.calls[0]![4]).toEqual({ minAssetOutputSats: 1_000n })
+  })
+
+  it('settles a single-key row on its own tree, not the nonce one', async () => {
+    const singleKey = intent({ fromAssetId: EURA, fromAmount: 500n, contractVersion: RFQ_ASSET_SWAP_DIRECTED_NONCE_V2 })
+    const { settle, fulfill } = settleWith([carrying(500n)])
+    await settle(singleKey)
+    expect(hex.encode(fulfill.mock.calls[0]![2].swapPkScript)).toBe(singleKey.offerPkScript)
+    expect(singleKey.offerPkScript).not.toBe(row.offerPkScript)
   })
 
   it.each([

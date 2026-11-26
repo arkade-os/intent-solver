@@ -22,11 +22,12 @@ import {
 } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
-import { RFQ_ASSET_SWAP_DIRECTED } from '@arkade-os/solver-core/core/rfqContract.js'
+import { RFQ_ASSET_SWAP_DIRECTED, RFQ_ASSET_SWAP_DIRECTED_NONCE_V2 } from '@arkade-os/solver-core/core/rfqContract.js'
 
 const state = vi.hoisted(() => ({
   vtxos: [] as unknown[],
   arkTx: undefined as string | undefined,
+  arkdTx: undefined as string | undefined,
   checkpointTxs: [] as string[],
   prevTxs: new Map<string, string>(),
   submitError: undefined as Error | undefined,
@@ -48,6 +49,11 @@ vi.mock('@arkade-os/sdk', async (importOriginal) => {
         ),
       }
     }
+    async submitTx(arkTx: string): Promise<never> {
+      state.arkdTx = arkTx
+      throw new Error('stub arkd refuses every submission')
+    }
+    async finalizeTx() {}
   }
   return {
     ...mod,
@@ -132,7 +138,7 @@ const fundingCoin = (value: number, assets?: { assetId: string; amount: bigint }
   }
 }
 
-const offerFor = (over: Record<string, unknown>): Offer => {
+const offerFor = (over: Record<string, unknown>, version?: Parameters<typeof offerVtxoScript>[2]): Offer => {
   const terms = {
     wantAmount: 500n,
     makerPkScript: hex.decode(`5120${MAKER_KEY}`),
@@ -140,7 +146,7 @@ const offerFor = (over: Record<string, unknown>): Offer => {
     emulatorPubkey: hex.decode(EMULATOR_KEY),
     ...over,
   } as Omit<Offer, 'swapPkScript'>
-  return { ...terms, swapPkScript: offerVtxoScript(terms, SERVER_KEY).pkScript } as Offer
+  return { ...terms, swapPkScript: offerVtxoScript(terms, SERVER_KEY, version).pkScript } as Offer
 }
 
 /**
@@ -598,6 +604,24 @@ describe('a directed deposit', () => {
 
     expect(vi.mocked(fillOffer).mock.calls[0]![2]).toMatchObject({ version: RFQ_ASSET_SWAP_DIRECTED, taker: takerKey })
     expect(state.arkTx).toBeDefined()
+  })
+
+  it('submits a single-key nonce fill to arkd, never to the emulator', async () => {
+    state.arkTx = undefined
+    state.arkdTx = undefined
+    vi.mocked(fillOffer).mockClear()
+    const singleKey = offerFor(
+      { offerAsset: asset.AssetId.fromString(ASSET_B), taker: takerKey, nonce: new Uint8Array(32).fill(9) },
+      RFQ_ASSET_SWAP_DIRECTED_NONCE_V2,
+    )
+
+    await expect(
+      fulfillOffer(ctx([fundingCoin(80_000)]), 'http://emulator.test', singleKey, deposit()),
+    ).rejects.toThrow('stub arkd refuses')
+
+    expect(vi.mocked(fillOffer).mock.calls[0]![2]).toMatchObject({ version: RFQ_ASSET_SWAP_DIRECTED_NONCE_V2 })
+    expect(state.arkdTx).toBeDefined()
+    expect(state.arkTx).toBeUndefined()
   })
 
   it('refuses a deposit quoted for another taker above the latch, sending nothing', async () => {
