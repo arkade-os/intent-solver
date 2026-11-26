@@ -499,6 +499,32 @@ one.
   receives; an asset pair refuses it as `unsupported_pair` instead (§ 7.2.1).
   A solver predating the field refuses it as an unknown field, so a
   client that can also derive the baseline retries without it.
+- **Version-specific fields** _(specified; NOT yet implemented, § 7.1)_. Some
+  contract versions take request fields the baseline does not:
+  `onchain-htlc-v1` takes `profile.payout_pk_script` and
+  `profile.max_network_fee` (§ 7.1.3.1), and both HTLC versions take
+  `profile.asset` on a pair with an Arkade-asset leg, which none of the pairs
+  they serve has.
+  Negotiation strips only `contract_versions` before the corridor's strict
+  schema reads the rest (`negotiatingContractVersion`,
+  `packages/solver-core/src/core/corridor.ts`). A solver that negotiates but
+  predates a field therefore refuses the whole request, and a retry that drops
+  only the list still carries the field. A client sends one of three shapes:
+  1. **Default** — no `contract_versions` and no version-specific field: byte
+     for byte the request of a client predating both.
+  2. **Opt-in** — `contract_versions` together with the fields its listed
+     versions take. A version-specific field never travels without the list.
+  3. **Fallback** — after `unsupported_payload` whose `error_code` is absent
+     or `contract_version_unsupported`, the default shape under a fresh
+     `rfq_id` (§ 4.5).
+
+  A solver refuses a version-specific field beside a negotiated version that
+  does not take it as it refuses an unknown field. A solver that predates
+  negotiation, predates a field, or serves none of the listed versions
+  therefore answers an opt-in with one of the two refusals that trigger the
+  fallback. A list naming `onchain-htlc-v1` before `arkade-htlc-v1`, sent with
+  the L1 fields, can be quoted only at `onchain-htlc-v1`; reaching
+  `arkade-htlc-v1` takes a request without them.
 
 ### 4.2 `rfq_quote`
 
@@ -551,8 +577,16 @@ one.
 - The top-level fields `solver_pubkey`, `valid_until`, `from_amount`,
   `to_amount` and `refund_locktime` are **binding fields**. HTLC send quotes
   also bind `profile.refund_without_receiver_delay`: the exact BIP68 delay the
-  client must put in its solo-refund leaf. Other profile fields are
-  compare-only or informational.
+  client must put in its solo-refund leaf. Quotes under `arkade-htlc-v1` and
+  `onchain-htlc-v1` (§ 7.1) also bind `profile.amount`, `profile.asset` when
+  present and, on `onchain-htlc-v1`, `profile.max_network_fee`. Each is a
+  contract argument, so each moves the address, and none can be compare-only.
+  `profile.amount` is REQUIRED there, a canonical decimal string (§ 2.1) that
+  MUST equal, as an integer, the § 7.1.1.2 derivation from `from_amount` or
+  `to_amount`; `profile.asset` and `profile.max_network_fee` MUST echo the
+  request's. A client MUST refuse a quote that omits `profile.amount` or where
+  any of them does not match. Other profile fields are compare-only or
+  informational.
 
 ### 4.3 `rfq_refusal`
 
@@ -832,6 +866,20 @@ for the server's key. And a receive leg's non-interactive claim by covclaimd
 (§ 7.1.2) works on a server-key lockup only if covclaimd submits that claim
 to the Arkade server; the client's own interactive claim works either way.
 
+**Under `arkade-htlc-v1` and `onchain-htlc-v1`** _(specified; NOT yet
+implemented, § 7.1)_ no emulator key exists. Each covenant leaf's co-signer is
+the Arkade server's own key `X` tweaked by that leaf's covenant, `t(X, fn)`,
+and `X` is the `signerPubkey` the client reads from its own `/v1/info`.
+`profile.emulator_pubkey` MUST be absent: a request naming it is refused
+`unsupported_payload`, `error_code` `unsupported_emulator_pubkey`. arkd has
+signed for `t(X, fn)` since `ArkLabsHQ/arkd#127`, so a solver whose Arkade
+server predates it serves neither version. covclaimd, which is deprecated,
+cannot claim either version: it signs through the emulator, which cannot sign
+for `t(X, fn)`. An `ArkadeHTLC` claim template for `arkade-os/executor` is to
+replace it as the claim service; until one is registered, a receiving client
+(§ 7.1.2) claims for itself. On `onchain-htlc-v1` arkd also co-signs the L1
+HTLC, so every L1 path that opens before a CSV needs it (§ 7.1.3.1).
+
 ## 7. Settlement profiles
 
 A profile defines the `profile` objects of request/quote/status, the funding
@@ -854,6 +902,31 @@ atomic class is NOT an exception, though this document long said it was: it
 funds an offer covenant rather than sending a message, and its refund is
 `cancel` — a 2-of-2 of the funder and the Arkade Service, needing no solver
 signature and carrying no timelock. § 7.2.)
+
+**Contract versions** _(specified; NOT yet implemented — the reference solver
+serves only the baselines)_. A request naming no `contract_versions` gets each
+pair's baseline (§ 4.1). Two further versions move the lockups onto contracts
+whose covenant leaves the Arkade server co-signs alone (§ 6):
+
+| version                                                                   | pairs                     | Arkade lockup                | L1 HTLC                   |
+| ------------------------------------------------------------------------- | ------------------------- | ---------------------------- | ------------------------- |
+| baselines: `lightning-send-v2`, `lightning-receive-v2`, `onchain-send-v2` | § 7.1.1, § 7.1.2, § 7.1.3 | `VHTLC.ScriptV2` (§ 7.1.1.1) | two-leaf P2TR (§ 7.1.3)   |
+| `arkade-htlc-v1`                                                          | all three                 | `ArkadeHTLC` (§ 7.1.1.2)     | as the baseline           |
+| `onchain-htlc-v1`                                                         | `arkade:BTC->onchain:BTC` | `ArkadeHTLC` (§ 7.1.1.2)     | `OnchainHTLC` (§ 7.1.3.1) |
+
+`onchain-htlc-v1` names both of its pair's contracts because a quote carries
+exactly one `contract_version` (§ 4.2). Each id pins its contract by the
+compiled artifact's `codeHash`, given beside each contract below; a contract
+with another `codeHash` needs another id. Neither version changes the quote's
+amounts or the spread: the fee stays inside `from_amount − to_amount`. A
+request naming no `contract_versions` gets byte for byte what it gets today,
+and a lockup already funded keeps the tree it was funded with.
+
+The contracts are `ArkadeHTLC`
+(`packages/sdk/src/script/contracts/arkade-htlc.ark`, `arkade-os/ts-sdk#1299`)
+and `OnchainHTLC` (`onchain-htlc.ark`, `arkade-os/ts-sdk#1300`), each with a
+regtest e2e against arkd's own co-signer and neither released yet. The leaf
+tables in § 7.1.1.2 and § 7.1.3.1 are read from their compiled artifacts.
 
 #### 7.1.1 `arkade:BTC->lightning:BTC` — implemented today
 
@@ -933,10 +1006,18 @@ each converted as blocks × 600 climbed to a 512-second boundary. A client that
 re-derives with the base values mixes units and its address will not match —
 derive the other two rungs with that same rule.
 
-##### 7.1.1.1 The covenant script: eight leaves, nine with the timelocked non-interactive refund leaf
+**Under `arkade-htlc-v1`** _(specified; NOT yet implemented, § 7.1)_ the
+lockup is the `ArkadeHTLC` tree of § 7.1.1.2, in the same roles: the solver is
+`receiver`, the client is `sender`, and `amount` is `from_amount`. The request
+only adds the version and carries no `emulator_pubkey` (§ 6); the quote adds
+`profile.amount`. The solver's fill is still the `claim` leaf, and its refund
+sweep pushes `nonInteractiveRefund` through arkd.
 
-Every RFQ-family quote commits to the extended tree — `VHTLC.ScriptV2` from
-`@arkade-os/sdk`, the same class `@arkade-os/swap`'s reference client builds,
+##### 7.1.1.1 The baseline covenant script (`VHTLC.ScriptV2`): eight leaves, nine with the timelocked non-interactive refund leaf
+
+Every RFQ-family quote on a baseline version (§ 7.1) commits to the extended
+tree — `VHTLC.ScriptV2` from `@arkade-os/sdk`, the same class
+`@arkade-os/swap`'s reference client builds,
 so the client's and the solver's derivations are byte-identical by
 construction GIVEN THE SAME PARAMETERS — same class, so there is no
 independent-reimplementation drift to worry about for how a leaf is built,
@@ -1052,6 +1133,67 @@ claim**, and a timelocked **refund** (server + covenant key, anyone can
 push, after `refund_locktime`). None of the client-cooperative leaves exist
 there.
 
+##### 7.1.1.2 The `arkade-htlc-v1` lockup: `ArkadeHTLC`, nine leaves
+
+_Specified; NOT yet implemented (§ 7.1)._ Under `arkade-htlc-v1`, and on the
+Arkade side of `onchain-htlc-v1`, the lockup of each pair served is
+`ArkadeHTLC` from `@arkade-os/sdk`, artifact `codeHash`
+`sha256:5d58e749e6ddcd46b30add050f3a2d13537a991e063974034d2d5c3d5b8bc11b`.
+As in § 7.1.1.1, `receiver` claims with `P`, `sender` is refunded, and the six
+signature leaves keep their roles. In the three covenant leaves the Arkade
+server and the emulator covenant key become one key, `X` tweaked by the leaf's
+covenant:
+
+| leaf                                  | needs                                             | § 7.1.1.1 role                    |
+| ------------------------------------- | ------------------------------------------------- | --------------------------------- |
+| `claim`                               | `P`, receiver, `X`                                | claim                             |
+| `refund`                              | sender, receiver, `X`                             | refund collaborative              |
+| `refundWithoutReceiver`               | sender, `X`, after `refund_locktime`              | refund without receiver           |
+| `unilateralClaim`                     | `P`, receiver, after `unilateral_claim_delay`     | unilateral claim                  |
+| `unilateralRefund`                    | sender, receiver, after `unilateral_refund_delay` | refund without server             |
+| `unilateralRefundWithoutReceiver`     | sender, after `refund_without_receiver_delay`     | refund unilateral                 |
+| `nonInteractiveClaim`                 | `P`, `t(X, payReceiver)`                          | non-interactive claim             |
+| `nonInteractiveRefund`                | receiver, `t(X, paySender)`                       | non-interactive refund            |
+| `nonInteractiveRefundWithoutReceiver` | `t(X, paySender)`, after `refund_locktime`        | timelocked non-interactive refund |
+
+Both covenants check only output `i`, the spent input's own index, and pay
+only a v1 witness program. `payReceiver` pays `receiverScript` at least
+`max(input value, amount)`, plus at least the bound amount of `asset` when one
+is bound. `paySender` pays `senderScript` at least the input value. Both carry
+the input's assets to output `i` exactly (`OP_TUNNEL` with the assets flag), so
+a covenant spend can neither strip assets sent to the lockup nor mix others in.
+
+| `ArkadeHTLC` argument                            | client funds (§ 7.1.1, § 7.1.3)                 | solver funds (§ 7.1.2)                  |
+| ------------------------------------------------ | ----------------------------------------------- | --------------------------------------- |
+| `sender`                                         | `client_refund_pubkey`                          | `solver_pubkey`                         |
+| `receiver`                                       | `solver_pubkey`                                 | `payout_pubkey`                         |
+| `server` (`X`)                                   | `signerPubkey` from the client's own `/v1/info` | the same                                |
+| `senderScript`                                   | the witness program of `refund_address`         | `solver_refund_pk_script` minus `5120`  |
+| `receiverScript`                                 | `receiver_pk_script` minus `5120`               | the witness program of `payout_address` |
+| `amount`                                         | `from_amount`                                   | `to_amount`                             |
+| `asset`                                          | `profile.asset`, absent on these BTC pairs      | the same                                |
+| `preimageHash`, `refundLocktime`, the three CSVs | as on the baseline tree                         | the same                                |
+
+`amount` is the funding the quote expects, so even a lockup funded short pays
+its receiver at least `amount` through the covenant. The quote states it as
+`profile.amount` (§ 4.2), including on `onchain-htlc-v1`, whose L1 HTLC has its
+own floor (§ 7.1.3.1). `profile.asset` is
+`{ "id": <asset id, § 2>, "amount": <atomic units, § 2.1> }`. The three pairs
+these versions serve are BTC on both legs, so it is absent and the contract
+binds no asset.
+
+Spend rules:
+
+- The Arkade server co-signs the covenant leaves itself, through `submitTx`;
+  the standalone emulator plays no part.
+- Every co-signed spend, the solver's ordinary `claim` included, reveals in its
+  input's `arkadetweak` PSBT field the hash of each covenant it does not run.
+  arkd recognises a tweaked key only by a script hash it knows, and refuses a
+  tree whose keys it cannot account for. A CSV spend reveals none.
+- A negotiated version is exact. § 7.1.1.1's rule of deriving both the eight-
+  and nine-leaf shapes serves clients that name no version and does not extend
+  to this tree.
+
 #### 7.1.2 `lightning:BTC->arkade:BTC` — implemented today
 
 The client is paid over Lightning and the sats land on Arkade
@@ -1102,6 +1244,11 @@ The client is paid over Lightning and the sats land on Arkade
   settles the held Lightning payment with it.
 - Funding gates and the refund locktime derivation for this profile are the
   § 9 receive-side invariants.
+- **Under `arkade-htlc-v1`** _(specified; NOT yet implemented, § 7.1)_ the
+  solver funds the `ArkadeHTLC` tree of § 7.1.1.2, roles inverted: the client
+  is `receiver`, the solver is `sender`, and `amount` is `to_amount`. A claim
+  service pushes `nonInteractiveClaim` through arkd, which covclaimd cannot do
+  (§ 6).
 
 #### 7.1.3 `arkade:BTC->onchain:BTC` — implemented today
 
@@ -1134,6 +1281,83 @@ Arkade lockup.
   HTLC with `to_amount` — the amount minus this corridor's fee, fixed at
   quote time. A quote whose payout would be below the onchain dust floor is
   refused (`pricing_unavailable`), never funded.
+- **Under `arkade-htlc-v1`** _(specified; NOT yet implemented, § 7.1)_ the
+  Arkade lockup is the `ArkadeHTLC` tree of § 7.1.1.2 in § 7.1.1's roles, with
+  `amount` = `from_amount`. The onchain HTLC stays the two-leaf P2TR.
+
+##### 7.1.3.1 The `onchain-htlc-v1` L1 HTLC: `OnchainHTLC`, six leaves
+
+_Specified; NOT yet implemented (§ 7.1)._ Under `onchain-htlc-v1` the Arkade
+lockup is as under `arkade-htlc-v1`, and the solver funds `OnchainHTLC` from
+`@arkade-os/sdk` on L1 instead of the two-leaf P2TR, artifact `codeHash`
+`sha256:99cbb4e5997fc46247dbb667af143e4bd5706ed4abb0145409140403c107ea7d`. The
+solver is `sender` and the client is `receiver`. arkd co-signs its spends
+through `CosignOnchainTx`, and every leaf without a CSV names `X`, plain or
+tweaked. An arkd outage therefore unwinds the swap once the CSVs open, where
+the two-leaf HTLC would let it complete.
+
+- **request.profile** adds `payout_pk_script`, the client's L1 destination as
+  a hex pkScript, and `max_network_fee`, the most the covenant claim may leave
+  to fees, in sats as a canonical decimal string (§ 2.1).
+  `payout_pk_script` is a derivation input, not a compare-only field:
+  `payReceiver` pins it. It MUST be v1 P2TR (`5120` + 32 bytes), else the
+  request is refused `unsupported_payload`, `error_code` `payout_not_taproot`
+  (§ 10). `payout_pubkey` stays, as `receiver`.
+- **quote.profile** adds `htlc_refund_pk_script`, the solver's P2TR refund
+  destination, which `paySender` pins. It is compare-only like
+  `receiver_pk_script`: a wrong value only hurts the solver. The quote echoes
+  `max_network_fee` as a binding field (§ 4.2). `htlc_pubkey` stays, as
+  `sender`, and `htlc_address` is still the compare-only address.
+
+| `OnchainHTLC` argument      | carrier                                                      |
+| --------------------------- | ------------------------------------------------------------ |
+| `sender`                    | `htlc_pubkey`                                                |
+| `receiver`                  | `payout_pubkey`                                              |
+| `server` (`X`)              | `signerPubkey` from the client's own `/v1/info`              |
+| `preimageHash`              | as on the two-leaf HTLC: HASH160 of `P`, from `payment_hash` |
+| `refundLocktime`            | `htlc_locktime`                                              |
+| `refundDelay`, `claimDelay` | no carrier yet (§ 12)                                        |
+| `receiverScript`            | `payout_pk_script` minus `5120`                              |
+| `senderScript`              | `htlc_refund_pk_script` minus `5120`                         |
+| `amount`                    | `to_amount − max_network_fee`, which MUST be positive        |
+| `fee`                       | `max_network_fee`                                            |
+| `asset`                     | absent; the L1 asset leg waits on `ArkLabsHQ/arkd#202`       |
+
+| leaf                                  | needs                                    |
+| ------------------------------------- | ---------------------------------------- |
+| `claim`                               | `P`, receiver, `X`                       |
+| `nonInteractiveClaim`                 | `P`, `t(X, payReceiver)`                 |
+| `refundWithoutReceiver`               | sender, `X`, after `htlc_locktime`       |
+| `nonInteractiveRefundWithoutReceiver` | `t(X, paySender)`, after `htlc_locktime` |
+| `unilateralRefundWithoutReceiver`     | sender, after `refundDelay`              |
+| `unilateralClaim`                     | `P`, receiver, after `claimDelay`        |
+
+**Amounts.** `to_amount` is still what the solver funds the HTLC with.
+`payReceiver` requires `output_i.value >= max(amount, input value − fee)`, so
+with `amount = to_amount − max_network_fee` and `fee = max_network_fee` the
+covenant claim pays the client at least the net and leaves at most
+`max_network_fee` to miners or to whoever builds the claim. An exact-out client
+asks for `to_amount` = its wanted payout + `max_network_fee`. `paySender`
+requires at least the input value, so the refund covenant takes nothing from
+the coin and its pusher adds the fee. The signature leaves bind no fee; their
+signers choose it.
+
+**The ladder is reversed** relative to the Arkade lockup:
+
+- Every CSV is at least the `boardingExitDelay` the client reads from its own
+  `/v1/info`, in seconds. arkd co-signs no spend of a coin with a shorter one.
+- `refundDelay`, the solver's solo refund, opens before `claimDelay`, the
+  client's. With arkd withholding every signature the solver then refunds
+  first; in the other order the client could unroll and refund the Arkade
+  lockup and still claim L1 later with `P`.
+- `htlc_locktime`, the contract's `refundLocktime`, stays a timestamp: an arkd
+  on seconds refuses a block-height one. It MUST fall inside arkd's co-sign
+  window, since arkd co-signs nothing once the coin's smallest CSV is within
+  its margin of maturing.
+
+The solver still reads `P` off the client's L1 claim and claims the Arkade
+lockup with it. No field carries `refundDelay` or `claimDelay` yet, so until
+one does a client cannot derive `htlc_address` under this version (§ 12).
 
 #### 7.1.4 `onchain:BTC->arkade:BTC` — not served
 
@@ -1711,6 +1935,14 @@ Additionally:
   `<CORRIDOR>_FEE_BPS`/`_FEE_FLAT_SATS`, and `<CORRIDOR>_ENABLED` to darken a
   corridor entirely — an unserved corridor refuses `unsupported_pair`); the
   fee lives in the quote's two amounts per § 4.2 and is fixed at quote time.
+- **`onchain-htlc-v1`'s L1 HTLC** _(specified; NOT yet implemented,
+  § 7.1.3.1)_. Up to `max_network_fee` of the L1 payout may go to miners or
+  to whoever builds the claim; the refund covenant takes nothing from the coin,
+  and its pusher adds the fee. The L1 ladder holds:
+  `refundDelay < claimDelay`, each at least the client's own
+  `boardingExitDelay`, with `htlc_locktime` inside arkd's co-sign window. The
+  normative timelock-ordering invariant (§ 7.1.4) is unchanged and still
+  governs the Arkade lockup.
 
 ## 10. Refusal reasons
 
@@ -1769,7 +2001,8 @@ fixed by the code; `unit`, when present, is `blocks`, `characters` or `sats`.
 | `invoice_sub_satoshi_amount`   | use an invoice whose amount is a whole number of sats                                                 |
 | `invoice_too_long`             | use an invoice no longer than `limit` characters                                                      |
 | `invoice_wrong_network`        | use an invoice for the pair's network                                                                 |
-| `unsupported_emulator_pubkey`  | omit `emulator_pubkey` (and derive with the default key), or name a server signer key with no cutoff  |
+| `payout_not_taproot`           | use a v1 P2TR `payout_pk_script`, or request without `onchain-htlc-v1` (§ 7.1.3.1)                    |
+| `unsupported_emulator_pubkey`  | omit `emulator_pubkey`, or on a baseline contract name a server signer key with no cutoff (§ 6)       |
 
 Solvers MUST NOT return free-form diagnostic text, raw request values, backend
 errors, inventory levels or pricing configuration in a refusal. Those belong in
@@ -1786,6 +2019,7 @@ The reference implementation's internal refusal names map onto the closed set
 | `zero_amount_invoice`        | `unsupported_payload` |
 | `invalid_refund_address`     | `unsupported_payload` |
 | `invalid_payout_address`     | `unsupported_payload` |
+| `payout_not_taproot`         | `unsupported_payload` |
 | `invalid_claim_packet`       | `unsupported_payload` |
 | `unsupported_payload`        | `unsupported_payload` |
 | `invoice_expired`            | `invoice_expired`     |
@@ -1799,6 +2033,9 @@ The reference implementation's internal refusal names map onto the closed set
 | `duplicate_swap`             | `quote_conflict`      |
 | `provider_at_capacity`       | `exposure_cap`        |
 | `rate_limited`               | `rate_limited`        |
+
+`payout_not_taproot` is specified for `onchain-htlc-v1` (§ 7.1.3.1) and NOT
+yet implemented: no corridor raises it today.
 
 `payable_amount_unmatchable` is the Lightning receive leg's exact-in guard: a
 deployment whose backend wraps the hold invoice it publishes could not find a
@@ -1946,3 +2183,9 @@ have a tested reference in this repo.
   decreasing timelock ladder whose per-hop cost on an Arkade leg is bounded
   below by the operator's own unilateral exit delay. Neither the
   representation nor the ladder is specified here.
+- **`onchain-htlc-v1`'s L1 delays and claim packet.** No field yet carries
+  `OnchainHTLC`'s `refundDelay` or `claimDelay`, so a client cannot derive
+  `htlc_address` under that version; § 7.1.3.1 fixes only their constraints.
+  Nor is there a claim packet that would let a claim service push the client's
+  L1 claim while it is offline, so on that version the client claims L1
+  itself.
