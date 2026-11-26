@@ -203,7 +203,8 @@ export const fulfillOffer = async (
 
   // What output[0] must carry in SATS. An asset-wanting maker is paid through
   // the asset packet, so its BTC leg is only this server's own dust (§ 4.1).
-  const carrierSats = options?.minAssetOutputSats ?? ctx.dustSats
+  const changeFloor = options?.minAssetOutputSats
+  const carrierSats = changeFloor ?? ctx.dustSats
   const makerSats = wantedAssetId === undefined ? wantAmount : carrierSats
 
   // Coins that carry the wanted ASSET when there is one, otherwise coins that
@@ -218,13 +219,13 @@ export const fulfillOffer = async (
       // taker's side from what the declared inputs carry — a subtraction here
       // would duplicate a job already discharged there.
       funding = selectCoinsWithAsset(free, wantedAssetId, wantAmount).selected
-      if (options?.minAssetOutputSats !== undefined) {
+      if (changeFloor !== undefined) {
         const inputsSats = funding.reduce((total, coin) => total + BigInt(coin.value), BigInt(deposit.value))
-        const extra = makerSats + options.minAssetOutputSats - inputsSats
-        if (extra > 0n) {
+        const missingSats = makerSats + changeFloor - inputsSats
+        if (missingSats > 0n) {
           const used = new Set(funding.map((coin) => outpointKey(coin.txid, coin.vout)))
           const rest = free.filter((coin) => !used.has(outpointKey(coin.txid, coin.vout)))
-          funding = [...funding, ...selectVirtualCoins(rest, assertSafeAmount(extra)).inputs]
+          funding = [...funding, ...selectVirtualCoins(rest, assertSafeAmount(missingSats)).inputs]
         }
       }
     }

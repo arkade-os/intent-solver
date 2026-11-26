@@ -146,7 +146,7 @@ export interface AssetRfqDeps {
   ) => { pkScript: string; address: string; emulatorPubkey?: string }
   /** The x-only key to build on for a client-named co-signer key, or null to refuse. Absent: refuse any. */
   cosignerKey?: (requested: string) => Promise<string | null>
-  /** What is funded at the offer's script, or null while nothing is. */
+  /** Finds a live deposit. The optional predicate lets the adapter discard ineligible outpoints before ranking. */
   depositAt: (
     offerPkScript: string,
     depositLeg: AssetLeg,
@@ -477,6 +477,7 @@ export class AssetRfqSwapService {
       (row.state === 'quoted' || (deposit.txid === row.depositTxid && deposit.vout === row.depositVout)) &&
       hasExactOfferAsset(deposit, fromAssetId, fromAmount)
     const deposit = await this.deps.depositAt(offerPkScript, fromAssetId, acceptDeposit)
+    // Older adapters can ignore the optional predicate.
     return deposit && acceptDeposit(deposit) ? deposit : null
   }
 

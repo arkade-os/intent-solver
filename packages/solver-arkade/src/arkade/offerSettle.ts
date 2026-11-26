@@ -140,9 +140,7 @@ export const offerSettleFor = (
 
     // The packet's terms, read through the SAME adapter the decision read them
     // through, so a change in how an asset id is spelled cannot make these
-    // comparisons pass for the wrong reason. `offerAmount` here is the sats at
-    // the outpoint — `heldOf` returns the deposit's sats when the deposit leg is
-    // BTC, and 0 when it names an asset this deposit view does not carry.
+    // comparisons pass for the wrong reason. Only the BTC underflow check uses this view's amount.
     const terms = offerFillInputFrom(found.offer, { sats: BigInt(found.value) })
     if (terms.wantAmount !== intent.wantAmount) {
       throw new Error(
