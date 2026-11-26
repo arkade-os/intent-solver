@@ -1,4 +1,5 @@
 import type { ValueOf } from '../shared/brand.js'
+import { InvalidValue } from '../shared/error.js'
 import type { UnixSeconds } from '../shared/time.js'
 
 const MINUTE = 60
@@ -20,20 +21,23 @@ export const FillRefusal = {
 
 export type FillRefusal = ValueOf<typeof FillRefusal>
 
-/** How long until our refund of the `to` leg opens, in seconds. */
-interface RefundTimes {
-  readonly untilRefundOpens: number
+interface Fill {
+  readonly at: number
+  readonly refundOpensAt: number
   /** With the Arkade server gone. Null when the operator accepts having no such refund in time. */
-  readonly untilRefundAlone: number | null
+  readonly secondsToRefundAlone: number | null
 }
 
-// The held HTLC must not expire before each of these has passed. Checked in this order.
-const TIME_THE_HTLC_MUST_STILL_LAST: readonly [FillRefusal, (refund: RefundTimes) => number][] = [
-  [FillRefusal.TooLittleTimeToSettle, () => TIME_TO_SETTLE],
-  [FillRefusal.RefundOpensTooLate, (refund) => refund.untilRefundOpens + SPARE_TIME_AFTER_REFUND_OPENS],
+// The held HTLC must not expire before any of these moments. Checked in this order.
+const EARLIEST_THE_HTLC_MAY_EXPIRE: readonly [FillRefusal, (fill: Fill) => number][] = [
+  [FillRefusal.TooLittleTimeToSettle, (fill) => fill.at + TIME_TO_SETTLE],
+  [FillRefusal.RefundOpensTooLate, (fill) => fill.refundOpensAt + SPARE_TIME_AFTER_REFUND_OPENS],
   [
     FillRefusal.RefundAloneOpensTooLate,
-    (refund) => (refund.untilRefundAlone === null ? 0 : refund.untilRefundAlone + SPARE_TIME_AFTER_REFUND_ALONE),
+    (fill) =>
+      fill.secondsToRefundAlone === null
+        ? fill.at
+        : fill.at + fill.secondsToRefundAlone + SPARE_TIME_AFTER_REFUND_ALONE,
   ],
 ]
 
@@ -46,24 +50,39 @@ export interface ReceiveTerms {
   readonly acceptsNoRefundAlone: boolean
 }
 
+// Below this a locktime is a block height. The rules compare times, so a height must be converted before it gets here.
+const FIRST_LOCKTIME_THAT_IS_A_TIME = 500_000_000
+
+const checked = (terms: ReceiveTerms): ReceiveTerms => {
+  if (terms.refundOpensAt < FIRST_LOCKTIME_THAT_IS_A_TIME) {
+    throw new InvalidValue(`refundOpensAt must be a unix time, not a block height: ${terms.refundOpensAt}`)
+  }
+  if (!(terms.secondsToRefundAlone >= 0) || !Number.isFinite(terms.secondsToRefundAlone)) {
+    throw new InvalidValue(`secondsToRefundAlone must not be negative: ${terms.secondsToRefundAlone}`)
+  }
+  return terms
+}
+
 /** Why the `to` leg must not be filled right now. Null when it may. Ask right before filling: the answer depends on the clock. */
 export const whatStopsTheFill = (terms: ReceiveTerms, now: UnixSeconds): FillRefusal | null => {
-  if (now >= terms.invoiceExpiresAt) return FillRefusal.InvoiceExpired
-  if (terms.htlcExpiresAt === null) return FillRefusal.HoldNotArmed
-  const htlcStillLasts = terms.htlcExpiresAt - now
-  const refund: RefundTimes = {
-    untilRefundOpens: terms.refundOpensAt - now,
-    untilRefundAlone: terms.acceptsNoRefundAlone ? null : terms.secondsToRefundAlone,
+  const { invoiceExpiresAt, htlcExpiresAt, refundOpensAt, secondsToRefundAlone, acceptsNoRefundAlone } = checked(terms)
+  if (now >= invoiceExpiresAt) return FillRefusal.InvoiceExpired
+  if (htlcExpiresAt === null) return FillRefusal.HoldNotArmed
+  const fill: Fill = {
+    at: now,
+    refundOpensAt,
+    secondsToRefundAlone: acceptsNoRefundAlone ? null : secondsToRefundAlone,
   }
-  const broken = TIME_THE_HTLC_MUST_STILL_LAST.find(([, needed]) => htlcStillLasts < needed(refund))
+  const broken = EARLIEST_THE_HTLC_MAY_EXPIRE.find(([, earliest]) => htlcExpiresAt < earliest(fill))
   return broken ? broken[0] : null
 }
 
 /** How long a held HTLC must last, so that an invoice asking for this much is never refused later. */
 export const timeTheHtlcMustLast = (secondsToRefundAlone: number, acceptsNoRefundAlone: boolean): number => {
-  const refund: RefundTimes = {
-    untilRefundOpens: LONGEST_A_FILL_STAYS_LOCKED,
-    untilRefundAlone: acceptsNoRefundAlone ? null : secondsToRefundAlone,
+  const fill: Fill = {
+    at: 0,
+    refundOpensAt: LONGEST_A_FILL_STAYS_LOCKED,
+    secondsToRefundAlone: acceptsNoRefundAlone ? null : secondsToRefundAlone,
   }
-  return Math.max(...TIME_THE_HTLC_MUST_STILL_LAST.map(([, needed]) => needed(refund)))
+  return Math.max(...EARLIEST_THE_HTLC_MAY_EXPIRE.map(([, earliest]) => earliest(fill)))
 }
