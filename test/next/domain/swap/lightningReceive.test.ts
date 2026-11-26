@@ -31,6 +31,23 @@ describe('filling a Lightning receive', () => {
     expect(whatStopsTheFill(terms({ htlcExpiresAt: null }), NOW)).toBe('htlc_not_armed')
   })
 
+  it('calls an expired invoice expired even while a payment is held on it', () => {
+    expect(whatStopsTheFill(terms({ invoiceExpiresAt: NOW, htlcExpiresAt: after(180 * MINUTE) }), NOW)).toBe(
+      'invoice_expired',
+    )
+  })
+
+  it('still judges a refund that is already open: it opens before the HTLC expires', () => {
+    expect(whatStopsTheFill(terms({ refundOpensAt: after(-10 * MINUTE) }), NOW)).toBeNull()
+  })
+
+  it('refuses terms that cannot be right: a block height for a time, or a negative delay', () => {
+    expect(() => whatStopsTheFill(terms({ refundOpensAt: t(900_000) }), NOW)).toThrow('not a block height')
+    for (const delay of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => whatStopsTheFill(terms({ secondsToRefundAlone: delay }), NOW)).toThrow('must not be negative')
+    }
+  })
+
   it('stops when the HTLC expires in under 90 minutes', () => {
     expect(whatStopsTheFill(terms({ htlcExpiresAt: after(90 * MINUTE - 1) }), NOW)).toBe('settle_window_too_short')
     const justEnough = terms({ htlcExpiresAt: after(90 * MINUTE), refundOpensAt: after(75 * MINUTE) })
@@ -102,6 +119,39 @@ describe('the rules in production today', () => {
       if ((today.fund ? null : today.reason) !== ours) {
         throw new Error(`differs on ${JSON.stringify(input)}: today ${JSON.stringify(today)}, ours ${ours}`)
       }
+    }
+  })
+
+  it('never fill either when the refund locktime is a block height: neither side takes it for a time', () => {
+    for (let i = 0; i < 20_000; i++) {
+      const now = between(1_700_000_000, 1_900_000_000)
+      const input = {
+        invoiceExpiresAt: now + seconds(),
+        htlcExpiresAt: next() < 0.1 ? null : now + seconds(),
+        refundLocktime: between(1, 499_999_999),
+        unilateralRefundWithoutReceiverDelay: 1024,
+        acceptUnilateralGap: next() < 0.3,
+        now,
+      }
+      let todayFills = false
+      try {
+        todayFills = evaluateReceiveFunding(input).fund
+      } catch {
+        todayFills = false
+      }
+      expect(todayFills).toBe(false)
+      expect(() =>
+        whatStopsTheFill(
+          {
+            invoiceExpiresAt: t(input.invoiceExpiresAt),
+            htlcExpiresAt: input.htlcExpiresAt === null ? null : t(input.htlcExpiresAt),
+            refundOpensAt: t(input.refundLocktime),
+            secondsToRefundAlone: 1024,
+            acceptsNoRefundAlone: input.acceptUnilateralGap,
+          },
+          t(now),
+        ),
+      ).toThrow('not a block height')
     }
   })
 
