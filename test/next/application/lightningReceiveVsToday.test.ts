@@ -7,11 +7,13 @@ import { HoldInvoice } from '@arkade-os/solver-next/application/legs/hold_invoic
 import { SolverLockup } from '@arkade-os/solver-next/application/legs/solver_lockup.js'
 import { LightningReceive, type ReceiveStep } from '@arkade-os/solver-next/application/lightning_receive.js'
 import { Hashlock } from '@arkade-os/solver-next/domain/swap/hashlock.js'
-import { Quote } from '@arkade-os/solver-next/domain/swap/quote.js'
-import type { Swap } from '@arkade-os/solver-next/domain/swap/swap.js'
+import {
+  swapFromReceiveRow,
+  type ReceiveSwapRecord,
+} from '@arkade-os/solver-next/infrastructure/db/receive_swap_row.js'
 import type { LockupOutpoint } from '@arkade-os/solver-next/ports/arkade.js'
 import type { HoldState } from '@arkade-os/solver-next/ports/lightning.js'
-import { btc, quoted, ref, SECRET, t } from '../domain/support.js'
+import { SECRET, t } from '../domain/support.js'
 import { lockupContract } from './support.js'
 
 const MINUTE = 60
@@ -29,7 +31,17 @@ const random = (seed: number) => (): number => {
   return ((x ^ (x >>> 14)) >>> 0) / 4294967296
 }
 
-type State = 'quoted' | 'armed' | 'armed_fill_started' | 'funded' | 'claimed' | 'refunding'
+type State =
+  | 'quoted'
+  | 'armed'
+  | 'armed_fill_started'
+  | 'funded'
+  | 'claimed'
+  | 'refunding'
+  | 'settled'
+  | 'refunded'
+  | 'refused'
+  | 'stuck'
 
 /** One moment of one swap: what is on record, and what the node and Arkade show. */
 interface Situation {
@@ -55,21 +67,34 @@ const spendableOf = (s: Situation) =>
 const preimageOn = (s: Situation, outpoints: readonly { txid: string; vout: number }[]) =>
   outpoints.some((o) => `${o.txid}:${o.vout}` === s.claimedOn)
 
-const today = (s: Situation): Promise<{ do: string; reason?: string }> => {
-  const lockupRecorded = s.state === 'funded' || s.state === 'claimed' || s.state === 'refunding'
-  const row: ReceivePlanRow = {
+/** The row as `receive_swap` holds it. Both sides read this one. */
+const rowOf = (s: Situation): ReceiveSwapRecord & ReceivePlanRow => {
+  const fillStarted = s.state === 'armed_fill_started'
+  const lockupRecorded = !['quoted', 'armed', 'armed_fill_started', 'refused'].includes(s.state)
+  const claimed = s.state === 'claimed' || s.state === 'settled'
+  return {
+    id: 'swap-1',
     state: s.state === 'armed_fill_started' ? 'armed' : s.state,
-    invoiceExpiresAt: INVOICE_EXPIRES_AT,
+    updatedAt: s.enteredStateAt,
+    paymentHash: HASH,
+    amountSats: 5_000,
     payoutSats: PAYOUT,
-    fundStartedAt: s.state === 'armed_fill_started' ? s.enteredStateAt : null,
+    invoiceExpiresAt: INVOICE_EXPIRES_AT,
+    htlcExpiresAt: s.state === 'quoted' ? null : s.savedHtlcExpiresAt,
+    fundStartedAt: fillStarted ? s.enteredStateAt : null,
     refundWithoutReceiverDelay: s.rawRefundAloneDelay,
     arkadeLockupTxid: lockupRecorded ? RECORDED.txid : null,
     arkadeLockupVout: lockupRecorded ? RECORDED.vout : null,
-    preimage: s.state === 'claimed' ? SECRET : null,
-    htlcExpiresAt: s.state === 'quoted' ? null : s.savedHtlcExpiresAt,
-    settleAttemptedAt: null,
-    updatedAt: s.enteredStateAt,
+    settleAttemptedAt: s.state === 'settled' ? s.enteredStateAt : null,
+    preimage: claimed ? SECRET : null,
+    refundArkTxid: s.state === 'refunded' ? 'refund-tx' : null,
+    failureReason: s.state === 'refused' || s.state === 'stuck' ? 'a reason' : null,
+    rfqId: null,
   }
+}
+
+const today = (s: Situation): Promise<{ do: string; reason?: string }> => {
+  const row = rowOf(s)
   // As the orchestrator builds them today.
   const reads: ReceiveReads = {
     now: () => s.now,
@@ -93,25 +118,6 @@ const today = (s: Situation): Promise<{ do: string; reason?: string }> => {
   return planReceive(row, reads)
 }
 
-const swapOf = (s: Situation): Swap => {
-  const start = quoted({
-    hashlock: HASH,
-    quote: Quote.of(t(INVOICE_EXPIRES_AT), { fee: btc(50n), spreadBps: 0 }),
-    from: { rail: 'lightning', amount: btc(5_000n), contract: 'lightning', version: null },
-    to: { rail: 'arkade', amount: btc(BigInt(PAYOUT)), contract: 'vhtlc', version: null },
-    at: t(QUOTED_AT),
-  })
-  if (s.state === 'quoted') return start
-  const saved = s.savedHtlcExpiresAt === null ? null : t(s.savedHtlcExpiresAt)
-  const armed = start.markFunded(t(QUOTED_AT + 1), ref(HASH), saved)
-  if (s.state === 'armed') return armed
-  if (s.state === 'armed_fill_started') return armed.startFill(t(s.enteredStateAt))
-  const funded = armed.startFill(t(QUOTED_AT + 2)).markToLocked(t(QUOTED_AT + 3), ref('pay:0'))
-  if (s.state === 'funded') return funded
-  if (s.state === 'claimed') return funded.markFilled(t(s.enteredStateAt), SECRET)
-  return funded.startRefund(t(s.enteredStateAt))
-}
-
 const ours = (s: Situation): Promise<ReceiveStep> =>
   new LightningReceive(
     new HoldInvoice({ getHoldState: async () => s.hold, settleHold: async () => undefined }),
@@ -131,7 +137,7 @@ const ours = (s: Situation): Promise<ReceiveStep> =>
     ),
     () => t(s.now),
     { acceptsNoRefundAlone: s.acceptsNoRefundAlone },
-  ).next(swapOf(s))
+  ).next(swapFromReceiveRow(rowOf(s)))
 
 // Where the new decision differs from today's on purpose. Each is safer, and takes one tick less.
 const intended = (s: Situation, old: { do: string }, next: ReceiveStep): string | null => {
@@ -147,7 +153,7 @@ const intended = (s: Situation, old: { do: string }, next: ReceiveStep): string 
 }
 
 describe('the Lightning receive decision', () => {
-  it('is the one production makes today, on 60,000 random situations', () => {
+  it('is the one production makes today, on 60,000 random rows read from the table', () => {
     const next = random(20261127)
     const pick = <T>(of: readonly T[]): T => of[Math.floor(next() * of.length)]!
     const TIMES = [-1, 0, 1].flatMap((d) => [INVOICE_EXPIRES_AT + d, REFUND_OPENS_AT + d, REFUND_OPENS_AT + 120 + d])
@@ -168,7 +174,11 @@ describe('the Lightning receive decision', () => {
       const now = anyTime()
       const history = lockup()
       const s: Situation = {
-        state: pick(['quoted', 'armed', 'armed_fill_started', 'funded', 'claimed', 'refunding'] as const),
+        state: pick([
+          ...(['quoted', 'armed', 'armed_fill_started', 'funded', 'claimed', 'refunding'] as const),
+          ...(['quoted', 'armed', 'armed_fill_started', 'funded', 'claimed', 'refunding'] as const),
+          ...(['settled', 'refunded', 'refused', 'stuck'] as const),
+        ]),
         now,
         hold: {
           status: pick(['pending', 'armed', 'armed', 'armed', 'settled', 'cancelled', 'unknown'] as const),
