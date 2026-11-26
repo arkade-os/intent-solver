@@ -10,6 +10,9 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
+import { asset } from '@arkade-os/sdk'
+import { ASSET_SWAP_CONTRACT_VERSIONS, arkadeSwapRequest } from '@arkade-os/swap/protocol'
+import { hex } from '@scure/base'
 import {
   corridorSetFromDeps,
   readerSetFromDeps,
@@ -22,6 +25,7 @@ import {
   RFQ_ASSET_SWAP_V2,
   RFQ_ASSET_SWAP_DIRECTED,
   RFQ_ASSET_SWAP_DIRECTED_NONCE,
+  RFQ_ASSET_SWAP_DIRECTED_NONCE_V2,
 } from '@arkade-os/solver-core/core/rfqContract.js'
 
 const ASSET_A = `${'aa'.repeat(32)}0100`
@@ -203,6 +207,13 @@ describe('asset RFQ negotiates only directed covenants', () => {
   it.each([
     ['a nonce-capable client', [RFQ_ASSET_SWAP_DIRECTED_NONCE, RFQ_ASSET_SWAP_DIRECTED], RFQ_ASSET_SWAP_DIRECTED_NONCE],
     ['an older client', [RFQ_ASSET_SWAP_DIRECTED], RFQ_ASSET_SWAP_DIRECTED],
+    ["the swap client's default order", ASSET_SWAP_CONTRACT_VERSIONS, RFQ_ASSET_SWAP_DIRECTED_NONCE],
+    [
+      'a client preferring the single-key covenant',
+      [RFQ_ASSET_SWAP_DIRECTED_NONCE_V2, RFQ_ASSET_SWAP_DIRECTED_NONCE, RFQ_ASSET_SWAP_DIRECTED],
+      RFQ_ASSET_SWAP_DIRECTED_NONCE_V2,
+    ],
+    ['a single-key-only client', [RFQ_ASSET_SWAP_DIRECTED_NONCE_V2], RFQ_ASSET_SWAP_DIRECTED_NONCE_V2],
   ])('selects and records the version for %s', async (_client, wanted, version) => {
     const { store, derived, corridor, corridorFor } = await serving()
     const outcome = await corridor.quote(request({ contract_versions: wanted }))
@@ -215,6 +226,30 @@ describe('asset RFQ negotiates only directed covenants', () => {
     const next = await narrowed.quote(request({ contract_versions: [version] }))
     expect(next).toMatchObject({ kind: 'refused', payload: { error_code: 'contract_version_unsupported' } })
     expect(await narrowed.statusFor(RFQ_ID)).toMatchObject({ type: 'rfq_status', state: 'quoted' })
+    await store.close()
+  })
+
+  it('quotes the single-key covenant on a co-signer key it never builds on, and refuses that key for the nonce one', async () => {
+    const { store, corridor } = await serving()
+    const fromClient = (rfqId: string, contractVersions: readonly string[]) =>
+      arkadeSwapRequest({
+        rfqId,
+        wantAsset: asset.AssetId.fromString(ASSET_A),
+        amount: 100_000_000n,
+        makerPkScript: `5120${'c'.repeat(64)}`,
+        makerPublicKey: 'b'.repeat(64),
+        contractVersions,
+        emulatorPubkey: hex.decode('a1'.repeat(32)),
+      })
+
+    expect(await corridor.quote(fromClient(RFQ_ID, [RFQ_ASSET_SWAP_DIRECTED_NONCE_V2]))).toMatchObject({
+      kind: 'quote',
+      payload: { contract_version: RFQ_ASSET_SWAP_DIRECTED_NONCE_V2 },
+    })
+    expect(await corridor.quote(fromClient('b'.repeat(64), [RFQ_ASSET_SWAP_DIRECTED_NONCE]))).toMatchObject({
+      kind: 'refused',
+      payload: { error_code: 'unsupported_emulator_pubkey' },
+    })
     await store.close()
   })
 })

@@ -4,6 +4,7 @@ import {
   RFQ_ASSET_SWAP_V2,
   RFQ_ASSET_SWAP_DIRECTED,
   RFQ_ASSET_SWAP_DIRECTED_NONCE,
+  RFQ_ASSET_SWAP_DIRECTED_NONCE_V2,
   RFQ_CONTRACT_VERSIONS,
   RFQ_EVM_RECEIVE_V1,
   RFQ_EVM_SEND_V1,
@@ -14,13 +15,14 @@ import {
 } from '@arkade-os/solver-core/core/rfqContract.js'
 
 describe('RFQ contract versions', () => {
-  it('serves both directed asset swap contracts and the other built-in methods', () => {
+  it('serves the three directed asset swap contracts and the other built-in methods', () => {
     expect(RFQ_CONTRACT_VERSIONS).toEqual([
       RFQ_LIGHTNING_SEND_V2,
       RFQ_LIGHTNING_RECEIVE_V2,
       RFQ_ONCHAIN_SEND_V2,
       RFQ_ASSET_SWAP_DIRECTED_NONCE,
       RFQ_ASSET_SWAP_DIRECTED,
+      RFQ_ASSET_SWAP_DIRECTED_NONCE_V2,
       RFQ_EVM_SEND_V1,
       RFQ_EVM_RECEIVE_V1,
     ])
@@ -34,6 +36,7 @@ describe('RFQ contract versions', () => {
       'onchain-send-v2',
       'asset-swap-directed-nonce',
       'asset-swap-directed',
+      'asset-swap-directed-nonce-v2',
       'evm-send-v1',
       'evm-receive-v1',
     ])

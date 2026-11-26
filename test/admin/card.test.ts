@@ -9,6 +9,7 @@ import { cardOmissions, deploymentCard, type CardSource } from '@arkade-os/solve
 import {
   RFQ_ASSET_SWAP_DIRECTED,
   RFQ_ASSET_SWAP_DIRECTED_NONCE,
+  RFQ_ASSET_SWAP_DIRECTED_NONCE_V2,
   RFQ_CONTRACT_VERSIONS,
 } from '@arkade-os/solver-core/core/rfqContract.js'
 import { verifyCardSig, type SolverCard } from '@arkade-os/solver-core/core/registryCard.js'
@@ -260,7 +261,7 @@ describe('GET /api/card', () => {
     const off = await withoutContractVersion(configured)
     expect(off.card!.markets.some((m) => quoteId(m) === `arkade:mutinynet/asset:${ASSET}`)).toBe(false)
     expect(off.cardOmitted).toEqual([
-      `asset RFQ markets are omitted: none of ${RFQ_ASSET_SWAP_DIRECTED_NONCE}, ${RFQ_ASSET_SWAP_DIRECTED} is in rfq.contractVersions`,
+      `asset RFQ markets are omitted: none of ${RFQ_ASSET_SWAP_DIRECTED_NONCE}, ${RFQ_ASSET_SWAP_DIRECTED}, ${RFQ_ASSET_SWAP_DIRECTED_NONCE_V2} is in rfq.contractVersions`,
     ])
     const faulty = await withoutContractVersion({ ...configured, baseDecimals: 6 })
     expect(faulty.cardOmitted.join(' ')).toContain('the BTC leg is 8 decimals (sats), got 6')
@@ -275,7 +276,7 @@ describe('GET /api/card', () => {
           }),
         )
       ).body
-    for (const version of [RFQ_ASSET_SWAP_DIRECTED_NONCE, RFQ_ASSET_SWAP_DIRECTED]) {
+    for (const version of [RFQ_ASSET_SWAP_DIRECTED_NONCE, RFQ_ASSET_SWAP_DIRECTED, RFQ_ASSET_SWAP_DIRECTED_NONCE_V2]) {
       const directedOnly = await servingOnly([version])
       expect(directedOnly.card!.markets.some((m) => quoteId(m) === `arkade:mutinynet/asset:${ASSET}`)).toBe(true)
       expect(directedOnly.cardOmitted.join(' ')).not.toContain('asset RFQ markets are omitted')
@@ -322,6 +323,8 @@ describe('GET /api/card', () => {
     const hintOnly = await read(RFQ_ASSET_SWAP_DIRECTED_NONCE, null)
     expect(hintOnly.card!.markets.some((m) => quoteId(m) === `arkade:mutinynet/asset:${ASSET}`)).toBe(false)
     expect(hintOnly.cardOmitted.join(' ')).toContain('relay.url is not set')
+    const singleKey = await read(RFQ_ASSET_SWAP_DIRECTED_NONCE_V2)
+    expect(singleKey.card!.markets.some((m) => quoteId(m) === `arkade:mutinynet/asset:${ASSET}`)).toBe(true)
     const on = await read(RFQ_ASSET_SWAP_DIRECTED_NONCE)
     expect(validateCard(on.card).ok).toBe(true)
     expect(cardErrors(on.card!, 'mutinynet')).toEqual([])
