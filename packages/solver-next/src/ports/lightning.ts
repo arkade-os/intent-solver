@@ -17,7 +17,7 @@ export interface HoldState {
 }
 
 // The method names are the ones the node adapters already have.
-export interface HoldingNode {
+export interface HoldInvoiceNode {
   getHoldState(paymentHash: string): Promise<HoldState>
   settleHold(preimage: string): Promise<void>
   /** Only for an invoice nobody paid. A node cannot promise to hand a held payment back. */
