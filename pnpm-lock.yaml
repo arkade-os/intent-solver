@@ -132,6 +132,9 @@ importers:
       '@arkade-os/solver-corridors-evm':
         specifier: workspace:*
         version: link:../solver-corridors-evm
+      '@arkade-os/solver-next':
+        specifier: workspace:*
+        version: link:../solver-next
       '@arkade-os/solver-rails':
         specifier: workspace:*
         version: link:../solver-rails
