@@ -18,6 +18,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   AssetRfqRequest,
+  assetRfqCarrierChoice,
   assetRfqQuotePayload,
   assetRfqStatusPayload,
   assetRfqStateFromRow,
@@ -92,6 +93,43 @@ describe('AssetRfqRequest', () => {
    */
   it('is strict at both levels, so a misspelled covenant field cannot be ignored', () => {
     expect(AssetRfqRequest.safeParse(request({}, { maker_pubkey: XONLY })).success).toBe(false)
+  })
+
+  it('leaves the profile alone when no carrier is named', () => {
+    const parsed = AssetRfqRequest.safeParse(request())
+    expect(parsed.success && parsed.data.profile).not.toHaveProperty('carrier')
+  })
+
+  it.each([
+    [{ mode: 'purchase' }, { mode: 'purchase' }],
+    [
+      { mode: 'recycle', quote_id: 'q-1' },
+      { mode: 'recycle', quoteId: 'q-1' },
+    ],
+    [
+      { mode: 'recycle_receiver', quote_id: 'q-1', taxi_url: 'https://taxi.example', taxi_key: XONLY },
+      { mode: 'recycle_receiver', quoteId: 'q-1', taxiUrl: 'https://taxi.example', taxiKey: XONLY },
+    ],
+  ])('accepts the %o carrier and reads it in the internal spelling', (carrier, internal) => {
+    const parsed = AssetRfqRequest.parse(request({}, { carrier }))
+    expect(assetRfqCarrierChoice(parsed.profile)).toEqual(internal)
+  })
+
+  it.each([
+    ['an unknown mode', { mode: 'fronted' }],
+    ['purchase with a quote id, which authorizes no such quote', { mode: 'purchase', quote_id: 'q-1' }],
+    ['recycle naming no quote', { mode: 'recycle' }],
+    ['recycle naming an empty quote', { mode: 'recycle', quote_id: '' }],
+    ['recycle naming an over-long quote', { mode: 'recycle', quote_id: 'q'.repeat(129) }],
+    ['an unknown field beside the mode', { mode: 'purchase', price: '1' }],
+    ['a bare string in place of the union', 'purchase'],
+    ['recycle_receiver naming no taxi url', { mode: 'recycle_receiver', quote_id: 'q-1', taxi_key: XONLY }],
+    [
+      'recycle_receiver naming an upper-case taxi key',
+      { mode: 'recycle_receiver', quote_id: 'q-1', taxi_url: 'https://taxi.example', taxi_key: XONLY.toUpperCase() },
+    ],
+  ])('refuses %s', (_why, carrier) => {
+    expect(AssetRfqRequest.safeParse(request({}, { carrier })).success).toBe(false)
   })
 })
 
@@ -172,6 +210,35 @@ describe('assetRfqQuotePayload', () => {
 
   it('echoes the pair it was quoted on', () => {
     expect(assetRfqQuotePayload(row(), RFQ_ID)).toMatchObject({ pair: `arkade:BTC->arkade:${ASSET_A}` })
+  })
+
+  it('echoes a recycle carrier as decimal strings, expiring no later than the quote', () => {
+    const terms = {
+      mode: 'recycle' as const,
+      quoteId: 'q-1',
+      physicalSats: 330n,
+      loanSats: 329n,
+      receiptSats: 1n,
+      serviceFareSats: 4n,
+      pricedSats: 5n,
+      expiresAt: 5_000,
+    }
+    const quote = assetRfqQuotePayload(row({ carrierTerms: terms }), RFQ_ID) as { profile: Record<string, unknown> }
+    expect(quote.profile.carrier).toEqual({
+      mode: 'recycle',
+      quote_id: 'q-1',
+      physical_sats: '330',
+      loan_sats: '329',
+      receipt_sats: '1',
+      service_fare_sats: '4',
+      priced_sats: '5',
+      expires_at: 2_000,
+    })
+  })
+
+  it('carries no carrier on a legacy quote, so its profile is unchanged', () => {
+    const quote = assetRfqQuotePayload(row(), RFQ_ID) as { profile: Record<string, unknown> }
+    expect(Object.keys(quote.profile)).toEqual(['offer_address', 'offer_pk_script'])
   })
 })
 

@@ -39,6 +39,7 @@ const TXID = 'a'.repeat(64)
 /** A BTC deposit buying the asset — the direction the e2e drives. */
 const intent = (over: Partial<QuotedOfferIntent> = {}): QuotedOfferIntent => {
   const base = {
+    id: 'row-1',
     rfqId: 'f'.repeat(64),
     fromAssetId: null,
     fromAmount: 20_000n,
@@ -128,7 +129,7 @@ describe('quotedOfferSettleFor', () => {
         value: 20_000,
         assetAmount: undefined,
       },
-      undefined,
+      { parent: { kind: 'rfq', id: 'row-1' } },
     )
   })
 
@@ -136,7 +137,7 @@ describe('quotedOfferSettleFor', () => {
     const { settle, fulfill } = settleWith([funded()])
     const options = { markSubmitting: async () => true }
     await settle(intent(), options)
-    expect(fulfill.mock.calls[0]![4]).toBe(options)
+    expect(fulfill.mock.calls[0]![4]).toEqual({ ...options, parent: { kind: 'rfq', id: 'row-1' } })
   })
 
   it('hands `fulfill` an offer whose script is the DERIVED one', async () => {

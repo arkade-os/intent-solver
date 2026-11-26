@@ -25,7 +25,8 @@
     "test:perf": "vitest run --config vitest.perf.config.ts"
   },
   "dependencies": {
-    "@arkade-os/sdk": "0.5.11",
+    "@arkade-os/sdk": "0.5.14",
+    "@arkade-taxi/client": "1.1.4",
     "@hono/node-server": "^2.1.0",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.0.0",
@@ -51,7 +52,7 @@
   },
   "devDependencies": {
     "@arkade-os/solver-discovery": "0.3.0",
-    "@arkade-os/swap": "0.1.13",
+    "@arkade-os/swap": "0.1.16",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^24.13.3",
     "@types/ws": "^8.18.1",
@@ -69,6 +70,11 @@
       "esbuild",
       "protobufjs",
       "@foundry-rs/anvil"
-    ]
+    ],
+    "overrides": {
+      "@arkade-taxi/client": "file:packages/solver-app/vendor/carrier/arkade-taxi-client-1.1.4-5df105e8.tgz",
+      "@arkade-taxi/covenant": "file:packages/solver-app/vendor/carrier/arkade-taxi-covenant-1.1.4-5df105e8.tgz",
+      "@arkade-taxi/protocol": "file:packages/solver-app/vendor/carrier/arkade-taxi-protocol-1.1.4-5df105e8.tgz"
+    }
   }
 }

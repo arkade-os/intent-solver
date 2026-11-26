@@ -1,6 +1,10 @@
 // SSRF hygiene for a Taxi URL a request names: stricter than operatorUrlFromEnv, which trusts what the operator typed.
 
 import { lookup } from 'node:dns/promises'
+import { request as httpRequest, type IncomingHttpHeaders } from 'node:http'
+import { request as httpsRequest } from 'node:https'
+import type { LookupFunction } from 'node:net'
+import { Readable } from 'node:stream'
 import { RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 
 export interface TaxiUrlPolicy {
@@ -83,6 +87,60 @@ export const publicTaxiAddress = async (host: string, resolve: typeof lookup = l
   }
   return addresses[0]!
 }
+
+const NULL_BODY_STATUS = new Set([101, 204, 205, 304])
+
+const headersOf = (raw: IncomingHttpHeaders): Headers => {
+  const headers = new Headers()
+  for (const [name, value] of Object.entries(raw)) {
+    for (const each of Array.isArray(value) ? value : value === undefined ? [] : [value]) headers.append(name, each)
+  }
+  return headers
+}
+
+/**
+ * A fetch whose socket connects to the address `pin` vetted, so a name cannot resolve public for the
+ * check and private for the connection. Over node:http(s): the built-in fetch takes no lookup.
+ */
+export const createPinnedTaxiFetch =
+  (pin: (host: string) => Promise<{ address: string; family: number }> = (host) => publicTaxiAddress(host)) =>
+  async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const target = new Request(input, init)
+    const url = new URL(target.url)
+    const lookup: LookupFunction = (host, options, callback) => {
+      pin(host).then(
+        // Node asks for every address when it races families; the pinned one is the only answer.
+        ({ address, family }) => callback(null, options.all ? [{ address, family }] : address, family),
+        (error: unknown) => callback(error instanceof Error ? error : new Error(String(error)), '', 4),
+      )
+    }
+    const body = target.body === null ? undefined : Buffer.from(await target.arrayBuffer())
+    return new Promise<Response>((settle, reject) => {
+      const send = url.protocol === 'https:' ? httpsRequest : httpRequest
+      const options = {
+        method: target.method,
+        headers: Object.fromEntries(target.headers),
+        lookup,
+        signal: target.signal,
+      }
+      const outgoing = send(url, options, (incoming) => {
+        const status = incoming.statusCode ?? 502
+        try {
+          const stream = NULL_BODY_STATUS.has(status) ? null : (Readable.toWeb(incoming) as ReadableStream<Uint8Array>)
+          settle(
+            new Response(stream, { status, statusText: incoming.statusMessage, headers: headersOf(incoming.headers) }),
+          )
+        } catch (error) {
+          // Node's parser accepts any three-digit status but `Response` holds only 200-599: a throw
+          // here is in an event callback, so it would reach the process rather than this promise.
+          incoming.destroy()
+          reject(error instanceof Error ? error : new Error(String(error)))
+        }
+      })
+      outgoing.on('error', reject)
+      outgoing.end(body)
+    })
+  }
 
 export const normalizeTaxiUrl = (raw: string, policy: TaxiUrlPolicy): string => {
   let url: URL

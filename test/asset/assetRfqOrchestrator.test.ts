@@ -26,8 +26,11 @@ import {
 } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { IMPLIED_PRICE_HEADROOM } from '@arkade-os/solver-core/core/assetRfq.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
+import { RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { RFQ_ASSET_SWAP_DIRECTED } from '@arkade-os/solver-core/core/rfqContract.js'
 import {
+  type ReceiveCarrierQuote,
+  type ReceiveCarrierQuotes,
   AssetRfqSwapService,
   type AssetRfqDeps,
   type ObservedDeposit,
@@ -1302,5 +1305,307 @@ describe('a tick whose exit another writer already took', () => {
     expect(await store.get('swap-1')).toMatchObject({ state: 'stuck', failureReason: 'parked by recovery' })
     expect(deferred).toEqual([])
     expect(errors).toEqual([])
+  })
+})
+
+describe('a direct fill the journal proved after its reply was lost', () => {
+  it('records the fill and its mark once, beside the ticks it would race', async () => {
+    let reads = 0
+    const { service, store } = await harness({
+      depositAt: async () => deposit(),
+      fetchPrice: async () => {
+        reads += 1
+        return { mantissa: reads === 1 ? 100_000n : 90_000n, scale: 0 }
+      },
+      settle: async () => {
+        throw new Error('accepted fill reply lost')
+      },
+    })
+    await service.quote(request())
+    await service.tick('swap-1')
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).state).toBe('stuck')
+    const proof = { id: 'swap-1', depositTxid: deposit().txid, depositVout: 0, offerPkScript: OFFER_SCRIPT }
+
+    expect(await service.recoverDirectFill(proof, 'fb'.repeat(32))).toBe(true)
+    expect(await service.recoverDirectFill(proof, 'fb'.repeat(32))).toBe(true)
+    expect(await store.get('swap-1')).toMatchObject({
+      state: 'filled',
+      fillTxid: 'fb'.repeat(32),
+      fillPriceMantissa: 90_000n,
+    })
+    expect(reads).toBe(2)
+  })
+})
+
+describe('carrier admission', () => {
+  const quoteFor = (over: Partial<ReceiveCarrierQuote> = {}): ReceiveCarrierQuote => ({
+    quoteId: 'q-1',
+    makerPkScript: PK_SCRIPT,
+    makerPublicKey: XONLY,
+    assetId: ASSET_A,
+    physicalSats: 330n,
+    loanSats: 330n,
+    receiptSats: 0n,
+    serviceFareSats: 0n,
+    taxiKey: 'd'.repeat(64),
+    inputExpiryFloor: { kind: 'height', value: 1_000_000n },
+    expiresAt: 1_600,
+    ...over,
+  })
+  const receiver = {
+    mode: 'recycle_receiver' as const,
+    quoteId: 'q-1',
+    taxiUrl: 'https://taxi.example',
+    taxiKey: 'd'.repeat(64),
+  }
+
+  it("reads a carrier fill's inventory from the adapter, never the generic balance", async () => {
+    const available = vi.fn(async () => new Map([[ASSET_A, 10n ** 18n]]))
+    const balance = vi.fn(async () => new Map())
+    const { service, store } = await harness({
+      balance,
+      receiveCarrierQuotes: {
+        settle: vi.fn(),
+        reconcile: vi.fn(),
+        resolve: async () => quoteFor(),
+        available,
+      },
+    })
+    expect(await service.quote(request({ carrier: receiver }))).toMatchObject({ accepted: true, carrierSats: 0n })
+    expect(balance).not.toHaveBeenCalled()
+    expect(available).toHaveBeenCalledWith(expect.objectContaining({ receiverPaid: true, admission: true }))
+    expect((await store.get('swap-1')).carrierTerms).toMatchObject({ mode: 'recycle_receiver', pricedSats: 0n })
+  })
+
+  it('refuses when the carrier inventory cannot be read, and records nothing', async () => {
+    const errors: unknown[] = []
+    const { service, store } = await harness({
+      onError: (_id, error) => errors.push(error),
+      receiveCarrierQuotes: {
+        settle: vi.fn(),
+        reconcile: vi.fn(),
+        resolve: async () => quoteFor(),
+        available: async () => {
+          throw new Error('taxi down')
+        },
+      },
+    })
+    const outcome = await service.quote(request({ carrier: receiver }))
+    expect(outcome).toMatchObject({ accepted: false, reason: 'price_unavailable' })
+    expect(errors).toEqual([new Error('taxi down')])
+    expect(await store.findByRfqId(RFQ_ID)).toBeNull()
+  })
+
+  it('refuses rather than re-reading the Taxi when the market arrives after the prefetch', async () => {
+    const marketB = { ...MARKET, quote: ASSET_B, symbol: 'USDB' }
+    const resolve = vi.fn(async () => quoteFor())
+    let release = () => {}
+    const parked = new Promise<void>((settle) => (release = () => settle()))
+    let first = true
+    const limiter = new RateLimiter(1, 60, () => 1_000)
+    const take = vi.spyOn(limiter, 'take')
+    const { service } = await harness({
+      markets: [marketB],
+      quoteLimiter: limiter,
+      fetchPrice: async () => {
+        if (first) {
+          first = false
+          await parked
+        }
+        return { mantissa: 100_000n, scale: 0 }
+      },
+      receiveCarrierQuotes: {
+        settle: vi.fn(),
+        reconcile: vi.fn(),
+        resolve,
+        available: async () => new Map([[ASSET_A, 10n ** 18n]]),
+      },
+    })
+
+    // Parks the queue, so the replace below is queued ahead of the carrier's turn.
+    const parker = service.quote(request({ rfqId: 'b'.repeat(64), pair: `arkade:BTC->arkade:${ASSET_B}` }))
+    const replacing = service.replaceMarkets([marketB, MARKET])
+    const quoting = service.quote(request({ carrier: receiver, requesterKey: 'peer-1' }))
+    // Released only once the carrier request has spent its allowance and queued its turn behind the replace.
+    await vi.waitFor(() => expect(take).toHaveBeenCalledTimes(1))
+    release()
+
+    expect(await quoting).toMatchObject({ accepted: false, reason: 'unsupported_pair' })
+    expect(resolve).not.toHaveBeenCalled()
+    expect(take).toHaveBeenCalledTimes(1)
+    await Promise.all([parker, replacing])
+  })
+
+  it('refuses an asset receiver fare that would leave the payee nothing', async () => {
+    const { service } = await harness({
+      receiveCarrierQuotes: {
+        settle: vi.fn(),
+        reconcile: vi.fn(),
+        resolve: async () => quoteFor({ receiverFare: { currency: 'asset', units: 10n ** 30n } }),
+        available: async () => new Map([[ASSET_A, 10n ** 18n]]),
+      },
+    })
+    expect(await service.quote(request({ carrier: receiver }))).toMatchObject({
+      accepted: false,
+      reason: 'price_unavailable',
+    })
+  })
+})
+
+describe('a carrier fill', () => {
+  const quoteOf = (over: Partial<ReceiveCarrierQuote> = {}): ReceiveCarrierQuote => ({
+    quoteId: 'q-1',
+    makerPkScript: PK_SCRIPT,
+    makerPublicKey: XONLY,
+    assetId: ASSET_A,
+    physicalSats: 330n,
+    loanSats: 330n,
+    receiptSats: 0n,
+    serviceFareSats: 0n,
+    taxiKey: 'd'.repeat(64),
+    inputExpiryFloor: { kind: 'height', value: 1_000_000n },
+    expiresAt: 1_600,
+    ...over,
+  })
+  const receiver = {
+    mode: 'recycle_receiver' as const,
+    quoteId: 'q-1',
+    taxiUrl: 'https://taxi.example',
+    taxiKey: 'd'.repeat(64),
+  }
+  const adapter = (over: Partial<ReceiveCarrierQuotes> = {}): ReceiveCarrierQuotes => ({
+    resolve: async () => quoteOf(),
+    available: async () => new Map([[ASSET_A, 10n ** 18n]]),
+    settle: vi.fn(async () => ({ status: 'submitted' as const })),
+    reconcile: vi.fn(async () => ({ status: 'pending' as const })),
+    ...over,
+  })
+  const funded = async (carrier: ReceiveCarrierQuotes) => {
+    const settle = vi.fn(async () => 'fa'.repeat(32))
+    const built = await harness({
+      receiveCarrierQuotes: carrier,
+      depositAt: async () => deposit(),
+      settle,
+      newId: sequentialIds(),
+      deriveOffer: perClientOffer,
+    })
+    expect(await built.service.quote(request({ carrier: receiver }))).toMatchObject({ accepted: true })
+    await built.service.tick('swap-1')
+    expect((await built.store.get('swap-1')).state).toBe('funded')
+    return { ...built, genericSettle: settle }
+  }
+
+  it('settles through the adapter, never the generic spend, and fills on its proven outcome', async () => {
+    const carrier = adapter({ settle: vi.fn(async () => ({ status: 'settled' as const, txid: 'fb'.repeat(32) })) })
+    const { service, store, genericSettle } = await funded(carrier)
+    await service.tick('swap-1')
+    expect(carrier.settle).toHaveBeenCalledOnce()
+    expect(genericSettle).not.toHaveBeenCalled()
+    expect(await store.get('swap-1')).toMatchObject({ state: 'filled', fillTxid: 'fb'.repeat(32) })
+  })
+
+  it('reconciles a submitted fill until the adapter proves it, or parks it when it cannot be observed', async () => {
+    const carrier = adapter()
+    const { service, store } = await funded(carrier)
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).state).toBe('filling')
+    await service.tick('swap-1')
+    expect((await store.get('swap-1')).state).toBe('filling')
+    vi.mocked(carrier.reconcile).mockResolvedValueOnce({ status: 'stuck', reason: 'fill unobservable' })
+    await service.tick('swap-1')
+    expect(await store.get('swap-1')).toMatchObject({ state: 'stuck', failureReason: 'fill unobservable' })
+  })
+
+  it('keeps a slow payee Taxi on its own queue: the sweep and other quotes do not wait for it', async () => {
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const carrier = adapter({
+      settle: vi.fn(async () => {
+        await held
+        return { status: 'submitted' as const }
+      }),
+    })
+    const { service, store } = await funded(carrier)
+    expect(await service.tickAll()).toEqual([])
+    await vi.waitFor(() => expect(carrier.settle).toHaveBeenCalledOnce())
+    expect(await service.quote(request({ rfqId: 'f'.repeat(64), makerPublicKey: 'c'.repeat(64) }))).toMatchObject({
+      accepted: true,
+    })
+    await service.tickAll()
+    expect(carrier.settle).toHaveBeenCalledOnce()
+    release()
+    await service.stop()
+    expect((await store.get('swap-1')).state).toBe('filling')
+  })
+
+  it('refuses a carrier row at fill time when no adapter is configured', async () => {
+    const { service, store } = await funded(adapter())
+    const bare = new AssetRfqSwapService({
+      store,
+      markets: [MARKET],
+      solverPubkey: 'e'.repeat(64),
+      quoteValiditySeconds: 30,
+      dustSats: 330n,
+      now: () => 1_000,
+      fetchPrice: async () => ({ mantissa: 100_000n, scale: 0 }),
+      deriveOffer: () => ({ pkScript: OFFER_SCRIPT, address: 'ark1qoffer' }),
+      depositAt: async () => deposit(),
+      balance: async () => new Map(),
+      settle: async () => 'fa'.repeat(32),
+    })
+    expect(service).toBeDefined()
+    await bare.tick('swap-1')
+    expect(await store.get('swap-1')).toMatchObject({ state: 'refused' })
+  })
+})
+
+describe('payee-named Taxi rows', () => {
+  it('a Taxi that never answers does not delay a row on a different Taxi', async () => {
+    const quote = (quoteId: string, makerPublicKey: string): ReceiveCarrierQuote => ({
+      quoteId,
+      makerPkScript: PK_SCRIPT,
+      makerPublicKey,
+      assetId: ASSET_A,
+      physicalSats: 330n,
+      loanSats: 330n,
+      receiptSats: 0n,
+      serviceFareSats: 0n,
+      taxiKey: 'd'.repeat(64),
+      inputExpiryFloor: { kind: 'height', value: 1_000_000n },
+      expiresAt: 1_600,
+    })
+    const settle = vi.fn((row: { id: string }) =>
+      row.id === 'swap-1' ? new Promise<never>(() => {}) : Promise.resolve({ status: 'submitted' as const }),
+    )
+    const { service, store } = await harness({
+      newId: sequentialIds(),
+      deriveOffer: perClientOffer,
+      depositAt: async (script) => deposit({ txid: script.slice(4) }),
+      receiveCarrierQuotes: {
+        resolve: async (request) => quote(request.quoteId, request.makerPublicKey),
+        available: async () => new Map([[ASSET_A, 10n ** 18n]]),
+        settle,
+        reconcile: vi.fn(async () => ({ status: 'pending' as const })),
+      },
+    })
+    for (const [n, key] of [
+      ['1', 'c'],
+      ['2', 'f'],
+    ] as const) {
+      const carrier = {
+        mode: 'recycle_receiver' as const,
+        quoteId: `q-${n}`,
+        taxiUrl: `https://taxi-${n}.example`,
+        taxiKey: 'd'.repeat(64),
+      }
+      const request_ = request({ rfqId: n.repeat(64), makerPublicKey: key.repeat(64), carrier })
+      expect(await service.quote(request_)).toMatchObject({ accepted: true })
+    }
+    await service.tickAll()
+    await service.tickAll()
+    await vi.waitFor(async () => expect((await store.get('swap-2')).state).toBe('filling'))
+    expect((await store.get('swap-1')).state).toBe('filling')
+    expect(settle).toHaveBeenCalledTimes(2)
   })
 })

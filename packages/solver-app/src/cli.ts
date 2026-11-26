@@ -1086,7 +1086,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
 
   async watch() {
     const config = loadConfig()
-    const services = await createServices(config, { rebalance: 'active' })
+    const services = await createServices(config, { rebalance: 'active', directFills: 'active' })
     const admin = await startAdminServer(services, config, 'watch')
     try {
       await watchUntilStopped(services)
@@ -1106,7 +1106,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
    */
   async serve() {
     const config = loadConfig()
-    const services = await createServices(config, { rebalance: 'active' })
+    const services = await createServices(config, { rebalance: 'active', directFills: 'active' })
     const { buildApp } = await import('@arkade-os/solver-transport/http/server.js')
     const { serve } = await import('@hono/node-server')
     const { getConnInfo } = await import('@hono/node-server/conninfo')
@@ -1155,7 +1155,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
   async relay() {
     const config = loadConfig()
     if (!config.relayUrl) throw new GiveUp('relay.url is not set')
-    const services = await createServices(config, { rebalance: 'active' })
+    const services = await createServices(config, { rebalance: 'active', directFills: 'active' })
     const { webSocketRelayConnection, isRelayFault } = await import('@arkade-os/solver-transport/relay/connection.js')
     const { RelayIngress } = await import('@arkade-os/solver-transport/ingress/relay.js')
     const { OpenRfqBidder } = await import('@arkade-os/solver-transport/ingress/openRfq.js')

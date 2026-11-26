@@ -63,6 +63,7 @@ const ctx = {} as unknown as ArkadeContext
 
 /** The row `consider()` would have written for `published`. */
 const intentFor = (published: Offer, raw: string, over: Partial<OfferFillIntent> = {}): OfferFillIntent => ({
+  id: 'fill-1',
   offerTxid: txidOf(raw),
   offerVout: 0,
   offerPkScript: hex.encode(published.swapPkScript),
@@ -122,7 +123,10 @@ describe('offerSettleFor — the fill it submits', () => {
 
     await settle(intentFor(published, raw), options)
 
-    expect((fulfill.mock.calls[0]! as unknown as unknown[])[4]).toBe(options)
+    expect((fulfill.mock.calls[0]! as unknown as unknown[])[4]).toEqual({
+      ...options,
+      parent: { kind: 'offer', id: 'fill-1' },
+    })
   })
 
   it('carries no asset amount when the deposit is sats', async () => {

@@ -32,7 +32,8 @@ export interface DirectFillAttempt {
   funding: DirectFillFunding[]
   proceedsScript: string
   createdAt: number
-  phase: 'prepared' | 'submitting' | 'cancelling' | 'settled' | 'cancelled' | 'abandoned'
+  /** `rejected`: arkd refused the recorded graph, so it can never land. */
+  phase: 'prepared' | 'submitting' | 'cancelling' | 'settled' | 'cancelled' | 'abandoned' | 'rejected'
   graph?: DirectFillGraph
   conflict?: DirectFillGraph
   outcomeTxid?: string
@@ -72,10 +73,8 @@ export class DirectFillAttempts {
     if (!/^5120[0-9a-f]{64}$/.test(proceedsScript))
       throw new Error('direct fill requires the current wallet P2TR script')
     const store = new DirectFillAttempts(db, reservations, walletIdentity, proceedsScript, now)
-    for (const attempt of await store.list()) {
-      store.pin(attempt)
-      if (attempt.phase === 'prepared') await store.change(attempt, { ...attempt, phase: 'abandoned' })
-    }
+    // A `prepared` row is left to the recovery sweep: a one-shot opening this file may sit beside a live fill.
+    for (const attempt of await store.list()) store.pin(attempt)
     return store
   }
 
@@ -114,7 +113,9 @@ export class DirectFillAttempts {
       attempt.proceedsScript !== this.proceedsScript ||
       !Number.isSafeInteger(attempt.createdAt) ||
       attempt.createdAt < 0 ||
-      !['prepared', 'submitting', 'cancelling', 'settled', 'cancelled', 'abandoned'].includes(attempt.phase) ||
+      !['prepared', 'submitting', 'cancelling', 'settled', 'cancelled', 'abandoned', 'rejected'].includes(
+        attempt.phase,
+      ) ||
       typeof attempt.acknowledged !== 'boolean' ||
       Number(attempt.acknowledged) !== row.acknowledged
     )
@@ -146,6 +147,9 @@ export class DirectFillAttempts {
     if (['settled', 'cancelled'].includes(attempt.phase) && !TXID.test(attempt.outcomeTxid ?? '')) {
       throw new Error(`direct fill ${row.id} has no proven outcome`)
     }
+    if (attempt.phase === 'rejected' && (attempt.conflict || attempt.outcomeTxid)) {
+      throw new Error(`direct fill ${row.id} was rejected but records an outcome`)
+    }
     if (
       attempt.phase === 'settled' &&
       attempt.outcomeTxid !== validateDirectFillGraph(attempt.graph!, [attempt.deposit, ...attempt.funding]).txid
@@ -159,7 +163,7 @@ export class DirectFillAttempts {
     ) {
       throw new Error(`direct fill ${row.id} outcome differs from conflict graph`)
     }
-    if (attempt.acknowledged && !['settled', 'cancelled', 'abandoned'].includes(attempt.phase)) {
+    if (attempt.acknowledged && !['settled', 'cancelled', 'abandoned', 'rejected'].includes(attempt.phase)) {
       throw new Error(`direct fill ${row.id} acknowledged before resolution`)
     }
     return attempt
@@ -227,12 +231,34 @@ export class DirectFillAttempts {
     if (this.active.has(attempt.key)) throw new Error(`direct fill ${attempt.key} is already in flight`)
     this.active.add(attempt.key)
     try {
-      await this.db.run('INSERT INTO direct_fill_attempt(id, wallet_identity, deposit, body) VALUES (?, ?, ?, ?)', [
-        attempt.key,
-        this.walletIdentity,
-        `${attempt.deposit.txid}:${attempt.deposit.vout}`,
-        JSON.stringify(attempt),
-      ])
+      const previous = await this.read(attempt.key)
+      if (!previous) {
+        await this.db.run('INSERT INTO direct_fill_attempt(id, wallet_identity, deposit, body) VALUES (?, ?, ?, ?)', [
+          attempt.key,
+          this.walletIdentity,
+          `${attempt.deposit.txid}:${attempt.deposit.vout}`,
+          JSON.stringify(attempt),
+        ])
+      } else {
+        // A parent retries only past an attempt that provably sent nothing and has been closed.
+        if (!previous.acknowledged || !['abandoned', 'rejected'].includes(previous.phase)) {
+          throw new Error(`direct fill ${attempt.key} still holds an attempt in phase ${previous.phase}`)
+        }
+        // Another process may have closed the old row, so this one can still hold its pin.
+        this.pins.get(attempt.key)?.()
+        this.pins.delete(attempt.key)
+        const replaced = await this.db.get<{ id: string }>(
+          `UPDATE direct_fill_attempt SET deposit = ?, acknowledged = 0, body = ?
+           WHERE id = ? AND acknowledged = 1 AND body = ? RETURNING id`,
+          [
+            `${attempt.deposit.txid}:${attempt.deposit.vout}`,
+            JSON.stringify(attempt),
+            attempt.key,
+            JSON.stringify(previous),
+          ],
+        )
+        if (!replaced) throw new Error(`direct fill ${attempt.key} changed while it was being retried`)
+      }
       const stored = await this.read(attempt.key)
       if (!same(stored, attempt)) throw new Error(`direct fill ${attempt.key} critical write did not persist`)
       this.pin(attempt)
@@ -249,11 +275,12 @@ export class DirectFillAttempts {
     if (expected.acknowledged) throw new Error('direct fill already acknowledged')
     const edges: Record<DirectFillAttempt['phase'], readonly DirectFillAttempt['phase'][]> = {
       prepared: ['submitting', 'abandoned'],
-      submitting: ['cancelling', 'settled'],
+      submitting: ['cancelling', 'settled', 'rejected'],
       cancelling: ['settled', 'cancelled'],
       settled: [],
       cancelled: [],
       abandoned: [],
+      rejected: [],
     }
     if (expected.phase !== next.phase && !edges[expected.phase].includes(next.phase)) {
       throw new Error(`illegal direct fill transition ${expected.phase} -> ${next.phase}`)

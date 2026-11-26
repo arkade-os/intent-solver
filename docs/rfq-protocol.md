@@ -524,7 +524,25 @@ one.
   of `from_amount` when the payout leg is an asset (the solver fronts it at
   output 0). A client funding an asset deposit sends `from_amount` of the asset
   plus `carrier_sats` in sats, and a client aiming at a target payout adds
-  `carrier_sats` to the input it asks to be quoted on. Absent means zero.
+  `carrier_sats` to the input it asks to be quoted on. Absent means zero. A
+  client refuses a `carrier_sats` above the operator's dust (swap 0.1.14 and
+  later), so a solver publishes the dust or nothing.
+- An asset-payout `rfq_request` MAY name how that carrier is paid, in
+  `profile.carrier`; absent, the request and its quote are unchanged. The
+  modes are `{ "mode": "purchase" }` (the solver buys the dust, priced into
+  the amounts), `{ "mode": "recycle", "quote_id" }` (a Taxi quote splits the
+  dust into a returnable loan and a priced receipt) and
+  `{ "mode": "recycle_receiver", "quote_id", "taxi_url", "taxi_key" }` (the
+  payee's own Taxi loans the whole dust at no price; `taxi_key` is that Taxi's
+  x-only operator key). Unknown modes and fields are `unsupported_payload`, as
+  is a mode on a BTC payout. A recycle needs a solver with a Taxi configured;
+  otherwise, or when the Taxi quote cannot be read or verified, the request is
+  refused as `pricing_unavailable`. The quote echoes the terms it was netted
+  against in `profile.carrier` as decimal strings (`physical_sats`,
+  `loan_sats`, `receipt_sats`, `service_fare_sats`, `priced_sats`, plus
+  `quote_id` on a recycle), with `expires_at` never later than `valid_until`.
+  A recycle quote's `valid_until` also stops 30 seconds short of the Taxi
+  quote's expiry, the time a fill needs after the deposit lands.
 - The Arkade asset corridor serves `amount_side: "to"` as well as `"from"`.
   Exact-out resolves `from_amount` to the LEAST input whose exact-in payout
   reaches the requested `to_amount`, so the two sides share one rounding

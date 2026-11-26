@@ -10,6 +10,8 @@
  * configured markets really do become registered corridors — is, at the bottom.
  */
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { runInNewContext } from 'node:vm'
 import { OfferFillStore } from '@arkade-os/solver-corridors/db/offerFills.js'
 import { DirectFillAttempts } from '@arkade-os/solver-arkade/arkade/directFillAttempts.js'
@@ -127,10 +129,15 @@ describe('the four Arkade seams', () => {
     expect(body()).not.toContain('offerExitDelay(arkade.unilateralDelays')
   })
 
-  it('reads AVAILABLE inventory, never the total', () => {
+  it('reads the coins a fill could select, never the total', () => {
     // A wallet whose batch expired reports millions and can spend nothing;
     // quoting off `total` accepts every swap and fails every fill.
-    expect(body()).toContain('balance: async () => offerInventoryFrom(await arkade.wallet.getBalance())')
+    expect(body()).toContain('balance: () => offerInventoryFor(arkade)')
+  })
+
+  it('records a journalled rfq fill through the service, and sweeps at boot only in the daemon', () => {
+    expect(body()).toContain('recoverDirectFill: (proof, txid) => assetRfqService.recoverDirectFill(proof, txid)')
+    expect(body()).toContain("if (opts?.directFills === 'active') await directFillRecovery.sweep()")
   })
 
   it('watches ONE outpoint, because a fill spends one input', () => {
@@ -323,5 +330,36 @@ describe('a market that stopped serving stays readable across a restart', () => 
     expect(source).toContain(seeded)
     expect(source).toContain(built)
     expect(source.indexOf(seeded)).toBeLessThan(source.indexOf(built))
+  })
+})
+
+describe('which commands sweep journalled direct fills at boot', () => {
+  const cli = readFileSync(fileURLToPath(new URL('../../packages/solver-app/src/cli.ts', import.meta.url)), 'utf8')
+
+  it('is the daemon commands, and never a one-shot sharing their wallet file', () => {
+    for (const command of ['async watch()', 'async serve()', 'async relay()']) {
+      const at = cli.indexOf(command)
+      expect(cli.slice(at, at + 400)).toContain(
+        "createServices(config, { rebalance: 'active', directFills: 'active' })",
+      )
+    }
+    expect(cli.match(/directFills: 'active'/g)).toHaveLength(3)
+    const oneShot = cli.slice(cli.indexOf('const withServices = async'), cli.indexOf('const quoteAsClient'))
+    expect(oneShot).toContain('createServices(config, opts)')
+  })
+})
+
+describe('createServices — the Taxi receive carrier', () => {
+  it('is wired only when TAXI_URL is configured, after re-pinning every unresolved attempt', () => {
+    const source = body()
+    const gate = source.indexOf('if (config.taxiUrl) {')
+    expect(gate).toBeGreaterThan(0)
+    expect(source.indexOf('receiveCarrierQuotes = await taxiReceiveCarrierFor(')).toBeGreaterThan(gate)
+    expect(source.indexOf('restoreCarrierAttemptPins(')).toBeLessThan(gate)
+    expect(source).toContain('...(receiveCarrierQuotes ? { receiveCarrierQuotes } : {})')
+    expect(source).toContain("['assetRfqService', () => assetRfqService.stop()]")
+    expect(source).toMatch(
+      /unanswered: \(await assetRfqStore\.listUnresolvedCarrierAttempts\(\)\)\s*\.filter\(\(\{ attempt \}\) => attempt\.phase === 'submitting'\)/,
+    )
   })
 })

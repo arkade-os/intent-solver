@@ -9,10 +9,15 @@
  * possible moment.
  */
 
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { createCorridorSet } from '@arkade-os/solver-core/core/corridor.js'
 import { AssetRfqSwapStore } from '@arkade-os/solver-corridors/db/assetRfqSwaps.js'
-import { AssetRfqSwapService } from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
+import {
+  AssetRfqSwapService,
+  CARRIER_FILL_MARGIN_SECONDS,
+  MAX_ASSET_QUOTE_VALIDITY_SECONDS,
+  type ReceiveCarrierQuote,
+} from '@arkade-os/solver-corridors/asset/assetRfqOrchestrator.js'
 import {
   assetRfqCorridor,
   assetRfqDescriptor,
@@ -43,7 +48,10 @@ const MARKET = {
 const BUY = assetRfqDescriptor(MARKET, 'sell_base')
 const SELL = assetRfqDescriptor(MARKET, 'buy_base')
 
-const harness = async (markets: (typeof MARKET)[] = [MARKET]) => {
+const harness = async (
+  markets: (typeof MARKET)[] = [MARKET],
+  options: { dustSats?: bigint; carrier?: Partial<ReceiveCarrierQuote> } = {},
+) => {
   let clock = 1_000
   let sequence = 0
   const store = await AssetRfqSwapStore.open(':memory:', () => clock)
@@ -52,7 +60,7 @@ const harness = async (markets: (typeof MARKET)[] = [MARKET]) => {
     markets,
     solverPubkey: 'e'.repeat(64),
     quoteValiditySeconds: 30,
-    dustSats: 0n,
+    dustSats: options.dustSats ?? 0n,
     now: () => clock,
     fetchPrice: async () => ({ mantissa: 100_000n, scale: 0 }),
     deriveOffer: (terms) => ({
@@ -67,6 +75,28 @@ const harness = async (markets: (typeof MARKET)[] = [MARKET]) => {
       ]),
     settle: async () => 'fa'.repeat(32),
     newId: () => `swap-${++sequence}`,
+    ...(options.carrier === undefined
+      ? {}
+      : {
+          receiveCarrierQuotes: {
+            settle: vi.fn(),
+            reconcile: vi.fn(),
+            resolve: async () => ({
+              quoteId: 'q-1',
+              makerPkScript: PK_SCRIPT,
+              makerPublicKey: XONLY,
+              assetId: ASSET_A,
+              physicalSats: 330n,
+              loanSats: 329n,
+              receiptSats: 1n,
+              serviceFareSats: 0n,
+              inputExpiryFloor: { kind: 'height' as const, value: 1_000_000n },
+              expiresAt: 1_600,
+              ...options.carrier,
+            }),
+            available: async () => new Map([[ASSET_A, 10n ** 18n]]),
+          },
+        }),
   })
   return { store, service, corridor: assetRfqCorridor(BUY, service, store), tick: (n: number) => (clock = n) }
 }
@@ -405,5 +435,77 @@ describe('the read half', () => {
     const { corridor } = await harness()
     await corridor.quote(rfqRequest())
     expect(await corridor.findRecoverable()).toEqual([{ id: 'swap-1', pkScript: `5120${XONLY}` }])
+  })
+})
+
+describe('profile.carrier through the corridor', () => {
+  const carrierRequest = (carrier: unknown) =>
+    rfqRequest({ profile: { maker_pk_script: PK_SCRIPT, maker_public_key: XONLY, carrier } })
+  const carrierOf = (outcome: { kind: string; payload?: unknown }) =>
+    (outcome.payload as { profile: { carrier?: Record<string, unknown> } }).profile.carrier
+
+  it('echoes the pinned purchase terms, a zero loan included', async () => {
+    const { corridor } = await harness(undefined, { dustSats: 330n })
+    const outcome = await corridor.quote(carrierRequest({ mode: 'purchase' }))
+    expect(outcome.kind).toBe('quote')
+    expect(carrierOf(outcome)).toEqual({
+      mode: 'purchase',
+      physical_sats: '330',
+      loan_sats: '0',
+      receipt_sats: '0',
+      service_fare_sats: '0',
+      priced_sats: '330',
+      expires_at: 1_030,
+    })
+  })
+
+  it('echoes the pinned recycle split and holds the fill margin back from its expiry', async () => {
+    const { corridor, store } = await harness(undefined, { dustSats: 330n, carrier: { expiresAt: 1_040 } })
+    const outcome = await corridor.quote(carrierRequest({ mode: 'recycle', quote_id: 'q-1' }))
+    expect(outcome.kind).toBe('quote')
+    expect(carrierOf(outcome)).toMatchObject({ mode: 'recycle', quote_id: 'q-1', loan_sats: '329', priced_sats: '1' })
+    expect((await store.get('swap-1')).validUntil).toBe(1_040 - CARRIER_FILL_MARGIN_SECONDS)
+  })
+
+  it.each([
+    ['no adapter is configured', undefined],
+    [
+      'the quote outlives the longest window this solver prices',
+      { expiresAt: 1_000 + MAX_ASSET_QUOTE_VALIDITY_SECONDS + 1 },
+    ],
+    ['the quote expires inside the fill margin', { expiresAt: 1_000 + CARRIER_FILL_MARGIN_SECONDS }],
+    ['the quote names another payout script', { makerPkScript: `5120${'d'.repeat(64)}` }],
+    ['the split does not sum to the dust', { loanSats: 300n }],
+  ])('refuses a recycle when %s, in the closed vocabulary', async (_why, carrier) => {
+    const { corridor, store } = await harness(undefined, { dustSats: 330n, carrier })
+    const outcome = await corridor.quote(carrierRequest({ mode: 'recycle', quote_id: 'q-1' }))
+    expect(outcome).toMatchObject({ kind: 'refused', payload: { reason: 'pricing_unavailable' } })
+    expect(await store.findByRfqId(RFQ_ID)).toBeNull()
+  })
+
+  it('admits a recycle whose quote lasts exactly as long as this solver prices', async () => {
+    const { corridor } = await harness(undefined, {
+      dustSats: 330n,
+      carrier: { expiresAt: 1_000 + MAX_ASSET_QUOTE_VALIDITY_SECONDS },
+    })
+    expect((await corridor.quote(carrierRequest({ mode: 'recycle', quote_id: 'q-1' }))).kind).toBe('quote')
+  })
+
+  it('answers an unknown mode as an unsupported payload', async () => {
+    const { corridor } = await harness()
+    const outcome = await corridor.quote(carrierRequest({ mode: 'fronted' }))
+    expect(outcome).toMatchObject({ kind: 'invalid', payload: { reason: 'unsupported_payload' } })
+  })
+
+  it('answers a mode on a BTC payout as an unsupported payload', async () => {
+    const { service, store } = await harness()
+    const outcome = await assetRfqCorridor(SELL, service, store).quote(
+      rfqRequest({
+        pair: SELL.pair,
+        amount: '1000000',
+        profile: { maker_pk_script: PK_SCRIPT, maker_public_key: XONLY, carrier: { mode: 'purchase' } },
+      }),
+    )
+    expect(outcome).toMatchObject({ kind: 'refused', payload: { reason: 'unsupported_payload' } })
   })
 })

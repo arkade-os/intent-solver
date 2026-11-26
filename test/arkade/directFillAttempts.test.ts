@@ -16,6 +16,7 @@ import { sqliteExecutor } from '@arkade-os/solver-arkade/arkade/wallet.js'
 import { DirectFillAttempts, type DirectFillAttempt } from '@arkade-os/solver-arkade/arkade/directFillAttempts.js'
 import { createReservationLedger } from '@arkade-os/solver-arkade/arkade/reservations.js'
 import { createDirectFillRecovery } from '@arkade-os/solver-app/ops/directFillRecovery.js'
+import { TickErrorTracker } from '@arkade-os/solver-app/ops/tickErrors.js'
 import { DirectFillUnfinalizableError, type DirectFillChain } from '@arkade-os/solver-arkade/arkade/directFillGraph.js'
 
 const solver = SingleKey.fromHex('11'.repeat(32))
@@ -189,8 +190,52 @@ describe('durable direct-fill attempts', () => {
     const store = await DirectFillAttempts.open(db, createReservationLedger(), 'wallet', script)
     await submitting(store)
     await expect(store.prepare({ ...input, parent: { kind: 'rfq', id: 'other' } })).rejects.toThrow('UNIQUE')
-    await expect(store.prepare(input)).rejects.toThrow('UNIQUE')
+    await expect(store.prepare(input)).rejects.toThrow('still holds an attempt')
     expect(await store.list()).toHaveLength(1)
+  })
+
+  it('lets a parent retry once its attempt provably sent nothing, pinning only the new funding', async () => {
+    const { db } = database()
+    const pins = createReservationLedger()
+    const store = await DirectFillAttempts.open(db, pins, 'wallet', script)
+    const prepared = await store.prepare(input)
+    store.finishInvocation(prepared.key)
+    const abandoned: DirectFillAttempt = { ...prepared, phase: 'abandoned' }
+    expect(await store.change(prepared, abandoned)).toBe(true)
+    expect(await store.acknowledge(abandoned)).toBe(true)
+    const other = [{ ...funding[0]!, txid: '03'.repeat(32) }]
+    const retried = await store.prepare({ ...input, funding: other })
+    expect(retried.phase).toBe('prepared')
+    expect(pins.reserved()).toEqual(new Set([`${other[0]!.txid}:0`]))
+    expect((await store.list()).map((attempt) => attempt.funding)).toEqual([other])
+  })
+
+  it('records a submission arkd refused as rejected, keeping its graph, and frees the parent to retry', async () => {
+    const { db } = database()
+    const pins = createReservationLedger()
+    const store = await DirectFillAttempts.open(db, pins, 'wallet', script)
+    const sent = await submitting(store)
+    const rejected: DirectFillAttempt = { ...sent, phase: 'rejected' }
+    expect(await store.change(sent, rejected)).toBe(true)
+    await expect(
+      store.change(rejected, { ...rejected, phase: 'settled', outcomeTxid: fixture.arkTx.id }),
+    ).rejects.toThrow('illegal direct fill transition rejected -> settled')
+    expect(await store.acknowledge(rejected)).toBe(true)
+    expect(pins.reserved().size).toBe(0)
+    const reopened = await DirectFillAttempts.open(db, createReservationLedger(), 'wallet', script)
+    expect((await reopened.read(sent.key))?.graph).toEqual(graph)
+    expect((await store.prepare(input)).phase).toBe('prepared')
+  })
+
+  it('never reuses a parent whose attempt settled', async () => {
+    const { db } = database()
+    const store = await DirectFillAttempts.open(db, createReservationLedger(), 'wallet', script)
+    const sent = await submitting(store)
+    const settled: DirectFillAttempt = { ...sent, phase: 'settled', outcomeTxid: fixture.arkTx.id }
+    await store.change(sent, settled)
+    await store.acknowledge(settled)
+    await expect(store.prepare(input)).rejects.toThrow('still holds an attempt')
+    expect((await store.read(sent.key))?.phase).toBe('settled')
   })
 
   it('retains a critical CAS that committed before its acknowledgement was lost', async () => {
@@ -216,16 +261,18 @@ describe('durable direct-fill attempts', () => {
     expect(pins.reserved().size).toBe(1)
   })
 
-  it('does not drop a counted sibling hold when acknowledging a never-invoked prepared attempt', async () => {
+  it('leaves a prepared attempt to recovery, which keeps a counted sibling hold when it abandons it', async () => {
     const { db } = database()
     const store = await DirectFillAttempts.open(db, createReservationLedger(), 'wallet', script)
     await store.prepare(input)
     const pins = createReservationLedger()
     pins.reserve(funding)
+    // Opening is what a one-shot CLI does beside the daemon that may be mid-fill.
     const restarted = await DirectFillAttempts.open(db, pins, 'wallet', script)
-    const abandoned = (await restarted.list())[0]!
-    expect(abandoned.phase).toBe('abandoned')
-    expect(await restarted.acknowledge(abandoned)).toBe(true)
+    expect((await restarted.list())[0]?.phase).toBe('prepared')
+    await recoveryFor(restarted).sweep()
+    expect(await restarted.list()).toEqual([])
+    expect((await restarted.read(input.parent.kind + ':' + input.parent.id))?.phase).toBe('abandoned')
     expect(pins.reserved().size).toBe(1)
   })
 
@@ -426,6 +473,33 @@ describe('durable direct-fill attempts', () => {
     expect(await store.list()).toEqual([])
     expect(pins.reserved().size).toBe(1)
     expect((await store.read('offer:row'))?.phase).toBe('abandoned')
+  })
+
+  it('backs a failing attempt off between sweeps instead of asking arkd on every pass', async () => {
+    const { db } = database()
+    const store = await DirectFillAttempts.open(db, createReservationLedger(), 'wallet', script)
+    await submitting(store)
+    let clock = 0
+    const tracker = new TickErrorTracker(() => clock)
+    const missing = new Error('Missing signatures from: 44444444...')
+    const ark = { getPendingTxs: vi.fn().mockRejectedValue(missing), submitTx: vi.fn(), finalizeTx: vi.fn() }
+    const recovery = createDirectFillRecovery({
+      attempts: store,
+      parent: () => null,
+      chain: { getVtxos: async ({ outpoints }) => ({ vtxos: outpoints }), getVirtualTxs: vi.fn() },
+      graph: { ark, signer: solver, serverKey, solverKeys: [hex.encode(solverKey)] },
+      coins: async () => [],
+      serverUnrollScript: unroll,
+      onError: (key, error) => tracker.record(key, error),
+      backoff: tracker,
+    })
+    await recovery.sweep()
+    await recovery.sweep()
+    expect(ark.getPendingTxs).toHaveBeenCalledOnce()
+    clock += 60_000
+    await recovery.sweep()
+    expect(ark.getPendingTxs).toHaveBeenCalledTimes(2)
+    expect((await store.list())[0]?.phase).toBe('submitting')
   })
 
   it('pins a committed row it could not read back as soon as the journal reads it again', async () => {

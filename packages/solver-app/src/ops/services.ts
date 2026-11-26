@@ -140,12 +140,14 @@ import {
   ungatedAssetSymbols,
 } from './assetRfqMarkets.js'
 import { marketServingDivergence } from './marketDivergence.js'
-import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
+import { offerInventoryFor } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { offerExitDelay, offerScriptFrom, xOnlyPubkey } from '@arkade-os/solver-arkade/arkade/offerTerms.js'
 import { quoteCosignerKey } from '@arkade-os/solver-arkade/arkade/cosignerKey.js'
 import { largestOfferOutpoint, liveOfferOutpoints } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
-import { quotedOfferSettleFor } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
+import { quotedOfferHexFor, quotedOfferSettleFor } from '@arkade-os/solver-arkade/arkade/quotedOfferSettle.js'
 import { directFillRecoveryFor } from './directFillRecovery.js'
+import { carrierChainTip, createCarrierPinLedger, restoreCarrierAttemptPins } from './assetRfqTaxi.js'
+import { taxiReceiveCarrierFor } from './assetRfqTaxiAdapter.js'
 
 export interface Services {
   directFillRecovery?: Awaited<ReturnType<typeof directFillRecoveryFor>>
@@ -491,10 +493,18 @@ export const openReportReaders = async (
  *
  * `opts.rebalance: 'active'` makes this process the one that drives wallet rebalancing; omitted, it only
  * reads that state. The daemon commands pass it, and so must an embedding host that wants rebalancing.
+ *
+ * `opts.directFills: 'active'` likewise makes this the process that recovers journalled direct fills at
+ * boot. A one-shot must not: its sweep would abandon the daemon's fill between journal and submission.
  */
 export const createServices = async (
   config: Config,
-  opts?: { allCorridors?: boolean; corridors?: readonly CorridorPlugin[]; rebalance?: 'active' },
+  opts?: {
+    allCorridors?: boolean
+    corridors?: readonly CorridorPlugin[]
+    rebalance?: 'active'
+    directFills?: 'active'
+  },
 ): Promise<Services> => {
   setLatencyDiagnostics(config.latencyDiagnostics)
   const settingPath = (id: string): string => config.configPaths?.get(id) ?? id
@@ -970,6 +980,39 @@ export const createServices = async (
     // The same key the quote names as `solver_pubkey` below, so the client derives this covenant.
     taker: hex.decode(arkadeOps.providerPubkey),
   }
+  // On ROWS, not on TAXI_URL: unsetting the knob over an open attempt must not free the coins it may spend.
+  const carrierPins = createCarrierPinLedger()
+  const repinned = await restoreCarrierAttemptPins({
+    attempts: () => assetRfqStore.listUnresolvedCarrierAttempts(),
+    reserve: (outpoints) => arkade.reservations.reserve(outpoints),
+    pins: carrierPins,
+  })
+  if (repinned.length > 0) log(`receive carrier: re-pinned the inputs of ${repinned.length} unresolved attempt(s)`)
+  // OFF unless TAXI_URL is set: without it recycle carriers are refused before quoting; purchase needs no Taxi.
+  let receiveCarrierQuotes: Awaited<ReturnType<typeof taxiReceiveCarrierFor>> | undefined
+  if (config.taxiUrl) {
+    const allowPrivate = process.env.TAXI_RECEIVER_ALLOW_PRIVATE === '1'
+    if (config.arkade.isMainnet && allowPrivate)
+      throw new Error('TAXI_RECEIVER_ALLOW_PRIVATE=1 is not allowed on mainnet')
+    receiveCarrierQuotes = await taxiReceiveCarrierFor({
+      ctx: arkade,
+      store: assetRfqStore,
+      taxiUrl: config.taxiUrl,
+      policy: { isMainnet: config.arkade.isMainnet, allowPrivate },
+      emulatorKey: assetRfqDerivation.emulatorPubkey,
+      quoteValiditySeconds: policy.assetQuoteValiditySeconds,
+      // Uncached, unlike the shared tip: a new block can move the input expiry floor.
+      tipHeight: config.chainTipEsploraUrl
+        ? carrierChainTip(createEsploraClient(config.chainTipEsploraUrl)).height
+        : undefined,
+      offerHex: quotedOfferHexFor(assetRfqDerivation),
+      pins: carrierPins,
+      // Replayed once after a restart, as a lost reply is: the Taxi answers a same-terms repeat idempotently.
+      unanswered: (await assetRfqStore.listUnresolvedCarrierAttempts())
+        .filter(({ attempt }) => attempt.phase === 'submitting')
+        .map(({ row }) => row.id),
+    })
+  }
   const assetRfqService = new AssetRfqSwapService({
     quoteLimiter,
     store: assetRfqStore,
@@ -988,24 +1031,33 @@ export const createServices = async (
     },
     depositAt: async (offerPkScript, depositLeg) =>
       largestOfferOutpoint(await liveOfferOutpoints(arkade, offerPkScript), depositLeg),
-    // AVAILABLE, never total, and read fresh per decision. @see offerInventory.ts
-    balance: async () => offerInventoryFrom(await arkade.wallet.getBalance()),
+    // The coins a fill could select, read fresh per decision: a journal-pinned coin is not inventory.
+    balance: () => offerInventoryFor(arkade),
     fetchPrice: createPriceFeed(),
     settle: quotedOfferSettleFor({
       ctx: arkade,
       emulatorUrl: config.emulatorUrl,
       derivation: assetRfqDerivation,
     }),
+    ...(receiveCarrierQuotes ? { receiveCarrierQuotes } : {}),
     approvalGate: gateFor('arkade asset RFQ'),
     onError: (id, error) => log(`asset rfq ${id} failed:`, error instanceof Error ? error.message : String(error)),
     onDeferred: (id, error) => log(`asset rfq ${id} deferred:`, error instanceof Error ? error.message : String(error)),
   })
   const directFillRecovery = await directFillRecoveryFor(
     arkade,
-    (kind) => (kind === 'offer' ? offerStore : assetRfqStore),
-    (key, error) => log(`direct fill ${key} recovery failed:`, messageOf(error)),
+    (kind) =>
+      kind === 'offer'
+        ? offerStore
+        : {
+            // Through the service, so a recovery waits out the fill it would race and marks the price.
+            recoverDirectFill: (proof, txid) => assetRfqService.recoverDirectFill(proof, txid),
+            cancelDirectFill: (proof, txid) => assetRfqStore.cancelDirectFill(proof, txid),
+          },
+    tickErrorLogger('direct fill recovery'),
+    tickErrors,
   )
-  await directFillRecovery.sweep()
+  if (opts?.directFills === 'active') await directFillRecovery.sweep()
 
   // ONE reading, whole house: a narrower one lends out headroom another corridor
   // holds. EVM and asset read direct — their readers narrow per token and pair.
@@ -1725,6 +1777,7 @@ export const createServices = async (
         ['onchainStore', () => onchainStore.close()],
         ['receiveStore', () => receiveStore.close()],
         ['offerStore', () => offerStore?.close()],
+        ['assetRfqService', () => assetRfqService.stop()],
         ['assetRfqStore', () => assetRfqStore.close()],
         ['adminStore', () => adminStore.close()],
         ['arkade', () => arkade.close()],

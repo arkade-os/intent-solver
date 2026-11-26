@@ -1,15 +1,28 @@
 [
   {
     "name": "asset",
-    "why": "The only group that mints an asset. An asset coin in the shared float changes what every later sats-only spend can select, so nothing that measures the sats float runs beside it.",
-    "profiles": "emulator",
+    "why": "The only group that mints an asset, and the one running arkade-regtest's Nostr relay for the two-party RFQ. An asset coin in the shared float changes what every later sats-only spend can select, so nothing that measures the sats float runs beside it.",
+    "profiles": "emulator,nostr",
     "files": [
       "assetRfqCorridor.e2e.test.ts",
       "assetOffer.e2e.test.ts",
       "assetLockup.e2e.test.ts",
       "assetDustLockup.e2e.test.ts",
-      "assetRfqRelay.e2e.test.ts"
+      "assetRfqRelay.e2e.test.ts",
+      "assetRfqCarrierConflict.e2e.test.ts"
     ],
+    "mintAsset": true,
+    "lnd": false,
+    "evmChain": false,
+    "arkdTimelocks": "seconds"
+  },
+  {
+    "name": "taxi",
+    "why": "Runs the solver against a funded Taxi built from ArkLabsHQ/arkade-taxi on the arkd v0.9.25 and emulator v0.0.10 stack directed Taxi fills are proven on, so the other lanes stay on theirs: a receiver-paid directed-nonce fill, its lost reply and the receiver recycle, on a zero-fee stack so the conservation predicates are exact.",
+    "profiles": "emulator,nostr,taxi",
+    "files": ["assetRfqTaxi.e2e.test.ts"],
+    "regtestRef": "185da8e2863fb461d12b898a0a692b0623476254",
+    "taxiRef": "5df105e82f33a1c74a1d898c93356cb9a70150c7",
     "mintAsset": true,
     "lnd": false,
     "evmChain": false,

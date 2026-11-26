@@ -23,6 +23,7 @@
  * minus its 2-byte prefix", and `user` is the cancel path's signer). They come
  * from the client because they ARE the client — the covenant pins the fill's
  * output to that script, which is what makes the swap trustless for it.
+ * On a carrier RFQ that script is the Taxi's receive covenant, paying the payee.
  */
 
 import { z } from 'zod'
@@ -30,8 +31,15 @@ import { WIRE_ASSET_AMOUNT } from '@arkade-os/solver-core/core/wireAmount.js'
 import { MAX_PAIR_LENGTH } from '@arkade-os/solver-core/core/marketKey.js'
 import { EMULATOR_PUBKEY } from '@arkade-os/solver-core/core/rfqProtocol.js'
 import type { AssetLeg } from '@arkade-os/solver-core/core/assetRfq.js'
-import type { AssetRfqSwapRow } from '../db/assetRfqSwaps.js'
+import { carrierTermsToJson, type AssetRfqSwapRow } from '../db/assetRfqSwaps.js'
 import { type RfqState } from './payloads.js'
+
+/** The client's carrier choice, parsed. Absent is the request as it was before the field existed.
+ * `recycle_receiver` names the payee's own Taxi, priced at zero. */
+export type AssetRfqCarrierChoice =
+  | { mode: 'purchase' }
+  | { mode: 'recycle'; quoteId: string }
+  | { mode: 'recycle_receiver'; quoteId: string; taxiUrl: string; taxiKey: string }
 
 const RFQ_ID = z
   .string()
@@ -60,6 +68,23 @@ const PK_SCRIPT_HEX = z
   .string()
   .length(68)
   .regex(/^[0-9a-f]{68}$/)
+
+/** An empty id names no quote; an unbounded one is a huge read. */
+const CARRIER_QUOTE_ID = z.string().min(1).max(128)
+
+const AssetRfqCarrierField = z.discriminatedUnion('mode', [
+  z.object({ mode: z.literal('purchase') }).strict(),
+  z.object({ mode: z.literal('recycle'), quote_id: CARRIER_QUOTE_ID }).strict(),
+  // `taxi_key` is x-only, as the Taxi publishes `info().operatorKey`.
+  z
+    .object({
+      mode: z.literal('recycle_receiver'),
+      quote_id: CARRIER_QUOTE_ID,
+      taxi_url: z.string().min(1).max(512),
+      taxi_key: XONLY_HEX,
+    })
+    .strict(),
+])
 
 /**
  * The directed request. Strict at BOTH levels per § 1 — "a directed request
@@ -93,10 +118,32 @@ export const AssetRfqRequest = z
         /** The client's x-only key: the `cancel` path's `user` signer. */
         maker_public_key: XONLY_HEX,
         emulator_pubkey: EMULATOR_PUBKEY,
+        /** OPTIONAL; absent leaves the request and its quote byte-identical. */
+        carrier: AssetRfqCarrierField.optional(),
       })
       .strict(),
   })
   .strict()
+
+/** The wire's snake_case choice in the internal spelling. `never` makes an unhandled mode a compile error. */
+export const assetRfqCarrierChoice = (profile: {
+  carrier?: z.infer<typeof AssetRfqCarrierField>
+}): AssetRfqCarrierChoice | undefined => {
+  const choice = profile.carrier
+  if (choice === undefined) return undefined
+  switch (choice.mode) {
+    case 'purchase':
+      return { mode: 'purchase' }
+    case 'recycle':
+      return { mode: 'recycle', quoteId: choice.quote_id }
+    case 'recycle_receiver':
+      return { mode: 'recycle_receiver', quoteId: choice.quote_id, taxiUrl: choice.taxi_url, taxiKey: choice.taxi_key }
+    default: {
+      const unhandled: never = choice
+      throw new Error(`carrier field names an unhandled mode '${JSON.stringify(unhandled)}'`)
+    }
+  }
+}
 
 /** The § 2 pair string for two legs, `null` being BTC as everywhere else. */
 export const assetRfqPairFor = (from: AssetLeg, to: AssetLeg): string =>
@@ -140,6 +187,15 @@ export const assetRfqQuotePayload = (
   profile: {
     offer_address: row.offerAddress,
     offer_pk_script: row.offerPkScript,
+    // The terms the amounts were netted against, for the client to check; a legacy row carries none.
+    ...(row.carrierTerms === null
+      ? {}
+      : {
+          carrier: {
+            ...carrierTermsToJson(row.carrierTerms),
+            expires_at: Math.min(row.carrierTerms.expiresAt, row.validUntil),
+          },
+        }),
   },
 })
 

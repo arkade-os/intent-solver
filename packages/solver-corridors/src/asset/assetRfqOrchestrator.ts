@@ -57,8 +57,9 @@ import {
   OfferSubmitRejectedError,
   type FulfillOptions,
 } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
-import { assetRfqPairFor } from '../wire/assetRfqPayloads.js'
-import { AssetRfqSwapStore, type AssetRfqSwapRow } from '../db/assetRfqSwaps.js'
+import { assetRfqPairFor, type AssetRfqCarrierChoice } from '../wire/assetRfqPayloads.js'
+import { AssetRfqSwapStore, type AssetRfqCarrierTerms, type AssetRfqSwapRow } from '../db/assetRfqSwaps.js'
+import type { DirectFillParentProof } from '../db/offerFills.js'
 
 /**
  * A market this deployment serves, plus where its price comes from.
@@ -115,6 +116,93 @@ export interface OfferTerms {
   emulatorPubkey?: string
 }
 
+/** What the Taxi adapter answers for ONE recycle quote id: a trusted service adapter, never caller JSON. */
+export interface ReceiveCarrierQuote {
+  quoteId: string
+  makerPkScript: string
+  makerPublicKey: string
+  assetId: string
+  physicalSats: bigint
+  loanSats: bigint
+  receiptSats: bigint
+  serviceFareSats: bigint
+  /** `recycle_receiver` only: which Taxi answered, re-checked against the request's `taxi_key`. */
+  taxiKey?: string
+  /** Locktime domain and minimum expiry a carrier fill's inputs must clear. */
+  inputExpiryFloor: Readonly<{ kind: 'height' | 'time'; value: bigint }>
+  /** Receiver-paid only: what the payee pays its Taxi at claim; an asset fare comes out of the delivery. */
+  receiverFare?: Readonly<{ currency: 'sats' | 'asset'; units: bigint }>
+  /** Unix seconds, read against `now` so a stale quote cannot be priced. */
+  expiresAt: number
+}
+
+export interface ReceiveCarrierQuoteRequest {
+  quoteId: string
+  makerPkScript: string
+  makerPublicKey: string
+  assetId: string
+  now: number
+  /** Admission rather than a fill: a fill re-anchors on a later clock, so admission keeps room to spare. */
+  admission: boolean
+  /** Absent resolves against the configured Taxi. */
+  taxi?: { url: string; operatorKey: string }
+  receiverPaid?: boolean
+  /** Settle's post-sign re-read only: the fill request bound the quote, so it must be bound to this fill. */
+  boundFillId?: string
+}
+
+export interface ReceiveCarrierQuotes {
+  resolve: (request: ReceiveCarrierQuoteRequest) => Promise<ReceiveCarrierQuote>
+  /** Re-reads the named quote and answers the inventory a carrier fill could spend, net of reservations. */
+  available: (request: ReceiveCarrierQuoteRequest) => Promise<ReadonlyMap<AssetLeg, bigint>>
+  settle: (row: AssetRfqSwapRow) => Promise<ReceiveCarrierSettleOutcome>
+  /** Read-only observation: settled only on verified transaction, deposit and quote evidence. */
+  reconcile: (row: AssetRfqSwapRow) => Promise<ReceiveCarrierReconcileOutcome>
+}
+
+/** `submitted` is not a failure: the row stays `filling` until reconciliation proves the fill. */
+export type ReceiveCarrierSettleOutcome = { status: 'submitted' } | { status: 'settled'; txid: string }
+
+/** `stuck` is unobservable rather than never-sent, so it parks the row for a human. */
+export type ReceiveCarrierReconcileOutcome =
+  { status: 'pending' } | { status: 'stuck'; reason: string } | { status: 'settled'; txid: string }
+
+/** A row whose fill is the payee's own Taxi to answer, which nothing here trusts to be quick. */
+const payeeNamed = (row: AssetRfqSwapRow): boolean =>
+  row.carrierTerms?.mode === 'recycle_receiver' && (row.state === 'funded' || row.state === 'filling')
+
+type CarrierRead =
+  | {
+      ok: true
+      terms?: AssetRfqCarrierTerms
+      priceTerm: bigint
+      publishedSats: bigint
+      receiverFare?: ReceiveCarrierQuote['receiverFare']
+    }
+  | { ok: false; detail: string }
+
+/** Fill time kept between `valid_until` and the Taxi quote's expiry, which the Taxi enforces at submit:
+ * four 5 s round trips (settle's read, the fill request, the post-sign read, the submit) and 10 s of skew. */
+export const CARRIER_FILL_MARGIN_SECONDS = 30
+
+/** The longest a carrier quote may bind this solver's fill inputs. */
+export const MAX_ASSET_QUOTE_VALIDITY_SECONDS = 900
+
+/** Settled through the carrier adapter rather than the generic spend. */
+export const carrierSettled = (terms: AssetRfqCarrierTerms | null | undefined): terms is AssetRfqCarrierTerms =>
+  terms?.mode === 'recycle' || terms?.mode === 'recycle_receiver'
+
+/** What every read of a persisted row must carry, so it verifies the Taxi and payer its quote did. */
+export const receiveCarrierTaxiOf = (
+  terms: AssetRfqCarrierTerms | null | undefined,
+): Pick<ReceiveCarrierQuoteRequest, 'taxi' | 'receiverPaid'> => {
+  if (terms?.mode !== 'recycle_receiver') return {}
+  if (terms.taxiUrl === undefined || terms.taxiKey === undefined) {
+    throw new Error('a recycle_receiver carrier names no Taxi to resolve against')
+  }
+  return { taxi: { url: terms.taxiUrl, operatorKey: terms.taxiKey }, receiverPaid: true }
+}
+
 export interface AssetRfqDeps {
   quoteLimiter?: RateLimiter
   store: AssetRfqSwapStore
@@ -152,6 +240,8 @@ export interface AssetRfqDeps {
   /** Spend the deposit through `fulfill`, paying the client. Returns the txid.
    * `options.markSubmitting` gates the submission. @see FulfillOptions */
   settle: (row: AssetRfqSwapRow, options?: FulfillOptions) => Promise<string>
+  /** The Taxi adapter, reached only for an explicit recycle. Absent is a REFUSAL, never a default. */
+  receiveCarrierQuotes?: ReceiveCarrierQuotes
   /** The large-swap approval gate. Absent means no gate. @see ops/approvals.ts */
   approvalGate?: ApprovalCheck
   onError?: (id: string, error: unknown) => void
@@ -167,6 +257,7 @@ export interface AssetRfqDeps {
 export type AssetRfqQuoteRefusal =
   | 'rate_limited'
   | 'unsupported_pair'
+  | 'unsupported_payload'
   | 'price_unavailable'
   | 'fee_consumes_swap'
   | 'amount_out_of_range'
@@ -187,6 +278,8 @@ export interface AssetRfqQuoteRequest {
   amountSide: 'from' | 'to'
   makerPkScript: string
   makerPublicKey: string
+  /** Absent is the request as it was before the field existed; a mode applies to an asset payout only. */
+  carrier?: AssetRfqCarrierChoice
   /** The negotiated contract version, if any. Absent derives the corridor's baseline. */
   contractVersion?: string
   emulatorPubkey?: string
@@ -237,6 +330,8 @@ export class AssetRfqSwapService {
   private readonly newId: () => string
   private markets: readonly AssetRfqMarket[]
   private readonly serialise: Serialiser = createSerialiser()
+  /** Payee-named Taxi rows, each driven on its own: a slow or hostile Taxi holds back only its rows. */
+  private readonly named = new Map<string, Promise<void>>()
 
   constructor(private readonly deps: AssetRfqDeps) {
     this.now = deps.now ?? nowSeconds
@@ -259,11 +354,25 @@ export class AssetRfqSwapService {
    * expensive gate runs last: the pair and the market are answered without
    * touching the network, and only then is a price fetched.
    */
-  quote(request: AssetRfqQuoteRequest): Promise<AssetRfqQuoteOutcome> {
-    return this.serialise(() => this.quoteInner(request))
+  async quote(request: AssetRfqQuoteRequest): Promise<AssetRfqQuoteOutcome> {
+    if (request.carrier?.mode !== 'recycle_receiver') return this.serialise(() => this.quoteInner(request))
+    // The payee's own Taxi is read before the queue, so a slow one stalls only this quote; its id and
+    // rate are checked first so a retry storm cannot drive that traffic.
+    if (await this.deps.store.findByRfqId(request.rfqId)) {
+      return { accepted: false, reason: 'duplicate_swap', detail: 'rfq_id already names a negotiation' }
+    }
+    if (request.requesterKey !== undefined && !this.quoteLimiter.take(request.requesterKey)) {
+      return { accepted: false, reason: 'rate_limited' }
+    }
+    const prefetched = await this.prefetchCarrier(request)
+    return this.serialise(() => this.quoteInner(request, prefetched))
   }
 
-  private async quoteInner(request: AssetRfqQuoteRequest): Promise<AssetRfqQuoteOutcome> {
+  private async quoteInner(
+    request: AssetRfqQuoteRequest,
+    /** `null`: the prefetch ran and declined. `undefined`: there was no prefetch, so no allowance is spent yet. */
+    prefetched?: { carrier: CarrierRead; inventory?: ReadonlyMap<AssetLeg, bigint> | null } | null,
+  ): Promise<AssetRfqQuoteOutcome> {
     const pair = parseAssetPair(request.pair)
     if (!pair) {
       return {
@@ -284,13 +393,32 @@ export class AssetRfqSwapService {
     const bounds = pair.from === market.base ? market.sellBase : market.buyBase
     const priced: AssetQuoteMarket = { ...market, minPayout: bounds.min, maxPayout: bounds.max }
 
+    // An inapplicable field (§ 1): a BTC payout has no carrier to want, so this is answered before the network.
+    if (request.carrier !== undefined && pair.to === null) {
+      return {
+        accepted: false,
+        reason: 'unsupported_payload',
+        detail: 'profile.carrier applies to an asset payout only',
+      }
+    }
+
+    // A market `replaceMarkets` added since the prefetch is not one this turn may serve: reading the
+    // payee's Taxi here would put that I/O in the shared queue and spend a second allowance.
+    if (prefetched === null) {
+      return { accepted: false, reason: 'unsupported_pair', detail: 'the market for this pair arrived mid-request' }
+    }
+
     // § 4.5: an rfq_id already bound to a negotiation is a conflict, whatever
     // became of that one. Checked BEFORE the feed read so a retry storm on one
     // id cannot drive traffic to the price source.
     if (await this.deps.store.findByRfqId(request.rfqId)) {
       return { accepted: false, reason: 'duplicate_swap', detail: 'rfq_id already names a negotiation' }
     }
-    if (request.requesterKey !== undefined && !this.quoteLimiter.take(request.requesterKey)) {
+    if (
+      prefetched === undefined &&
+      request.requesterKey !== undefined &&
+      !this.quoteLimiter.take(request.requesterKey)
+    ) {
       return { accepted: false, reason: 'rate_limited' }
     }
     const emulatorPubkey =
@@ -299,7 +427,12 @@ export class AssetRfqSwapService {
         : ((await this.deps.cosignerKey?.(request.emulatorPubkey)) ?? null)
     if (emulatorPubkey === null) return { accepted: false, reason: 'unsupported_emulator_pubkey' }
 
-    const inventoryP = capture(this.deps.balance())
+    // BEFORE the feed read, so an unavailable adapter cannot fall through to the market's free carrier.
+    const carrier = prefetched?.carrier ?? (await this.resolveCarrier(request, market, pair.to))
+    if (!carrier.ok) return { accepted: false, reason: 'price_unavailable', detail: carrier.detail }
+    const terms = carrier.terms
+
+    const inventoryP = carrierSettled(terms) ? undefined : capture(this.deps.balance())
     let feed: Price
     try {
       feed = await this.deps.fetchPrice(market.feedUrl, market.pricePath)
@@ -316,10 +449,18 @@ export class AssetRfqSwapService {
       amountSide: request.amountSide,
       market: priced,
       feed,
-      carrierSats: market.carrierSats,
+      carrierSats: carrier.priceTerm,
       dustSats: this.deps.dustSats,
     })
     if (!resolved.ok) return { accepted: false, reason: resolved.reason }
+    // The Taxi's own rule (`fare_exceeds_delivery`), refused before a payer funds what it would refuse.
+    if (carrier.receiverFare?.currency === 'asset' && carrier.receiverFare.units >= resolved.toAmount) {
+      return {
+        accepted: false,
+        reason: 'price_unavailable',
+        detail: `the receiver fare of ${carrier.receiverFare.units} asset units is not below the ${resolved.toAmount} delivered`,
+      }
+    }
     if (pair.to === null && resolved.toAmount < (this.deps.minOutputSats ?? 0n)) {
       return { accepted: false, reason: 'payout_below_dust' }
     }
@@ -328,9 +469,32 @@ export class AssetRfqSwapService {
     // `tick` runs the same gate again immediately before spending. Quoting a
     // payout the float already cannot cover would commit this solver to a price
     // it knows it cannot honour.
-    const available = unwrap(await inventoryP)
+    const available = carrierSettled(terms)
+      ? prefetched?.inventory !== undefined
+        ? prefetched.inventory
+        : await this.carrierInventory(request, terms, pair.to)
+      : unwrap(await inventoryP!)
+    if (available === null) {
+      return { accepted: false, reason: 'price_unavailable', detail: 'carrier inventory could not be read' }
+    }
     if ((available.get(pair.to) ?? 0n) < resolved.toAmount) {
       return { accepted: false, reason: 'insufficient_inventory' }
+    }
+
+    // A carrier quote binds no longer than its Taxi quote, less the time a fill needs after funding.
+    const carrierUntil =
+      terms === undefined
+        ? undefined
+        : Math.min(
+            this.now() + this.deps.quoteValiditySeconds,
+            terms.expiresAt - (carrierSettled(terms) ? CARRIER_FILL_MARGIN_SECONDS : 0),
+          )
+    if (carrierUntil !== undefined && carrierUntil <= this.now()) {
+      return {
+        accepted: false,
+        reason: 'price_unavailable',
+        detail: 'the carrier quote expires too soon to fill after funding',
+      }
     }
 
     const offer = this.deps.deriveOffer(
@@ -372,10 +536,11 @@ export class AssetRfqSwapService {
         // Against a feed read at fill time it measures how far the market moved
         // while the quote was outstanding; against its own feed it would measure
         // the configured spread and nothing else.
-        ...quoteSnapshot({ resolved, market: priced, pair, feed, carrierSats: market.carrierSats }),
+        ...quoteSnapshot({ resolved, market: priced, pair, feed, carrierSats: carrier.priceTerm }),
+        ...(terms === undefined ? {} : { validUntil: carrierUntil!, carrierTerms: terms }),
         ...(request.contractVersion === undefined ? {} : { contractVersion: request.contractVersion }),
       })
-      return { accepted: true, swap, carrierSats: market.carrierSats }
+      return { accepted: true, swap, carrierSats: carrier.publishedSats }
     } catch (error) {
       // Only the unique indexes mean duplicate — both onchain orchestrators narrow it so.
       if (error instanceof UniqueConstraintError) {
@@ -393,13 +558,34 @@ export class AssetRfqSwapService {
    * Each arm ends at a compare-and-swap, so two ticks racing one row cannot
    * both act.
    */
-  tick(id: string): Promise<void> {
+  async tick(id: string): Promise<void> {
+    const row = await this.deps.store.findById(id)
+    if (row && payeeNamed(row)) return this.driveNamed(id)
     return this.serialise(() => this.drive(id))
   }
 
-  private async drive(id: string): Promise<void> {
+  /** One drive per row at a time, off the main queue; a sweep does not wait for it. */
+  private driveNamed(id: string): Promise<void> {
+    const running = this.named.get(id)
+    if (running) return running
+    const work = this.drive(id, true).finally(() => this.named.delete(id))
+    this.named.set(id, work)
+    return work
+  }
+
+  /** Waits out the payee-Taxi work a sweep left running. */
+  async stop(): Promise<void> {
+    await Promise.allSettled([...this.named.values()])
+  }
+
+  private async drive(id: string, named = false): Promise<void> {
     const row = await this.deps.store.findById(id)
     if (!row) return
+    // Re-read inside the queue: a row that became payee-named since the caller looked must leave it.
+    if (!named && payeeNamed(row)) {
+      this.driveNamed(id).catch((error: unknown) => this.deps.onError?.(id, error))
+      return
+    }
     switch (row.state) {
       case 'quoted':
         return this.whenQuoted(row)
@@ -427,6 +613,10 @@ export class AssetRfqSwapService {
     return this.serialise(async () => {
       const driven: string[] = []
       for (const row of await this.deps.store.listNonTerminal()) {
+        if (payeeNamed(row)) {
+          this.driveNamed(row.id).catch((error: unknown) => this.deps.onError?.(row.id, error))
+          continue
+        }
         try {
           await this.drive(row.id)
           driven.push(row.id)
@@ -468,10 +658,19 @@ export class AssetRfqSwapService {
    * spend it — § 9's action-time gate.
    */
   private async whenFunded(row: AssetRfqSwapRow): Promise<void> {
+    const carrier = carrierSettled(row.carrierTerms) ? this.deps.receiveCarrierQuotes : undefined
+    if (carrierSettled(row.carrierTerms) && !carrier) {
+      await this.deps.store.fail(row.id, 'funded', 'not filled: receive-carrier adapter unavailable')
+      return
+    }
     const [deposit, available] = await Promise.all([
       this.deps.depositAt(row.offerPkScript, row.fromAssetId),
-      this.deps.balance(),
+      carrier ? this.carrierFillInventory(row, carrier) : this.deps.balance(),
     ])
+    if (available === null) {
+      await this.deps.store.fail(row.id, 'funded', 'not filled: receive-carrier inventory unavailable')
+      return
+    }
     const decision = evaluateAssetFill({
       toAmount: row.toAmount,
       toAssetId: row.toAssetId,
@@ -500,6 +699,7 @@ export class AssetRfqSwapService {
     // `selecting`: nothing is sent yet, which is what makes a walk-back sound.
     const seen = deposit ? { deposit_txid: deposit.txid, deposit_vout: deposit.vout } : {}
     if (!(await this.deps.store.transition(row.id, 'funded', 'filling', { ...seen, fill_phase: 'selecting' }))) return
+    if (carrier) return this.settleCarrier(row, carrier)
     try {
       const txid = await this.deps.settle(await this.deps.store.get(row.id), {
         // The deadline again at the latch: approval and the settle's own reads come after the decision.
@@ -591,10 +791,236 @@ export class AssetRfqSwapService {
    * is exactly this case: exposure exists and progress needs a human.
    */
   private async whenFilling(row: AssetRfqSwapRow): Promise<void> {
+    if (carrierSettled(row.carrierTerms)) return this.reconcileCarrier(row)
     if (row.fillPhase === 'selecting') {
       await this.deps.store.revertUnsubmitted(row.id)
       return
     }
     await this.deps.store.fail(row.id, 'filling', 'fill outcome unknown after restart; check the offer address')
+  }
+
+  /** The journal's proof that a fill landed, recorded in the queue the fills run in, with the mark a lost reply skipped. */
+  recoverDirectFill(proof: DirectFillParentProof, fillTxid: string): Promise<boolean> {
+    return this.serialise(async () => {
+      const before = await this.deps.store.findById(proof.id)
+      const recovered = await this.deps.store.recoverDirectFill(proof, fillTxid)
+      if (recovered && before?.state !== 'filled' && before?.fillPriceMantissa === null)
+        await this.recordFillMark(before)
+      return recovered
+    })
+  }
+
+  /** `priceTerm` is what the amounts net; `publishedSats` is the physical dust `carrier_sats` reports. */
+  private async resolveCarrier(
+    request: AssetRfqQuoteRequest,
+    market: AssetRfqMarket,
+    payout: AssetLeg,
+  ): Promise<
+    | {
+        ok: true
+        terms?: AssetRfqCarrierTerms
+        priceTerm: bigint
+        publishedSats: bigint
+        receiverFare?: ReceiveCarrierQuote['receiverFare']
+      }
+    | { ok: false; detail: string }
+  > {
+    const carrier = request.carrier
+    if (carrier === undefined) return { ok: true, priceTerm: market.carrierSats, publishedSats: market.carrierSats }
+    const dust = this.deps.dustSats
+    if (carrier.mode === 'purchase') {
+      // Bought outright: no loan to return and no receipt to reserve.
+      const expiresAt = this.now() + this.deps.quoteValiditySeconds
+      const terms = { mode: 'purchase' as const, physicalSats: dust, loanSats: 0n, receiptSats: 0n }
+      return {
+        ok: true,
+        terms: { ...terms, serviceFareSats: 0n, pricedSats: dust, expiresAt },
+        priceTerm: dust,
+        publishedSats: dust,
+      }
+    }
+    const adapter = this.deps.receiveCarrierQuotes
+    if (!adapter) return { ok: false, detail: `${carrier.mode} requested but no receive-carrier adapter is configured` }
+    const now = this.now()
+    let quote: ReceiveCarrierQuote
+    try {
+      quote = await adapter.resolve({
+        quoteId: carrier.quoteId,
+        makerPkScript: request.makerPkScript,
+        makerPublicKey: request.makerPublicKey,
+        assetId: payout as string,
+        now,
+        admission: true,
+        ...(carrier.mode === 'recycle_receiver'
+          ? { taxi: { url: carrier.taxiUrl, operatorKey: carrier.taxiKey }, receiverPaid: true }
+          : {}),
+      })
+    } catch (error) {
+      // An adapter that threw is an unavailable quote, never a free carrier.
+      this.deps.onError?.('carrier', error)
+      return { ok: false, detail: 'the receive-carrier quote could not be read' }
+    }
+    const refused = this.carrierQuoteRefusal(quote, request, payout as string, now)
+    if (refused) return { ok: false, detail: refused }
+    // `physicalSats` and `loanSats` are this solver's own dust here, never a Taxi-supplied figure.
+    if (carrier.mode === 'recycle_receiver') {
+      const loan = { physicalSats: dust, loanSats: dust, receiptSats: 0n, serviceFareSats: 0n, pricedSats: 0n }
+      return {
+        ok: true,
+        terms: {
+          mode: 'recycle_receiver',
+          quoteId: quote.quoteId,
+          ...loan,
+          expiresAt: quote.expiresAt,
+          taxiUrl: carrier.taxiUrl,
+          taxiKey: carrier.taxiKey,
+        },
+        priceTerm: 0n,
+        publishedSats: 0n,
+        receiverFare: quote.receiverFare,
+      }
+    }
+    const priceTerm = quote.receiptSats + quote.serviceFareSats
+    return {
+      ok: true,
+      terms: {
+        mode: 'recycle',
+        quoteId: quote.quoteId,
+        physicalSats: quote.physicalSats,
+        loanSats: quote.loanSats,
+        receiptSats: quote.receiptSats,
+        serviceFareSats: quote.serviceFareSats,
+        pricedSats: priceTerm,
+        expiresAt: quote.expiresAt,
+      },
+      priceTerm,
+      publishedSats: quote.physicalSats,
+    }
+  }
+
+  /** Each request-bound field is matched on its own, so a refusal names the one that disagreed. */
+  private carrierQuoteRefusal(
+    quote: ReceiveCarrierQuote,
+    request: AssetRfqQuoteRequest,
+    assetId: string,
+    now: number,
+  ): string | undefined {
+    const carrier = request.carrier
+    if (carrier?.mode !== 'recycle' && carrier?.mode !== 'recycle_receiver') return 'carrier quote named by no recycle'
+    if (quote.quoteId !== carrier.quoteId) return 'carrier quote id does not match the request'
+    if (quote.makerPkScript !== request.makerPkScript) return 'carrier quote is for a different payout script'
+    if (quote.makerPublicKey !== request.makerPublicKey) return 'carrier quote is for a different signer key'
+    if (quote.assetId !== assetId) return 'carrier quote is for a different asset'
+    if (quote.physicalSats !== this.deps.dustSats) return 'carrier quote physical sats are not this dust floor'
+    if (carrier.mode === 'recycle_receiver') {
+      // The payee's Taxi fronts the whole dust, so the split a recycle needs is exactly what fails here.
+      if (quote.receiptSats !== 0n) return 'carrier quote receipt sats must be zero on recycle_receiver'
+      if (quote.serviceFareSats !== 0n) return 'carrier quote service fare must be zero on recycle_receiver'
+      if (quote.loanSats !== quote.physicalSats) return 'carrier quote loan must be the whole dust on recycle_receiver'
+      if (quote.taxiKey !== carrier.taxiKey) return 'carrier quote taxi key differs from the one the request named'
+    } else {
+      if (quote.receiptSats <= 0n) return 'carrier quote receipt sats must be positive'
+      if (quote.loanSats <= 0n) return 'carrier quote loan sats must be positive'
+      if (quote.loanSats + quote.receiptSats !== quote.physicalSats)
+        return 'carrier quote split does not sum to physical sats'
+      if (quote.serviceFareSats < 0n) return 'carrier quote service fare must not be negative'
+    }
+    if (!Number.isSafeInteger(quote.expiresAt) || quote.expiresAt <= now) return 'carrier quote is already expired'
+    if (quote.expiresAt - now > MAX_ASSET_QUOTE_VALIDITY_SECONDS)
+      return 'carrier quote binds for longer than this solver will'
+    return undefined
+  }
+
+  /** The adapter's inventory for a carrier fill; null when it could not be read. */
+  private async carrierInventory(
+    request: AssetRfqQuoteRequest,
+    terms: AssetRfqCarrierTerms,
+    payout: AssetLeg,
+  ): Promise<ReadonlyMap<AssetLeg, bigint> | null> {
+    try {
+      return await this.deps.receiveCarrierQuotes!.available({
+        quoteId: terms.quoteId!,
+        makerPkScript: request.makerPkScript,
+        makerPublicKey: request.makerPublicKey,
+        assetId: payout as string,
+        now: this.now(),
+        admission: true,
+        ...receiveCarrierTaxiOf(terms),
+      })
+    } catch (error) {
+      this.deps.onError?.('carrier', error)
+      return null
+    }
+  }
+
+  /** For a payee-named Taxi only: the carrier read and its inventory, taken outside the queue. */
+  private async prefetchCarrier(
+    request: AssetRfqQuoteRequest,
+  ): Promise<{ carrier: CarrierRead; inventory?: ReadonlyMap<AssetLeg, bigint> | null } | null> {
+    const pair = parseAssetPair(request.pair)
+    const market =
+      pair &&
+      this.markets.find(
+        (m) => (pair.from === m.base && pair.to === m.quote) || (pair.from === m.quote && pair.to === m.base),
+      )
+    // The queued turn refuses each of these itself.
+    if (!pair || !market || pair.to === null) return null
+    const carrier = await this.resolveCarrier(request, market, pair.to)
+    if (!carrier.ok || !carrierSettled(carrier.terms)) return { carrier }
+    return { carrier, inventory: await this.carrierInventory(request, carrier.terms, pair.to) }
+  }
+
+  /** Fill-time inventory through the adapter; null when it could not be read. */
+  private async carrierFillInventory(
+    row: AssetRfqSwapRow,
+    carrier: ReceiveCarrierQuotes,
+  ): Promise<ReadonlyMap<AssetLeg, bigint> | null> {
+    try {
+      return await carrier.available({
+        quoteId: row.carrierTerms!.quoteId!,
+        makerPkScript: row.makerPkScript,
+        makerPublicKey: row.makerPublicKey,
+        assetId: row.toAssetId as string,
+        now: this.now(),
+        admission: false,
+        ...receiveCarrierTaxiOf(row.carrierTerms),
+      })
+    } catch (error) {
+      this.deps.onError?.(row.id, error)
+      return null
+    }
+  }
+
+  /** The adapter owns its attempt and refuses one it proves unsent; this only records what it settled. */
+  private async settleCarrier(row: AssetRfqSwapRow, carrier: ReceiveCarrierQuotes): Promise<void> {
+    try {
+      const filling = await this.deps.store.get(row.id)
+      const outcome = await carrier.settle(filling)
+      if (outcome.status === 'settled') await this.completeCarrierFill(filling, outcome.txid)
+    } catch (error) {
+      this.deps.onError?.(row.id, error)
+    }
+  }
+
+  /** A carrier row in `filling` is never resubmitted here: it is observed until proven or parked. */
+  private async reconcileCarrier(row: AssetRfqSwapRow): Promise<void> {
+    const adapter = this.deps.receiveCarrierQuotes
+    if (!adapter) {
+      this.deps.onError?.(row.id, new Error('receive-carrier adapter unavailable while a fill outcome is unknown'))
+      return
+    }
+    try {
+      const outcome = await adapter.reconcile(row)
+      if (outcome.status === 'stuck') await this.deps.store.fail(row.id, 'filling', outcome.reason)
+      if (outcome.status === 'settled') await this.completeCarrierFill(row, outcome.txid)
+    } catch (error) {
+      this.deps.onError?.(row.id, error)
+    }
+  }
+
+  private async completeCarrierFill(row: AssetRfqSwapRow, txid: string): Promise<void> {
+    if (await this.deps.store.transition(row.id, 'filling', 'filled', { fill_txid: txid })) {
+      await this.recordFillMark(row)
+    }
   }
 }

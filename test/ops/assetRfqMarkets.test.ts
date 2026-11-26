@@ -7,6 +7,8 @@
  * served with no bounds would quote an unbounded payout out of the float.
  */
 import { describe, it, expect } from 'vitest'
+import { verifiedCarrierSats } from '@arkade-os/swap/advanced'
+import { ASSET_CARRIER_SATS, type RfqQuote } from '@arkade-os/swap/protocol'
 import {
   assetCardMarketsFromPolicy,
   assetRfqMarketsFrom,
@@ -83,6 +85,25 @@ describe('carrierSatsFor', () => {
   it('follows ASSET_CARRIER_PRICING on inherit', () => {
     expect(carrierSatsFor('inherit', { dustSats: 330n, pricedByDefault: true })).toBe(330n)
     expect(carrierSatsFor('inherit', { dustSats: 330n, pricedByDefault: false })).toBe(0n)
+  })
+
+  it('publishes only a carrier the swap client accepts', () => {
+    for (const dustSats of [330n, 546n])
+      for (const mode of ['inherit', 'off', 'priced'] as const)
+        for (const pricedByDefault of [true, false]) {
+          const published = carrierSatsFor(mode, { dustSats, pricedByDefault })
+          const quote = { carrier_sats: published.toString() } as RfqQuote
+          expect(verifiedCarrierSats(quote, dustSats)).toBe(published > 0n ? published : ASSET_CARRIER_SATS)
+        }
+    // What the relay e2e once published: the client has refused a carrier above the dust since swap 0.1.14.
+    const refused = (() => {
+      try {
+        return verifiedCarrierSats({ carrier_sats: '400' } as RfqQuote, 330n)
+      } catch (error) {
+        return error as { cause?: { reason?: string } }
+      }
+    })()
+    expect(refused).toMatchObject({ cause: { reason: 'carrier_malformed' } })
   })
 })
 
