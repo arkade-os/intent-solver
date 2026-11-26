@@ -579,14 +579,18 @@ one.
   also bind `profile.refund_without_receiver_delay`: the exact BIP68 delay the
   client must put in its solo-refund leaf. Quotes under `arkade-htlc-v1` and
   `onchain-htlc-v1` (§ 7.1) also bind `profile.amount`, `profile.asset` when
-  present and, on `onchain-htlc-v1`, `profile.max_network_fee`. Each is a
+  present and, on `onchain-htlc-v1`, `profile.max_network_fee`,
+  `profile.htlc_refund_delay` and `profile.htlc_claim_delay`. Each is a
   contract argument, so each moves the address, and none can be compare-only.
   `profile.amount` is REQUIRED there, a canonical decimal string (§ 2.1) that
   MUST equal, as an integer, the § 7.1.1.2 derivation from `from_amount` or
   `to_amount`; `profile.asset` and `profile.max_network_fee` MUST echo the
-  request's. A client MUST refuse a quote that omits `profile.amount` or where
-  any of them does not match. Other profile fields are compare-only or
-  informational.
+  request's. The two delays are REQUIRED on `onchain-htlc-v1`. The solver
+  chooses each, an exact BIP68 delay, as it chooses
+  `profile.refund_without_receiver_delay`, and the client checks them against
+  its own `/v1/info` (§ 7.1.3.1). A client MUST refuse a quote that omits a
+  required field or where any of them does not match or check out. Other
+  profile fields are compare-only or informational.
 
 ### 4.3 `rfq_refusal`
 
@@ -1306,22 +1310,27 @@ the two-leaf HTLC would let it complete.
 - **quote.profile** adds `htlc_refund_pk_script`, the solver's P2TR refund
   destination, which `paySender` pins. It is compare-only like
   `receiver_pk_script`: a wrong value only hurts the solver. The quote echoes
-  `max_network_fee` as a binding field (§ 4.2). `htlc_pubkey` stays, as
-  `sender`, and `htlc_address` is still the compare-only address.
+  `max_network_fee` as a binding field (§ 4.2) and binds `htlc_refund_delay`
+  and `htlc_claim_delay`, the contract's `refundDelay` and `claimDelay`. The
+  solver chooses both as it chooses `refund_without_receiver_delay`: each is
+  the exact BIP68 delay, in seconds and a multiple of 512, in that field's
+  encoding. `htlc_pubkey` stays, as `sender`, and `htlc_address` is still the
+  compare-only address.
 
-| `OnchainHTLC` argument      | carrier                                                      |
-| --------------------------- | ------------------------------------------------------------ |
-| `sender`                    | `htlc_pubkey`                                                |
-| `receiver`                  | `payout_pubkey`                                              |
-| `server` (`X`)              | `signerPubkey` from the client's own `/v1/info`              |
-| `preimageHash`              | as on the two-leaf HTLC: HASH160 of `P`, from `payment_hash` |
-| `refundLocktime`            | `htlc_locktime`                                              |
-| `refundDelay`, `claimDelay` | no carrier yet (§ 12)                                        |
-| `receiverScript`            | `payout_pk_script` minus `5120`                              |
-| `senderScript`              | `htlc_refund_pk_script` minus `5120`                         |
-| `amount`                    | `to_amount − max_network_fee`, which MUST be positive        |
-| `fee`                       | `max_network_fee`                                            |
-| `asset`                     | absent; the L1 asset leg waits on `ArkLabsHQ/arkd#202`       |
+| `OnchainHTLC` argument | carrier                                                      |
+| ---------------------- | ------------------------------------------------------------ |
+| `sender`               | `htlc_pubkey`                                                |
+| `receiver`             | `payout_pubkey`                                              |
+| `server` (`X`)         | `signerPubkey` from the client's own `/v1/info`              |
+| `preimageHash`         | as on the two-leaf HTLC: HASH160 of `P`, from `payment_hash` |
+| `refundLocktime`       | `htlc_locktime`                                              |
+| `refundDelay`          | `htlc_refund_delay`                                          |
+| `claimDelay`           | `htlc_claim_delay`                                           |
+| `receiverScript`       | `payout_pk_script` minus `5120`                              |
+| `senderScript`         | `htlc_refund_pk_script` minus `5120`                         |
+| `amount`               | `to_amount − max_network_fee`, which MUST be positive        |
+| `fee`                  | `max_network_fee`                                            |
+| `asset`                | absent; the L1 asset leg waits on `ArkLabsHQ/arkd#202`       |
 
 | leaf                                  | needs                                    |
 | ------------------------------------- | ---------------------------------------- |
@@ -1329,8 +1338,8 @@ the two-leaf HTLC would let it complete.
 | `nonInteractiveClaim`                 | `P`, `t(X, payReceiver)`                 |
 | `refundWithoutReceiver`               | sender, `X`, after `htlc_locktime`       |
 | `nonInteractiveRefundWithoutReceiver` | `t(X, paySender)`, after `htlc_locktime` |
-| `unilateralRefundWithoutReceiver`     | sender, after `refundDelay`              |
-| `unilateralClaim`                     | `P`, receiver, after `claimDelay`        |
+| `unilateralRefundWithoutReceiver`     | sender, after `htlc_refund_delay`        |
+| `unilateralClaim`                     | `P`, receiver, after `htlc_claim_delay`  |
 
 **Amounts.** `to_amount` is still what the solver funds the HTLC with.
 `payReceiver` requires `output_i.value >= max(amount, input value − fee)`, so
@@ -1342,22 +1351,26 @@ requires at least the input value, so the refund covenant takes nothing from
 the coin and its pusher adds the fee. The signature leaves bind no fee; their
 signers choose it.
 
-**The ladder is reversed** relative to the Arkade lockup:
+**The ladder is reversed** relative to the Arkade lockup. The client validates
+both delays, builds them into its derivation, and refuses a quote that omits
+either or breaks any of these:
 
-- Every CSV is at least the `boardingExitDelay` the client reads from its own
-  `/v1/info`, in seconds. arkd co-signs no spend of a coin with a shorter one.
-- `refundDelay`, the solver's solo refund, opens before `claimDelay`, the
-  client's. With arkd withholding every signature the solver then refunds
-  first; in the other order the client could unroll and refund the Arkade
-  lockup and still claim L1 later with `P`.
-- `htlc_locktime`, the contract's `refundLocktime`, stays a timestamp: an arkd
-  on seconds refuses a block-height one. It MUST fall inside arkd's co-sign
-  window, since arkd co-signs nothing once the coin's smallest CSV is within
-  its margin of maturing.
+- `htlc_refund_delay`, the solver's solo refund, is at least the
+  `boardingExitDelay` from the client's own `/v1/info`. arkd co-signs no spend
+  of a coin with a shorter CSV.
+- `htlc_claim_delay`, the client's solo claim, is greater than
+  `htlc_refund_delay`, in the same unit. With arkd withholding every signature
+  the solver's solo refund then opens first; in the other order the client
+  could unroll and refund the Arkade lockup and still claim L1 later with `P`.
+- Both are in seconds on an arkd whose delays are in seconds.
+
+`htlc_locktime`, the contract's `refundLocktime`, stays a timestamp: an arkd on
+seconds refuses a block-height one. It MUST fall inside arkd's co-sign window,
+since arkd co-signs nothing once the coin's smallest CSV is within its margin
+of maturing.
 
 The solver still reads `P` off the client's L1 claim and claims the Arkade
-lockup with it. No field carries `refundDelay` or `claimDelay` yet, so until
-one does a client cannot derive `htlc_address` under this version (§ 12).
+lockup with it. No claim packet exists for that L1 claim yet (§ 12).
 
 #### 7.1.4 `onchain:BTC->arkade:BTC` — not served
 
@@ -1938,11 +1951,11 @@ Additionally:
 - **`onchain-htlc-v1`'s L1 HTLC** _(specified; NOT yet implemented,
   § 7.1.3.1)_. Up to `max_network_fee` of the L1 payout may go to miners or
   to whoever builds the claim; the refund covenant takes nothing from the coin,
-  and its pusher adds the fee. The L1 ladder holds:
-  `refundDelay < claimDelay`, each at least the client's own
-  `boardingExitDelay`, with `htlc_locktime` inside arkd's co-sign window. The
-  normative timelock-ordering invariant (§ 7.1.4) is unchanged and still
-  governs the Arkade lockup.
+  and its pusher adds the fee. The L1 ladder holds: `htlc_refund_delay` is at
+  least the client's own `boardingExitDelay`, `htlc_claim_delay` is greater
+  than `htlc_refund_delay`, and `htlc_locktime` falls inside arkd's co-sign
+  window. The normative timelock-ordering invariant (§ 7.1.4) is unchanged
+  and still governs the Arkade lockup.
 
 ## 10. Refusal reasons
 
@@ -2183,9 +2196,6 @@ have a tested reference in this repo.
   decreasing timelock ladder whose per-hop cost on an Arkade leg is bounded
   below by the operator's own unilateral exit delay. Neither the
   representation nor the ladder is specified here.
-- **`onchain-htlc-v1`'s L1 delays and claim packet.** No field yet carries
-  `OnchainHTLC`'s `refundDelay` or `claimDelay`, so a client cannot derive
-  `htlc_address` under that version; § 7.1.3.1 fixes only their constraints.
-  Nor is there a claim packet that would let a claim service push the client's
-  L1 claim while it is offline, so on that version the client claims L1
-  itself.
+- **`onchain-htlc-v1`'s L1 claim packet.** No claim packet yet lets a claim
+  service push the client's L1 claim while it is offline, so on that version
+  the client claims L1 itself.
