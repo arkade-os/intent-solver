@@ -26,6 +26,7 @@ import {
 } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { IMPLIED_PRICE_HEADROOM } from '@arkade-os/solver-core/core/assetRfq.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
+import { RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { RFQ_ASSET_SWAP_DIRECTED } from '@arkade-os/solver-core/core/rfqContract.js'
 import {
   type ReceiveCarrierQuote,
@@ -1394,6 +1395,46 @@ describe('carrier admission', () => {
     expect(outcome).toMatchObject({ accepted: false, reason: 'price_unavailable' })
     expect(errors).toEqual([new Error('taxi down')])
     expect(await store.findByRfqId(RFQ_ID)).toBeNull()
+  })
+
+  it('refuses rather than re-reading the Taxi when the market arrives after the prefetch', async () => {
+    const marketB = { ...MARKET, quote: ASSET_B, symbol: 'USDB' }
+    const resolve = vi.fn(async () => quoteFor())
+    let release = () => {}
+    const parked = new Promise<void>((settle) => (release = () => settle()))
+    let first = true
+    const limiter = new RateLimiter(1, 60, () => 1_000)
+    const take = vi.spyOn(limiter, 'take')
+    const { service } = await harness({
+      markets: [marketB],
+      quoteLimiter: limiter,
+      fetchPrice: async () => {
+        if (first) {
+          first = false
+          await parked
+        }
+        return { mantissa: 100_000n, scale: 0 }
+      },
+      receiveCarrierQuotes: {
+        settle: vi.fn(),
+        reconcile: vi.fn(),
+        resolve,
+        available: async () => new Map([[ASSET_A, 10n ** 18n]]),
+      },
+    })
+
+    // Parks the queue, so the replace below is queued ahead of the carrier's turn.
+    const parker = service.quote(request({ rfqId: 'b'.repeat(64), pair: `arkade:BTC->arkade:${ASSET_B}` }))
+    const replacing = service.replaceMarkets([marketB, MARKET])
+    const quoting = service.quote(request({ carrier: receiver, requesterKey: 'peer-1' }))
+    // Released only once the carrier request has spent its allowance and queued its turn behind the replace.
+    await vi.waitFor(() => expect(take).toHaveBeenCalledTimes(1))
+    release()
+
+    expect(await quoting).toMatchObject({ accepted: false, reason: 'unsupported_pair' })
+    expect(resolve).not.toHaveBeenCalled()
+    expect(take).toHaveBeenCalledTimes(1)
+    await Promise.all([parker, replacing])
   })
 
   it('refuses an asset receiver fare that would leave the payee nothing', async () => {

@@ -370,7 +370,8 @@ export class AssetRfqSwapService {
 
   private async quoteInner(
     request: AssetRfqQuoteRequest,
-    prefetched?: { carrier: CarrierRead; inventory?: ReadonlyMap<AssetLeg, bigint> | null },
+    /** `null`: the prefetch ran and declined. `undefined`: there was no prefetch, so no allowance is spent yet. */
+    prefetched?: { carrier: CarrierRead; inventory?: ReadonlyMap<AssetLeg, bigint> | null } | null,
   ): Promise<AssetRfqQuoteOutcome> {
     const pair = parseAssetPair(request.pair)
     if (!pair) {
@@ -399,6 +400,12 @@ export class AssetRfqSwapService {
         reason: 'unsupported_payload',
         detail: 'profile.carrier applies to an asset payout only',
       }
+    }
+
+    // A market `replaceMarkets` added since the prefetch is not one this turn may serve: reading the
+    // payee's Taxi here would put that I/O in the shared queue and spend a second allowance.
+    if (prefetched === null) {
+      return { accepted: false, reason: 'unsupported_pair', detail: 'the market for this pair arrived mid-request' }
     }
 
     // § 4.5: an rfq_id already bound to a negotiation is a conflict, whatever
@@ -949,7 +956,7 @@ export class AssetRfqSwapService {
   /** For a payee-named Taxi only: the carrier read and its inventory, taken outside the queue. */
   private async prefetchCarrier(
     request: AssetRfqQuoteRequest,
-  ): Promise<{ carrier: CarrierRead; inventory?: ReadonlyMap<AssetLeg, bigint> | null } | undefined> {
+  ): Promise<{ carrier: CarrierRead; inventory?: ReadonlyMap<AssetLeg, bigint> | null } | null> {
     const pair = parseAssetPair(request.pair)
     const market =
       pair &&
@@ -957,7 +964,7 @@ export class AssetRfqSwapService {
         (m) => (pair.from === m.base && pair.to === m.quote) || (pair.from === m.quote && pair.to === m.base),
       )
     // The queued turn refuses each of these itself.
-    if (!pair || !market || pair.to === null) return undefined
+    if (!pair || !market || pair.to === null) return null
     const carrier = await this.resolveCarrier(request, market, pair.to)
     if (!carrier.ok || !carrierSettled(carrier.terms)) return { carrier }
     return { carrier, inventory: await this.carrierInventory(request, carrier.terms, pair.to) }
