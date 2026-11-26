@@ -4,72 +4,66 @@ import type { UnixSeconds } from '../shared/time.js'
 const MINUTE = 60
 const HOUR = 60 * MINUTE
 
-export const TIME_TO_COLLECT_THE_PAYMENT = 90 * MINUTE
-export const SPARE_TIME_AFTER_PAYOUT_IS_BACK = 15 * MINUTE
-export const SPARE_TIME_AFTER_TAKING_IT_BACK_ALONE = 30 * MINUTE
-export const LONGEST_A_PAYOUT_STAYS_LOCKED = 2 * HOUR
+export const TIME_TO_SETTLE = 90 * MINUTE
+export const SPARE_TIME_AFTER_REFUND_OPENS = 15 * MINUTE
+export const SPARE_TIME_AFTER_REFUND_ALONE = 30 * MINUTE
+export const LONGEST_A_FILL_STAYS_LOCKED = 2 * HOUR
 
 // The words are what clients and logs already see.
-export const PayoutRefusal = {
+export const FillRefusal = {
   InvoiceExpired: 'invoice_expired',
-  NobodyPaidYet: 'htlc_not_armed',
-  TooLittleTimeToCollect: 'settle_window_too_short',
-  PayoutComesBackTooLate: 'refund_deadline_too_late',
-  CannotTakeItBackAloneInTime: 'unilateral_recourse_after_htlc',
+  HoldNotArmed: 'htlc_not_armed',
+  TooLittleTimeToSettle: 'settle_window_too_short',
+  RefundOpensTooLate: 'refund_deadline_too_late',
+  RefundAloneOpensTooLate: 'unilateral_recourse_after_htlc',
 } as const
 
-export type PayoutRefusal = ValueOf<typeof PayoutRefusal>
+export type FillRefusal = ValueOf<typeof FillRefusal>
 
-/** How long our payout can stay away from us, in seconds. */
-interface PayoutAway {
-  readonly untilItComesBack: number
-  /** With the Arkade server gone. Null when the operator accepts not being covered for that. */
-  readonly untilWeTakeItBackAlone: number | null
+/** How long until our refund of the `to` leg opens, in seconds. */
+interface RefundTimes {
+  readonly untilRefundOpens: number
+  /** With the Arkade server gone. Null when the operator accepts having no such refund in time. */
+  readonly untilRefundAlone: number | null
 }
 
-// The payment waiting for us must not expire before each of these has passed. Checked in this order.
-const TIME_THE_PAYMENT_MUST_STILL_LAST: readonly [PayoutRefusal, (payout: PayoutAway) => number][] = [
-  [PayoutRefusal.TooLittleTimeToCollect, () => TIME_TO_COLLECT_THE_PAYMENT],
-  [PayoutRefusal.PayoutComesBackTooLate, (payout) => payout.untilItComesBack + SPARE_TIME_AFTER_PAYOUT_IS_BACK],
+// The held HTLC must not expire before each of these has passed. Checked in this order.
+const TIME_THE_HTLC_MUST_STILL_LAST: readonly [FillRefusal, (refund: RefundTimes) => number][] = [
+  [FillRefusal.TooLittleTimeToSettle, () => TIME_TO_SETTLE],
+  [FillRefusal.RefundOpensTooLate, (refund) => refund.untilRefundOpens + SPARE_TIME_AFTER_REFUND_OPENS],
   [
-    PayoutRefusal.CannotTakeItBackAloneInTime,
-    (payout) =>
-      payout.untilWeTakeItBackAlone === null
-        ? 0
-        : payout.untilWeTakeItBackAlone + SPARE_TIME_AFTER_TAKING_IT_BACK_ALONE,
+    FillRefusal.RefundAloneOpensTooLate,
+    (refund) => (refund.untilRefundAlone === null ? 0 : refund.untilRefundAlone + SPARE_TIME_AFTER_REFUND_ALONE),
   ],
 ]
 
 export interface ReceiveTerms {
   readonly invoiceExpiresAt: UnixSeconds
-  /** Null while nobody has paid the invoice. */
-  readonly paymentExpiresAt: UnixSeconds | null
-  readonly payoutComesBackAt: UnixSeconds
-  readonly secondsToTakeItBackAlone: number
-  readonly acceptsNotBeingCoveredWithoutArkade: boolean
+  /** Null while the hold is not armed. */
+  readonly htlcExpiresAt: UnixSeconds | null
+  readonly refundOpensAt: UnixSeconds
+  readonly secondsToRefundAlone: number
+  readonly acceptsNoRefundAlone: boolean
 }
 
-/** Why we must not pay the client out right now. Null when we may. Ask right before paying: the answer depends on the clock. */
-export const whatStopsThePayout = (terms: ReceiveTerms, now: UnixSeconds): PayoutRefusal | null => {
-  if (now >= terms.invoiceExpiresAt) return PayoutRefusal.InvoiceExpired
-  if (terms.paymentExpiresAt === null) return PayoutRefusal.NobodyPaidYet
-  const paymentStillLasts = terms.paymentExpiresAt - now
-  const payout: PayoutAway = {
-    untilItComesBack: terms.payoutComesBackAt - now,
-    untilWeTakeItBackAlone: terms.acceptsNotBeingCoveredWithoutArkade ? null : terms.secondsToTakeItBackAlone,
+/** Why the `to` leg must not be filled right now. Null when it may. Ask right before filling: the answer depends on the clock. */
+export const whatStopsTheFill = (terms: ReceiveTerms, now: UnixSeconds): FillRefusal | null => {
+  if (now >= terms.invoiceExpiresAt) return FillRefusal.InvoiceExpired
+  if (terms.htlcExpiresAt === null) return FillRefusal.HoldNotArmed
+  const htlcStillLasts = terms.htlcExpiresAt - now
+  const refund: RefundTimes = {
+    untilRefundOpens: terms.refundOpensAt - now,
+    untilRefundAlone: terms.acceptsNoRefundAlone ? null : terms.secondsToRefundAlone,
   }
-  const broken = TIME_THE_PAYMENT_MUST_STILL_LAST.find(([, needed]) => paymentStillLasts < needed(payout))
+  const broken = TIME_THE_HTLC_MUST_STILL_LAST.find(([, needed]) => htlcStillLasts < needed(refund))
   return broken ? broken[0] : null
 }
 
-/** How long a payment must be able to wait for us, so that an invoice asking for this much is never refused later. */
-export const timeAPaymentMustLast = (
-  secondsToTakeItBackAlone: number,
-  acceptsNotBeingCoveredWithoutArkade: boolean,
-): number => {
-  const payout: PayoutAway = {
-    untilItComesBack: LONGEST_A_PAYOUT_STAYS_LOCKED,
-    untilWeTakeItBackAlone: acceptsNotBeingCoveredWithoutArkade ? null : secondsToTakeItBackAlone,
+/** How long a held HTLC must last, so that an invoice asking for this much is never refused later. */
+export const timeTheHtlcMustLast = (secondsToRefundAlone: number, acceptsNoRefundAlone: boolean): number => {
+  const refund: RefundTimes = {
+    untilRefundOpens: LONGEST_A_FILL_STAYS_LOCKED,
+    untilRefundAlone: acceptsNoRefundAlone ? null : secondsToRefundAlone,
   }
-  return Math.max(...TIME_THE_PAYMENT_MUST_STILL_LAST.map(([, needed]) => needed(payout)))
+  return Math.max(...TIME_THE_HTLC_MUST_STILL_LAST.map(([, needed]) => needed(refund)))
 }

@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { evaluateReceiveFunding, minHtlcWindowFor } from '@arkade-os/solver-core/core/receive.js'
 import { rawDelaySeconds } from '@arkade-os/solver-core/core/timelocks.js'
 import {
-  timeAPaymentMustLast,
-  whatStopsThePayout,
+  timeTheHtlcMustLast,
+  whatStopsTheFill,
   type ReceiveTerms,
 } from '@arkade-os/solver-next/domain/swap/lightning_receive.js'
 import { t } from '../support.js'
@@ -14,45 +14,45 @@ const after = (seconds: number) => t(NOW + seconds)
 
 const terms = (override: Partial<ReceiveTerms> = {}): ReceiveTerms => ({
   invoiceExpiresAt: after(10 * MINUTE),
-  paymentExpiresAt: after(180 * MINUTE),
-  payoutComesBackAt: after(100 * MINUTE),
-  secondsToTakeItBackAlone: 60 * MINUTE,
-  acceptsNotBeingCoveredWithoutArkade: false,
+  htlcExpiresAt: after(180 * MINUTE),
+  refundOpensAt: after(100 * MINUTE),
+  secondsToRefundAlone: 60 * MINUTE,
+  acceptsNoRefundAlone: false,
   ...override,
 })
 
-describe('paying out a Lightning receive', () => {
-  it('is allowed when the invoice is valid, the payment waits, and there is time for everything', () => {
-    expect(whatStopsThePayout(terms(), NOW)).toBeNull()
+describe('filling a Lightning receive', () => {
+  it('is allowed when the invoice is valid, the hold is armed, and there is time for everything', () => {
+    expect(whatStopsTheFill(terms(), NOW)).toBeNull()
   })
 
-  it('stops on an invoice that expired, and while nobody has paid', () => {
-    expect(whatStopsThePayout(terms({ invoiceExpiresAt: NOW }), NOW)).toBe('invoice_expired')
-    expect(whatStopsThePayout(terms({ paymentExpiresAt: null }), NOW)).toBe('htlc_not_armed')
+  it('stops on an invoice that expired, and while the hold is not armed', () => {
+    expect(whatStopsTheFill(terms({ invoiceExpiresAt: NOW }), NOW)).toBe('invoice_expired')
+    expect(whatStopsTheFill(terms({ htlcExpiresAt: null }), NOW)).toBe('htlc_not_armed')
   })
 
-  it('stops when the payment expires in under 90 minutes', () => {
-    expect(whatStopsThePayout(terms({ paymentExpiresAt: after(90 * MINUTE - 1) }), NOW)).toBe('settle_window_too_short')
-    const justEnough = terms({ paymentExpiresAt: after(90 * MINUTE), payoutComesBackAt: after(75 * MINUTE) })
-    expect(whatStopsThePayout({ ...justEnough, secondsToTakeItBackAlone: 60 * MINUTE }, NOW)).toBeNull()
+  it('stops when the HTLC expires in under 90 minutes', () => {
+    expect(whatStopsTheFill(terms({ htlcExpiresAt: after(90 * MINUTE - 1) }), NOW)).toBe('settle_window_too_short')
+    const justEnough = terms({ htlcExpiresAt: after(90 * MINUTE), refundOpensAt: after(75 * MINUTE) })
+    expect(whatStopsTheFill({ ...justEnough, secondsToRefundAlone: 60 * MINUTE }, NOW)).toBeNull()
   })
 
-  it('stops when our payout would come back less than 15 minutes before the payment expires', () => {
-    const late = terms({ payoutComesBackAt: after(165 * MINUTE + 1) })
-    expect(whatStopsThePayout(late, NOW)).toBe('refund_deadline_too_late')
-    expect(whatStopsThePayout(terms({ payoutComesBackAt: after(165 * MINUTE) }), NOW)).toBeNull()
+  it('stops when our refund opens less than 15 minutes before the HTLC expires', () => {
+    const late = terms({ refundOpensAt: after(165 * MINUTE + 1) })
+    expect(whatStopsTheFill(late, NOW)).toBe('refund_deadline_too_late')
+    expect(whatStopsTheFill(terms({ refundOpensAt: after(165 * MINUTE) }), NOW)).toBeNull()
   })
 
-  it('stops when taking it back alone would end less than 30 minutes before the payment expires', () => {
-    const slow = terms({ secondsToTakeItBackAlone: 150 * MINUTE + 1 })
-    expect(whatStopsThePayout(slow, NOW)).toBe('unilateral_recourse_after_htlc')
-    expect(whatStopsThePayout({ ...slow, acceptsNotBeingCoveredWithoutArkade: true }, NOW)).toBeNull()
+  it('stops when our refund alone opens less than 30 minutes before the HTLC expires', () => {
+    const slow = terms({ secondsToRefundAlone: 150 * MINUTE + 1 })
+    expect(whatStopsTheFill(slow, NOW)).toBe('unilateral_recourse_after_htlc')
+    expect(whatStopsTheFill({ ...slow, acceptsNoRefundAlone: true }, NOW)).toBeNull()
   })
 
   it('asks an invoice for the longest of the times it will later check', () => {
-    expect(timeAPaymentMustLast(10 * MINUTE, false)).toBe(135 * MINUTE)
-    expect(timeAPaymentMustLast(200 * MINUTE, false)).toBe(230 * MINUTE)
-    expect(timeAPaymentMustLast(200 * MINUTE, true)).toBe(135 * MINUTE)
+    expect(timeTheHtlcMustLast(10 * MINUTE, false)).toBe(135 * MINUTE)
+    expect(timeTheHtlcMustLast(200 * MINUTE, false)).toBe(230 * MINUTE)
+    expect(timeTheHtlcMustLast(200 * MINUTE, true)).toBe(135 * MINUTE)
   })
 })
 
@@ -76,7 +76,7 @@ describe('the rules in production today', () => {
   const seconds = () => (next() < 0.5 ? EDGES[between(0, EDGES.length - 1)]! : between(-600, 5 * 3600))
   const RAW_DELAYS = [1, 6, 28, 144, 511, 512, 1024, 4096, 86_528, 5400, 9000, 9001]
 
-  it('give the same answer about paying out, on 300,000 random situations', () => {
+  it('give the same answer about filling, on 300,000 random situations', () => {
     for (let i = 0; i < 300_000; i++) {
       const now = between(1_700_000_000, 1_900_000_000)
       const raw = RAW_DELAYS[between(0, RAW_DELAYS.length - 1)]!
@@ -89,13 +89,13 @@ describe('the rules in production today', () => {
         now,
       }
       const today = evaluateReceiveFunding(input)
-      const ours = whatStopsThePayout(
+      const ours = whatStopsTheFill(
         {
           invoiceExpiresAt: t(input.invoiceExpiresAt),
-          paymentExpiresAt: input.htlcExpiresAt === null ? null : t(input.htlcExpiresAt),
-          payoutComesBackAt: t(input.refundLocktime),
-          secondsToTakeItBackAlone: rawDelaySeconds(raw),
-          acceptsNotBeingCoveredWithoutArkade: input.acceptUnilateralGap,
+          htlcExpiresAt: input.htlcExpiresAt === null ? null : t(input.htlcExpiresAt),
+          refundOpensAt: t(input.refundLocktime),
+          secondsToRefundAlone: rawDelaySeconds(raw),
+          acceptsNoRefundAlone: input.acceptUnilateralGap,
         },
         t(now),
       )
@@ -108,7 +108,7 @@ describe('the rules in production today', () => {
   it('ask an invoice for the same time', () => {
     for (const raw of RAW_DELAYS) {
       for (const accepts of [false, true]) {
-        expect(timeAPaymentMustLast(rawDelaySeconds(raw), accepts)).toBe(minHtlcWindowFor(raw, accepts))
+        expect(timeTheHtlcMustLast(rawDelaySeconds(raw), accepts)).toBe(minHtlcWindowFor(raw, accepts))
       }
     }
   })
