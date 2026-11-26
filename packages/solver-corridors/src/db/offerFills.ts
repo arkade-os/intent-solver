@@ -156,6 +156,13 @@ const toRow = (raw: Raw): OfferFillRow => ({
   rfqId: raw.rfq_id === null ? null : String(raw.rfq_id),
 })
 
+export interface DirectFillParentProof {
+  id: string
+  depositTxid: string
+  depositVout: number
+  offerPkScript: string
+}
+
 export class OfferFillStore {
   private constructor(
     readonly driver: SqlDriver,
@@ -340,6 +347,59 @@ export class OfferFillStore {
   async markSubmitting(id: string): Promise<boolean> {
     const result = await this.driver.run(sql.markSubmitting, [this.now(), id])
     return result.changes === 1
+  }
+
+  async recoverDirectFill(proof: DirectFillParentProof, fillTxid: string): Promise<boolean> {
+    return this.resolveDirectFill(proof, fillTxid, false)
+  }
+
+  async cancelDirectFill(proof: DirectFillParentProof, conflictTxid: string): Promise<boolean> {
+    return this.resolveDirectFill(proof, conflictTxid, true)
+  }
+
+  private async resolveDirectFill(proof: DirectFillParentProof, txid: string, cancelled: boolean): Promise<boolean> {
+    if (!/^[0-9a-f]{64}$/.test(txid)) return false
+    const moved = await this.driver.transaction(async () => {
+      const row = await this.findById(proof.id)
+      if (
+        !row ||
+        row.offerTxid !== proof.depositTxid ||
+        row.offerVout !== proof.depositVout ||
+        row.offerPkScript !== proof.offerPkScript
+      )
+        return false
+      const reason = `direct fill cancelled by confirmed conflict ${txid}`
+      const recovered = `direct fill recovered as ${txid}`
+      if (cancelled && row.state === 'stuck' && row.fillTxid === null && row.failureReason === reason) return true
+      if (!cancelled && row.fillTxid === txid && (row.state === 'filled' || row.failureReason?.startsWith(recovered)))
+        return true
+      if (row.state !== 'filling' && row.state !== 'stuck') return false
+      if (row.failureReason?.startsWith('direct fill cancelled by confirmed conflict ')) return false
+      if (row.fillTxid !== null && (cancelled || row.fillTxid !== txid)) return false
+      // A stuck row gave up its outpoint and a later row may hold it now: record the fill, never displace that row.
+      const holder =
+        cancelled || row.state !== 'stuck' ? undefined : await this.findLiveByOutpoint(row.offerTxid, row.offerVout)
+      const next: OfferFillState = cancelled || holder ? 'stuck' : 'filled'
+      const result = await this.driver.run(sql.resolveDirectFill, [
+        next,
+        this.now(),
+        cancelled ? null : txid,
+        cancelled ? reason : holder ? `${recovered} after ${holder.id} took its outpoint` : null,
+        proof.id,
+        row.state,
+        proof.depositTxid,
+        proof.depositVout,
+        proof.offerPkScript,
+        row.fillTxid,
+        row.failureReason,
+      ])
+      if (result.changes !== 1) return false
+      await this.recordEvent(proof.id, row.state, next, cancelled ? reason : txid)
+      return { from: row.state, to: next }
+    })
+    if (typeof moved === 'boolean') return moved
+    if (moved.from !== moved.to) announceTransition(this.onTransition, proof.id, moved.from, moved.to)
+    return true
   }
 
   /** @see BaseSwapStore.onTransition — this store carries its own `transition`. */

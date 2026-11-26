@@ -23,11 +23,11 @@ const record = (over: Record<string, unknown> = {}) => ({
   ...over,
 })
 
-const build = async (opts: { serving?: boolean } = {}) => {
+const build = async (opts: { serving?: boolean; recovering?: boolean } = {}) => {
   const serving = opts.serving ?? true
-  const offerStore = serving ? await OfferFillStore.open(':memory:', () => 1_000_000) : null
+  const offerStore = serving || opts.recovering ? await OfferFillStore.open(':memory:', () => 1_000_000) : null
   const offerRefusals = createOfferRefusalTail()
-  const services = { offerStore, offerRefusals } as never
+  const services = { offerStore, offerRefusals, assetOffers: serving ? {} : null } as never
   return { app: buildAdminApp({ services, startedAt: 1, mode: 'relay' }), offerStore, offerRefusals }
 }
 
@@ -138,6 +138,14 @@ describe('GET /api/offers: a deployment serving no market', () => {
     const { app } = await build()
     const { body } = await get(app)
     expect(body.serving).toBe(true)
+  })
+
+  it('reports serving false, and still lists rows, for a store opened only to recover a journalled fill', async () => {
+    const { app, offerStore } = await build({ serving: false, recovering: true })
+    await offerStore!.insertIntent(record())
+    const { body } = await get(app)
+    expect(body.serving).toBe(false)
+    expect(body.offers).toHaveLength(1)
   })
 })
 

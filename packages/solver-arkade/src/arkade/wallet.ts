@@ -59,6 +59,7 @@ import { operatorHolds } from './cosignerKey.js'
 import { virtualTxPages, vtxoPages } from './indexerPaging.js'
 import { SharedSyncIndexerProvider, TimedArkadeProvider, TimedIndexerProvider } from './latencyProviders.js'
 import { createReservationLedger, type ReservationLedger } from './reservations.js'
+import { DirectFillAttempts } from './directFillAttempts.js'
 
 /** What {@link claimSwapScript} spends; CovenantSwapScript satisfies it. */
 export interface ClaimableScript {
@@ -196,6 +197,7 @@ export interface ArkadeContext {
    * agree on nothing. @see reservations.ts
    */
   reservations: ReservationLedger
+  directFills: DirectFillAttempts
   /** Drain wallet resources before checkpointing and releasing SQLite. */
   close(): Promise<void>
 }
@@ -381,6 +383,13 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
     })
     for (const notice of notices) log(notice)
 
+    const reservations = createReservationLedger()
+    const directFills = await DirectFillAttempts.open(
+      executor,
+      reservations,
+      `${config.operatorUrl}:${hex.encode(wallet.arkServerPublicKey)}:${hex.encode(await identity.xOnlyPublicKey())}`,
+      hex.encode(ArkAddress.decode(await wallet.getAddress()).pkScript),
+    )
     return {
       wallet,
       identity,
@@ -391,7 +400,8 @@ export const createArkadeContext = async (config: ArkadeWalletConfig): Promise<A
       vtxoMinSats,
       timelockUnit: advertisedUnit,
       hrp: config.arkadeHrp,
-      reservations: createReservationLedger(),
+      reservations,
+      directFills,
       close,
     }
   } catch (error) {
