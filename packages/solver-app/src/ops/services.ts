@@ -981,8 +981,8 @@ export const createServices = async (
       // x-only, as the offer carries it; the hash-lock corridors store the compressed form instead.
       return key === null ? null : hex.encode(xOnlyPubkey(hex.decode(key)))
     },
-    depositAt: async (offerPkScript, depositLeg) =>
-      largestOfferOutpoint(await liveOfferOutpoints(arkade, offerPkScript), depositLeg),
+    depositAt: async (offerPkScript, depositLeg, acceptDeposit) =>
+      largestOfferOutpoint(await liveOfferOutpoints(arkade, offerPkScript), depositLeg, acceptDeposit),
     // AVAILABLE, never total, and read fresh per decision. @see offerInventory.ts
     balance: async () => offerInventoryFrom(await arkade.wallet.getBalance()),
     fetchPrice: createPriceFeed(),

@@ -226,10 +226,6 @@ const assetMarketEntry = (
   }
   const baseAsset = cardAsset(market.base, market.baseDecimals, network)
   const quoteAsset = cardAsset(market.quote, market.quoteDecimals, network)
-  // Refused at `assetRfq.ts` for want of a covenant, so naming one is a lie.
-  if (market.base !== null && market.quote !== null) {
-    throw new Error(`an asset market where neither leg is BTC cannot be served, so it is not advertised`)
-  }
   // The CONFIGURED leg order, base then quote, is what the card publishes —
   // while `marketKeyForPair` sorts its two arkade legs, so the two disagree
   // for an asset id sorting before `btc`. Pre-existing; reachability is

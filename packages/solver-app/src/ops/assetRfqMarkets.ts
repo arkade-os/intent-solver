@@ -119,7 +119,6 @@ export const assetRfqMarketsFrom = (
 ): readonly AssetRfqMarket[] =>
   pricing.flatMap((market) => {
     if (!market.servesRfq || market.symbol === null) return []
-    if (market.base !== null && market.quote !== null) return []
     const sellBase = market.rfqSellBase ? (market.sellBase ?? CLOSED) : CLOSED
     const buyBase = market.rfqBuyBase ? (market.buyBase ?? CLOSED) : CLOSED
     if (sellBase.max === 0n && buyBase.max === 0n) return []
@@ -139,7 +138,7 @@ export const assetRfqMarketsFrom = (
         buyBase,
         feedUrl: market.feedUrl,
         pricePath: market.pricePath,
-        carrierSats: carrierSatsFor(market.carrierMode, carrier),
+        carrierSats: market.base === null || market.quote === null ? carrierSatsFor(market.carrierMode, carrier) : 0n,
       },
     ]
   })
@@ -240,7 +239,7 @@ const unionBounds = (...bounds: Array<Bounds | null | undefined>): Bounds | unde
   }
 }
 
-/** Projects console rows onto the union of directions the offer and RFQ paths actually serve. */
+/** Projects market directions suited to the card's client transport. */
 export const assetCardMarketsFromPolicy = (args: {
   pricing: readonly AssetMarketPricingView[]
   offerMarkets: readonly AssetMarket[]
@@ -257,7 +256,8 @@ export const assetCardMarketsFromPolicy = (args: {
     const pricing = args.pricing.find(
       (candidate) => candidate.base === market.base && candidate.quote === market.quote,
     )!
-    const servesOffers = args.offerMarkets.some((pair) => samePair(pricing, pair))
+    const hasBtc = market.base === null || market.quote === null
+    const servesOffers = hasBtc && args.offerMarkets.some((pair) => samePair(pricing, pair))
     const rfq = args.rfqMarkets.find((candidate) => candidate.base === market.base && candidate.quote === market.quote)
     if (!servesOffers && !rfq) return []
 
@@ -265,7 +265,7 @@ export const assetCardMarketsFromPolicy = (args: {
     // skips a charge we take is refused by the client's floor on every quote.
     const charges =
       (servesOffers && args.chargesDeliveredCarrier === true) ||
-      (rfq !== undefined && carrierPriced(pricing.carrierMode, args.rfqCarrierPricedByDefault))
+      (hasBtc && rfq !== undefined && carrierPriced(pricing.carrierMode, args.rfqCarrierPricedByDefault))
     const sellBase = unionBounds(servesOffers ? market.sellBase : undefined, rfq?.sellBase)
     const buyBase = unionBounds(servesOffers ? market.buyBase : undefined, rfq?.buyBase)
     return [

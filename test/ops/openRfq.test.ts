@@ -107,6 +107,37 @@ const source = () => ({
 })
 
 describe('public price previews', () => {
+  it('bids in both directions of a two-asset market only with nonce RFQs enabled', async () => {
+    const other = 'cd'.repeat(34)
+    const services = source()
+    const market = {
+      ...services.assetRfqMarkets[0]!,
+      quote: other,
+      baseDecimals: 6,
+      quoteDecimals: 6,
+    }
+    const preview = openRfqPreview({ ...services, assetRfqMarkets: [market] } as unknown as Services, {
+      fetchPrice: async () => ({ mantissa: 2n, scale: 0 }),
+    })
+    services.arkade.wallet.getBalance.mockResolvedValue({
+      available: 0,
+      availableAssets: [
+        { assetId: asset, amount: 1000n },
+        { assetId: other, amount: 1000n },
+      ],
+    })
+    const from = `arkade:bitcoin/asset:${asset}`
+    const to = `arkade:bitcoin/asset:${other}`
+    const sell = open(`${from}->${to}`, '100')
+    const buy = open(`${to}->${from}`, '100', 'to')
+    services.policy.rfqContractVersions = [RFQ_ASSET_SWAP_DIRECTED]
+    expect(await preview(sell)).toBeUndefined()
+    services.policy.rfqContractVersions = [RFQ_ASSET_SWAP_DIRECTED_NONCE]
+    expect(await preview(sell)).toMatchObject({ from_amount: '100', to_amount: '200' })
+    expect(await preview(buy)).toMatchObject({ from_amount: '200', to_amount: '100' })
+    expect(services.assetRfqService.quote).not.toHaveBeenCalled()
+  })
+
   it('prices an asset amount beyond double precision without reserving or opening a swap', async () => {
     const services = source()
     const preview = openRfqPreview(services as unknown as Services, {

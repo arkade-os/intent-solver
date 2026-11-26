@@ -70,10 +70,7 @@ const PK_SCRIPT_HEX = z
  * anyway would fund an address derived from a value the solver never read, and
  * the mismatch would surface as a deposit at a script nothing watches.
  *
- * The pair is validated for SHAPE only — length, so the § 2 maximum of two full
- * asset legs is admitted. Whether it is SERVED, and whether it is even
- * expressible as an offer packet, is `core/assetRfq.ts`'s decision, so the two
- * refusals stay distinguishable.
+ * The pair is length-checked here. The service checks the legs, market and negotiated contract.
  */
 export const AssetRfqRequest = z
   .object({
@@ -131,8 +128,7 @@ export const assetRfqQuotePayload = (
   // comparable as numbers.
   from_amount: row.fromAmount.toString(),
   to_amount: row.toAmount.toString(),
-  // NOT a fee: already netted into the amounts above, published so a client can
-  // fund a deposit, or aim at a payout, exactly.
+  // Two-asset quotes publish the physical carrier, which cancels across the two legs.
   ...(carrierSats > 0n ? { carrier_sats: carrierSats.toString() } : {}),
   solver_pubkey: row.solverPubkey,
   valid_until: row.validUntil,

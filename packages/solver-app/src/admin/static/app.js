@@ -1992,22 +1992,27 @@ const row = (label, explain, controls, hidden = false) => [
   h('span.span2', { hidden }, controls),
 ]
 
-/** The market's symbol names its asset; until it has one, the issuer's ticker stands in, display only. */
-const nameOf = (leg) =>
-  leg === assetLeg(marketDraft)
-    ? String(marketDraft.symbol ?? '')
-        .trim()
-        .toUpperCase() ||
-      tickerSymbol(assetLabels.get(String(marketDraft[leg] ?? '').trim())?.label) ||
-      'asset'
-    : isBtcLeg(marketDraft[leg])
-      ? 'BTC'
-      : shortId(marketDraft[leg])
+const draftAssetLeg = () => (marketDraft.marketKey ? assetLeg(marketDraft) : 'quote')
+const twoAssetDraft = () => !isBtcLeg(marketDraft[draftAssetLeg() === 'quote' ? 'base' : 'quote'])
+
+const nameOf = (leg) => {
+  const id = String(marketDraft[leg] ?? '').trim()
+  if (leg !== draftAssetLeg() && isBtcLeg(id)) return 'BTC'
+  const ticker = tickerSymbol(assetLabels.get(id)?.label)
+  if (twoAssetDraft()) return ticker ?? (id ? shortId(id) : 'asset')
+  return (
+    String(marketDraft.symbol ?? '')
+      .trim()
+      .toUpperCase() ||
+    ticker ||
+    'asset'
+  )
+}
 
 const arrow = (side) => `${nameOf(side.gives)} → ${nameOf(side.receives)}`
 
 const pairName = () =>
-  (assetLeg(marketDraft) === 'base' ? [nameOf('quote'), nameOf('base')] : [nameOf('base'), nameOf('quote')]).join(' ⇄ ')
+  (draftAssetLeg() === 'base' ? [nameOf('quote'), nameOf('base')] : [nameOf('base'), nameOf('quote')]).join(' ⇄ ')
 
 /** Retried only after a reload: a failure that repainted into a fresh lookup would ask forever. */
 const lookupFailed = new Set()
@@ -2020,7 +2025,7 @@ const issuerLabel = (id) => {
     entry.hooked = true
     entry.ready.then(() => {
       if (!entry.label) lookupFailed.add(id)
-      if (marketDraft?.[assetLeg(marketDraft)] !== id) return
+      if (!marketDraft || marketDraft[draftAssetLeg()] !== id) return
       fillFromLookup()
       schedulePreview()
     })
@@ -2058,16 +2063,16 @@ const offeredSymbol = (id, label) =>
 /** A new market only: a saved row's symbol and decimals are the operator's, whatever the issuer says now. */
 const fillFromLookup = () => {
   if (marketDraft.marketKey) return false
-  const leg = assetLeg(marketDraft)
+  const leg = draftAssetLeg()
   const id = String(marketDraft[leg] ?? '').trim()
   const label = issuerLabel(id)
-  const offered = offeredSymbol(id, label)
+  const offered = twoAssetDraft() ? null : offeredSymbol(id, label)
   const symbol = fill('symbol', offered && !symbolsTaken().has(offered) ? offered : '')
   return fill(`${leg}Decimals`, String(issuerDecimals(label) ?? '')) || symbol
 }
 
 const fillLimits = (feed) => {
-  if (!marketDraft || marketDraft.marketKey || assetLeg(marketDraft) !== 'quote' || feed?.state !== 'resolved') {
+  if (!marketDraft || marketDraft.marketKey || twoAssetDraft() || feed?.state !== 'resolved') {
     return false
   }
   const limits = limitDefaults(feed, marketDraft.quoteDecimals)
@@ -2115,7 +2120,7 @@ const feedReadout = () => {
 }
 
 const assetNote = (id, label, issuer, said) => {
-  if (id === '') return 'BTC is always the other side'
+  if (id === '') return 'paste an Arkade asset id'
   if (!ASSET_ID.test(id)) return 'an asset id is 68 lowercase hex characters'
   if (label === undefined) return 'looking up the asset…'
   if (label === null) return 'the asset lookup failed — enter its decimals'
@@ -2370,13 +2375,15 @@ const fieldName = (key) => {
 }
 
 const carrierText = (sample, legs, carrier) =>
-  sample.carrierCharged !== '0'
-    ? `${sats(sample.carrierCharged)} sats, paid by the client`
-    : sample.carrierReturned !== '0'
-      ? `${sats(sample.carrierReturned)} sats paid back, included in what they receive`
-      : legs.from === 'BTC'
-        ? `not charged: we pay the ${carrier.sats} sats`
-        : 'not paid back'
+  legs.from !== 'BTC' && legs.to !== 'BTC'
+    ? `${carrier.sats} sats on each leg`
+    : sample.carrierCharged !== '0'
+      ? `${sats(sample.carrierCharged)} sats, paid by the client`
+      : sample.carrierReturned !== '0'
+        ? `${sats(sample.carrierReturned)} sats paid back, included in what they receive`
+        : legs.from === 'BTC'
+          ? `not charged: we pay the ${carrier.sats} sats`
+          : 'not paid back'
 
 const quoteResult = (side, feed) => {
   const { samples = [], legs, carrier, breakEven, samplesReason } = previewData
@@ -2467,7 +2474,7 @@ const previewBody = () => {
 }
 
 const quoteBody = () => {
-  if (!marketDraft.marketKey && !ASSET_ID.test(String(marketDraft[assetLeg(marketDraft)] ?? '').trim())) {
+  if (!marketDraft.marketKey && !ASSET_ID.test(String(marketDraft[draftAssetLeg()] ?? '').trim())) {
     return h('p.muted', 'Paste the asset id to price this market.')
   }
   if (previewError) return h('p.muted', previewError)
@@ -2554,17 +2561,20 @@ let formArgs = []
 const marketForm = (save = saveMarket, close = () => ((marketDraft = null), render()), saveLabel = 'Save') => {
   formArgs = [save, close, saveLabel]
   const saved = Boolean(marketDraft.marketKey)
-  const leg = assetLeg(marketDraft)
+  const leg = draftAssetLeg()
+  const assetPair = twoAssetDraft()
   const id = String(marketDraft[leg] ?? '').trim()
   const label = issuerLabel(id)
   const issuer = issuerDecimals(label)
   const sides = directions(marketDraft)
   const [btcIn, assetIn] = sides
-  const offered = offeredSymbol(id, label)
+  const offered = assetPair ? null : offeredSymbol(id, label)
   const taken = offered !== null && symbolsTaken().has(offered)
   const savedSymbol = (state.data.markets?.markets ?? []).find((row) => row.marketKey === marketDraft.marketKey)?.symbol
   // From what was saved or offered, never from the typed value, so the box being typed into stays shown.
-  const askSymbol = saved ? !savedSymbol : ASSET_ID.test(id) && label !== undefined && (offered === null || taken)
+  const askSymbol = saved
+    ? !savedSymbol
+    : assetPair || (ASSET_ID.test(id) && label !== undefined && (offered === null || taken))
   const symbol = String(marketDraft.symbol ?? '')
     .trim()
     .toUpperCase()
@@ -2606,8 +2616,8 @@ const marketForm = (save = saveMarket, close = () => ((marketDraft = null), rend
     h(
       'div.form-grid',
       row(
-        'Asset',
-        'The asset this market trades against BTC. Its name, ticker and decimals are metadata the issuer chose; nothing checks them.',
+        assetPair ? 'Quote asset' : 'Asset',
+        'The asset name, ticker and decimals come from issuer metadata. To trade against a second asset, set its ID under Advanced.',
         [
           h('input', {
             'aria-label': 'asset id',
@@ -2692,6 +2702,7 @@ const marketForm = (save = saveMarket, close = () => ((marketDraft = null), rend
             marketDraft.carrierMode === 'inherit' ? ' Following the deployment default (Advanced).' : '',
           ),
         ],
+        assetPair,
       ),
       row(
         'Price feed',
@@ -2735,6 +2746,35 @@ const marketForm = (save = saveMarket, close = () => ((marketDraft = null), rend
         'div.form-grid',
         group('decimals and symbol'),
         row(
+          'Base asset ID',
+          'Leave BTC here for a bitcoin market. Enter an Arkade asset ID to trade two assets.',
+          [
+            h('input', {
+              'aria-label': 'base asset id',
+              value: marketDraft.base,
+              readonly: saved,
+              oninput: (e) => {
+                const id = e.target.value.trim()
+                if (id !== marketDraft.base) marketDraft.baseDecimals = isBtcLeg(id) ? '8' : ''
+                if (isBtcLeg(id) !== isBtcLeg(marketDraft.base)) {
+                  for (const { min, max } of sides) {
+                    for (const key of [min, max]) {
+                      if (marketDraft.filled?.[key] === marketDraft[key] && !marketDraft.typed?.has(key)) {
+                        marketDraft[key] = ''
+                      }
+                    }
+                  }
+                }
+                marketDraft.base = id
+                if (ASSET_ID.test(String(marketDraft.quote ?? '').trim()) && adoptSavedPair()) return
+                fillFromLookup()
+                schedulePreview()
+              },
+            }),
+          ],
+          saved && !assetPair,
+        ),
+        row(
           'Decimals',
           "Digits after the point in each leg's smallest unit; bitcoin has 8. A wrong value misprices by a power of " +
             'ten — 100× for 6 against 8 — and the preview cannot show it, because it divides by the same digits.',
@@ -2776,8 +2816,8 @@ const marketForm = (save = saveMarket, close = () => ((marketDraft = null), rend
         ),
         row(
           'Flat fee',
-          'A fixed amount taken from what the client sends, before the margin. Keep it at 0 while the client pays ' +
-            `the carrier; with the carrier off, ${toHuman(sats, 8)} BTC on ${arrow(btcIn)} covers it.`,
+          'A fixed amount taken from what the client sends, before the margin.' +
+            (assetPair ? '' : ` With the carrier off, ${toHuman(sats, 8)} BTC on ${arrow(btcIn)} covers it.`),
           sides.map(flatFee),
         ),
         row(
@@ -2803,23 +2843,28 @@ const marketForm = (save = saveMarket, close = () => ((marketDraft = null), rend
             'A switched-off market is served by nothing. It stays set up, so turning it back on does not mean retyping the asset id.',
           ),
         ]),
-        row('Carrier', null, [
-          h(
-            'label.check.toolbar',
-            h('input', {
-              type: 'checkbox',
-              'aria-label': 'follow the deployment default',
-              checked: marketDraft.carrierMode === 'inherit',
-              oninput: (e) => (
-                (marketDraft.carrierMode = e.target.checked ? 'inherit' : carrierModeFor(carrierDefaultDraft)),
-                schedulePreview()
-              ),
-            }),
-            'follow the deployment default',
-          ),
-          h('span.note', `deployment default: ${carrierPolicyLine()}`),
-          state.view === 'pricing' ? null : carrierDefaultField(),
-        ]),
+        row(
+          'Carrier',
+          null,
+          [
+            h(
+              'label.check.toolbar',
+              h('input', {
+                type: 'checkbox',
+                'aria-label': 'follow the deployment default',
+                checked: marketDraft.carrierMode === 'inherit',
+                oninput: (e) => (
+                  (marketDraft.carrierMode = e.target.checked ? 'inherit' : carrierModeFor(carrierDefaultDraft)),
+                  schedulePreview()
+                ),
+              }),
+              'follow the deployment default',
+            ),
+            h('span.note', `deployment default: ${carrierPolicyLine()}`),
+            state.view === 'pricing' ? null : carrierDefaultField(),
+          ],
+          assetPair,
+        ),
       ),
     ),
     h('p.toolbar', h('button.act', { onclick: save }, saveLabel), h('button.act', { onclick: close }, 'Close editor')),
@@ -2997,7 +3042,8 @@ const applyPricingDraft = async () => {
   if (!pricingDraft.size || pricingDraft.busy) return
   const unbounded = [...pricingDraft.markets.values()].flatMap((body) =>
     unboundedOpenDirections(body).map((side) => {
-      const name = (leg) => (isBtcLeg(body[leg]) ? 'BTC' : body.symbol || 'the asset')
+      const twoAssets = !isBtcLeg(body.base) && !isBtcLeg(body.quote)
+      const name = (leg) => (twoAssets ? shortId(body[leg]) : isBtcLeg(body[leg]) ? 'BTC' : body.symbol || 'the asset')
       return `${name(side.gives)} → ${name(side.receives)}`
     }),
   )

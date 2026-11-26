@@ -1490,12 +1490,11 @@ neither standing nor on chain: it expires at `valid_until`, and until the client
 itself deposits, nothing exists anywhere that anyone could take. A solver MUST
 NOT publish standing offers in order to serve this corridor.
 
-**Pairs.** `arkade:BTC->arkade:<68-hex>` and `arkade:<68-hex>->arkade:BTC`, with
-the asset leg written as a literal asset id per § 2. **Exactly one leg may name
-an asset.** This is not a policy choice: `encodeOffer` refuses a packet naming
-both a want asset and an offer asset, or neither, so an `arkade:<A>->arkade:<B>`
-offer is not expressible at all. A solver MUST refuse such a pair with
-`unsupported_pair` at quote time rather than discovering it at fill time.
+**Pairs.** The corridor quotes BTC/asset and pairs of two distinct Arkade
+assets. Each asset leg is a literal lowercase 68-hex asset ID per § 2. Two
+asset legs require `asset-swap-directed-nonce`. The covenant binds the payout
+asset and amount. The solver checks the funded output against the input asset
+and amount in the recorded quote before filling.
 
 **Both amount sides.** `amount_side` is `"from"` or `"to"`. § 4.2 gives how
 exact-out resolves `from_amount`.
@@ -1574,26 +1573,13 @@ A solver serving this corridor therefore has no refund sweep and no
 operator-forced refund, and their absence is a fact about the covenant rather
 than a missing feature.
 
-**Discovery: this corridor is not advertisable on a registry card today, and it
-does not need to be.** The card classifies a market by its LEGS, not by how the
-market is reached: with both legs on `arkade` it is a **spot** market, priced by
-`price_feed` and understood to be filled through the extension-packet path,
-while a **corridor** (RFQ) market is one with at least one non-arkade leg and is
-what `transports`/`discovery_pubkey` exist for. A cross-asset, both-legs-arkade
-market negotiated over RFQ falls between those two, and there is no field
-meaning "this arkade-to-arkade market is also negotiable over RFQ".
-
-That is a **discovery** gap, not a functional one. A directed `rfq_request` needs
-only the solver's `discovery_pubkey` and a relay, both of which a taker that
-already knows the solver has — so the corridor is fully usable without any card
-entry, and this is how it is expected to be reached in v1. What a taker must
-therefore already know, out of band, is: the solver's pubkey, a relay it is
-reachable on, and the exact pair string (asset id included, lowercase). What it
-cannot do is DISCOVER those from a published card, so this corridor will not be
-found by a client browsing the registry. Closing that gap is a schema change to
-`@arkade-os/solver-discovery` and is deliberately not made here; `transports` is
-the wrong home for it, since that map means "address a message to the solver"
-rather than "this market accepts negotiation".
+**Discovery.** A signed solver card can list two distinct Arkade asset IDs and
+the enabled RFQ directions when the nonce contract version is available and
+`relay.url` identifies the relay that receives directed requests.
+Open RFQs use those directions for indicative bids. A client selects a solver
+and negotiates the binding quote via directed RFQ. A client that knows the
+solver's key, a relay and the pair can also send a directed RFQ when the
+market's feed cannot be represented in the card schema.
 
 ## 8. Lifecycle
 
@@ -1905,11 +1891,6 @@ have a tested reference in this repo.
   class over RFQ (§ 7.2.1) gets the solver a price it chose without one, because
   the client funds an offer carrying the quoted terms — where a published offer
   would be a standing on-chain commitment with no expiry, i.e. a free option.
-  Still open: whether an arkade-to-arkade market can be ADVERTISED as
-  RFQ-negotiable at all. The registry card classifies a market by its legs, so
-  both-legs-arkade reads as spot and therefore as packet-only, and no field means
-  "also negotiable over RFQ" (§ 7.2.1). Until one exists, a taker must already
-  know the solver's pubkey, a relay, and the exact pair string.
 - **Canonical Ethereum HTLC contract — RESOLVED for 7.1.5**: Boltz
   `ERC20Swap`, addressed by configuration so any EVM chain can serve it. Still
   open: whether a published third-party audit is required before mainnet.

@@ -600,17 +600,22 @@ is who names the price, so the covenant is derived from the row it negotiated
 rather than read off a packet, and the quote binds for a window instead of
 standing open.
 
-Console rows are the live serve list. Add `BTC/<asset id>` plus a feed and the
-next RFQ quotes it; disable or delete refuses new quotes. No restart. The RFQ
-store and service are always constructed, even with an empty list, so a first
-dashboard row has something to attach to. The discovery card (`#discovery`) is
-assembled from those live rows.
+Console rows are the live serve list. Add `BTC/<asset id>` or two distinct
+Arkade asset IDs plus a feed and payout limits. For two assets, enter the base
+asset ID under **Advanced** and give the market its own symbol. Enable
+**answer RFQ quotes**. Two-asset quotes require `asset-swap-directed-nonce`
+in `rfq.contractVersions`. Disabling or deleting a row stops new quotes
+without a restart. The RFQ store and service are always constructed, even
+with an empty list. The discovery card (`#discovery`) is assembled from those
+live rows. To advertise a market, use a feed whose base precision is at
+least its quote precision, as the card schema requires non-negative
+`price_decimals`.
 
 Listing an `arkade` asset is optional. It names the market's symbol and can close
 a direction through its corridor key, `corridors["USDA->arkade:BTC"].enabled`
 for the client giving the asset and `corridors["arkade:BTC->USDA"].enabled` for
-the client receiving it. Unlisted, every enabled console market RFQ can express
-is still served — one asset leg, at least one open direction. A listed asset with
+the client receiving it. These settings seed BTC/asset markets. Two-asset
+markets declare their symbol and directions on the market row. A listed asset with
 no console row is omitted rather than taking the process down. These settings
 **seed** a row's serving once, at the first boot that finds it; after that the
 row is what the solver reads, the console edits it live, and its **Revert to
@@ -622,6 +627,10 @@ price, then removes `feeBps` from the converted payout. A flat fee that consumes
 the input refuses `pricing_unavailable`. For a BTC/asset market, set the fee on
 the BTC input direction to the carrier dust the solver spends when it delivers
 the asset; the opposite direction can remain zero.
+
+For two assets, the deposit and payout each carry the Arkade Service's dust
+amount. The signed quote reports the sats needed to fund the deposit, and both
+quoted amounts remain in the respective assets' atomic units.
 
 | Setting                            | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |

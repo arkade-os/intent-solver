@@ -135,6 +135,24 @@ describe('POST /api/pricing/preview — asset markets', () => {
     await adminStore.close()
   })
 
+  it('quotes two assets with no carrier fee or BTC break-even', async () => {
+    const { app, adminStore, fetchPrice } = await build()
+    fetchPrice.mockResolvedValue(priceFrom('2'))
+    const market = marketBody({ base: 'ee'.repeat(34), baseDecimals: 6, feeBps: 0, carrierMode: 'priced' })
+    expect((await save(app, market)).ok).toBe(true)
+    const { body } = await preview(app, {
+      target: 'market',
+      market,
+      direction: 'sell_base',
+      side: 'from',
+      amount: '10000',
+    })
+    expect(body.carrier).toEqual({ priced: false, sats: '330', charged: '0', returned: '0' })
+    expect(body.breakEven).toEqual({ kind: 'none' })
+    expect(body.samples).toMatchObject([{ ok: true, fromAmount: '10000', toAmount: '20000' }])
+    await adminStore.close()
+  })
+
   it('equals a real quote at the same inputs', async () => {
     const { app, adminStore } = await build()
     await save(app, marketBody())

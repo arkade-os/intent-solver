@@ -134,6 +134,35 @@ describe('fulfillOffer refuses before it spends', () => {
     expect(reserve).toHaveBeenCalledWith([expect.objectContaining({ txid: coin.txid, vout: coin.vout })])
     expect(release).toHaveBeenCalledTimes(1)
   })
+
+  it('adds sats for asset change under a higher VTXO minimum', async () => {
+    const paying = { ...coin, value: 330, assets: [{ assetId: ASSET_ID, amount: 1_000n }] }
+    const topUp = { ...coin, txid: 'c'.repeat(64), value: 670 }
+    const reserve = vi.fn(() => () => {})
+    const spending = ctx(
+      { getSpendableVtxos: async () => [paying, topUp] },
+      { reservations: { reserve, reserved: () => new Set<string>() } },
+    )
+    const offer = offerWith({ wantAsset: asset.AssetId.fromString(ASSET_ID) })
+    offer.swapPkScript = offerVtxoScript(offer, SERVER).pkScript
+
+    await expect(
+      fulfillOffer(
+        spending,
+        'http://emulator.test',
+        offer,
+        { ...deposit, value: 1_000 },
+        {
+          minAssetOutputSats: 1_000n,
+          markSubmitting: async () => false,
+        },
+      ),
+    ).rejects.toThrow(/already holds the fill/)
+    expect(reserve).toHaveBeenCalledWith([
+      expect.objectContaining({ txid: paying.txid }),
+      expect.objectContaining({ txid: topUp.txid }),
+    ])
+  })
 })
 
 describe('which refusals a caller may retry', () => {

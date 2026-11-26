@@ -124,6 +124,7 @@ const spentOutpointsIn = (error: unknown): string[] | null => {
 }
 
 export interface FulfillOptions {
+  minAssetOutputSats?: bigint
   /** Overrides the wallet's own indexer for the spend probe. @see depositSpentBy */
   probe?: DepositSpendProbe
   /**
@@ -202,7 +203,7 @@ export const fulfillOffer = async (
 
   // What output[0] must carry in SATS. An asset-wanting maker is paid through
   // the asset packet, so its BTC leg is only this server's own dust (§ 4.1).
-  const carrierSats = ctx.dustSats
+  const carrierSats = options?.minAssetOutputSats ?? ctx.dustSats
   const makerSats = wantedAssetId === undefined ? wantAmount : carrierSats
 
   // Coins that carry the wanted ASSET when there is one, otherwise coins that
@@ -217,6 +218,15 @@ export const fulfillOffer = async (
       // taker's side from what the declared inputs carry — a subtraction here
       // would duplicate a job already discharged there.
       funding = selectCoinsWithAsset(free, wantedAssetId, wantAmount).selected
+      if (options?.minAssetOutputSats !== undefined) {
+        const inputsSats = funding.reduce((total, coin) => total + BigInt(coin.value), BigInt(deposit.value))
+        const extra = makerSats + options.minAssetOutputSats - inputsSats
+        if (extra > 0n) {
+          const used = new Set(funding.map((coin) => outpointKey(coin.txid, coin.vout)))
+          const rest = free.filter((coin) => !used.has(outpointKey(coin.txid, coin.vout)))
+          funding = [...funding, ...selectVirtualCoins(rest, assertSafeAmount(extra)).inputs]
+        }
+      }
     }
   } catch (error) {
     const held = free.reduce((total, coin) => total + BigInt(coin.value), 0n)
@@ -300,6 +310,11 @@ export const fulfillOffer = async (
 
 /** The maker's script, hex, for logging a fill against its offer. */
 export const makerScriptHex = (offer: Offer): string => hex.encode(offer.makerPkScript)
+
+const assertSafeAmount = (sats: bigint): number => {
+  if (sats > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error(`required funding of ${sats} sats exceeds a safe integer`)
+  return Number(sats)
+}
 
 /**
  * Assets a coin carries, normalised.

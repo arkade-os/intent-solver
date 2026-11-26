@@ -261,8 +261,9 @@ const priceLadder = (
     direction === 'sell_base' ? { from: market.base, to: market.quote } : { from: market.quote, to: market.base }
   const bounds = (direction === 'sell_base' ? market.sellBase : market.buyBase) ?? { min: 0n, max: 0n }
   const priced: AssetQuoteMarket = { ...market, minPayout: bounds.min, maxPayout: bounds.max }
-  const carrierSats = carrierSatsFor(market.carrierMode, { dustSats: deps.services.arkade.dustSats, pricedByDefault })
   const dustSats = deps.services.arkade.dustSats
+  const carrierSats =
+    pair.from === null || pair.to === null ? carrierSatsFor(market.carrierMode, { dustSats, pricedByDefault }) : 0n
   const { charged, returned } = carrierLegs(pair, carrierSats)
   const shared = { pair, market: priced, feed, carrierSats, dustSats }
 
@@ -322,7 +323,7 @@ const priceLadder = (
     // Only where the solver delivers the asset and the carrier is unpriced;
     // anywhere else there is no cost to recover.
     breakEven: breakEvenJson(
-      charged === 0n && returned === 0n && pair.to !== null
+      charged === 0n && pair.from === null && pair.to !== null
         ? carrierBreakEven({ carrierSats: dustSats, flatSats: flat, feeBps })
         : { kind: 'none' },
     ),

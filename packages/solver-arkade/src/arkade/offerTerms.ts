@@ -102,7 +102,9 @@ export const offerFromTerms = (
 ): Omit<Offer, 'swapPkScript'> => ({
   wantAmount: terms.wantAmount,
   ...(terms.wantAssetId !== null ? { wantAsset: asset.AssetId.fromString(terms.wantAssetId) } : {}),
-  ...(terms.offerAssetId !== null ? { offerAsset: asset.AssetId.fromString(terms.offerAssetId) } : {}),
+  ...(terms.wantAssetId === null && terms.offerAssetId !== null
+    ? { offerAsset: asset.AssetId.fromString(terms.offerAssetId) }
+    : {}),
   makerPkScript: hex.decode(terms.makerPkScript),
   makerPublicKey: hex.decode(terms.makerPublicKey),
   emulatorPubkey,
@@ -133,6 +135,9 @@ export const offerScriptFrom = (
   return (terms, contractVersion) => {
     const emulatorPubkey = terms.emulatorPubkey ? xOnlyPubkey(hex.decode(terms.emulatorPubkey)) : fallback
     const version = derivableVersion(contractVersion)
+    if (terms.wantAssetId !== null && terms.offerAssetId !== null && version !== RFQ_ASSET_SWAP_DIRECTED_NONCE) {
+      throw new Error(`a two-asset quote requires ${RFQ_ASSET_SWAP_DIRECTED_NONCE}`)
+    }
     const offer = offerFromTerms(
       terms,
       emulatorPubkey,

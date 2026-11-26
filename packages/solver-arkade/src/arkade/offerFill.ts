@@ -75,6 +75,10 @@ export const heldOf = (deposit: OfferDeposit, assetId: string | null): bigint =>
   return held
 }
 
+export const hasExactOfferAsset = (deposit: OfferDeposit, assetId: string, amount: bigint): boolean =>
+  heldOf(deposit, assetId) === amount &&
+  (deposit.assets ?? []).every((entry) => entry.assetId === assetId || entry.amount === 0n)
+
 /**
  * The one held asset that `markets` serves against the wanted one, or null.
  *

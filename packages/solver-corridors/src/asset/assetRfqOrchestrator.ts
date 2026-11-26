@@ -51,6 +51,8 @@ import { capture, unwrap } from '@arkade-os/solver-core/util/capture.js'
 import { createSerialiser, type Serialiser } from '@arkade-os/solver-core/util/serialise.js'
 import { QUOTE_RATE_LIMIT, QUOTE_RATE_WINDOW_SECONDS, RateLimiter } from '@arkade-os/solver-core/core/rateLimit.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
+import { RFQ_ASSET_SWAP_DIRECTED_NONCE } from '@arkade-os/solver-core/core/rfqContract.js'
+import { hasExactOfferAsset, heldOf } from '@arkade-os/solver-arkade/arkade/offerFill.js'
 import {
   DEPOSIT_SPENT_REASON,
   OfferNotSubmittedError,
@@ -132,7 +134,7 @@ export interface AssetRfqDeps {
   quoteValiditySeconds: number
   /** The chain's dust floor. A rule, unlike the carrier, which is per market. */
   dustSats: bigint
-  /** arkd's smallest fundable output, `max(dust, vtxoMin)`. Floors a sats payout only. */
+  /** arkd's smallest fundable output, `max(dust, vtxoMin)`. */
   minOutputSats?: bigint
   /**
    * The offer covenant this solver will watch, derived from terms it has
@@ -145,7 +147,11 @@ export interface AssetRfqDeps {
   /** The x-only key to build on for a client-named co-signer key, or null to refuse. Absent: refuse any. */
   cosignerKey?: (requested: string) => Promise<string | null>
   /** What is funded at the offer's script, or null while nothing is. */
-  depositAt: (offerPkScript: string, depositLeg: AssetLeg | null) => Promise<ObservedDeposit | null>
+  depositAt: (
+    offerPkScript: string,
+    depositLeg: AssetLeg,
+    acceptDeposit?: (deposit: ObservedDeposit) => boolean,
+  ) => Promise<ObservedDeposit | null>
   /** Spendable balance per asset id — `available`, never `total`. */
   balance: () => Promise<ReadonlyMap<AssetLeg, bigint>>
   fetchPrice: (feedUrl: string, pricePath: string) => Promise<Price>
@@ -190,17 +196,6 @@ export interface AssetRfqQuoteRequest {
   /** The negotiated contract version, if any. Absent derives the corridor's baseline. */
   contractVersion?: string
   emulatorPubkey?: string
-}
-
-/** How much of one leg a deposit holds — sats when the leg is BTC. */
-const heldOf = (deposit: ObservedDeposit, leg: AssetLeg): bigint => {
-  if (leg === null) return deposit.sats
-  // Summed rather than found, for the reason `offerFill.ts` gives: nothing says
-  // one output holds the whole balance, and an offer funded by two payments is
-  // still an offer.
-  let held = 0n
-  for (const entry of deposit.assets) if (entry.assetId === leg) held += entry.amount
-  return held
 }
 
 /**
@@ -269,7 +264,15 @@ export class AssetRfqSwapService {
       return {
         accepted: false,
         reason: 'unsupported_pair',
-        detail: `pair ${JSON.stringify(request.pair)} is not an arkade-to-arkade pair with exactly one asset leg`,
+        detail: `pair ${JSON.stringify(request.pair)} must name two distinct Arkade legs`,
+      }
+    }
+    const twoAssets = pair.from !== null && pair.to !== null
+    if (twoAssets && request.contractVersion !== RFQ_ASSET_SWAP_DIRECTED_NONCE) {
+      return {
+        accepted: false,
+        reason: 'unsupported_pair',
+        detail: `a two-asset quote requires ${RFQ_ASSET_SWAP_DIRECTED_NONCE}`,
       }
     }
 
@@ -375,7 +378,11 @@ export class AssetRfqSwapService {
         ...quoteSnapshot({ resolved, market: priced, pair, feed, carrierSats: market.carrierSats }),
         ...(request.contractVersion === undefined ? {} : { contractVersion: request.contractVersion }),
       })
-      return { accepted: true, swap, carrierSats: market.carrierSats }
+      return {
+        accepted: true,
+        swap,
+        carrierSats: twoAssets ? (this.deps.minOutputSats ?? this.deps.dustSats) : market.carrierSats,
+      }
     } catch (error) {
       // Only the unique indexes mean duplicate — both onchain orchestrators narrow it so.
       if (error instanceof UniqueConstraintError) {
@@ -455,7 +462,7 @@ export class AssetRfqSwapService {
       return
     }
 
-    const deposit = await this.deps.depositAt(row.offerPkScript, row.fromAssetId)
+    const deposit = await this.findDeposit(row)
     if (!deposit || heldOf(deposit, row.fromAssetId) <= 0n) return
     await this.deps.store.transition(row.id, 'quoted', 'funded', {
       deposit_txid: deposit.txid,
@@ -463,15 +470,22 @@ export class AssetRfqSwapService {
     })
   }
 
+  private async findDeposit(row: AssetRfqSwapRow): Promise<ObservedDeposit | null> {
+    const { fromAssetId, fromAmount, toAssetId, offerPkScript } = row
+    if (fromAssetId === null || toAssetId === null) return this.deps.depositAt(offerPkScript, fromAssetId)
+    const acceptDeposit = (deposit: ObservedDeposit) =>
+      (row.state === 'quoted' || (deposit.txid === row.depositTxid && deposit.vout === row.depositVout)) &&
+      hasExactOfferAsset(deposit, fromAssetId, fromAmount)
+    const deposit = await this.deps.depositAt(offerPkScript, fromAssetId, acceptDeposit)
+    return deposit && acceptDeposit(deposit) ? deposit : null
+  }
+
   /**
    * A deposit is at the offer's script. Decide, at THIS instant, whether to
    * spend it — § 9's action-time gate.
    */
   private async whenFunded(row: AssetRfqSwapRow): Promise<void> {
-    const [deposit, available] = await Promise.all([
-      this.deps.depositAt(row.offerPkScript, row.fromAssetId),
-      this.deps.balance(),
-    ])
+    const [deposit, available] = await Promise.all([this.findDeposit(row), this.deps.balance()])
     const decision = evaluateAssetFill({
       toAmount: row.toAmount,
       toAssetId: row.toAssetId,

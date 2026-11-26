@@ -12,8 +12,14 @@ import {
   ASSET_SWAP_DIRECTED_NONCE as RFQ_ASSET_SWAP_DIRECTED_NONCE,
   ASSET_SWAP_V2 as RFQ_ASSET_SWAP_V2,
 } from '@arkade-os/swap/rfq-contract'
+import type { AssetPair } from './assetRfq.js'
 
 export { RFQ_ASSET_SWAP_V2, RFQ_ASSET_SWAP_DIRECTED, RFQ_ASSET_SWAP_DIRECTED_NONCE }
+export const ASSET_RFQ_CONTRACT_VERSIONS = [RFQ_ASSET_SWAP_DIRECTED_NONCE, RFQ_ASSET_SWAP_DIRECTED] as const
+
+export const assetRfqContractVersionsFor = (pair: AssetPair): readonly string[] =>
+  pair.from !== null && pair.to !== null ? [RFQ_ASSET_SWAP_DIRECTED_NONCE] : ASSET_RFQ_CONTRACT_VERSIONS
+
 export const RFQ_LIGHTNING_SEND_V2 = 'lightning-send-v2'
 export const RFQ_LIGHTNING_RECEIVE_V2 = 'lightning-receive-v2'
 export const RFQ_ONCHAIN_SEND_V2 = 'onchain-send-v2'

@@ -32,6 +32,7 @@ const derivation = {
   taker: TAKER,
 }
 const USDA = '11'.repeat(34)
+const EURA = '22'.repeat(34)
 const MAKER_SCRIPT = '5120' + 'cc'.repeat(32)
 const MAKER_KEY = hex.encode(xonly(3))
 const TXID = 'a'.repeat(64)
@@ -82,7 +83,7 @@ const settleWith = (
 ) => ({
   fulfill,
   settle: quotedOfferSettleFor({
-    ctx: {} as never,
+    ctx: { dustSats: 330n, vtxoMinSats: 1_000n } as never,
     emulatorUrl: 'http://emulator.test',
     derivation,
     outpointsAt: async () => outpoints,
@@ -294,5 +295,31 @@ describe('an asset DEPOSIT, where the packet declares what vin 0 carries', () =>
     const other = funded({ sats: 330n, assets: [{ assetId: '22'.repeat(34), amount: 10n ** 9n }] })
     const { settle } = settleWith([other])
     await expect(settle(assetIntent())).rejects.toThrow(/holds 0 of the deposit leg/)
+  })
+})
+
+describe('a quote exchanging two assets', () => {
+  const row = intent({ fromAssetId: EURA, fromAmount: 500n, contractVersion: RFQ_ASSET_SWAP_DIRECTED_NONCE })
+  const carrying = (amount: bigint) => funded({ sats: 330n, assets: [{ assetId: EURA, amount }] })
+
+  it('settles the exact deposit against an offer that encodes the payout asset', async () => {
+    const { settle, fulfill } = settleWith([carrying(500n)])
+    await settle(row)
+    const offer = fulfill.mock.calls[0]![2]
+    expect(offer.wantAsset?.toString()).toBe(USDA)
+    expect(offer.offerAsset).toBeUndefined()
+    expect(offer.nonce).toBeDefined()
+    expect(fulfill.mock.calls[0]![4]).toEqual({ minAssetOutputSats: 1_000n })
+  })
+
+  it.each([
+    carrying(499n),
+    carrying(501n),
+    funded({ sats: 330n, assets: [{ assetId: USDA, amount: 500n }] }),
+    funded({ sats: 330n, assets: [...carrying(500n).assets, { assetId: USDA, amount: 1n }] }),
+  ])('refuses a deposit with non-quoted assets or amounts', async (deposit) => {
+    const { settle, fulfill } = settleWith([deposit])
+    await expect(settle(row)).rejects.toThrow(/does not match the quoted asset deposit/)
+    expect(fulfill).not.toHaveBeenCalled()
   })
 })
