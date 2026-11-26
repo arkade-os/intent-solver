@@ -208,6 +208,10 @@ const market = (over: Partial<AssetRfqMarket> = {}): AssetRfqMarket => ({
 
 const emulatorXOnly = (): Uint8Array => hex.decode(arkade.emulator.pubkey).slice(-32)
 
+// The client defaults new covenants to arkd's own key, which this stack's arkd cannot co-sign.
+const requestSwap: typeof requestArkadeSwap = (wallet, transport, params) =>
+  requestArkadeSwap(wallet, transport, { ...params, emulatorPubkey: arkade.emulator.pubkey })
+
 const derivation = (): OfferDerivation => ({
   serverPubkey: arkade.ctx.wallet.arkServerPublicKey,
   emulatorPubkey: emulatorXOnly(),
@@ -267,6 +271,7 @@ const harness = async (
     dustSats: arkade.ctx.dustSats,
     minOutputSats: arkade.ctx.dustSats > arkade.ctx.vtxoMinSats ? arkade.ctx.dustSats : arkade.ctx.vtxoMinSats,
     deriveOffer: offerScriptFrom(derivation()),
+    cosignerKey: async (requested) => (requested === hex.encode(emulatorXOnly()) ? requested : null),
     depositAt,
     balance,
     fetchPrice: createPriceFeed(),
@@ -347,7 +352,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
         try {
           const trade = async (from: string, to: string, amount: bigint, amountSide: 'from' | 'to') => {
             const rfqId = randomBytes(32).toString('hex')
-            const swap = await requestArkadeSwap(maker.wallet, transport, {
+            const swap = await requestSwap(maker.wallet, transport, {
               amount,
               amountSide,
               rfqId,
@@ -417,7 +422,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
       const transport = requestTransport()
       const amount = depositSats(20_000)
       const wantAsset = asset.AssetId.fromString(assetId)
-      const request = (rfqId: string) => requestArkadeSwap(arkade.ctx.wallet, transport, { amount, rfqId, wantAsset })
+      const request = (rfqId: string) => requestSwap(arkade.ctx.wallet, transport, { amount, rfqId, wantAsset })
       const swapOnce = async (rfqId: string) => {
         const swap = await request(rfqId)
         expect(swap.fundAmount).toBe(amount)
@@ -488,7 +493,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
         const amount = BigInt(2000 + randomInt(1, 500))
         expect(held!.amount).toBeGreaterThanOrEqual(amount)
         const rfqId = randomBytes(32).toString('hex')
-        const swap = await requestArkadeSwap(arkade.ctx.wallet, transport, {
+        const swap = await requestSwap(arkade.ctx.wallet, transport, {
           amount,
           rfqId,
           offerAsset: asset.AssetId.fromString(assetId),
@@ -548,7 +553,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
         const transport = requestTransport()
 
         const wantUnits = BigInt(1200 + randomInt(1, 300))
-        const buy = await requestArkadeSwap(arkade.ctx.wallet, transport, {
+        const buy = await requestSwap(arkade.ctx.wallet, transport, {
           amount: wantUnits,
           amountSide: 'to',
           rfqId: randomBytes(32).toString('hex'),
@@ -568,7 +573,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
         expect((await driveTo(tickAll, store, buyId, 'filled')).toAmount).toBe(wantUnits)
 
         const wantSats = BigInt(1500 + randomInt(1, 300))
-        const sell = await requestArkadeSwap(arkade.ctx.wallet, transport, {
+        const sell = await requestSwap(arkade.ctx.wallet, transport, {
           amount: wantSats,
           amountSide: 'to',
           rfqId: randomBytes(32).toString('hex'),
@@ -607,7 +612,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
       try {
         const transport = requestTransport()
 
-        const swap = await requestArkadeSwap(arkade.ctx.wallet, transport, {
+        const swap = await requestSwap(arkade.ctx.wallet, transport, {
           amount: BigInt(1200 + randomInt(1, 300)),
           rfqId: randomBytes(32).toString('hex'),
           offerAsset: asset.AssetId.fromString(assetId),
@@ -636,7 +641,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
         // where it is already netted out of `to_amount`. Consuming it there
         // would overfund every such deposit by one dust.
         await waitForWalletBalance(arkade.ctx, (_sats, assets) => (assets.get(assetId) ?? 0n) >= 5_000n)
-        const btc = await requestArkadeSwap(arkade.ctx.wallet, transport, {
+        const btc = await requestSwap(arkade.ctx.wallet, transport, {
           amount: 5_000n,
           rfqId: randomBytes(32).toString('hex'),
           wantAsset: asset.AssetId.fromString(assetId),
@@ -658,12 +663,12 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
     const { ingress, store } = await harness(over)
     try {
       const transport = requestTransport()
-      const sell = await requestArkadeSwap(arkade.ctx.wallet, transport, {
+      const sell = await requestSwap(arkade.ctx.wallet, transport, {
         amount: 20_000n,
         rfqId: randomBytes(32).toString('hex'),
         wantAsset: asset.AssetId.fromString(assetId),
       })
-      const buy = await requestArkadeSwap(arkade.ctx.wallet, transport, {
+      const buy = await requestSwap(arkade.ctx.wallet, transport, {
         amount: 2000n,
         rfqId: randomBytes(32).toString('hex'),
         offerAsset: asset.AssetId.fromString(assetId),
@@ -727,7 +732,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
 
         // A payout alone under dust now quotes: the maker's carrier comes back on
         // top, lifting output 0 clear of what arkd would reject.
-        const tiny = await requestArkadeSwap(arkade.ctx.wallet, transport, {
+        const tiny = await requestSwap(arkade.ctx.wallet, transport, {
           amount: 100n,
           offerAsset: asset.AssetId.fromString(assetId),
         })
@@ -752,7 +757,7 @@ describe('e2e arkade asset RFQ over relay — quote, deposit, fill, both directi
         const transport = requestTransport()
         const amount = depositSats(4_000)
         const rfqId = randomBytes(32).toString('hex')
-        const swap = await requestArkadeSwap(arkade.ctx.wallet, transport, {
+        const swap = await requestSwap(arkade.ctx.wallet, transport, {
           amount,
           rfqId,
           wantAsset: asset.AssetId.fromString(assetId),

@@ -259,8 +259,13 @@ const requestFor = (pair: string, amount: bigint, rfqId = randomBytes(32).toStri
  * an earlier run's unspent deposit read as this one's funding. */
 const depositSats = (base: number): bigint => BigInt(base + randomInt(1, 400))
 
+// The SDK defaults new covenants to arkd's own key, which this stack's arkd cannot co-sign.
 const clientOffer = async (wantAmount: bigint) =>
-  createOffer(arkade.ctx.wallet, { wantAmount, wantAsset: asset.AssetId.fromString(assetId) })
+  createOffer(arkade.ctx.wallet, {
+    wantAmount,
+    wantAsset: asset.AssetId.fromString(assetId),
+    emulatorPubkey: arkade.emulator.pubkey,
+  })
 
 describe('e2e arkade asset RFQ — quote, deposit, fill', () => {
   it(
