@@ -208,6 +208,18 @@ describe('our lockup on Arkade: its state', () => {
     expect(await lockup.state(toLocked())).toEqual(at('gone'))
   })
 
+  it('finishes a lost refund while the indexer does not list our output yet, but not for one in an expired batch', async () => {
+    world.lostRefund = 'refund-tx'
+    world.history = []
+    expect(await lockup.state(refunding())).toEqual(at('refunded', 'pay:0', { refundTx: 'refund-tx' }))
+    const expiredBatch = new SolverLockup(
+      { contract: async () => CONTRACT },
+      { ...arkade(), spendable: async () => [] },
+    )
+    world.history = [output('pay')]
+    expect(await expiredBatch.state(refunding())).toEqual(at('gone'))
+  })
+
   it('lets a claim win over a refund that was recorded', async () => {
     world.history = [output('pay', PAYOUT, { spent: true })]
     world.claimedOn = 'pay:0'

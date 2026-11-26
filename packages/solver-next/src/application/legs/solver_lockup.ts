@@ -113,12 +113,13 @@ export class SolverLockup {
     // an output in an expired batch is neither spent nor spendable.
     if (seen?.spent !== true) {
       const now = spendable ?? (await arkade.spendable(contract))
-      return lockupAt(now.some(same(ours)) ? LockupStatus.Funded : LockupStatus.Gone, ours)
+      if (now.some(same(ours))) return lockupAt(LockupStatus.Funded, ours)
+      if (seen !== null) return lockupAt(LockupStatus.Gone, ours)
     }
 
     // A refund transaction on record proves nothing alone: it may have swept only dust. Our output must be spent.
     const refundTx = swap.to.fact('refund')
-    if (refundTx !== null) return lockupAt(LockupStatus.Refunded, ours, { refundTx })
+    if (refundTx !== null && seen?.spent === true) return lockupAt(LockupStatus.Refunded, ours, { refundTx })
     const lost = swap.to.state === 'refunding' ? ((await arkade.finalizePendingRefund?.(contract)) ?? null) : null
     return lost === null
       ? lockupAt(LockupStatus.Gone, ours)
