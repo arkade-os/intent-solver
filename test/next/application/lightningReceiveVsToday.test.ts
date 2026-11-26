@@ -153,7 +153,7 @@ const intended = (s: Situation, old: { do: string }, next: ReceiveStep): string 
 }
 
 describe('the Lightning receive decision', () => {
-  it('is the one production makes today, on 60,000 random rows read from the table', () => {
+  it('is the one production makes today, on 60,000 random rows read from the table', async () => {
     const next = random(20261127)
     const pick = <T>(of: readonly T[]): T => of[Math.floor(next() * of.length)]!
     const TIMES = [-1, 0, 1].flatMap((d) => [INVOICE_EXPIRES_AT + d, REFUND_OPENS_AT + d, REFUND_OPENS_AT + 120 + d])
@@ -167,7 +167,6 @@ describe('the Lightning receive decision', () => {
       return outputs
     }
 
-    const checks: Promise<void>[] = []
     const counts: Record<string, number> = {}
     const onPurpose = new Set<string>()
     for (let i = 0; i < 60_000; i++) {
@@ -198,39 +197,33 @@ describe('the Lightning receive decision', () => {
       if (s.claimedOn !== null && claimed?.spent !== true) s.claimedOn = null
       if (s.hold.expiresAt !== null && s.hold.expiresAt < 0) s.hold = { ...s.hold, expiresAt: null }
 
-      checks.push(
-        Promise.all([today(s), ours(s)]).then(([old, next]) => {
-          counts[old.do] = (counts[old.do] ?? 0) + 1
-          const same = old.do === next.do && (old.reason ?? null) === (next.reason ?? null)
-          const why = same ? null : intended(s, old, next)
-          if (why !== null) onPurpose.add(why)
-          if (!same && why === null) {
-            throw new Error(
-              `differs on ${JSON.stringify(s)}: today ${JSON.stringify(old)}, ours ${JSON.stringify(next)}`,
-            )
-          }
-        }),
-      )
+      // One row at a time: sixty thousand of them in flight at once is what a test worker runs out of memory on.
+      const [old, step] = await Promise.all([today(s), ours(s)])
+      counts[old.do] = (counts[old.do] ?? 0) + 1
+      const same = old.do === step.do && (old.reason ?? null) === (step.reason ?? null)
+      const why = same ? null : intended(s, old, step)
+      if (why !== null) onPurpose.add(why)
+      if (!same && why === null) {
+        throw new Error(`differs on ${JSON.stringify(s)}: today ${JSON.stringify(old)}, ours ${JSON.stringify(step)}`)
+      }
     }
-    return Promise.all(checks).then(() => {
-      expect(onPurpose.size).toBe(2)
-      const reached = Object.keys(counts).sort()
-      expect(reached).toEqual(
-        [
-          'adopt',
-          'arm',
-          'fail',
-          'fund',
-          'record_claim',
-          'record_refund',
-          'refund',
-          'refund_unrolled',
-          'settle',
-          'start_refund',
-          'stuck',
-          'wait',
-        ].sort(),
-      )
-    })
+    expect(onPurpose.size).toBe(2)
+    const reached = Object.keys(counts).sort()
+    expect(reached).toEqual(
+      [
+        'adopt',
+        'arm',
+        'fail',
+        'fund',
+        'record_claim',
+        'record_refund',
+        'refund',
+        'refund_unrolled',
+        'settle',
+        'start_refund',
+        'stuck',
+        'wait',
+      ].sort(),
+    )
   }, 60_000)
 })
