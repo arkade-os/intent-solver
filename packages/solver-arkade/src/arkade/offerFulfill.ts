@@ -221,6 +221,7 @@ export const fulfillOffer = async (
       funding = selectCoinsWithAsset(free, wantedAssetId, wantAmount).selected
       if (changeFloor !== undefined) {
         const inputsSats = funding.reduce((total, coin) => total + BigInt(coin.value), BigInt(deposit.value))
+        // The maker payout and solver change each carry assets and need the same sats minimum.
         const missingSats = makerSats + changeFloor - inputsSats
         if (missingSats > 0n) {
           const used = new Set(funding.map((coin) => outpointKey(coin.txid, coin.vout)))
