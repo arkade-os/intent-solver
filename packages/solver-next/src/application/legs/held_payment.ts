@@ -23,8 +23,10 @@ export interface PaymentSeen {
 
 const seen = (is: PaymentIs, goesBackAt: UnixSeconds | null = null): PaymentSeen => ({ is, goesBackAt })
 
-const timeFrom = (seconds: number | null): UnixSeconds | null =>
-  seconds === null || !Number.isFinite(seconds) || seconds < 0 ? null : UnixSeconds.of(Math.floor(seconds))
+const timeFrom = (seconds: number | null): UnixSeconds | null => {
+  const whole = seconds === null ? null : Math.floor(seconds)
+  return whole !== null && Number.isSafeInteger(whole) && whole >= 0 ? UnixSeconds.of(whole) : null
+}
 
 const invoiceOf = (swap: Swap): Hashlock => {
   if (swap.hashlock === null) throw new RuleViolated(`swap ${swap.id}: a payment over Lightning needs a hashlock`)

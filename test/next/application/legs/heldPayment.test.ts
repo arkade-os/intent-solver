@@ -105,7 +105,9 @@ describe('looking at a payment', () => {
   it('gives the time only for a waiting payment, and none when the node gives no usable one', async () => {
     expect(await saying('armed', null).payment.look(notPaidOut())).toEqual({ is: 'waiting', goesBackAt: null })
     expect(await saying('armed', 9_000.9).payment.look(notPaidOut())).toEqual({ is: 'waiting', goesBackAt: 9_000 })
-    expect(await saying('armed', -1).payment.look(notPaidOut())).toEqual({ is: 'waiting', goesBackAt: null })
+    for (const unusable of [-1, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1, 1e300]) {
+      expect(await saying('armed', unusable).payment.look(notPaidOut())).toEqual({ is: 'waiting', goesBackAt: null })
+    }
     for (const status of ['pending', 'settled', 'cancelled', 'unknown'] as const) {
       expect((await saying(status, GOES_BACK_AT).payment.look(notPaidOut())).goesBackAt).toBeNull()
     }
