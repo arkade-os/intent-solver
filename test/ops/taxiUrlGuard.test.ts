@@ -145,4 +145,20 @@ describe('the pinned Taxi fetch', () => {
     const pinnedFetch = createPinnedTaxiFetch((host) => publicTaxiAddress(host, resolve))
     await expect(pinnedFetch('https://taxi.example/v1/info')).rejects.toThrow('private address')
   })
+
+  it('rejects rather than crashing when the status is above what a Response holds', async () => {
+    const { createServer } = await import('node:net')
+    const server = createServer((socket) => {
+      socket.on('data', () => socket.end('HTTP/1.1 600 Odd\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}'))
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as { port: number }).port
+    const pinnedFetch = createPinnedTaxiFetch(async () => ({ address: '127.0.0.1', family: 4 }))
+    try {
+      const sent = pinnedFetch(`http://taxi.example:${port}/v1/fills`, { method: 'POST', body: 'signed' })
+      await expect(sent).rejects.toThrow('range of 200 to 599')
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
 })

@@ -125,10 +125,17 @@ export const createPinnedTaxiFetch =
       }
       const outgoing = send(url, options, (incoming) => {
         const status = incoming.statusCode ?? 502
-        const stream = NULL_BODY_STATUS.has(status) ? null : (Readable.toWeb(incoming) as ReadableStream<Uint8Array>)
-        settle(
-          new Response(stream, { status, statusText: incoming.statusMessage, headers: headersOf(incoming.headers) }),
-        )
+        try {
+          const stream = NULL_BODY_STATUS.has(status) ? null : (Readable.toWeb(incoming) as ReadableStream<Uint8Array>)
+          settle(
+            new Response(stream, { status, statusText: incoming.statusMessage, headers: headersOf(incoming.headers) }),
+          )
+        } catch (error) {
+          // Node's parser accepts any three-digit status but `Response` holds only 200-599: a throw
+          // here is in an event callback, so it would reach the process rather than this promise.
+          incoming.destroy()
+          reject(error instanceof Error ? error : new Error(String(error)))
+        }
       })
       outgoing.on('error', reject)
       outgoing.end(body)
