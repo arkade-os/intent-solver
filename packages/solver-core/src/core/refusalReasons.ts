@@ -189,7 +189,7 @@ export const REFUSAL_EXPLANATIONS: Record<RefusalReason, RefusalExplanation> = {
   },
   unsupported_emulator_pubkey: {
     meaning:
-      "The client named a covenant co-signer key that is neither this deployment's default nor one arkd signs for: its current signer, or a deprecated signer before its cutoff. The asset RFQ corridor accepts only the default.",
+      "The client named a covenant co-signer key that is neither this deployment's default nor one arkd signs for: its current signer, or a deprecated signer with no cutoff. A deprecated signer with any cutoff, even a future one, is refused: arkd rejects its inputs once the cutoff passes, which could fall before the refund. The asset RFQ corridor accepts only the default.",
     whatToDo: "Nothing, unless the client named arkd's key: then check that it and this solver use the same arkd.",
   },
   rate_limited: {

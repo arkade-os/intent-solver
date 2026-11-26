@@ -4,9 +4,9 @@ import { operatorCosignerKey, quoteCosignerKey } from '@arkade-os/solver-arkade/
 
 const PIN = REGTEST_EMULATOR_PUBKEY
 const OPERATOR = `03${'11'.repeat(32)}`
+const OLD = `02${'22'.repeat(32)}`
 const xOnly = (key: string) => key.slice(-64)
 
-const NOW = 1_800_000_000
 const arkd = (deprecated: [string, bigint][]): ArkadeInfo =>
   ({
     network: 'regtest',
@@ -16,7 +16,7 @@ const arkd = (deprecated: [string, bigint][]): ArkadeInfo =>
 
 const opsOver = (info: ArkadeInfo) => ({
   emulatorPubkey: PIN,
-  cosignerKeyFor: async (requested: string) => operatorCosignerKey(requested, info, NOW),
+  cosignerKeyFor: async (requested: string) => operatorCosignerKey(requested, info),
 })
 
 describe('the co-signer key allowlist', () => {
@@ -27,12 +27,15 @@ describe('the co-signer key allowlist', () => {
     expect(ops.cosignerKeyFor).not.toHaveBeenCalled()
   })
 
-  it('takes a key arkd signs for: its current signer, or a deprecated one before its cutoff', async () => {
-    const OLD = `02${'22'.repeat(32)}`
+  it('takes a key arkd signs for: its current signer, or a deprecated one with no cutoff', async () => {
     expect(await quoteCosignerKey(opsOver(arkd([])), xOnly(OPERATOR))).toBe(OPERATOR)
     expect(await quoteCosignerKey(opsOver(arkd([[OLD, 0n]])), xOnly(OLD))).toBe(OLD)
-    expect(await quoteCosignerKey(opsOver(arkd([[OLD, BigInt(NOW + 1)]])), xOnly(OLD))).toBe(OLD)
-    expect(await quoteCosignerKey(opsOver(arkd([[OLD, BigInt(NOW)]])), xOnly(OLD))).toBeNull()
+  })
+
+  it('refuses a deprecated key with any cutoff, future or past', async () => {
+    const year2100 = 4_102_444_800n
+    expect(await quoteCosignerKey(opsOver(arkd([[OLD, year2100]])), xOnly(OLD))).toBeNull()
+    expect(await quoteCosignerKey(opsOver(arkd([[OLD, 1n]])), xOnly(OLD))).toBeNull()
   })
 
   it('refuses any other key, and every non-default key when nothing can vouch for it', async () => {
