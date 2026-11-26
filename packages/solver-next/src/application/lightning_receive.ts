@@ -17,7 +17,6 @@ export const RECEIVE_FUNDING_LOST =
   'funding response lost; refund deadline reached with no lockup adopted — review for a stray lockup'
 export const RECEIVE_LOCKUP_GONE = 'funded output gone during refunding with no matching claim found; needs review'
 
-// The names of today's Lightning receive planner, so the two can be compared word for word.
 export const Do = {
   Wait: 'wait',
   Arm: 'arm',
@@ -53,7 +52,6 @@ export interface ReceiveSettings {
 const WAIT: ReceiveStep = { do: Do.Wait }
 const fail = (reason: string): ReceiveStep => ({ do: Do.Fail, reason })
 
-/** A client is paid over Lightning and receives on Arkade: a hold invoice in, our lockup out. */
 export class LightningReceive {
   constructor(
     private readonly invoice: HoldInvoice,
@@ -143,8 +141,7 @@ export class LightningReceive {
     }
   }
 
-  // Read lag, or something this service cannot explain. Only time tells them apart. Giving up also stops
-  // the read that could still recover the swap, so it waits for as long as the hold can still be settled.
+  // Giving up stops the read that could still recover the swap, so it waits while the hold can still be settled.
   private whenLockupIsGone(swap: Swap): ReceiveStep {
     const now = this.now()
     if (now - swap.to.since < EMPTY_LOCKUP_GRACE) return WAIT
