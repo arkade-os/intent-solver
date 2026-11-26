@@ -1,13 +1,17 @@
 import { offerInventoryFrom } from '@arkade-os/solver-arkade/arkade/offerInventory.js'
-import { resolveAssetQuote } from '@arkade-os/solver-core/core/assetRfq.js'
+import { parseAssetPair, resolveAssetQuote } from '@arkade-os/solver-core/core/assetRfq.js'
 import { giveSatsFor, payoutSatsFor, isCorridor } from '@arkade-os/solver-core/core/corridorPolicy.js'
 import { convertAmount, convertQuoteToBase, type Price } from '@arkade-os/solver-core/core/priceFeed.js'
 import type { OpenRfq, OpenRfqPrice } from '@arkade-os/solver-core/core/openRfq.js'
 import type { SolverCard } from '@arkade-os/solver-core/core/registryCard.js'
 import { createPriceFeed } from '@arkade-os/solver-core/price/feed.js'
-import { RFQ_EVM_RECEIVE_V1, RFQ_EVM_SEND_V1, rfqContractEnabled } from '@arkade-os/solver-core/core/rfqContract.js'
+import {
+  assetRfqContractVersionsFor,
+  RFQ_EVM_RECEIVE_V1,
+  RFQ_EVM_SEND_V1,
+  rfqContractEnabled,
+} from '@arkade-os/solver-core/core/rfqContract.js'
 import { descriptorFor } from '@arkade-os/solver-corridors/corridors/index.js'
-import { ASSET_RFQ_CONTRACT_VERSIONS } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
 import type { Services } from './services.js'
 
 export const openRfqPairs = (card: SolverCard): string[] =>
@@ -56,8 +60,8 @@ export const openRfqPreview = (
     let fromAmount: bigint
     let toAmount: bigint
     if (from.startsWith('arkade:') && to.startsWith('arkade:')) {
-      if (!served(...ASSET_RFQ_CONTRACT_VERSIONS)) return undefined
-      const legs = { from: from === 'arkade:BTC' ? null : from.slice(7), to: to === 'arkade:BTC' ? null : to.slice(7) }
+      const legs = parseAssetPair(pair)
+      if (!legs || !served(...assetRfqContractVersionsFor(legs))) return undefined
       const market = source.assetRfqMarkets.find(
         (market) =>
           (market.base === legs.from && market.quote === legs.to) ||

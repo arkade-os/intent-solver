@@ -22,7 +22,7 @@
  */
 
 import type { Offer } from '@arkade-os/swap/protocol'
-import type { OfferFillInput } from '@arkade-os/solver-core/core/assetOffer.js'
+import { sameMarket, type OfferFillInput, type OfferFillPolicy } from '@arkade-os/solver-core/core/assetOffer.js'
 
 /**
  * What the chain says is sitting at the offer's own script.
@@ -75,6 +75,30 @@ export const heldOf = (deposit: OfferDeposit, assetId: string | null): bigint =>
   return held
 }
 
+export const hasExactOfferAsset = (deposit: OfferDeposit, assetId: string, amount: bigint): boolean =>
+  heldOf(deposit, assetId) === amount &&
+  (deposit.assets ?? []).every((entry) => entry.assetId === assetId || entry.amount === 0n)
+
+/**
+ * The one held asset that `markets` serves against the wanted one, or null.
+ *
+ * The packet names one asset (§ 2.1), so an offer wanting one cannot say which it deposits. An
+ * unserved asset still counts for nothing, so the header's worthless mint buys no fill.
+ */
+const servedDepositAsset = (
+  wantAssetId: string | null,
+  deposit: OfferDeposit,
+  markets: OfferFillPolicy['markets'],
+): string | null => {
+  if (wantAssetId === null) return null
+  const served = new Set(
+    (deposit.assets ?? [])
+      .filter((entry) => entry.amount > 0n && markets.some((market) => sameMarket(market, entry.assetId, wantAssetId)))
+      .map((entry) => entry.assetId),
+  )
+  return served.size === 1 ? [...served][0]! : null
+}
+
 /**
  * The decision's input, from a decoded offer and an observed deposit.
  *
@@ -82,9 +106,13 @@ export const heldOf = (deposit: OfferDeposit, assetId: string | null): bigint =>
  * `deposit`. That is deliberate — the read is an indexer round trip with its own
  * failure modes, and burying it here would make this untestable without one.
  */
-export const offerFillInputFrom = (offer: Offer, deposit: OfferDeposit): OfferFillInput => {
+export const offerFillInputFrom = (
+  offer: Offer,
+  deposit: OfferDeposit,
+  markets: OfferFillPolicy['markets'] = [],
+): OfferFillInput => {
   const wantAssetId = idOf(offer.wantAsset)
-  const offerAssetId = idOf(offer.offerAsset)
+  const offerAssetId = idOf(offer.offerAsset) ?? servedDepositAsset(wantAssetId, deposit, markets)
   return {
     wantAssetId,
     wantAmount: offer.wantAmount,

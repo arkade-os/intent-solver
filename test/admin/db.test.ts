@@ -674,6 +674,15 @@ describe('an incoherent serving row cannot brick startup', () => {
     expect((await again.listMarkets())[0]!.symbol).toBe(rfqSymbolFor(USDA))
   })
 
+  it('keeps a named two-asset RFQ market enabled across restart', async () => {
+    const driver = betterSqliteDriver(':memory:')
+    const store = await AdminStore.open(driver, () => 1_000)
+    await store.putMarket({ ...marketFixture(), base: LEG_A, quote: LEG_B, baseDecimals: 6, symbol: 'AB' })
+    const reopened = await AdminStore.open(driver, () => 2_000)
+    expect(reopened.repairedServing).toEqual([])
+    expect((await reopened.listMarkets())[0]).toMatchObject({ symbol: 'AB', servesRfq: true })
+  })
+
   it('boots a row an older binary INSERTed after the marker, serving what it served', async () => {
     const driver = betterSqliteDriver(':memory:')
     await AdminStore.open(driver, () => 1_000, { offerMarkets: [], tokens: [] })

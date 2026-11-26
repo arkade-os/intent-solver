@@ -89,7 +89,7 @@ export interface AssetMarketConfig {
    * 68-character asset id to start it again.
    */
   enabled: boolean
-  /** The env stem and the console label — `USDA`. NULL only where RFQ cannot serve the pair at all. */
+  /** The env stem and the console label, required when RFQ is enabled. */
   symbol: string | null
   /** Declared for the offer-packet path (RESTART-GATED) and for RFQ (live, through `replaceMarkets()`). */
   servesOffer: boolean
@@ -217,12 +217,6 @@ const checkServing = (market: AssetMarketConfig): void => {
   }
   if (!market.servesRfq) return
   if (market.symbol === null) throw new Error('symbol is required on a market declared for RFQ: it names its corridors')
-  // The refusal `assetRfqMarketsFrom` makes SILENTLY today. Still legal for OFFERS.
-  if (market.base !== null && market.quote !== null) {
-    throw new Error(
-      'a market declared for RFQ must have exactly one BTC leg; the covenant cannot express asset-to-asset',
-    )
-  }
   if (!market.rfqSellBase && !market.rfqBuyBase) {
     throw new Error('a market declared for RFQ must leave at least one direction open')
   }

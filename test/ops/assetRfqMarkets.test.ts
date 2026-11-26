@@ -207,8 +207,11 @@ describe('assetRfqMarketsFrom', () => {
     expect(assetRfqMarketsFrom([view({ quote: OTHER })], CARRIER)[0]?.quote).toBe(OTHER)
   })
 
-  it('omits a market with an asset on both legs, which no offer packet expresses', () => {
-    expect(assetRfqMarketsFrom([view({ base: OTHER, quote: USDA })], CARRIER)).toEqual([])
+  it('serves a two-asset RFQ market without pricing either carrier', () => {
+    const [market] = assetRfqMarketsFrom([view({ base: OTHER, quote: USDA, carrierMode: 'priced' })], CARRIER)
+    expect(market).toMatchObject({ base: OTHER, quote: USDA, carrierSats: 0n })
+    expect(assetRfqDescriptor(market!, 'sell_base').pair).toBe(`arkade:${OTHER}->arkade:${USDA}`)
+    expect(assetRfqDescriptor(market!, 'buy_base').pair).toBe(`arkade:${USDA}->arkade:${OTHER}`)
   })
 
   it('closes a served direction the console left unbounded rather than quoting without a ceiling', () => {

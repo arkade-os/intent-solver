@@ -76,8 +76,13 @@ export const liveOfferOutpoints = async (
  * right outpoint was sitting beside it. Sats break the tie, so a BTC deposit
  * ranks exactly as it did.
  */
-export const largestOfferOutpoint = (outpoints: readonly OfferOutpoint[], leg: string | null): OfferOutpoint | null =>
+export const largestOfferOutpoint = (
+  outpoints: readonly OfferOutpoint[],
+  leg: string | null,
+  acceptDeposit?: (outpoint: OfferOutpoint) => boolean,
+): OfferOutpoint | null =>
   outpoints.reduce<OfferOutpoint | null>((best, next) => {
+    if (acceptDeposit && !acceptDeposit(next)) return best
     if (best === null) return next
     const a = heldOf(next, leg)
     const b = heldOf(best, leg)

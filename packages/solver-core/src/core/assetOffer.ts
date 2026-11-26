@@ -80,8 +80,11 @@ export type OfferFillRefusal =
 export type OfferFillDecision = { fill: true } | { fill: false; reason: OfferFillRefusal }
 
 /** Unordered pair equality — a market is a market in both directions. */
-const sameMarket = (market: { a: string | null; b: string | null }, x: string | null, y: string | null): boolean =>
-  (market.a === x && market.b === y) || (market.a === y && market.b === x)
+export const sameMarket = (
+  market: { a: string | null; b: string | null },
+  x: string | null,
+  y: string | null,
+): boolean => (market.a === x && market.b === y) || (market.a === y && market.b === x)
 
 /**
  * Can this solver fill this offer?

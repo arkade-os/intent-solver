@@ -104,7 +104,7 @@ describe('the four Arkade seams', () => {
     // An asset deposit rides a uniform dust carrier, so ranking on sats ties a
     // stale carrier against the live one and the indexer's order decides which
     // is recorded — then settle re-measures it and the row sticks.
-    expect(body()).toContain('offerPkScript), depositLeg)')
+    expect(body()).toContain('offerPkScript), depositLeg, acceptDeposit)')
   })
 
   it('wires the spend through the guarded settle port', () => {

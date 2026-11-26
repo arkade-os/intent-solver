@@ -15,7 +15,7 @@
  */
 import type { ArkadeContext } from './wallet.js'
 import { fulfillOffer, OfferNotSubmittedError, type FulfillOptions } from './offerFulfill.js'
-import { heldOf } from './offerFill.js'
+import { hasExactOfferAsset, heldOf } from './offerFill.js'
 import { liveOfferOutpoints, type OfferOutpoint } from './offerOutpoints.js'
 import { offerScriptFrom, type OfferDerivation, type QuotedOfferTerms } from './offerTerms.js'
 
@@ -95,6 +95,11 @@ export const quotedOfferSettleFor = (
     // terms compile to one address, so a second deposit can land beside this
     // one — spending it against a decision made about the other is the trade
     // this refuses.
+    const { fromAssetId, fromAmount, toAssetId } = intent
+    const twoAssets = fromAssetId !== null && toAssetId !== null
+    if (twoAssets && !hasExactOfferAsset(deposit, fromAssetId, fromAmount)) {
+      throw new Error(`${deposit.txid}:${deposit.vout} does not match the quoted asset deposit`)
+    }
     const held = heldOf(deposit, intent.fromAssetId)
     if (held < intent.fromAmount) {
       throw new Error(
@@ -121,7 +126,12 @@ export const quotedOfferSettleFor = (
         // an input that does not exist.
         assetAmount: intent.fromAssetId === null ? undefined : held,
       },
-      options,
+      twoAssets
+        ? {
+            ...options,
+            minAssetOutputSats: deps.ctx.vtxoMinSats > deps.ctx.dustSats ? deps.ctx.vtxoMinSats : deps.ctx.dustSats,
+          }
+        : options,
     )
   }
 }

@@ -26,7 +26,7 @@ import {
 } from '@arkade-os/solver-arkade/arkade/offerFulfill.js'
 import { IMPLIED_PRICE_HEADROOM } from '@arkade-os/solver-core/core/assetRfq.js'
 import { UniqueConstraintError } from '@arkade-os/solver-core/core/driver.js'
-import { RFQ_ASSET_SWAP_DIRECTED } from '@arkade-os/solver-core/core/rfqContract.js'
+import { RFQ_ASSET_SWAP_DIRECTED, RFQ_ASSET_SWAP_DIRECTED_NONCE } from '@arkade-os/solver-core/core/rfqContract.js'
 import {
   AssetRfqSwapService,
   type AssetRfqDeps,
@@ -129,6 +129,35 @@ const deposit = (over: Partial<ObservedDeposit> = {}): ObservedDeposit => ({
 })
 
 describe('quote', () => {
+  it('quotes a distinct asset pair only with the nonce contract', async () => {
+    const { service, store } = await harness({
+      markets: [{ ...MARKET, base: ASSET_A, quote: ASSET_B, baseDecimals: 6, carrierSats: 0n }],
+      balance: async () => new Map([[ASSET_B, 10n ** 18n]]),
+      minOutputSats: 1_000n,
+    })
+    const crossAsset = request({ pair: `arkade:${ASSET_A}->arkade:${ASSET_B}`, amount: 100n })
+    try {
+      expect(await service.quote(crossAsset)).toMatchObject({ accepted: false, reason: 'unsupported_pair' })
+      expect(await service.quote({ ...crossAsset, contractVersion: RFQ_ASSET_SWAP_DIRECTED })).toMatchObject({
+        accepted: false,
+        reason: 'unsupported_pair',
+      })
+      expect(await service.quote({ ...crossAsset, contractVersion: RFQ_ASSET_SWAP_DIRECTED_NONCE })).toMatchObject({
+        accepted: true,
+        carrierSats: 1_000n,
+        swap: {
+          fromAssetId: ASSET_A,
+          fromAmount: 100n,
+          toAssetId: ASSET_B,
+          toAmount: 9_950_000n,
+          contractVersion: RFQ_ASSET_SWAP_DIRECTED_NONCE,
+        },
+      })
+    } finally {
+      await store.close()
+    }
+  })
+
   it('resolves both amounts and records the terms before answering', async () => {
     const { service, store } = await harness()
     const outcome = await service.quote(request())
@@ -249,9 +278,9 @@ describe('quote', () => {
   it.each([
     ['a pair on another corridor', { pair: 'arkade:BTC->lightning:BTC' }],
     [
-      'a pair with an asset on both legs, which no packet can carry',
+      'a pair with the same asset on both legs',
       {
-        pair: `arkade:${ASSET_A}->arkade:${'bb'.repeat(32)}0000`,
+        pair: `arkade:${ASSET_A}->arkade:${ASSET_A}`,
       },
     ],
     ['a market this deployment does not serve', { pair: `arkade:BTC->arkade:${'bb'.repeat(32)}0000` }],
@@ -405,6 +434,39 @@ describe('quote', () => {
 })
 
 describe('tick — driving a negotiation', () => {
+  it.each([
+    [true, 'filled'],
+    [false, 'refused'],
+  ])('uses only its recorded two-asset deposit when the deposit is still live = %s', async (stillLive, state) => {
+    const first = deposit({ vout: 1, sats: 330n, assets: [{ assetId: ASSET_A, amount: 100n }] })
+    const second = { ...first, vout: 2, sats: 331n }
+    let observed = [first]
+    const { service, store, settled } = await harness({
+      markets: [{ ...MARKET, base: ASSET_A, quote: ASSET_B, baseDecimals: 6 }],
+      balance: async () => new Map([[ASSET_B, 10n ** 18n]]),
+      depositAt: async (_script, _leg, matches) => observed.find((candidate) => matches?.(candidate)) ?? null,
+    })
+    try {
+      const outcome = await service.quote(
+        request({
+          pair: `arkade:${ASSET_A}->arkade:${ASSET_B}`,
+          amount: 100n,
+          contractVersion: RFQ_ASSET_SWAP_DIRECTED_NONCE,
+        }),
+      )
+      if (!outcome.accepted) throw new Error('expected a quote')
+      const { id } = outcome.swap
+      await service.tick(id)
+      expect(await store.get(id)).toMatchObject({ state: 'funded', depositVout: 1 })
+      observed = stillLive ? [second, first] : [second]
+      await service.tick(id)
+      expect(await store.get(id)).toMatchObject({ state, depositVout: 1 })
+      expect(settled).toEqual(stillLive ? [id] : [])
+    } finally {
+      await store.close()
+    }
+  })
+
   it('leaves a quoted row alone while nothing is funded and the quote is live', async () => {
     const { service, store } = await harness()
     await service.quote(request())

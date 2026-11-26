@@ -496,7 +496,7 @@ describe('asset markets on the card', () => {
     const refused: Array<[Partial<AssetCardMarket>, RegExp]> = [
       [{ quote: 'NOTHEX' }, /asset id/],
       [{ quote: null }, /must differ/],
-      [{ base: ASSET, quote: OTHER_ASSET }, /neither leg is BTC/],
+      [{ base: ASSET, quote: ASSET }, /must differ/],
       [{ baseDecimals: 6 }, /BTC leg/],
       [{ quoteDecimals: 24 }, /in 0\.\.18/],
       [{ pricePath: '' }, /price_path/],

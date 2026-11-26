@@ -373,7 +373,7 @@ export class AssetOfferService {
     if ((await this.deps.rfqOwnsLegacyScript?.(pkScript)) || (await this.deps.rfqHolds?.(pkScript)))
       return { fill: false, reason: 'offer_held_by_rfq' }
     const [outputs, available] = await Promise.all([this.deps.outputsAt(pkScript), this.deps.balance()])
-    const input = offerFillInputFrom(offer, offerDepositFrom(pkScript, outputs))
+    const input = offerFillInputFrom(offer, offerDepositFrom(pkScript, outputs), this.markets)
     const bounds = this.boundsIn(input)
     const decision = evaluateOfferFill(input, this.policy(bounds, available))
     if (!decision.fill) return this.refuse(outpoint, decision.reason, refusalDetail(input, decision.reason, bounds))

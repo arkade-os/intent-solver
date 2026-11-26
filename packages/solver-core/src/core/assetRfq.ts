@@ -60,25 +60,14 @@ const legOf = (ticker: string): AssetLeg | undefined => {
   return ASSET_ID_HEX.test(ticker) ? ticker : undefined
 }
 
-/**
- * The two legs an arkade-to-arkade pair names, or null when it names none.
- *
- * EXACTLY ONE LEG MAY BE AN ASSET, and that is not this repo's rule to relax:
- * `@arkade-os/swap`'s `encodeOffer` "refuses a packet naming both a want asset
- * and an offer asset, or neither" (§ 7.2), and `fulfillOffer` throws on the
- * same shape. An asset-to-asset offer is not expressible in the packet, so
- * quoting one would be quoting a swap that can never be funded or settled.
- * Refusing it at the pair is what stops that reaching a client as a quote.
- */
+/** The two distinct Arkade legs named by a directed RFQ. */
 export const parseAssetPair = (pair: string): AssetPair | null => {
   const match = ARKADE_PAIR.exec(pair)
   if (!match) return null
   const from = legOf(match[1]!)
   const to = legOf(match[2]!)
   if (from === undefined || to === undefined) return null
-  // Both BTC is degenerate and both assets is unrepresentable; the packet
-  // refuses each, so neither can be quoted.
-  if ((from === null) === (to === null)) return null
+  if (from === to) return null
   return { from, to }
 }
 

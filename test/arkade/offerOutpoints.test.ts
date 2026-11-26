@@ -12,7 +12,7 @@ import {
   liveOfferOutpoints,
   type OfferOutpoint,
 } from '@arkade-os/solver-arkade/arkade/offerOutpoints.js'
-import { heldOf } from '@arkade-os/solver-arkade/arkade/offerFill.js'
+import { hasExactOfferAsset, heldOf } from '@arkade-os/solver-arkade/arkade/offerFill.js'
 import type { ArkadeContext } from '@arkade-os/solver-arkade/arkade/wallet.js'
 
 const SCRIPT = '5120' + 'ab'.repeat(32)
@@ -129,6 +129,14 @@ describe('largestOfferOutpoint', () => {
     const other = outpoint({ vout: 0, sats: 20_000n, assets: [{ assetId: '22'.repeat(34), amount: 10n ** 9n }] })
     const mine = carrying(1, 5n)
     expect(largestOfferOutpoint([other, mine], USDA)).toBe(mine)
+  })
+
+  it('selects an exact asset deposit even when a larger deposit sits at the same script', () => {
+    const oversized = carrying(0, 501n)
+    const exact = carrying(1, 500n)
+    const matches = (candidate: OfferOutpoint) => hasExactOfferAsset(candidate, USDA, 500n)
+    expect(largestOfferOutpoint([oversized, exact], USDA, matches)).toBe(exact)
+    expect(largestOfferOutpoint([oversized], USDA, matches)).toBeNull()
   })
 })
 

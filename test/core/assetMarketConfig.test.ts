@@ -284,8 +284,8 @@ describe('the serving fields', () => {
     expect(() => validateAssetMarket(rfq({ symbol: null }))).toThrow(/symbol is required/)
   })
 
-  it('refuses RFQ on a pair the covenant cannot express', () => {
-    expect(() => validateAssetMarket(rfq({ base: USDA, quote: OTHER }))).toThrow(/exactly one BTC leg/)
+  it('accepts a two-asset RFQ market and an unnamed offer-only market', () => {
+    expect(() => validateAssetMarket(rfq({ base: USDA, quote: OTHER }))).not.toThrow()
     expect(() => validateAssetMarket(rfq({ base: USDA, quote: OTHER, servesRfq: false, symbol: null }))).not.toThrow()
   })
 

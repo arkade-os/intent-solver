@@ -95,9 +95,9 @@ describe('marketCapability — gaps between the row and the process', () => {
     expect(gaps[0]!.detail).toMatch(/restart/i)
   })
 
-  it('names an RFQ declaration the serve list dropped, and why', () => {
+  it('allows two-asset RFQ and reports when both directions are closed', () => {
     const bothLegs = pair({ servesRfq: true, base: USDT, quote: OTHER })
-    expect(marketCapability(bothLegs, serving()).gaps[0]!.kind).toBe('rfq_pair_unsupported')
+    expect(marketCapability(bothLegs, serving()).gaps).toEqual([])
     const closed = pair({ servesRfq: true, rfqSellBase: false, rfqBuyBase: false })
     expect(marketCapability(closed, serving()).gaps[0]!.kind).toBe('rfq_both_directions_closed')
   })

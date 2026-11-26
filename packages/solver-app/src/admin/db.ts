@@ -333,12 +333,14 @@ export class AdminStore {
     const notes: string[] = []
     for (const row of rows) {
       if (!row.servesRfq) continue
-      const assetId = row.base !== null && row.quote !== null ? null : (row.base ?? row.quote)
+      const legacyAssetId = row.base === null || row.quote === null ? (row.base ?? row.quote) : null
       const close = (why: string): void => void notes.push(`${row.marketKey}: ${why}; wrote serves_rfq = 0 to the row.`)
-      if (assetId === null) {
-        close('an asset on both legs cannot be expressed over RFQ')
-      } else if (row.symbol === null) {
-        const symbol = rfqSymbolFor(assetId)
+      if (!row.rfqSellBase && !row.rfqBuyBase) {
+        close('both RFQ directions are closed')
+      } else if (row.symbol !== null) continue
+      else if (legacyAssetId === null) close('no symbol stored for this pair')
+      else {
+        const symbol = rfqSymbolFor(legacyAssetId)
         // Fail-OPEN, and only here: this is the symbol `assetRfqMarketsFrom` already derives for an un-named asset.
         if (taken.has(symbol)) close(`symbol ${symbol} is already carried by another market`)
         else {
@@ -350,9 +352,7 @@ export class AdminStore {
           await this.driver.run(sql.setMarketSymbol, [symbol, row.marketKey])
           continue
         }
-      } else if (!row.rfqSellBase && !row.rfqBuyBase) {
-        close('both RFQ directions are closed')
-      } else continue
+      }
       await this.driver.run(sql.closeMarketRfq, [row.marketKey])
     }
     this.repaired = notes

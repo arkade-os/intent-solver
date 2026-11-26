@@ -34,19 +34,8 @@ describe('parseAssetPair — which two legs an arkade pair names', () => {
     expect(parseAssetPair(`arkade:${ASSET_A}->arkade:BTC`)).toEqual({ from: ASSET_A, to: null })
   })
 
-  /**
-   * The constraint that is NOT this repo's choice: `@arkade-os/swap`'s
-   * `encodeOffer` "refuses a packet naming both a want asset and an offer
-   * asset, or neither" (§ 7.2), and `fulfillOffer` throws the same way. An
-   * asset-to-asset offer cannot be expressed in the packet at all, so quoting
-   * one would be quoting a swap that cannot be funded or settled.
-   *
-   * Refused HERE, at the pair, rather than discovered at fill time — the whole
-   * point of the shape being unrepresentable is that no client should ever get
-   * a quote for it.
-   */
-  it('refuses a pair naming an asset on BOTH legs, which no offer packet can carry', () => {
-    expect(parseAssetPair(`arkade:${ASSET_A}->arkade:${ASSET_B}`)).toBeNull()
+  it('reads both legs of a non-BTC pair', () => {
+    expect(parseAssetPair(`arkade:${ASSET_A}->arkade:${ASSET_B}`)).toEqual({ from: ASSET_A, to: ASSET_B })
   })
 
   it('refuses BTC on both legs, which is not a swap and which the packet also refuses', () => {
@@ -54,6 +43,7 @@ describe('parseAssetPair — which two legs an arkade pair names', () => {
   })
 
   it.each([
+    ['the same asset on both legs', `arkade:${ASSET_A}->arkade:${ASSET_A}`],
     ['a lightning leg', `lightning:BTC->arkade:${ASSET_A}`],
     ['an onchain leg', `arkade:${ASSET_A}->onchain:BTC`],
     ['an ethereum leg', `ethereum:0x00->arkade:BTC`],
@@ -338,7 +328,6 @@ describe('resolveAssetQuote — the two amounts a quote resolves', () => {
     ).toMatchObject({ ok: true, toAmount: 99_500_000_000n })
   })
 
-  /** Both legs assets: the two carriers cancel. Gated upstream by `parseAssetPair`. */
   it('prices no carrier when an asset rides on both legs', () => {
     const market: AssetQuoteMarket = { ...MARKET, base: ASSET_A, quote: ASSET_B, baseDecimals: 6, quoteDecimals: 6 }
     const quote = (carrierSats: bigint) =>

@@ -15,8 +15,13 @@ import { publishStateOf } from '../publishState.js'
 import type { AdminDeps } from '../server.js'
 import { assetCardMarketsFromPolicy } from '../../ops/assetRfqMarkets.js'
 import { descriptorFor } from '@arkade-os/solver-corridors/corridors/index.js'
-import { ASSET_RFQ_CONTRACT_VERSIONS } from '@arkade-os/solver-corridors/corridors/assetRfq.js'
-import { RFQ_EVM_RECEIVE_V1, RFQ_EVM_SEND_V1, rfqContractEnabled } from '@arkade-os/solver-core/core/rfqContract.js'
+import {
+  ASSET_RFQ_CONTRACT_VERSIONS,
+  assetRfqContractVersionsFor,
+  RFQ_EVM_RECEIVE_V1,
+  RFQ_EVM_SEND_V1,
+  rfqContractEnabled,
+} from '@arkade-os/solver-core/core/rfqContract.js'
 
 /** `RELAY_URL` then `SOLVER_CARD_RELAYS`. */
 export const advertisedRelays = (relayUrl: string | null, extra: readonly string[]): string[] =>
@@ -40,19 +45,29 @@ export type CardSource = Pick<
   'config' | 'policy' | 'bootPolicy' | 'assetMarkets' | 'liveOfferMarkets' | 'assetRfqMarkets' | 'providerPubkey'
 > & { arkade: { identity: Pick<Services['arkade']['identity'], 'signMessage'> } }
 
-/** Any one served contract version is enough: negotiation picks among the enabled ones. */
-const assetRfqServed = (source: CardSource): boolean =>
-  ASSET_RFQ_CONTRACT_VERSIONS.some((version) => rfqContractEnabled(source.bootPolicy.rfqContractVersions, version))
+type AssetRfqMarket = CardSource['assetRfqMarkets'][number]
+
+const isTwoAssetMarket = (market: AssetRfqMarket): boolean => market.base !== null && market.quote !== null
+
+const assetRfqVersions = (market: AssetRfqMarket) =>
+  assetRfqContractVersionsFor({ from: market.base, to: market.quote })
+
+const assetRfqServed = (source: CardSource, market: AssetRfqMarket): boolean =>
+  assetRfqVersions(market).some((version) => rfqContractEnabled(source.bootPolicy.rfqContractVersions, version))
 
 /** ENABLED already — `assetMarketPolicy` drops a pause. */
-const assetMarketsOf = (source: CardSource, rfqServed = assetRfqServed(source)) =>
+const assetMarketsOf = (source: CardSource, ignoreRfqAvailability = false) =>
   publishableAssetMarkets(
     assetCardMarketsFromPolicy({
       pricing: source.assetMarkets,
       offerMarkets: source.liveOfferMarkets,
       // BOOT: `AssetOfferService` reads these off constructor deps. `rfqMarkets` below is LIVE by contrast.
       offerBounds: { min: source.bootPolicy.offerMinFillAmount, max: source.bootPolicy.offerMaxFillAmount },
-      rfqMarkets: rfqServed ? source.assetRfqMarkets : [],
+      rfqMarkets: source.assetRfqMarkets.filter(
+        (market) =>
+          ignoreRfqAvailability ||
+          (assetRfqServed(source, market) && (!isTwoAssetMarket(market) || source.config.relayUrl !== null)),
+      ),
       chargesDeliveredCarrier: source.bootPolicy.offerChargesDeliveredCarrier,
       rfqCarrierPricedByDefault: source.policy.assetCarrierPricing,
     }),
@@ -104,6 +119,7 @@ export const evmCardMarketsOf = (source: CardSource) => {
 
 export const cardOmissions = (source: CardSource): string[] => {
   const evm = evmCardMarketsOf(source)
+  const unavailableRfq = source.assetRfqMarkets.filter((market) => !assetRfqServed(source, market))
   const inlineOnly = source.policy.evmCorridors
     .filter(
       (policy) =>
@@ -122,14 +138,23 @@ export const cardOmissions = (source: CardSource): string[] => {
       (corridor) =>
         `${corridor} is enabled but omitted: contract version ${descriptorFor(corridor).contractVersion} is not in rfq.contractVersions`,
     ),
-    ...(source.assetRfqMarkets.length === 0 || assetRfqServed(source)
-      ? []
-      : [
-          `asset RFQ markets are omitted: none of ${ASSET_RFQ_CONTRACT_VERSIONS.join(', ')} is in rfq.contractVersions`,
-        ]),
+    ...(unavailableRfq.some((market) => !isTwoAssetMarket(market))
+      ? [`asset RFQ markets are omitted: none of ${ASSET_RFQ_CONTRACT_VERSIONS.join(', ')} is in rfq.contractVersions`]
+      : []),
+    ...unavailableRfq
+      .filter(isTwoAssetMarket)
+      .map(
+        (market) =>
+          `${market.symbol} RFQ market is omitted: ${assetRfqVersions(market).join(', ')} is not in rfq.contractVersions`,
+      ),
+    ...(source.config.relayUrl === null
+      ? source.assetRfqMarkets
+          .filter((market) => isTwoAssetMarket(market) && assetRfqServed(source, market))
+          .map((market) => `${market.symbol} RFQ market is omitted: relay.url is not set`)
+      : []),
     ...evm.omitted,
     ...inlineOnly,
-    // As if an asset-swap contract version were on, so a market's own fault still shows beside the contract-version note above.
+    // Keep a market's own card errors visible alongside RFQ availability.
     ...assetMarketsOf(source, true).omitted,
   ]
 }

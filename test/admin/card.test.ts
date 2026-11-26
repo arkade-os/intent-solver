@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js'
 import { buildAdminApp } from '@arkade-os/solver-app/admin/server.js'
+import { cardErrors, validateCard } from '@arkade-os/solver-discovery'
 import { cardOmissions, deploymentCard, type CardSource } from '@arkade-os/solver-app/admin/routes/card.js'
 import {
   RFQ_ASSET_SWAP_DIRECTED,
@@ -287,6 +288,50 @@ describe('GET /api/card', () => {
     ])
     expect(legacyList.card!.markets.some((m) => quoteId(m) === `arkade:mutinynet/asset:${ASSET}`)).toBe(false)
     expect(legacyList.cardOmitted.join(' ')).toContain('asset RFQ markets are omitted')
+  })
+
+  it('publishes a two-asset market only with nonce RFQs enabled', async () => {
+    const market = {
+      base: GUCCI,
+      quote: ASSET,
+      baseDecimals: 6,
+      quoteDecimals: 6,
+      feedUrl: 'https://feed.test/price',
+      pricePath: '/price',
+      feeBps: 25,
+      sellBase: { min: 1n, max: 100n },
+      buyBase: { min: 2n, max: 200n },
+      carrierMode: 'priced',
+    }
+    const read = async (version: string, relayUrl: string | null = 'wss://relay.example') =>
+      (
+        await getCard(
+          makeDeps({
+            assetMarkets: [market],
+            assetRfqMarkets: [{ ...market, symbol: 'GUCCIASSET', buyBase: { min: 0n, max: 0n } }],
+            offerMarkets: [{ a: GUCCI, b: ASSET }],
+            relayUrl,
+            cardRelays: ['wss://hint.example'],
+            rfqContractVersions: [...RFQ_CONTRACT_VERSIONS.filter((v) => !v.startsWith('asset-swap-')), version],
+          }),
+        )
+      ).body
+    const off = await read(RFQ_ASSET_SWAP_DIRECTED)
+    expect(off.card!.markets.some((m) => quoteId(m) === `arkade:mutinynet/asset:${ASSET}`)).toBe(false)
+    expect(off.cardOmitted.join(' ')).toContain(RFQ_ASSET_SWAP_DIRECTED_NONCE)
+    const hintOnly = await read(RFQ_ASSET_SWAP_DIRECTED_NONCE, null)
+    expect(hintOnly.card!.markets.some((m) => quoteId(m) === `arkade:mutinynet/asset:${ASSET}`)).toBe(false)
+    expect(hintOnly.cardOmitted.join(' ')).toContain('relay.url is not set')
+    const on = await read(RFQ_ASSET_SWAP_DIRECTED_NONCE)
+    expect(validateCard(on.card).ok).toBe(true)
+    expect(cardErrors(on.card!, 'mutinynet')).toEqual([])
+    const advertised = on.card!.markets.find((m) => quoteId(m) === `arkade:mutinynet/asset:${ASSET}`)
+    expect(advertised).toMatchObject({
+      base_asset: { id: `arkade:mutinynet/asset:${GUCCI}` },
+      max_base_amount: '0',
+      max_quote_amount: '100',
+    })
+    expect(advertised!.charges_delivered_carrier).toBeUndefined()
   })
 
   /**
@@ -712,6 +757,6 @@ describe('deploymentCard', () => {
     const notes = (assetRfqMarkets: unknown[]) =>
       cardOmissions(sourceOf(makeDeps({ rfqContractVersions: ['lightning-send-v2'], assetRfqMarkets }))).join(' ')
     expect(notes([])).not.toContain('asset RFQ markets')
-    expect(notes([{ symbol: 'ASSET' }])).toContain('asset RFQ markets are omitted')
+    expect(notes([{ base: null, quote: ASSET, symbol: 'ASSET' }])).toContain('asset RFQ markets are omitted')
   })
 })

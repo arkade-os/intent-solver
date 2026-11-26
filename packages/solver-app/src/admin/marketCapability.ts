@@ -7,8 +7,7 @@ import { assetMarketKey, type AssetMarketConfig } from '@arkade-os/solver-core/c
 
 export type ServingPath = 'offer' | 'rfq'
 
-export type CapabilityGap =
-  'offer_path_not_built' | 'offer_market_not_live' | 'rfq_pair_unsupported' | 'rfq_both_directions_closed'
+export type CapabilityGap = 'offer_path_not_built' | 'offer_market_not_live' | 'rfq_both_directions_closed'
 
 export interface MarketCapability {
   readonly serving: readonly ServingPath[]
@@ -72,12 +71,7 @@ export const marketCapability = (market: Market, runtime: ServingRuntime): Marke
         're-save the market, or restart.',
     })
   }
-  if (market.servesRfq && market.base !== null && market.quote !== null) {
-    gaps.push({
-      kind: 'rfq_pair_unsupported',
-      detail: 'the offer covenant cannot express an asset on both legs, so RFQ drops this market.',
-    })
-  } else if (market.servesRfq && !market.rfqSellBase && !market.rfqBuyBase) {
+  if (market.servesRfq && !market.rfqSellBase && !market.rfqBuyBase) {
     gaps.push({
       kind: 'rfq_both_directions_closed',
       detail: 'both directions are closed, so RFQ registers no corridor for this market.',

@@ -675,6 +675,30 @@ describe('a new market fills what the lookup and the config know', () => {
     })
   })
 
+  it('creates a two-asset RFQ draft with its own symbol, decimals and limits', async () => {
+    const panel = await typed({ label: LABEL })
+    panel.previewPanel()
+    await panel.refreshPreview()
+    const base = 'fd'.repeat(34)
+    fire(labelled(panel.marketsView(), 'base asset id'), 'input', { value: base })
+    expect(panel.draft()).toMatchObject({ base, quote: USDA, baseDecimals: '', quoteDecimals: '6', symbol: '' })
+    const view = panel.marketsView()
+    fire(labelled(view, `${base} decimals`), 'input', { value: '6' })
+    fire(labelled(view, 'symbol'), 'input', { value: 'EURUSD' })
+    fire(labelled(view, `${base} → USDA min`), 'input', { value: '2' })
+    fire(labelled(view, `${base} → USDA max`), 'input', { value: '10' })
+    expect(panel.marketBody(panel.draft())).toMatchObject({
+      base,
+      quote: USDA,
+      baseDecimals: 6,
+      quoteDecimals: 6,
+      symbol: 'EURUSD',
+      sellBase: { min: '2000000', max: '10000000' },
+      buyBase: null,
+      servesRfq: true,
+    })
+  })
+
   it('leaves a prefilled limit the operator cleared empty on the next answer', async () => {
     const panel = await typed({ label: LABEL })
     panel.previewPanel()
