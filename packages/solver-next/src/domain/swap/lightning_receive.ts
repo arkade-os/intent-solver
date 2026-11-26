@@ -79,6 +79,7 @@ export const whatStopsTheFill = (terms: ReceiveTerms, now: UnixSeconds): FillRef
 
 /** How long a held HTLC must last, so that an invoice asking for this much is never refused later. */
 export const timeTheHtlcMustLast = (secondsToRefundAlone: number, acceptsNoRefundAlone: boolean): number => {
+  // A fill at time zero whose refund opens as late as we allow: every moment below is then a duration.
   const fill: Fill = {
     at: 0,
     refundOpensAt: LONGEST_A_FILL_STAYS_LOCKED,

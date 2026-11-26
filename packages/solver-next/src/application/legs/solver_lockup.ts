@@ -89,9 +89,9 @@ export class SolverLockup {
     let spendable: readonly FundedOutput[] | null = null
     if (swap.to.state === 'locked' && recorded !== null) {
       spendable = await arkade.spendable(contract)
-      if (spendable.some(same(recorded)) && !(await arkade.refundOpen(contract))) {
-        return lockupAt(LockupStatus.Funded, recorded)
-      }
+      // When that cannot be learned, the refund is taken as open: the full read below is the careful one.
+      const refundOpen = await arkade.refundOpen(contract).catch(() => true)
+      if (spendable.some(same(recorded)) && !refundOpen) return lockupAt(LockupStatus.Funded, recorded)
     }
 
     const history = await arkade.history(contract)

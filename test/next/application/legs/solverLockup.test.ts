@@ -259,6 +259,11 @@ describe('our lockup on Arkade: its state', () => {
       },
     )
     expect((await noChainTip.state(toLocked())).status).toBe('claimed')
+    world.history = [output('pay')]
+    world.claimedOn = null
+    world.reads = []
+    expect(await noChainTip.state(toLocked())).toEqual(at('funded'))
+    expect(world.reads).toEqual(['spendable', 'history', 'claimPreimage'])
   })
 
   it('tells outputs of one transaction apart, and takes no output larger than the payout', async () => {
