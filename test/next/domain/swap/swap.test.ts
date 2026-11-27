@@ -158,6 +158,29 @@ describe('a swap', () => {
   })
 })
 
+describe('markFundedBy', () => {
+  const output = (outpoint: string, units: bigint) => ({ outpoint: ref(outpoint), amount: btc(units) })
+  const amount = quoted().from.amount.units
+
+  it('locks the from leg in the outputs it was funded by, and names the first as the funding', () => {
+    const funded = quoted().markFundedBy(t(2), [output('a:0', amount - 1n), output('b:1', 1n)], t(900))
+    expect([funded.state, funded.from.fact('funding'), funded.from.expiresAt]).toEqual(['funded', 'a:0', 900])
+    expect(funded.from.outputs.map((held) => held.outpoint)).toEqual(['a:0', 'b:1'])
+    expect(funded.startFill(t(3)).from.outputs).toEqual(funded.from.outputs)
+  })
+
+  it('takes on exactly the amount of the leg, never more and never less', () => {
+    expect(() => quoted().markFundedBy(t(2), [output('a:0', amount + 1n)])).toThrow(RuleViolated)
+    expect(() => quoted().markFundedBy(t(2), [output('a:0', amount - 1n)])).toThrow(RuleViolated)
+    expect(() => quoted().markFundedBy(t(2), [])).toThrow(RuleViolated)
+  })
+
+  it('is refused where markFunded is', () => {
+    const funded = quoted().markFunded(t(2))
+    expect(() => funded.startFill(t(3)).markFundedBy(t(4), [output('a:0', amount)])).toThrow(IllegalTransition)
+  })
+})
+
 describe('abortFill', () => {
   it('lets a Lightning payment be tried again', () => {
     const retried = funded(quoted()).startFill(t(3), ref('pay-1')).abortFill(t(4))

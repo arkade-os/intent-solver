@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { IllegalTransition } from '@arkade-os/solver-next/domain/shared/error.js'
+import { IllegalTransition, RuleViolated } from '@arkade-os/solver-next/domain/shared/error.js'
 import { ContractKind, LEG_MOVES, Leg, Side, type LegState } from '@arkade-os/solver-next/domain/swap/leg.js'
 import { btc, ref, t } from '../support.js'
 
@@ -95,5 +95,30 @@ describe('Leg', () => {
   it('restores what was stored without checking it again', () => {
     const stored = Leg.restore('to', terms, 'refunded', { funding: [ref('a')], claim: [], refund: [ref('b')] }, t(7))
     expect([stored.state, stored.since, stored.expiresAt, stored.fact('refund')]).toEqual(['refunded', 7, null, 'b'])
+  })
+})
+
+describe('the outputs a leg is held in', () => {
+  const leg = Leg.open('from', { rail: 'arkade', amount: btc(10_000n), contract: 'vhtlc', version: null }, t(1))
+  const output = (outpoint: string, sats: bigint) => ({ outpoint: ref(outpoint), amount: btc(sats) })
+
+  it('are none until it is told, and survive every later move', () => {
+    expect(leg.outputs).toEqual([])
+    const held = leg.heldIn([output('a:0', 6_000n), output('b:1', 4_000n)])
+    expect(
+      held
+        .moveTo('locked', t(2))
+        .record({ claim: ref('claim') })
+        .moveTo('claimed', t(3)).outputs,
+    ).toEqual(held.outputs)
+  })
+
+  it.each([
+    ['less than the amount', [output('a:0', 9_999n)]],
+    ['more than the amount', [output('a:0', 6_000n), output('b:1', 4_001n)]],
+    ['nothing', []],
+    ['the same output twice', [output('a:0', 5_000n), output('a:0', 5_000n)]],
+  ])('must hold exactly the amount, once each: %s', (_what, outputs) => {
+    expect(() => leg.heldIn(outputs)).toThrow(RuleViolated)
   })
 })
