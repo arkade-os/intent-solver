@@ -1,7 +1,7 @@
 import { hex } from '@scure/base'
 import { beforeEach, describe, expect, it } from 'vitest'
-import { HoldInvoice } from '@arkade-os/solver-next/application/legs/hold_invoice.js'
-import { SolverLockup } from '@arkade-os/solver-next/application/legs/solver_lockup.js'
+import { FromLightning } from '@arkade-os/solver-next/application/legs/from_lightning.js'
+import { ToArkade } from '@arkade-os/solver-next/application/legs/to_arkade.js'
 import {
   EMPTY_LOCKUP_GRACE,
   LightningReceive,
@@ -52,7 +52,7 @@ const output = (txid: string, value = PAYOUT, flags: Partial<LockupOutpoint> = {
 
 const serviceWith = (acceptsNoRefundAlone = false): LightningReceive =>
   new LightningReceive(
-    new HoldInvoice({
+    new FromLightning({
       getHoldState: async () => {
         world.reads.push('hold')
         if (world.hold instanceof Error) throw world.hold
@@ -62,7 +62,7 @@ const serviceWith = (acceptsNoRefundAlone = false): LightningReceive =>
         throw new Error('next() must not settle')
       },
     }),
-    new SolverLockup(
+    new ToArkade(
       { contract: async () => CONTRACT },
       {
         canRefundUnrolled: true,
@@ -274,6 +274,12 @@ describe('a Lightning receive recorded as filled with no outpoint', () => {
 })
 
 describe('a Lightning receive the client has claimed', () => {
+  it('fails a row recorded as claimed with no preimage', async () => {
+    const blank = Swap.restore({ ...filled().snapshot, preimage: null }, 0)
+    expect(await receive.next(blank)).toEqual({ do: 'fail', reason: 'claimed state with no preimage' })
+    expect(world.reads).toEqual([])
+  })
+
   it('settles the hold, on the first attempt and on a repeat', async () => {
     expect(await receive.next(filled())).toEqual({ do: 'settle' })
     expect(await receive.next(filled().startSettle(t(QUOTED_AT + 64)))).toEqual({ do: 'settle' })

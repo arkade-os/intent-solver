@@ -6,8 +6,8 @@ import type { Reference } from '../domain/swap/leg.js'
 import { whatStopsTheFill } from '../domain/swap/lightning_receive.js'
 import type { Swap } from '../domain/swap/swap.js'
 import { HoldStatus } from '../ports/lightning.js'
-import type { HoldInvoice } from './legs/hold_invoice.js'
-import { LockupStatus, type SolverLockup } from './legs/solver_lockup.js'
+import type { FromLightning } from './legs/from_lightning.js'
+import { LockupStatus, type ToArkade } from './legs/to_arkade.js'
 
 /** How long a lockup may read as gone before that is believed: its claim is readable a little after the spend. */
 export const EMPTY_LOCKUP_GRACE = 120
@@ -54,8 +54,8 @@ const fail = (reason: string): ReceiveStep => ({ do: Do.Fail, reason })
 
 export class LightningReceive {
   constructor(
-    private readonly invoice: HoldInvoice,
-    private readonly lockup: SolverLockup,
+    private readonly invoice: FromLightning,
+    private readonly lockup: ToArkade,
     private readonly now: () => UnixSeconds,
     private readonly settings: ReceiveSettings,
   ) {}
@@ -73,7 +73,8 @@ export class LightningReceive {
         return this.whenAwaitingClaim(swap)
       case 'filled':
       case 'settling':
-        return Promise.resolve({ do: Do.Settle })
+        // Only a row read from the table can be here without one.
+        return Promise.resolve(swap.preimage === null ? fail('claimed state with no preimage') : { do: Do.Settle })
       case 'refunding':
         return this.whenRefunding(swap)
       default:
