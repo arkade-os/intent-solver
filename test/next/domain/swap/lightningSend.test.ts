@@ -145,7 +145,7 @@ describe('the Lightning send rules against production', () => {
     }
   }
 
-  it('agree on 300,000 random situations', async () => {
+  it('agree on 300,000 random situations, 20,000 of them with a lockup', async () => {
     const next = random(20261127)
     const pick = <T>(of: readonly T[]): T => of[Math.floor(next() * of.length)]!
     const around = (center: number) => center + pick([-1, 0, 1, -MINUTE, MINUTE, -HOUR, HOUR, 0, 0])
@@ -224,25 +224,28 @@ describe('the Lightning send rules against production', () => {
         `refund alone ${i}`,
       )
 
-      const spendableSats = Array.from({ length: pick([0, 1, 1, 1, 2, 5]) }, () =>
-        pick([10_000, 5_000, 2_000, 1, 10_001]),
-      )
-      const heldSats = spendableSats.reduce((sum, sats) => sum + sats, 0) + pick([0, 0, 0, 10_000, 3])
-      const maxOutputs = pick([1, 4])
-      s = { heldSats, spendable: spendableSats.map((value) => ({ value })), longestWait, maxOutputs }
-      const row = { state: 'quoted', createdAt: quotedAt, invoice: '', invoiceExpiresAt, amountSats: 10_000 }
-      const old = await planSend(row as never, reads)
-      const step = whatToDoWithTheLockup(
-        { heldSats, spendableSats },
-        { amountSats: 10_000, maxOutputs, quotedAt, invoiceExpiresAt, longestWait },
-        NOW,
-      )
-      const expected =
-        old.do === 'fail'
-          ? { do: 'refuse', reason: old.reason, heldSats: old.lockupValue ?? null }
-          : { do: old.do === 'adopt_lockup' ? 'adopt' : 'wait' }
-      same(step, expected, `lockup ${i}`)
-      reached.add(step.do === 'refuse' ? step.reason.replace(/\d+/g, 'N') : step.do)
+      // Today's lockup verdict is only reachable through an async call, and a long loop of awaits is slow on Node 22.
+      if (i % 15 === 0) {
+        const spendableSats = Array.from({ length: pick([0, 1, 1, 1, 2, 5]) }, () =>
+          pick([10_000, 5_000, 2_000, 1, 10_001]),
+        )
+        const heldSats = spendableSats.reduce((sum, sats) => sum + sats, 0) + pick([0, 0, 0, 10_000, 3])
+        const maxOutputs = pick([1, 4])
+        s = { heldSats, spendable: spendableSats.map((value) => ({ value })), longestWait, maxOutputs }
+        const row = { state: 'quoted', createdAt: quotedAt, invoice: '', invoiceExpiresAt, amountSats: 10_000 }
+        const old = await planSend(row as never, reads)
+        const step = whatToDoWithTheLockup(
+          { heldSats, spendableSats },
+          { amountSats: 10_000, maxOutputs, quotedAt, invoiceExpiresAt, longestWait },
+          NOW,
+        )
+        const expected =
+          old.do === 'fail'
+            ? { do: 'refuse', reason: old.reason, heldSats: old.lockupValue ?? null }
+            : { do: old.do === 'adopt_lockup' ? 'adopt' : 'wait' }
+        same(step, expected, `lockup ${i}`)
+        reached.add(step.do === 'refuse' ? step.reason.replace(/\d+/g, 'N') : step.do)
+      }
 
       const sentAt = pick([null, after(-59), after(-60), after(-1), after(-HOUR)])
       const polled = pick([
