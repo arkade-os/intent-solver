@@ -12,7 +12,7 @@ import { planPolledPayment, planSend, type SendReads } from '@arkade-os/solver-c
 import { rawDelaySeconds } from '@arkade-os/solver-core/core/timelocks.js'
 import {
   blocksThePaymentMayTake,
-  clientCannotRefundAloneEarly,
+  clientMayRefundAloneEarly,
   lockupDeadline,
   routeMayOutliveTheRefund,
   routingFeeCapSats,
@@ -219,8 +219,8 @@ describe('the Lightning send rules against production', () => {
       )
       const rawDelay = pick([512, 1_024, 4_096, 86_400 + 512, 144, 12])
       same(
-        clientCannotRefundAloneEarly(rawDelaySeconds(rawDelay), refundOpensAt, quotedAt),
-        refundWithoutReceiverDelayCovers(rawDelay, refundOpensAt, quotedAt),
+        clientMayRefundAloneEarly(rawDelaySeconds(rawDelay), refundOpensAt, quotedAt),
+        !refundWithoutReceiverDelayCovers(rawDelay, refundOpensAt, quotedAt),
         `refund alone ${i}`,
       )
 

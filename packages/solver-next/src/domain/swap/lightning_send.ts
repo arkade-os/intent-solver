@@ -60,8 +60,7 @@ export const whatToDoWithTheLockup = (seen: ClientLockupSeen, rules: LockupRules
   if (claimable < amountSats && heldSats >= amountSats) {
     return refuse(`lockup funded on an asset vtxo a claim cannot spend: ${heldSats} held, ${claimable} spendable`)
   }
-  const tooLate =
-    now >= lockupDeadline(rules.quotedAt, rules.invoiceExpiresAt, rules.longestWait) || now >= rules.invoiceExpiresAt
+  const tooLate = now >= lockupDeadline(rules.quotedAt, rules.invoiceExpiresAt, rules.longestWait)
   if (tooLate) return refuse(whyTooLate(rules, claimable, now))
   return claimable === amountSats ? { do: 'adopt' } : { do: 'wait' }
 }
@@ -129,12 +128,12 @@ export const whatStopsThePayment = (terms: PayTerms, now: UnixSeconds): PayRefus
   return null
 }
 
-/** With the Arkade server gone, the client's own refund must not open before the refund we quoted. */
-export const clientCannotRefundAloneEarly = (
+/** True is the problem: with the Arkade server gone, the client could refund before the refund we quoted. */
+export const clientMayRefundAloneEarly = (
   secondsToRefundAlone: number,
   refundOpensAt: number,
   quotedAt: number,
-): boolean => secondsToRefundAlone >= refundOpensAt - quotedAt
+): boolean => secondsToRefundAlone < refundOpensAt - quotedAt
 
 export const routingFeeCapSats = (amountSats: number): number =>
   Math.max(SMALLEST_ROUTING_FEE_CAP_SATS, Math.ceil(amountSats * 0.005))
