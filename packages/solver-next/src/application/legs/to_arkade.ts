@@ -63,7 +63,7 @@ const adoptFunding = (history: readonly LockupOutpoint[], payoutSats: number): L
   return exact.find((output) => !output.spent) ?? exact[0] ?? null
 }
 
-export class SolverLockup {
+export class ToArkade {
   constructor(
     private readonly contracts: LockupContracts,
     private readonly arkade: ArkadeLockups,
@@ -109,7 +109,8 @@ export class SolverLockup {
 
     // Before the spendable read, which shows an unrolled lockup as empty. Where it cannot be refunded on
     // Bitcoin there is nothing to do about it, and it is judged like any other output.
-    if (seen?.unrolled === true && arkade.canRefundUnrolled) return lockupAt(LockupStatus.Unrolled, ours)
+    const unrolled = history.some((output) => same(ours)(output) && output.unrolled === true)
+    if (unrolled && arkade.canRefundUnrolled) return lockupAt(LockupStatus.Unrolled, ours)
     // The history is final about a spent output. About an unspent one only the spendable read is:
     // an output in an expired batch is neither spent nor spendable.
     if (seen?.spent !== true) {

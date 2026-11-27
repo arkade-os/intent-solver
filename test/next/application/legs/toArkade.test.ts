@@ -1,6 +1,6 @@
 import { hex } from '@scure/base'
 import { beforeEach, describe, expect, it } from 'vitest'
-import { SolverLockup } from '@arkade-os/solver-next/application/legs/solver_lockup.js'
+import { ToArkade } from '@arkade-os/solver-next/application/legs/to_arkade.js'
 import { Hashlock } from '@arkade-os/solver-next/domain/swap/hashlock.js'
 import type { Swap } from '@arkade-os/solver-next/domain/swap/swap.js'
 import type { ArkadeLockups, LockupContract, LockupOutpoint } from '@arkade-os/solver-next/ports/arkade.js'
@@ -47,7 +47,7 @@ interface World {
 }
 
 let world: World
-let lockup: SolverLockup
+let lockup: ToArkade
 
 const output = (txid: string, value = PAYOUT, flags: Partial<LockupOutpoint> = {}): LockupOutpoint => ({
   txid,
@@ -108,7 +108,7 @@ beforeEach(() => {
     reads: [],
     searched: [],
   }
-  lockup = new SolverLockup({ contract: async () => CONTRACT }, arkade())
+  lockup = new ToArkade({ contract: async () => CONTRACT }, arkade())
 })
 
 describe('our lockup on Arkade: its state', () => {
@@ -175,7 +175,7 @@ describe('our lockup on Arkade: its state', () => {
   it('is gone, not funded, when its batch expired: neither spent nor spendable', async () => {
     const arkadeWithExpiredBatch = { ...arkade(), spendable: async () => [] }
     world.history = [output('pay')]
-    const expired = new SolverLockup({ contract: async () => CONTRACT }, arkadeWithExpiredBatch)
+    const expired = new ToArkade({ contract: async () => CONTRACT }, arkadeWithExpiredBatch)
     expect(await expired.state(toLocked())).toEqual(at('gone'))
   })
 
@@ -187,10 +187,7 @@ describe('our lockup on Arkade: its state', () => {
   })
 
   it('is not refunded by a refund on record alone: it may have swept only dust', async () => {
-    const expiredBatch = new SolverLockup(
-      { contract: async () => CONTRACT },
-      { ...arkade(), spendable: async () => [] },
-    )
+    const expiredBatch = new ToArkade({ contract: async () => CONTRACT }, { ...arkade(), spendable: async () => [] })
     world.history = [output('pay'), output('dust', 330, { spent: true })]
     expect(await expiredBatch.state(refunding('dust-refund'))).toEqual(at('gone'))
     world.history = [output('dust', 330, { spent: true })]
@@ -213,10 +210,7 @@ describe('our lockup on Arkade: its state', () => {
     world.lostRefund = 'refund-tx'
     world.history = []
     expect(await lockup.state(refunding())).toEqual(at('refunded', 'pay:0', { refundTx: 'refund-tx' }))
-    const expiredBatch = new SolverLockup(
-      { contract: async () => CONTRACT },
-      { ...arkade(), spendable: async () => [] },
-    )
+    const expiredBatch = new ToArkade({ contract: async () => CONTRACT }, { ...arkade(), spendable: async () => [] })
     world.history = [output('pay')]
     expect(await expiredBatch.state(refunding())).toEqual(at('gone'))
   })
@@ -231,7 +225,7 @@ describe('our lockup on Arkade: its state', () => {
     world.history = [output('pay', PAYOUT, { spent: true, unrolled: true })]
     world.claimedOn = 'pay:0'
     const unrolledSeen: (boolean | undefined)[] = []
-    const watching = new SolverLockup(
+    const watching = new ToArkade(
       { contract: async () => CONTRACT },
       {
         ...arkade(),
@@ -252,8 +246,13 @@ describe('our lockup on Arkade: its state', () => {
     expect(await lockup.state(refunding('refund-tx'))).toEqual(at('unrolled'))
   })
 
+  it('takes our output as unrolled when the history lists it twice and only one listing says so', async () => {
+    world.history = [output('pay', PAYOUT), output('pay', PAYOUT, { spent: true, unrolled: true })]
+    expect(await lockup.state(refunding())).toEqual(at('unrolled'))
+  })
+
   it('judges an unrolled lockup like any other where it cannot be refunded on Bitcoin', async () => {
-    const cannot = new SolverLockup({ contract: async () => CONTRACT }, { ...arkade(), canRefundUnrolled: false })
+    const cannot = new ToArkade({ contract: async () => CONTRACT }, { ...arkade(), canRefundUnrolled: false })
     world.history = [output('pay', PAYOUT, { spent: true, unrolled: true })]
     expect(await cannot.state(refunding())).toEqual(at('gone'))
     world.lostRefund = 'refund-tx'
@@ -270,7 +269,7 @@ describe('our lockup on Arkade: its state', () => {
   it('shows a claim even when it cannot learn whether the refund is open', async () => {
     world.history = [output('pay', PAYOUT, { spent: true })]
     world.claimedOn = 'pay:0'
-    const noChainTip = new SolverLockup(
+    const noChainTip = new ToArkade(
       { contract: async () => CONTRACT },
       {
         ...arkade(),

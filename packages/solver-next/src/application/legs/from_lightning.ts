@@ -23,7 +23,7 @@ const hashOf = (swap: Swap): Hashlock => {
 }
 
 /** The `from` leg of a Lightning receive: our node holds the payer's payment until we settle it with the preimage. */
-export class HoldInvoice {
+export class FromLightning {
   constructor(private readonly node: HoldInvoiceNode) {}
 
   /** Only `armed` may be filled against. */

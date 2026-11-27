@@ -9,8 +9,8 @@ import { hex } from '@scure/base'
 import { refundDeadlineReached, refundDeadlineSeconds } from '@arkade-os/solver-corridors/chainClock.js'
 import type { ReceiveSwapRow } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
 import type { ReceiveReadsSeen } from '@arkade-os/solver-corridors/receive/readsSeen.js'
-import { HoldInvoice } from '@arkade-os/solver-next/application/legs/hold_invoice.js'
-import { SolverLockup } from '@arkade-os/solver-next/application/legs/solver_lockup.js'
+import { FromLightning } from '@arkade-os/solver-next/application/legs/from_lightning.js'
+import { ToArkade } from '@arkade-os/solver-next/application/legs/to_arkade.js'
 import { LightningReceive, type ReceiveStep } from '@arkade-os/solver-next/application/lightning_receive.js'
 import { UnixSeconds } from '@arkade-os/solver-next/domain/shared/time.js'
 import { swapFromReceiveRow } from '@arkade-os/solver-next/infrastructure/db/receive_swap_row.js'
@@ -80,11 +80,11 @@ export const createReceiveShadow = (deps: ReceiveShadowDeps) => {
 
   const decide = (row: ReceiveSwapRow, seen: ReceiveReadsSeen): Promise<ReceiveStep> =>
     new LightningReceive(
-      new HoldInvoice({
+      new FromLightning({
         getHoldState: async (hash) => seen.hold ?? deps.ln.getHoldState(hash),
         settleHold: readOnly,
       }),
-      new SolverLockup(
+      new ToArkade(
         { contract: async () => contractOf(row) },
         {
           canRefundUnrolled: deps.arkade.refundUnrolled !== undefined,

@@ -3,8 +3,8 @@ import { describe, expect, it } from 'vitest'
 import { planReceive, type ReceivePlanRow, type ReceiveReads } from '@arkade-os/solver-core/core/receivePlan.js'
 import { rawDelaySeconds } from '@arkade-os/solver-core/core/timelocks.js'
 import { adoptFunding } from '@arkade-os/solver-corridors/legs/arkadeLockup.js'
-import { HoldInvoice } from '@arkade-os/solver-next/application/legs/hold_invoice.js'
-import { SolverLockup } from '@arkade-os/solver-next/application/legs/solver_lockup.js'
+import { FromLightning } from '@arkade-os/solver-next/application/legs/from_lightning.js'
+import { ToArkade } from '@arkade-os/solver-next/application/legs/to_arkade.js'
 import { LightningReceive, type ReceiveStep } from '@arkade-os/solver-next/application/lightning_receive.js'
 import { Hashlock } from '@arkade-os/solver-next/domain/swap/hashlock.js'
 import {
@@ -126,8 +126,8 @@ const READS: ReceiveReads = {
 
 const receiveWith = (acceptsNoRefundAlone: boolean, canRefundUnrolled: boolean): LightningReceive =>
   new LightningReceive(
-    new HoldInvoice({ getHoldState: async () => s.hold, settleHold: async () => undefined }),
-    new SolverLockup(
+    new FromLightning({ getHoldState: async () => s.hold, settleHold: async () => undefined }),
+    new ToArkade(
       { contract: async () => CONTRACT },
       {
         canRefundUnrolled,

@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { HoldInvoice } from '@arkade-os/solver-next/application/legs/hold_invoice.js'
+import { FromLightning } from '@arkade-os/solver-next/application/legs/from_lightning.js'
 import { Hashlock } from '@arkade-os/solver-next/domain/swap/hashlock.js'
 import { Quote } from '@arkade-os/solver-next/domain/swap/quote.js'
 import type { Swap } from '@arkade-os/solver-next/domain/swap/swap.js'
@@ -37,7 +37,7 @@ const nodeSaying = (answer: HoldState | Error, cancel?: () => Promise<void>) => 
       await cancel?.()
     },
   }
-  return { invoice: new HoldInvoice(node), closed }
+  return { invoice: new FromLightning(node), closed }
 }
 const saying = (status: HoldStatus, expiresAt: number | null = null) => nodeSaying({ status, expiresAt })
 const DOWN = new Error('node unreachable')
@@ -45,12 +45,12 @@ const DOWN = new Error('node unreachable')
 describe('a hold invoice on our Lightning node', () => {
   let dir: string
   let node: FakeLightningBackend
-  let invoice: HoldInvoice
+  let invoice: FromLightning
 
   beforeEach(async () => {
     dir = mkdtempSync(join(tmpdir(), 'hold-invoice-'))
     node = new FakeLightningBackend(join(dir, 'ln.json'), 'bcrt', () => 1_000)
-    invoice = new HoldInvoice(node)
+    invoice = new FromLightning(node)
     await node.createHoldInvoice({
       amountSats: 5_000,
       paymentHash: HASH,
@@ -93,7 +93,7 @@ describe('a hold invoice on our Lightning node', () => {
 
 describe('the state of a hold', () => {
   it('passes on the words of a node that refuses to settle', async () => {
-    const refusing = new HoldInvoice({
+    const refusing = new FromLightning({
       getHoldState: async () => ({ status: 'armed', expiresAt: HTLC_EXPIRES_AT }),
       settleHold: async () => {
         throw new Error('permission denied')
@@ -198,7 +198,7 @@ describe('closing an invoice', () => {
       },
       settleHold: async () => undefined,
     }
-    await new HoldInvoice(cannotClose).closeIfNotPaid(unfilled())
+    await new FromLightning(cannotClose).closeIfNotPaid(unfilled())
     expect(asked).toBe(false)
   })
 })
