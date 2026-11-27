@@ -264,6 +264,12 @@ describe('a Lightning receive recorded as filled with no outpoint', () => {
     })
     expect(world.reads).toEqual([])
   })
+
+  it('fails the same way when what is recorded is not an outpoint at all', async () => {
+    const garbled = filling().markToLocked(t(QUOTED_AT + 62), ref('pay:0:1'))
+    expect(await receive.next(garbled)).toEqual({ do: 'fail', reason: 'funded state with no funded outpoint recorded' })
+    expect(world.reads).toEqual([])
+  })
 })
 
 describe('a Lightning receive the client has claimed', () => {

@@ -145,7 +145,7 @@ export class SolverLockup {
   }
 
   hasOutpointOnRecord(swap: Swap): boolean {
-    return outpointOf(swap.to.fact('funding')) !== null
+    return OUTPOINT.test(swap.to.fact('funding') ?? '')
   }
 
   private recordedOutpoint(swap: Swap): Outpoint | null {
