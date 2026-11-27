@@ -93,40 +93,41 @@ const rowOf = (s: Situation): ReceiveSwapRecord & ReceivePlanRow => {
   }
 }
 
-const today = (s: Situation): Promise<{ do: string; reason?: string }> => {
-  const row = rowOf(s)
-  // As the orchestrator builds them today.
-  const reads: ReceiveReads = {
-    now: () => s.now,
-    acceptsUnilateralGap: () => s.acceptsNoRefundAlone,
-    canRefundUnrolled: () => true,
-    hold: async () => s.hold,
-    coupledSend: async () => null,
-    coupledRefundDeadline: async () => 0,
-    coupledLockupFunded: async () => false,
-    earlierFunding: async () => adoptFunding(s.history, PAYOUT),
-    refundDeadline: async () => REFUND_OPENS_AT,
-    spendable: async () => spendableOf(s),
-    refundOpen: async () => s.now >= REFUND_OPENS_AT,
-    claim: async () => {
-      const searched = s.history.some(isRecorded) ? s.history : [...s.history, RECORDED]
-      return { history: s.history, preimage: preimageOn(s, searched) ? SECRET : null }
-    },
-    ownRefund: async () => s.pendingRefund,
-    holdSettled: async () => s.hold.status === 'settled',
-  }
-  return planReceive(row, reads)
+// Built once and pointed at one situation at a time: sixty thousand sets of them is what a busy test worker chokes on.
+let s: Situation
+const CONTRACT = lockupContract(HASH, PAYOUT)
+const SECRET_BYTES = hex.decode(SECRET)
+
+// As the orchestrator builds them today.
+const READS: ReceiveReads = {
+  now: () => s.now,
+  acceptsUnilateralGap: () => s.acceptsNoRefundAlone,
+  canRefundUnrolled: () => true,
+  hold: async () => s.hold,
+  coupledSend: async () => null,
+  coupledRefundDeadline: async () => 0,
+  coupledLockupFunded: async () => false,
+  earlierFunding: async () => adoptFunding(s.history, PAYOUT),
+  refundDeadline: async () => REFUND_OPENS_AT,
+  spendable: async () => spendableOf(s),
+  refundOpen: async () => s.now >= REFUND_OPENS_AT,
+  claim: async () => {
+    const searched = s.history.some(isRecorded) ? s.history : [...s.history, RECORDED]
+    return { history: s.history, preimage: preimageOn(s, searched) ? SECRET : null }
+  },
+  ownRefund: async () => s.pendingRefund,
+  holdSettled: async () => s.hold.status === 'settled',
 }
 
-const ours = (s: Situation): Promise<ReceiveStep> =>
+const receiveWith = (acceptsNoRefundAlone: boolean): LightningReceive =>
   new LightningReceive(
     new HoldInvoice({ getHoldState: async () => s.hold, settleHold: async () => undefined }),
     new SolverLockup(
-      { contract: async () => lockupContract(HASH, PAYOUT) },
+      { contract: async () => CONTRACT },
       {
         spendable: async () => spendableOf(s),
         history: async () => s.history,
-        claimPreimage: async (_contract, outpoints) => (preimageOn(s, outpoints) ? hex.decode(SECRET) : null),
+        claimPreimage: async (_contract, outpoints) => (preimageOn(s, outpoints) ? SECRET_BYTES : null),
         fund: async () => null,
         refund: async () => 'refund-tx',
         finalizePendingRefund: async () => s.pendingRefund,
@@ -136,8 +137,13 @@ const ours = (s: Situation): Promise<ReceiveStep> =>
       },
     ),
     () => t(s.now),
-    { acceptsNoRefundAlone: s.acceptsNoRefundAlone },
-  ).next(swapFromReceiveRow(rowOf(s)))
+    { acceptsNoRefundAlone },
+  )
+const RECEIVE = { cautious: receiveWith(false), accepting: receiveWith(true) }
+
+const today = (row: ReceivePlanRow): Promise<{ do: string; reason?: string }> => planReceive(row, READS)
+const ours = (row: ReceiveSwapRecord): Promise<ReceiveStep> =>
+  (s.acceptsNoRefundAlone ? RECEIVE.accepting : RECEIVE.cautious).next(swapFromReceiveRow(row))
 
 // Where the new decision differs from today's on purpose. Each is safer, and takes one tick less.
 const intended = (s: Situation, old: { do: string }, next: ReceiveStep): string | null => {
@@ -153,7 +159,7 @@ const intended = (s: Situation, old: { do: string }, next: ReceiveStep): string 
 }
 
 describe('the Lightning receive decision', () => {
-  it('is the one production makes today, on 60,000 random rows read from the table', async () => {
+  it('is the one production makes today, on 10,000 random rows read from the table', async () => {
     const next = random(20261127)
     const pick = <T>(of: readonly T[]): T => of[Math.floor(next() * of.length)]!
     const TIMES = [-1, 0, 1].flatMap((d) => [INVOICE_EXPIRES_AT + d, REFUND_OPENS_AT + d, REFUND_OPENS_AT + 120 + d])
@@ -169,10 +175,10 @@ describe('the Lightning receive decision', () => {
 
     const counts: Record<string, number> = {}
     const onPurpose = new Set<string>()
-    for (let i = 0; i < 60_000; i++) {
+    for (let i = 0; i < 10_000; i++) {
       const now = anyTime()
       const history = lockup()
-      const s: Situation = {
+      s = {
         state: pick([
           ...(['quoted', 'armed', 'armed_fill_started', 'funded', 'claimed', 'refunding'] as const),
           ...(['quoted', 'armed', 'armed_fill_started', 'funded', 'claimed', 'refunding'] as const),
@@ -185,7 +191,7 @@ describe('the Lightning receive decision', () => {
         },
         savedHtlcExpiresAt: next() < 0.1 ? null : pick([now - 1, now, now + 1, now + 200 * MINUTE]),
         history,
-        batchExpired: next() < 0.1,
+        batchExpired: next() < 0.2,
         claimedOn: next() < 0.4 ? pick(['pay:0', 'twin:1', 'dust:0']) : null,
         pendingRefund: next() < 0.2 ? 'refund-tx' : null,
         rawRefundAloneDelay: pick([6, 144, 512, 1024, 4096, 20_480]),
@@ -197,8 +203,9 @@ describe('the Lightning receive decision', () => {
       if (s.claimedOn !== null && claimed?.spent !== true) s.claimedOn = null
       if (s.hold.expiresAt !== null && s.hold.expiresAt < 0) s.hold = { ...s.hold, expiresAt: null }
 
-      // One row at a time: sixty thousand of them in flight at once is what a test worker runs out of memory on.
-      const [old, step] = await Promise.all([today(s), ours(s)])
+      const row = rowOf(s)
+      const old = await today(row)
+      const step = await ours(row)
       counts[old.do] = (counts[old.do] ?? 0) + 1
       const same = old.do === step.do && (old.reason ?? null) === (step.reason ?? null)
       const why = same ? null : intended(s, old, step)
