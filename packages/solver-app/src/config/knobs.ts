@@ -98,6 +98,7 @@ export const PATHS: readonly Row[] = [
   ['notify.slackWebhookUrl', 'SLACK_WEBHOOK_URL'],
   ['notify.balanceReportIntervalMinutes', 'BALANCE_REPORT_INTERVAL_MINUTES'],
   ['diagnostics.latency', 'SOLVER_LATENCY_DIAGNOSTICS', (on) => (on ? '1' : '0')],
+  ['diagnostics.receiveShadow', 'SOLVER_RECEIVE_SHADOW', (on) => (on ? '1' : '0')],
 ]
 
 export const EVM_FIELDS: Readonly<Record<string, string>> = {

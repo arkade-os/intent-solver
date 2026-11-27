@@ -90,6 +90,12 @@ describe('a receive_swap row read as a swap', () => {
     expect(stuckAt(CLAIMED)).toEqual(['stuck', 'locked', 'claimed'])
   })
 
+  it('takes an empty preimage as none', () => {
+    const swap = swapFromReceiveRow(row({ state: 'funded', ...FUNDED, preimage: '' }))
+    expect([swap.preimage, swap.state]).toEqual([null, 'awaiting_claim'])
+    expect(swapFromReceiveRow(row({ state: 'stuck', ...FUNDED, preimage: '' })).to.state).toBe('locked')
+  })
+
   it('never charges a negative fee when the row pays out more than it takes', () => {
     expect(swapFromReceiveRow(row({ payoutSats: 6_000 })).quote.pricing.fee.units).toBe(0n)
   })

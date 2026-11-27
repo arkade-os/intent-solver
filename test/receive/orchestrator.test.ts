@@ -2936,3 +2936,60 @@ describe('ReceiveSwapService.tick — answers a backend should never give', () =
     expect(refunded).toEqual([true])
   })
 })
+
+describe('ReceiveSwapService.tick — onPlanned', () => {
+  const watched = (onPlanned: NonNullable<ConstructorParameters<typeof ReceiveSwapService>[0]['onPlanned']>) =>
+    new ReceiveSwapService({
+      acceptUnilateralGap: false,
+      store,
+      ln,
+      arkade: arkade.ops,
+      limits: LIMITS,
+      maxExposedSats: 1_000_000,
+      totalCommitted: () => store.committedSats(),
+      admission: new AdmissionControl(),
+      now: clock,
+      onPlanned,
+    })
+
+  it('is told the step and the reads behind it, before the step is carried out', async () => {
+    const told: unknown[] = []
+    const svc = watched(async (row, next, seen) => {
+      told.push([row.state, next.do, seen.hold?.status, arkade.state.fundCalls.length])
+    })
+    const outcome = await svc.quote(quoteRequest())
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    ln.armHold(paymentHash, now + 4 * 3600)
+    await svc.tick(outcome.swap.id)
+    expect(told[0]).toEqual(['quoted', 'arm', 'armed', 0])
+    expect(told).toContainEqual(['armed', 'fund', 'armed', 0])
+    expect(arkade.state.fundCalls).toHaveLength(1)
+  })
+
+  it('stops waiting for a listener that never answers', async () => {
+    const svc = watched(() => new Promise<void>(() => {}))
+    const outcome = await svc.quote(quoteRequest())
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    ln.armHold(paymentHash, now + 4 * 3600)
+    vi.useFakeTimers()
+    try {
+      const ticked = svc.tick(outcome.swap.id)
+      await vi.advanceTimersByTimeAsync(10_000)
+      await ticked
+    } finally {
+      vi.useRealTimers()
+    }
+    expect((await store.get(outcome.swap.id)).state).toBe('funded')
+  })
+
+  it('goes on as planned when the listener throws', async () => {
+    const svc = watched(async () => {
+      throw new Error('listener broke')
+    })
+    const outcome = await svc.quote(quoteRequest())
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    ln.armHold(paymentHash, now + 4 * 3600)
+    await svc.tick(outcome.swap.id)
+    expect((await store.get(outcome.swap.id)).state).toBe('funded')
+  })
+})

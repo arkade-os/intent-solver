@@ -163,6 +163,7 @@
     "balanceReportIntervalMinutes": 360
   },
   "diagnostics": {
-    "latency": false
+    "latency": false,
+    "receiveShadow": false
   }
 }

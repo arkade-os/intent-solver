@@ -65,6 +65,7 @@ const serviceWith = (acceptsNoRefundAlone = false): LightningReceive =>
     new SolverLockup(
       { contract: async () => CONTRACT },
       {
+        canRefundUnrolled: true,
         spendable: async () => (world.reads.push('spendable'), world.history.filter((o) => !o.spent && !o.unrolled)),
         history: async () => (world.reads.push('history'), world.history),
         claimPreimage: async (_contract, outpoints) => {

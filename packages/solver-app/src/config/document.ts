@@ -187,7 +187,7 @@ const buildSchema = (railNames: readonly string[]) =>
       slackWebhookUrl: str,
       balanceReportIntervalMinutes: num,
     }),
-    diagnostics: section({ latency: bool }),
+    diagnostics: section({ latency: bool, receiveShadow: bool }),
   })
 
 export type SolverDocument = z.output<ReturnType<typeof buildSchema>>

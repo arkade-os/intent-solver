@@ -116,6 +116,7 @@ import { createRfqRefusalTail, type RfqRefusalRecorder } from '../admin/rfqRefus
 import { ReceiveSwapService } from '@arkade-os/solver-corridors/receive/orchestrator.js'
 import { driveCoupledPeers } from '@arkade-os/solver-corridors/coupledHandoff.js'
 import { receiveArkadeOpsFromContext } from '@arkade-os/solver-corridors/receive/arkadeOps.js'
+import { createReceiveShadow } from './receiveShadow.js'
 import { json, log, messageOf, nowSeconds } from '@arkade-os/solver-core/util/poll.js'
 import { watchRail, type RailWatch } from './railWatch.js'
 import { createSerialiser } from '@arkade-os/solver-core/util/serialise.js'
@@ -1256,6 +1257,19 @@ export const createServices = async (
         // Gated on the SAME value the send corridor's `coupling` is, so the
         // pay half can never be wired without the collect half.
         coupledSendStore: selfPaymentCoupling ? store : undefined,
+        onPlanned: config.receiveShadow
+          ? createReceiveShadow({
+              ln: rail!.ln,
+              arkade: receiveOps,
+              onchain: rail!.onchain,
+              chainTip,
+              coupledSend: async (paymentHash) =>
+                selfPaymentCoupling ? store.findLiveByPaymentHash(paymentHash) : null,
+              now: nowSeconds,
+              acceptUnilateralGap: config.lnReceiveAcceptUnilateralGap,
+              log,
+            }).compare
+          : undefined,
       })
     : undefined
   if (receiveService) wireTickErrors(receiveService, 'receive tick')

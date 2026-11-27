@@ -59,6 +59,7 @@ const output = (txid: string, value = PAYOUT, flags: Partial<LockupOutpoint> = {
 })
 
 const arkade = (): ArkadeLockups => ({
+  canRefundUnrolled: true,
   spendable: async () => (world.reads.push('spendable'), world.history.filter((o) => !o.spent && !o.unrolled)),
   history: async () => (world.reads.push('history'), world.history),
   claimPreimage: async (_contract, outpoints) => {
@@ -249,6 +250,14 @@ describe('our lockup on Arkade: its state', () => {
     expect(await lockup.state(refunding())).toEqual(at('unrolled'))
     world.history = [output('pay', PAYOUT, { spent: true, unrolled: true })]
     expect(await lockup.state(refunding('refund-tx'))).toEqual(at('unrolled'))
+  })
+
+  it('judges an unrolled lockup like any other where it cannot be refunded on Bitcoin', async () => {
+    const cannot = new SolverLockup({ contract: async () => CONTRACT }, { ...arkade(), canRefundUnrolled: false })
+    world.history = [output('pay', PAYOUT, { spent: true, unrolled: true })]
+    expect(await cannot.state(refunding())).toEqual(at('gone'))
+    world.lostRefund = 'refund-tx'
+    expect(await cannot.state(refunding())).toEqual(at('refunded', 'pay:0', { refundTx: 'refund-tx' }))
   })
 
   it('looks for a claim before a refund once the refund is open, even while our output is still there', async () => {
