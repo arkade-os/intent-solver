@@ -48,6 +48,14 @@ const hashOf = (swap: Swap): Hashlock => {
   return swap.hashlock
 }
 
+const wellFormed = (revealed: string): Preimage | null => {
+  try {
+    return Preimage.of(revealed.toLowerCase())
+  } catch {
+    return null
+  }
+}
+
 /** The `to` leg of a Lightning send: our node pays the client's invoice and learns the preimage. */
 export class ToLightning {
   constructor(private readonly node: PayingNode) {}
@@ -99,8 +107,8 @@ export class ToLightning {
   // A preimage that does not open this swap's hashlock collects nothing: nothing may act on it.
   private verified(swap: Swap, revealed: string | undefined): Preimage | null {
     if (!revealed) return null
-    const preimage = Preimage.of(revealed.toLowerCase())
-    if (!Preimage.opens(preimage, hashOf(swap))) {
+    const preimage = wellFormed(revealed)
+    if (preimage === null || !Preimage.opens(preimage, hashOf(swap))) {
       throw new RuleViolated(`swap ${swap.id}: the node reported a preimage that does not open the hashlock`)
     }
     return preimage

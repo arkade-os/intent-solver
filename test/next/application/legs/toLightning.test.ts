@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ToLightning } from '@arkade-os/solver-next/application/legs/to_lightning.js'
+import { RuleViolated } from '@arkade-os/solver-next/domain/shared/error.js'
 import { Hashlock } from '@arkade-os/solver-next/domain/swap/hashlock.js'
 import type { Swap } from '@arkade-os/solver-next/domain/swap/swap.js'
 import type {
@@ -92,6 +93,11 @@ describe('paying', () => {
   it('lets a failure through', async () => {
     await expect(nodeSaying({ payment: DOWN }).leg.pay(filling(), ORDER)).rejects.toThrow('node unreachable')
   })
+
+  it.each(['22'.repeat(32), 'not a preimage'])('refuses a paid answer whose preimage is %s', async (preimage) => {
+    const { leg } = nodeSaying({ payment: { status: 'succeeded', preimage } })
+    await expect(leg.pay(filling(), ORDER)).rejects.toThrow(RuleViolated)
+  })
 })
 
 describe('the state of a payment with its id on record', () => {
@@ -114,9 +120,9 @@ describe('the state of a payment with its id on record', () => {
     expect(asked).toEqual(['payment pay-1'])
   })
 
-  it('refuses a preimage that does not open the hashlock', async () => {
-    const { leg } = nodeSaying({ payment: { status: 'succeeded', preimage: '22'.repeat(32) } })
-    await expect(leg.state(sent())).rejects.toThrow('does not open the hashlock')
+  it.each(['22'.repeat(32), 'not a preimage'])('refuses a preimage that is %s', async (preimage) => {
+    const { leg } = nodeSaying({ payment: { status: 'succeeded', preimage } })
+    await expect(leg.state(sent())).rejects.toThrow(RuleViolated)
   })
 
   it('lets a failed read through', async () => {
