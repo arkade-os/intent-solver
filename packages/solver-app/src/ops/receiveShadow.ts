@@ -67,6 +67,7 @@ const contractOf = (row: ReceiveSwapRow): LockupContract => ({
 
 const NOT_COMPARED: readonly ReceiveAction['do'][] = ['arm_coupled', 'record_settled']
 const SUMMARY_EVERY = 500
+const DIFFS_REMEMBERED = 10_000
 
 /**
  * Asks the new model what it would do with a `receive_swap` row and logs where that differs from what
@@ -110,6 +111,8 @@ export const createReceiveShadow = (deps: ReceiveShadowDeps) => {
       { acceptsNoRefundAlone: deps.acceptUnilateralGap },
     ).next(swapFromReceiveRow(row))
 
+  const logged = new Set<string>()
+
   const counted = (outcome: keyof ShadowCounts): void => {
     counts[outcome] += 1
     if ((counts.compared + counts.skipped + counts.failed) % SUMMARY_EVERY === 0) {
@@ -137,6 +140,11 @@ export const createReceiveShadow = (deps: ReceiveShadowDeps) => {
           return counted('compared')
         }
         counts.different += 1
+        // A row that keeps differing the same way is logged once, not on every tick.
+        const difference = `${row.id} ${row.state} ${old.do} ${next.do}`
+        if (logged.has(difference)) return counted('compared')
+        if (logged.size >= DIFFS_REMEMBERED) logged.clear()
+        logged.add(difference)
         deps.log(
           `receive_shadow_diff ${json({
             swapId: row.id,

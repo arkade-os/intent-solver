@@ -2966,6 +2966,22 @@ describe('ReceiveSwapService.tick — onPlanned', () => {
     expect(arkade.state.fundCalls).toHaveLength(1)
   })
 
+  it('stops waiting for a listener that never answers', async () => {
+    const svc = watched(() => new Promise<void>(() => {}))
+    const outcome = await svc.quote(quoteRequest())
+    if (!outcome.accepted) throw new Error('expected acceptance')
+    ln.armHold(paymentHash, now + 4 * 3600)
+    vi.useFakeTimers()
+    try {
+      const ticked = svc.tick(outcome.swap.id)
+      await vi.advanceTimersByTimeAsync(10_000)
+      await ticked
+    } finally {
+      vi.useRealTimers()
+    }
+    expect((await store.get(outcome.swap.id)).state).toBe('funded')
+  })
+
   it('goes on as planned when the listener throws', async () => {
     const svc = watched(async () => {
       throw new Error('listener broke')

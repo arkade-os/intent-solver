@@ -225,7 +225,8 @@ export interface ReceiveServiceDeps {
   chainTip?: ChainTipProvider
   /**
    * Told what the planner chose for a row, and what it read to choose it, before that step is carried out.
-   * For comparing another model against this one. It is awaited, so it must be quick, and it cannot change the step.
+   * For comparing another model against this one. It cannot change the step, and the tick stops waiting for it
+   * after `ON_PLANNED_DEADLINE_MS`.
    */
   onPlanned?: (row: ReceiveSwapRow, next: ReceiveAction, seen: ReceiveReadsSeen) => Promise<void>
   now?: () => number
@@ -242,6 +243,8 @@ export type CoupledSendRow = Pick<
   SendSwapRow,
   'state' | 'pkScript' | 'amountSats' | 'refundLocktime' | 'refundWithoutReceiverDelay' | 'createdAt'
 >
+
+const ON_PLANNED_DEADLINE_MS = 2_000
 
 type HistoryOutpoint = LockupOutpoint & { unrolled: boolean }
 
@@ -684,7 +687,12 @@ export class ReceiveSwapService {
     const recording = recordingReads(reads)
     const next = await planReceive(row, recording.reads)
     const seen = reads.history === null ? recording.seen : { ...recording.seen, history: reads.history }
-    await onPlanned(row, next, seen).catch(() => undefined)
+    let deadline: ReturnType<typeof setTimeout> | undefined
+    await Promise.race([
+      onPlanned(row, next, seen).catch(() => undefined),
+      new Promise<void>((resolve) => (deadline = setTimeout(resolve, ON_PLANNED_DEADLINE_MS))),
+    ])
+    clearTimeout(deadline)
     return next
   }
 

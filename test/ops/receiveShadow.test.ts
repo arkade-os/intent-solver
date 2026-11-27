@@ -107,6 +107,15 @@ describe('the Lightning receive shadow', () => {
     expect(it.counts()).toMatchObject({ compared: 1, different: 1 })
   })
 
+  it('logs a row that keeps differing the same way once, and counts it every time', async () => {
+    hold = { status: 'armed', expiresAt: QUOTED_AT + 60 * MINUTE }
+    const it = shadow()
+    await it.compare(row(), FUND)
+    await it.compare(row(), FUND)
+    expect(lines).toHaveLength(1)
+    expect(it.counts()).toMatchObject({ compared: 2, different: 2 })
+  })
+
   it('counts a different reason for the same step as a difference', async () => {
     hold = { status: 'pending', expiresAt: null }
     await shadow().compare(row(), { do: 'fail', reason: 'refused to fund: invoice_expired' })
