@@ -56,7 +56,7 @@ const legsAt = (row: ReceiveSwapRecord, state: Lived): readonly [from: LegState,
 
 // A failed row forgets the state it failed from. This is the furthest one its columns still prove.
 const lastProven = (row: ReceiveSwapRecord): Lived => {
-  if (row.preimage !== null) return 'claimed'
+  if (row.preimage) return 'claimed'
   if (row.arkadeLockupTxid !== null) return 'funded'
   return row.htlcExpiresAt !== null || row.fundStartedAt !== null ? 'armed' : 'quoted'
 }
@@ -88,7 +88,8 @@ export const swapFromReceiveRow = (row: ReceiveSwapRecord): Swap => {
       rfqId: row.rfqId === null ? null : RfqId.of(row.rfqId),
       quote: Quote.of(UnixSeconds.of(row.invoiceExpiresAt), { fee, spreadBps: 0 }),
       hashlock: Hashlock.of(row.paymentHash),
-      preimage: row.preimage === null ? null : Preimage.of(row.preimage),
+      // An empty string is how a row without one has been seen to say so.
+      preimage: row.preimage ? Preimage.of(row.preimage) : null,
       from: Leg.restore(
         'from',
         { rail: 'lightning', amount, contract: 'lightning', version: null },

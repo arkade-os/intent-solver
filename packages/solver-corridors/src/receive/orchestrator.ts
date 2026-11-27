@@ -40,8 +40,10 @@ import {
   planReceive,
   planRefundFailed,
   planSettleFailed,
+  type ReceiveAction,
   type ReceiveReads,
 } from '@arkade-os/solver-core/core/receivePlan.js'
+import { recordingReads, type ReceiveReadsSeen } from './readsSeen.js'
 import type { ChainTipProvider } from '@arkade-os/solver-rails/onchain/chainTip.js'
 import { absoluteLocktimeFor, refundDeadlineReached, refundDeadlineSeconds } from '../chainClock.js'
 import type { Limits } from '@arkade-os/solver-core/core/limits.js'
@@ -221,6 +223,11 @@ export interface ReceiveServiceDeps {
    * never asks.
    */
   chainTip?: ChainTipProvider
+  /**
+   * Told what the planner chose for a row, and what it read to choose it, before that step is carried out.
+   * For comparing another model against this one. It is awaited, so it must be quick, and it cannot change the step.
+   */
+  onPlanned?: (row: ReceiveSwapRow, next: ReceiveAction, seen: ReceiveReadsSeen) => Promise<void>
   now?: () => number
 }
 
@@ -671,6 +678,16 @@ export class ReceiveSwapService {
     }
   }
 
+  private async plan(row: ReceiveSwapRow, reads: TickReads): Promise<ReceiveAction> {
+    const { onPlanned } = this.deps
+    if (!onPlanned) return planReceive(row, reads)
+    const recording = recordingReads(reads)
+    const next = await planReceive(row, recording.reads)
+    const seen = reads.history === null ? recording.seen : { ...recording.seen, history: reads.history }
+    await onPlanned(row, next, seen).catch(() => undefined)
+    return next
+  }
+
   private readsFor(row: ReceiveSwapRow): TickReads {
     const { ln, arkade, chainTip, coupledSendStore } = this.deps
     const deadlineOf = (locktime: number) =>
@@ -686,7 +703,8 @@ export class ReceiveSwapService {
       coupledRefundDeadline: (send) => deadlineOf(send.refundLocktime),
       coupledLockupFunded: async (send) =>
         satsOutputs(await arkade.findLockups(send.pkScript)).some((o) => o.value === send.amountSats),
-      earlierFunding: async () => adoptFunding(await arkade.findLockupOutpoints(row.pkScript), row.payoutSats),
+      earlierFunding: async () =>
+        adoptFunding((reads.history = await arkade.findLockupOutpoints(row.pkScript)), row.payoutSats),
       refundDeadline: () => deadlineOf(row.refundLocktime),
       spendable: async () => (reads.outputs = await arkade.findLockups(row.pkScript)),
       refundOpen: () => refundDeadlineReached(row.refundLocktime, this.now, chainTip),
@@ -719,7 +737,7 @@ export class ReceiveSwapService {
 
   private async whenQuoted(row: ReceiveSwapRow): Promise<boolean> {
     const { store } = this.deps
-    const next = await planReceive(row, this.readsFor(row))
+    const next = await this.plan(row, this.readsFor(row))
     if (next.do === 'arm') {
       const armed = await store.transition(row.id, 'quoted', 'armed', { htlc_expires_at: next.htlcExpiresAt })
       if (armed) await this.noteCltvHeadroom(row, next.htlcExpiresAt)
@@ -772,7 +790,7 @@ export class ReceiveSwapService {
   private async whenArmed(row: ReceiveSwapRow): Promise<boolean> {
     const { store, arkade } = this.deps
     const armedStarted = performance.now()
-    const next = await planReceive(row, this.readsFor(row))
+    const next = await this.plan(row, this.readsFor(row))
     if (next.do === 'adopt') {
       // Transition rather than wait in `armed`: `funded` already owns the
       // "learn P, or recover/refund past the deadline" obligation.
@@ -886,7 +904,7 @@ export class ReceiveSwapService {
   private async whenFunded(row: ReceiveSwapRow): Promise<boolean> {
     const { store } = this.deps
     const observeStarted = performance.now()
-    const next = await planReceive(row, this.readsFor(row))
+    const next = await this.plan(row, this.readsFor(row))
     if (next.do === 'fail') {
       await store.fail(row.id, 'funded', next.reason)
       return false
@@ -909,7 +927,7 @@ export class ReceiveSwapService {
   private async whenClaimed(row: ReceiveSwapRow): Promise<boolean> {
     const { store, ln } = this.deps
     const reads = this.readsFor(row)
-    const next = await planReceive(row, reads)
+    const next = await this.plan(row, reads)
     if (next.do === 'fail') {
       await store.fail(row.id, 'claimed', next.reason)
       return false
@@ -949,7 +967,7 @@ export class ReceiveSwapService {
   private async whenRefunding(row: ReceiveSwapRow): Promise<boolean> {
     const { store, arkade } = this.deps
     const reads = this.readsFor(row)
-    const next = await planReceive(row, reads)
+    const next = await this.plan(row, reads)
     if (next.do === 'fail') {
       await store.fail(row.id, 'refunding', next.reason)
       return false

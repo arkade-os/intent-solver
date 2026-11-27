@@ -127,16 +127,50 @@ describe('the Lightning receive shadow', () => {
     }
   })
 
-  it('leaves out a payment between two of our own clients, and what only an action can learn', async () => {
+  it('leaves out a payment between two of our own clients', async () => {
     const it = shadow()
     await it.compare(row(), { do: 'fund', coupled: true })
     await it.compare(row({ state: 'quoted' }), { do: 'arm_coupled' })
     await it.compare(row({ state: 'claimed' }), { do: 'record_settled' })
-    await it.compare(row({ state: 'refunding' }), { do: 'record_refund', txid: 'refund-tx' })
     coupled = { id: 'send-1' }
     await it.compare(row(), { do: 'wait' })
+    await it.compare(row(), { do: 'wait' }, { coupledSend: { state: 'funded' } as never })
     expect(it.counts()).toEqual({ compared: 0, same: 0, different: 0, skipped: 5, failed: 0 })
     expect(asked).toEqual([])
+  })
+
+  it('answers the new model from what today read, and reads nothing twice', async () => {
+    const funded = row({ state: 'funded', arkadeLockupTxid: 'pay', arkadeLockupVout: 0 })
+    const ours = { txid: 'pay', vout: 0, value: 4_950, spent: true, unrolled: false }
+    const it = shadow()
+    await it.compare(
+      funded,
+      { do: 'record_claim', preimage: PREIMAGE },
+      {
+        spendable: [],
+        claim: { history: [ours], preimage: PREIMAGE },
+        history: [ours],
+        refundOpen: false,
+      },
+    )
+    expect(asked).toEqual([])
+    expect(it.counts()).toMatchObject({ compared: 1, same: 1 })
+  })
+
+  it('passes on a refund the server finished only when today asked for it', async () => {
+    const refunding = row({ state: 'refunding', arkadeLockupTxid: 'pay', arkadeLockupVout: 0 })
+    const spent = [{ txid: 'pay', vout: 0, value: 4_950, spent: true, unrolled: false }]
+    const seen = { spendable: [], claim: { history: spent, preimage: null }, history: spent }
+    const it = shadow({ now: () => QUOTED_AT + 121 * MINUTE })
+    await it.compare(refunding, { do: 'record_refund', txid: 'refund-tx' }, { ...seen, ownRefund: 'refund-tx' })
+    expect(it.counts()).toMatchObject({ compared: 1, same: 1 })
+    expect(lines).toEqual([])
+  })
+
+  it('logs a count every five hundred rows', async () => {
+    const it = shadow()
+    for (let i = 0; i < 500; i++) await it.compare(row(), { do: 'fund', coupled: true })
+    expect(lines).toEqual(['receive_shadow {"compared":0,"same":0,"different":0,"skipped":500,"failed":0}'])
   })
 
   it('never throws: a failure is counted and logged, with what failed', async () => {

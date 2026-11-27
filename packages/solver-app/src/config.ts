@@ -507,6 +507,8 @@ export interface Config {
   /** Relays the card lists after `relayUrl`, credentials not yet stripped. */
   cardRelays: readonly string[]
   latencyDiagnostics: boolean
+  /** Compare every Lightning receive decision with the new model's and log where they differ. Changes no decision. */
+  receiveShadow: boolean
   /** Null when `EVM_RPC_URL` is unset: no chain, so no EVM corridor can run. */
   evmChain: EvmChainConfig | null
   /** Setting id to its path in the config document; empty when no document was read. */
@@ -1134,6 +1136,7 @@ export const configFromKnobs = (env: Knobs): Config => {
       .map((relay) => relay.trim())
       .filter(Boolean),
     latencyDiagnostics: env.SOLVER_LATENCY_DIAGNOSTICS === '1',
+    receiveShadow: env.SOLVER_RECEIVE_SHADOW === '1',
     evmChain: loadEvmChainConfig(env),
     configPaths: new Map(),
     lightningRailBlock: null,

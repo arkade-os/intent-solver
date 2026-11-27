@@ -5,19 +5,24 @@ import { rawDelaySeconds } from '@arkade-os/solver-core/core/timelocks.js'
 import type { HoldState } from '@arkade-os/solver-core/ports/lightning.js'
 import type { OnchainBackend } from '@arkade-os/solver-core/ports/onchain.js'
 import { json } from '@arkade-os/solver-core/util/poll.js'
+import { hex } from '@scure/base'
 import { refundDeadlineReached, refundDeadlineSeconds } from '@arkade-os/solver-corridors/chainClock.js'
 import type { ReceiveSwapRow } from '@arkade-os/solver-corridors/db/receiveSwaps.js'
+import type { ReceiveReadsSeen } from '@arkade-os/solver-corridors/receive/readsSeen.js'
 import { HoldInvoice } from '@arkade-os/solver-next/application/legs/hold_invoice.js'
 import { SolverLockup } from '@arkade-os/solver-next/application/legs/solver_lockup.js'
 import { LightningReceive, type ReceiveStep } from '@arkade-os/solver-next/application/lightning_receive.js'
 import { UnixSeconds } from '@arkade-os/solver-next/domain/shared/time.js'
 import { swapFromReceiveRow } from '@arkade-os/solver-next/infrastructure/db/receive_swap_row.js'
-import type { LockupContract } from '@arkade-os/solver-next/ports/arkade.js'
+import type { FundedOutput, LockupContract, LockupOutpoint } from '@arkade-os/solver-next/ports/arkade.js'
 import type { ChainTipProvider } from '@arkade-os/solver-rails/onchain/chainTip.js'
 
 export interface ReceiveShadowDeps {
   readonly ln: { getHoldState(paymentHash: string): Promise<HoldState> }
-  readonly arkade: Pick<ReceiveArkadeOps, 'findLockups' | 'findLockupOutpoints' | 'findClaimPreimage'>
+  readonly arkade: Pick<
+    ReceiveArkadeOps,
+    'findLockups' | 'findLockupOutpoints' | 'findClaimPreimage' | 'refundUnrolled'
+  >
   readonly onchain?: Pick<OnchainBackend, 'findSpendWitness'>
   readonly chainTip?: ChainTipProvider
   /** A payment between two of our own clients is not compared yet. */
@@ -60,31 +65,43 @@ const contractOf = (row: ReceiveSwapRow): LockupContract => ({
   nonInteractiveParameters: row.nonInteractiveParameters,
 })
 
-// Today's planner learns of a finished refund by asking the server to finish it, which is an action.
-// The shadow never acts, so it cannot reach that answer, and neither side is compared on it.
-const NOT_COMPARED: readonly ReceiveAction['do'][] = ['arm_coupled', 'record_settled', 'record_refund']
+const NOT_COMPARED: readonly ReceiveAction['do'][] = ['arm_coupled', 'record_settled']
+const SUMMARY_EVERY = 500
 
 /**
  * Asks the new model what it would do with a `receive_swap` row and logs where that differs from what
- * today's planner decided. It only reads: it holds no way to fund, settle, refund or write.
+ * today's planner decided. It answers the new model from what today's planner already read on this tick,
+ * and reads for itself only what the planner did not. It holds no way to fund, settle, refund or write.
  */
 export const createReceiveShadow = (deps: ReceiveShadowDeps) => {
   const preimages = new LockupPreimageReader(deps.arkade, deps.onchain, () => {})
   const counts: ShadowCounts = { compared: 0, same: 0, different: 0, skipped: 0, failed: 0 }
 
-  const decide = (row: ReceiveSwapRow): Promise<ReceiveStep> =>
+  const decide = (row: ReceiveSwapRow, seen: ReceiveReadsSeen): Promise<ReceiveStep> =>
     new LightningReceive(
-      new HoldInvoice({ getHoldState: (hash) => deps.ln.getHoldState(hash), settleHold: readOnly }),
+      new HoldInvoice({
+        getHoldState: async (hash) => seen.hold ?? deps.ln.getHoldState(hash),
+        settleHold: readOnly,
+      }),
       new SolverLockup(
         { contract: async () => contractOf(row) },
         {
-          spendable: () => deps.arkade.findLockups(row.pkScript),
-          history: () => deps.arkade.findLockupOutpoints(row.pkScript),
-          claimPreimage: (_contract, outpoints) => preimages.find(row, outpoints),
+          canRefundUnrolled: deps.arkade.refundUnrolled !== undefined,
+          spendable: async () =>
+            (seen.spendable as FundedOutput[] | undefined) ?? deps.arkade.findLockups(row.pkScript),
+          history: async () =>
+            (seen.history as LockupOutpoint[] | undefined) ?? deps.arkade.findLockupOutpoints(row.pkScript),
+          claimPreimage: async (_contract, outpoints) => {
+            if (seen.claim === undefined) return preimages.find(row, outpoints)
+            return seen.claim.preimage === null ? null : hex.decode(seen.claim.preimage)
+          },
           fund: readOnly,
           refund: readOnly,
-          refundOpen: () => refundDeadlineReached(row.refundLocktime, deps.now, deps.chainTip),
-          refundOpensAt: () =>
+          // Asking the server to finish a refund is an action. Only its answer to today's planner is passed on.
+          finalizePendingRefund: async () => seen.ownRefund ?? null,
+          refundOpen: async () => seen.refundOpen ?? refundDeadlineReached(row.refundLocktime, deps.now, deps.chainTip),
+          refundOpensAt: async () =>
+            seen.refundDeadline ??
             refundDeadlineSeconds(row.refundLocktime, deps.now, deps.chainTip, 'compare with the new model'),
           secondsToRefundAlone: () => rawDelaySeconds(row.refundWithoutReceiverDelay),
         },
@@ -93,23 +110,31 @@ export const createReceiveShadow = (deps: ReceiveShadowDeps) => {
       { acceptsNoRefundAlone: deps.acceptUnilateralGap },
     ).next(swapFromReceiveRow(row))
 
+  const counted = (outcome: keyof ShadowCounts): void => {
+    counts[outcome] += 1
+    if ((counts.compared + counts.skipped + counts.failed) % SUMMARY_EVERY === 0) {
+      deps.log(`receive_shadow ${json(counts)}`)
+    }
+  }
+
+  // A payment between two of our own clients is not compared yet.
+  const coupled = async (row: ReceiveSwapRow, old: ReceiveAction, seen: ReceiveReadsSeen): Promise<boolean> => {
+    if (NOT_COMPARED.includes(old.do) || ('coupled' in old && old.coupled)) return true
+    return Boolean('coupledSend' in seen ? seen.coupledSend : await deps.coupledSend(row.paymentHash))
+  }
+
   return {
     counts: (): ShadowCounts => ({ ...counts }),
 
     /** Never throws: a shadow that fails is counted, and today's code goes on as if it were not there. */
-    async compare(row: ReceiveSwapRow, old: ReceiveAction): Promise<void> {
+    async compare(row: ReceiveSwapRow, old: ReceiveAction, seen: ReceiveReadsSeen = {}): Promise<void> {
       try {
-        const coupled = 'coupled' in old && old.coupled
-        if (coupled || NOT_COMPARED.includes(old.do) || (await deps.coupledSend(row.paymentHash))) {
-          counts.skipped += 1
-          return
-        }
-        const next = await decide(row)
-        counts.compared += 1
+        if (await coupled(row, old, seen)) return counted('skipped')
+        const next = await decide(row, seen)
         const oldReason = 'reason' in old ? old.reason : undefined
         if (old.do === next.do && oldReason === next.reason) {
           counts.same += 1
-          return
+          return counted('compared')
         }
         counts.different += 1
         deps.log(
@@ -122,10 +147,11 @@ export const createReceiveShadow = (deps: ReceiveShadowDeps) => {
             ...(next.reason === undefined ? {} : { nextReason: next.reason }),
           })}`,
         )
+        counted('compared')
       } catch (error) {
-        counts.failed += 1
         const message = error instanceof Error ? error.message : String(error)
         deps.log(`receive_shadow_failed ${json({ swapId: row.id, state: row.state, error: message })}`)
+        counted('failed')
       }
     },
   }

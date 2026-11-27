@@ -107,8 +107,9 @@ export class SolverLockup {
     const preimage = this.verified(swap, await arkade.claimPreimage(contract, searched))
     if (preimage !== null) return lockupAt(LockupStatus.Claimed, ours, { preimage })
 
-    // Before the spendable read, which shows an unrolled lockup as empty.
-    if (seen?.unrolled === true) return lockupAt(LockupStatus.Unrolled, ours)
+    // Before the spendable read, which shows an unrolled lockup as empty. Where it cannot be refunded on
+    // Bitcoin there is nothing to do about it, and it is judged like any other output.
+    if (seen?.unrolled === true && arkade.canRefundUnrolled) return lockupAt(LockupStatus.Unrolled, ours)
     // The history is final about a spent output. About an unspent one only the spendable read is:
     // an output in an expired batch is neither spent nor spendable.
     if (seen?.spent !== true) {

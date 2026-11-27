@@ -38,6 +38,8 @@ export interface LockupOutpoint extends FundedOutput {
 }
 
 export interface ArkadeLockups {
+  /** Whether a lockup that a unilateral exit took onto Bitcoin can be refunded there. */
+  readonly canRefundUnrolled: boolean
   spendable(contract: LockupContract): Promise<FundedOutput[]>
   history(contract: LockupContract): Promise<LockupOutpoint[]>
   /** The preimage a claim of one of these outpoints revealed, on Arkade or on Bitcoin. Null while none is readable. */

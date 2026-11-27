@@ -57,6 +57,9 @@ interface Situation {
   pendingRefund: string | null
   /** The row says it was filled and names no output: it should never happen, and both sides must say the same. */
   outpointMissing: 'no' | 'txid' | 'vout'
+  canRefundUnrolled: boolean
+  /** An operator refunded by hand: the transaction is on the row, and the row is still refunding. */
+  refundOnRecord: boolean
   rawRefundAloneDelay: number
   acceptsNoRefundAlone: boolean
   enteredStateAt: number
@@ -89,7 +92,7 @@ const rowOf = (s: Situation): ReceiveSwapRecord & ReceivePlanRow => {
     arkadeLockupVout: lockupRecorded && s.outpointMissing === 'no' ? RECORDED.vout : null,
     settleAttemptedAt: s.state === 'settled' ? s.enteredStateAt : null,
     preimage: claimed ? SECRET : null,
-    refundArkTxid: s.state === 'refunded' ? 'refund-tx' : null,
+    refundArkTxid: s.state === 'refunded' || (s.state === 'refunding' && s.refundOnRecord) ? 'refund-tx' : null,
     failureReason: s.state === 'refused' || s.state === 'stuck' ? 'a reason' : null,
     rfqId: null,
   }
@@ -104,7 +107,7 @@ const SECRET_BYTES = hex.decode(SECRET)
 const READS: ReceiveReads = {
   now: () => s.now,
   acceptsUnilateralGap: () => s.acceptsNoRefundAlone,
-  canRefundUnrolled: () => true,
+  canRefundUnrolled: () => s.canRefundUnrolled,
   hold: async () => s.hold,
   coupledSend: async () => null,
   coupledRefundDeadline: async () => 0,
@@ -121,12 +124,13 @@ const READS: ReceiveReads = {
   holdSettled: async () => s.hold.status === 'settled',
 }
 
-const receiveWith = (acceptsNoRefundAlone: boolean): LightningReceive =>
+const receiveWith = (acceptsNoRefundAlone: boolean, canRefundUnrolled: boolean): LightningReceive =>
   new LightningReceive(
     new HoldInvoice({ getHoldState: async () => s.hold, settleHold: async () => undefined }),
     new SolverLockup(
       { contract: async () => CONTRACT },
       {
+        canRefundUnrolled,
         spendable: async () => spendableOf(s),
         history: async () => s.history,
         claimPreimage: async (_contract, outpoints) => (preimageOn(s, outpoints) ? SECRET_BYTES : null),
@@ -141,21 +145,25 @@ const receiveWith = (acceptsNoRefundAlone: boolean): LightningReceive =>
     () => t(s.now),
     { acceptsNoRefundAlone },
   )
-const RECEIVE = { cautious: receiveWith(false), accepting: receiveWith(true) }
+const RECEIVE = [false, true].map((accepts) => [false, true].map((unrolled) => receiveWith(accepts, unrolled)))
 
 const today = (row: ReceivePlanRow): Promise<{ do: string; reason?: string }> => planReceive(row, READS)
 const ours = (row: ReceiveSwapRecord): Promise<ReceiveStep> =>
-  (s.acceptsNoRefundAlone ? RECEIVE.accepting : RECEIVE.cautious).next(swapFromReceiveRow(row))
+  RECEIVE[Number(s.acceptsNoRefundAlone)]![Number(s.canRefundUnrolled)]!.next(swapFromReceiveRow(row))
 
 // Where the new decision differs from today's on purpose. Each is safer, and takes one tick less.
-const intended = (s: Situation, old: { do: string }, next: ReceiveStep): string | null => {
+const intended = (s: Situation, old: { do: string }, step: ReceiveStep): string | null => {
   const claimReadable = preimageOn(s, s.history.some(isRecorded) ? s.history : [...s.history, RECORDED])
-  if (s.state === 'funded' && old.do === 'start_refund' && next.do === 'record_claim' && claimReadable) {
+  if (s.state === 'funded' && old.do === 'start_refund' && step.do === 'record_claim' && claimReadable) {
     return 'refund open and our output still there: today starts the refund and reads the claim a tick later'
   }
   const ourOutput = s.history.find(isRecorded)
-  if (s.state === 'refunding' && old.do === 'record_refund' && s.batchExpired && ourOutput?.spent === false) {
-    return 'our output is in an expired batch, unspent: a refund the server finished cannot have spent it'
+  const neitherSpentNorSpendable = ourOutput?.spent === false && !spendableOf(s).some(isRecorded)
+  if (s.state === 'refunding' && old.do === 'record_refund' && neitherSpentNorSpendable) {
+    return 'our output is neither spent nor spendable: a refund the server finished cannot have spent it'
+  }
+  if (s.state === 'refunding' && s.refundOnRecord && step.do === 'record_refund' && ourOutput?.spent === true) {
+    return 'a refund made by hand is on the row and our output is spent: today waits, then calls the lockup gone'
   }
   return null
 }
@@ -197,6 +205,8 @@ describe('the Lightning receive decision', () => {
         claimedOn: next() < 0.4 ? pick(['pay:0', 'twin:1', 'dust:0']) : null,
         pendingRefund: next() < 0.2 ? 'refund-tx' : null,
         outpointMissing: next() < 0.97 ? 'no' : pick(['txid', 'vout'] as const),
+        canRefundUnrolled: next() < 0.7,
+        refundOnRecord: next() < 0.15,
         rawRefundAloneDelay: pick([6, 144, 512, 1024, 4096, 20_480]),
         acceptsNoRefundAlone: next() < 0.3,
         enteredStateAt: pick([now, now - 119, now - 120, now - 121, now - 10_000]),
@@ -217,7 +227,7 @@ describe('the Lightning receive decision', () => {
         throw new Error(`differs on ${JSON.stringify(s)}: today ${JSON.stringify(old)}, ours ${JSON.stringify(step)}`)
       }
     }
-    expect(onPurpose.size).toBe(2)
+    expect(onPurpose.size).toBe(3)
     const reached = Object.keys(counts).sort()
     expect(reached).toEqual(
       [

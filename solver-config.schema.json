@@ -612,6 +612,9 @@
       "properties": {
         "latency": {
           "type": "boolean"
+        },
+        "receiveShadow": {
+          "type": "boolean"
         }
       },
       "additionalProperties": false
