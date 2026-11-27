@@ -62,3 +62,37 @@ export interface ArkadeLockups {
 export interface LockupContracts {
   contract(swapId: string): Promise<LockupContract>
 }
+
+/** An output at a client's lockup. `assets`: it carries more than sats, and a plain claim cannot spend it. */
+export interface ClientLockupOutput extends FundedOutput {
+  readonly assets?: readonly unknown[]
+  /** Unix seconds: when the batch it sits in expires. Absent when that is unknown or does not apply. */
+  readonly expiresAt?: number
+}
+
+/** The contract a client's lockup is under, and what we took on when we adopted it. */
+export interface ClientLockupContract {
+  readonly id: string
+  readonly pkScript: string
+  readonly amountSats: number
+  /** Null until the lockup is adopted. */
+  readonly lockedSats: number | null
+  readonly adopted: readonly FundedOutput[] | null
+  /** Seconds or a block height, in whichever unit the contract was built with. */
+  readonly refundLocktime: number
+  readonly refundWithoutReceiverDelay: number
+}
+
+export interface ClientLockups {
+  /** Every output a claim could still reach. */
+  available(contract: ClientLockupContract): Promise<ClientLockupOutput[]>
+  /** Whether a claim still works after the outputs' batch expired. Where it does not, the expiry is a deadline. */
+  claimsOutlastTheBatch(contract: ClientLockupContract): boolean
+  /** Unix seconds. An estimate when the contract counts blocks. */
+  refundOpensAt(contract: ClientLockupContract): Promise<number>
+  secondsToRefundAlone(contract: ClientLockupContract): number
+}
+
+export interface ClientLockupContracts {
+  contract(swapId: string): Promise<ClientLockupContract>
+}
