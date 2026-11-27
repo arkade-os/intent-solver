@@ -119,12 +119,14 @@ export class LightningReceive {
   }
 
   private async whenAwaitingClaim(swap: Swap): Promise<ReceiveStep> {
+    if (!this.lockup.hasOutpointOnRecord(swap)) return fail('funded state with no funded outpoint recorded')
     const lockup = await this.lockup.state(swap)
     if (lockup.preimage !== null) return { do: Do.RecordClaim, preimage: lockup.preimage }
     return (await this.lockup.refundTimes(swap)).refundOpen ? { do: Do.StartRefund } : WAIT
   }
 
   private async whenRefunding(swap: Swap): Promise<ReceiveStep> {
+    if (!this.lockup.hasOutpointOnRecord(swap)) return fail('refunding state with no funded outpoint recorded')
     const lockup = await this.lockup.state(swap)
     switch (lockup.status) {
       case LockupStatus.Claimed:

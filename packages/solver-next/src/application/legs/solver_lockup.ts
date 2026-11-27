@@ -144,6 +144,10 @@ export class SolverLockup {
     return Reference.of(await this.arkade.refund(contract, outputs))
   }
 
+  hasOutpointOnRecord(swap: Swap): boolean {
+    return outpointOf(swap.to.fact('funding')) !== null
+  }
+
   private recordedOutpoint(swap: Swap): Outpoint | null {
     const recorded = outpointOf(swap.to.fact('funding'))
     const mustBeRecorded = swap.to.state !== 'pending' && swap.to.state !== 'locking'

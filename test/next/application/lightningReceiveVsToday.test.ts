@@ -55,6 +55,8 @@ interface Situation {
   batchExpired: boolean
   claimedOn: string | null
   pendingRefund: string | null
+  /** The row says it was filled and names no output: it should never happen, and both sides must say the same. */
+  outpointMissing: 'no' | 'txid' | 'vout'
   rawRefundAloneDelay: number
   acceptsNoRefundAlone: boolean
   enteredStateAt: number
@@ -83,8 +85,8 @@ const rowOf = (s: Situation): ReceiveSwapRecord & ReceivePlanRow => {
     htlcExpiresAt: s.state === 'quoted' ? null : s.savedHtlcExpiresAt,
     fundStartedAt: fillStarted ? s.enteredStateAt : null,
     refundWithoutReceiverDelay: s.rawRefundAloneDelay,
-    arkadeLockupTxid: lockupRecorded ? RECORDED.txid : null,
-    arkadeLockupVout: lockupRecorded ? RECORDED.vout : null,
+    arkadeLockupTxid: lockupRecorded && s.outpointMissing !== 'txid' ? RECORDED.txid : null,
+    arkadeLockupVout: lockupRecorded && s.outpointMissing === 'no' ? RECORDED.vout : null,
     settleAttemptedAt: s.state === 'settled' ? s.enteredStateAt : null,
     preimage: claimed ? SECRET : null,
     refundArkTxid: s.state === 'refunded' ? 'refund-tx' : null,
@@ -194,6 +196,7 @@ describe('the Lightning receive decision', () => {
         batchExpired: next() < 0.2,
         claimedOn: next() < 0.4 ? pick(['pay:0', 'twin:1', 'dust:0']) : null,
         pendingRefund: next() < 0.2 ? 'refund-tx' : null,
+        outpointMissing: next() < 0.97 ? 'no' : pick(['txid', 'vout'] as const),
         rawRefundAloneDelay: pick([6, 144, 512, 1024, 4096, 20_480]),
         acceptsNoRefundAlone: next() < 0.3,
         enteredStateAt: pick([now, now - 119, now - 120, now - 121, now - 10_000]),

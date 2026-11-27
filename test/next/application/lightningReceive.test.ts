@@ -168,6 +168,11 @@ describe('a Lightning receive that is armed', () => {
     expect(await receive.next(armed())).toEqual({ do: 'adopt', outpoint: 'pay:0' })
   })
 
+  it('adopts an earlier fill that is spent with no claim readable yet, rather than filling again', async () => {
+    world.history = [output('pay', PAYOUT, { spent: true })]
+    expect(await receive.next(armed())).toEqual({ do: 'adopt', outpoint: 'pay:0' })
+  })
+
   it('funds a held payment that passes the rules, reading the hold again first', async () => {
     expect(await receive.next(armed())).toEqual({ do: 'fund' })
     expect(world.reads).toEqual(['history', 'hold'])
@@ -246,6 +251,18 @@ describe('a Lightning receive that is filled and waits for the client', () => {
     expect(await receive.next(toLocked())).toEqual({ do: 'wait' })
     world.now = REFUND_OPENS_AT
     expect(await receive.next(toLocked())).toEqual({ do: 'start_refund' })
+  })
+})
+
+describe('a Lightning receive recorded as filled with no outpoint', () => {
+  it('fails in the words production uses, without reading anything', async () => {
+    const bare = filling().markToLocked(t(QUOTED_AT + 62), ref('pay'))
+    expect(await receive.next(bare)).toEqual({ do: 'fail', reason: 'funded state with no funded outpoint recorded' })
+    expect(await receive.next(bare.startRefund(t(REFUND_OPENS_AT)))).toEqual({
+      do: 'fail',
+      reason: 'refunding state with no funded outpoint recorded',
+    })
+    expect(world.reads).toEqual([])
   })
 })
 
