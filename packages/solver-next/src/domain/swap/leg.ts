@@ -1,7 +1,7 @@
-import type { Amount } from '../shared/amount.js'
+import { Amount } from '../shared/amount.js'
 import { nonEmpty, type Brand, type ValueOf } from '../shared/brand.js'
 import type { Rail } from '../shared/endpoint.js'
-import { IllegalTransition, InvalidValue } from '../shared/error.js'
+import { IllegalTransition, InvalidValue, RuleViolated } from '../shared/error.js'
 import type { UnixSeconds } from '../shared/time.js'
 
 export const Side = {
@@ -54,6 +54,12 @@ export type FactHistory = Readonly<Record<FactKind, readonly Reference[]>>
 
 export type LegFacts = Partial<Record<FactKind, Reference>>
 
+/** One output that holds a leg's money. */
+export interface LockedOutput {
+  readonly outpoint: Reference
+  readonly amount: Amount
+}
+
 export interface LegTerms {
   readonly rail: Rail
   readonly amount: Amount
@@ -87,11 +93,13 @@ export class Leg {
     readonly facts: FactHistory,
     readonly since: UnixSeconds,
     readonly expiresAt: UnixSeconds | null,
+    /** Empty for a leg that is not held in outputs, such as a Lightning payment. */
+    readonly outputs: readonly LockedOutput[],
   ) {}
 
   static open(side: Side, terms: LegTerms, at: UnixSeconds): Leg {
     if (terms.amount.isZero) throw new InvalidValue(`${side} leg amount must be positive`)
-    return new Leg(side, terms, 'pending', NO_FACTS, at, null)
+    return new Leg(side, terms, 'pending', NO_FACTS, at, null, [])
   }
 
   static restore(
@@ -101,8 +109,9 @@ export class Leg {
     facts: FactHistory,
     since: UnixSeconds,
     expiresAt: UnixSeconds | null = null,
+    outputs: readonly LockedOutput[] = [],
   ): Leg {
-    return new Leg(side, terms, state, facts, since, expiresAt)
+    return new Leg(side, terms, state, facts, since, expiresAt, outputs)
   }
 
   get rail(): Rail {
@@ -137,10 +146,23 @@ export class Leg {
   moveTo(state: LegState, at: UnixSeconds, facts: LegFacts = {}, expiresAt: UnixSeconds | null = null): Leg {
     if (!this.canMoveTo(state)) throw new IllegalTransition(`${this.side} leg cannot go ${this.state} -> ${state}`)
     const expires = expiresAt ?? this.expiresAt
-    return new Leg(this.side, this.terms, state, withFacts(this.facts, facts), at, expires)
+    return new Leg(this.side, this.terms, state, withFacts(this.facts, facts), at, expires, this.outputs)
   }
 
   record(facts: LegFacts): Leg {
-    return new Leg(this.side, this.terms, this.state, withFacts(this.facts, facts), this.since, this.expiresAt)
+    const known = withFacts(this.facts, facts)
+    return new Leg(this.side, this.terms, this.state, known, this.since, this.expiresAt, this.outputs)
+  }
+
+  /** The outputs the leg's money is in. Together they hold exactly its amount: no more is ever taken on. */
+  heldIn(outputs: readonly LockedOutput[]): Leg {
+    const total = outputs.reduce((sum, output) => sum.plus(output.amount), Amount.zero(this.amount.asset))
+    if (!total.equals(this.amount)) {
+      throw new RuleViolated(`${this.side} leg is for ${this.amount.units}, its outputs hold ${total.units}`)
+    }
+    if (new Set(outputs.map((output) => output.outpoint)).size !== outputs.length) {
+      throw new RuleViolated(`${this.side} leg names the same output twice`)
+    }
+    return new Leg(this.side, this.terms, this.state, this.facts, this.since, this.expiresAt, outputs)
   }
 }

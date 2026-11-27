@@ -8,6 +8,7 @@ import {
   Leg,
   Side,
   type LegFacts,
+  type LockedOutput,
   type LegState,
   type LegTerms,
   type Reference,
@@ -131,6 +132,12 @@ export class Swap {
 
   markFunded(at: UnixSeconds, funding?: Reference, expiresAt: UnixSeconds | null = null): Swap {
     return this.move(Side.From, 'locked', at, noted(FactKind.Funding, funding), expiresAt)
+  }
+
+  /** A lockup made of several outputs. The funding fact names the first, as the table does. */
+  markFundedBy(at: UnixSeconds, outputs: readonly LockedOutput[], expiresAt: UnixSeconds | null = null): Swap {
+    const funded = this.markFunded(at, outputs[0]?.outpoint, expiresAt)
+    return funded.with({ from: funded.from.heldIn(outputs) })
   }
 
   /** Call this before sending on the rail, so a crash in between still leaves the payout on record. */
