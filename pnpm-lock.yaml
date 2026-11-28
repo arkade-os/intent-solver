@@ -132,6 +132,9 @@ importers:
       '@arkade-os/solver-corridors-evm':
         specifier: workspace:*
         version: link:../solver-corridors-evm
+      '@arkade-os/solver-next':
+        specifier: workspace:*
+        version: link:../solver-next
       '@arkade-os/solver-rails':
         specifier: workspace:*
         version: link:../solver-rails
@@ -293,6 +296,15 @@ importers:
       '@types/better-sqlite3':
         specifier: ^7.6.12
         version: 7.6.13
+
+  packages/solver-next:
+    dependencies:
+      '@noble/hashes':
+        specifier: ^2.0.0
+        version: 2.4.0
+      '@scure/base':
+        specifier: ^2.0.0
+        version: 2.4.0
 
   packages/solver-rails:
     dependencies:

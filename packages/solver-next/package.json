@@ -1,0 +1,30 @@
+{
+  "name": "@arkade-os/solver-next",
+  "version": "0.7.1",
+  "description": "Part of the Arkade intent-solver: the domain model the corridors are being moved onto.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arkade-os/intent-solver.git",
+    "directory": "packages/solver-next"
+  },
+  "homepage": "https://github.com/arkade-os/intent-solver#readme",
+  "type": "module",
+  "exports": {
+    "./*.js": {
+      "types": "./dist/*.d.ts",
+      "default": "./dist/*.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@noble/hashes": "^2.0.0",
+    "@scure/base": "^2.0.0"
+  },
+  "private": true
+}
