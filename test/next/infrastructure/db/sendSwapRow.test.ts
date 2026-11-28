@@ -79,6 +79,7 @@ describe('a send row read as a swap', () => {
     expect(failed(FUNDED)).toEqual(['stuck', 'why', 'locked', 'pending'])
     expect(failed(SENT)).toEqual(['stuck', 'why', 'locked', 'locking'])
     expect(failed({ ...FUNDED, payAttemptedAt: 1_100 })).toEqual(['stuck', 'why', 'locked', 'locking'])
+    expect(failed({ ...FUNDED, paymentId: 'pay-1' })).toEqual(['stuck', 'why', 'locked', 'locking'])
     expect(failed(PAID)).toEqual(['stuck', 'why', 'locked', 'claimed'])
     expect(swapFromSendRow(row({ state: 'refused', failureReason: 'late' })).state).toBe('refused')
   })
